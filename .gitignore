@@ -13,6 +13,7 @@ build/
 *.pem
 *.key
 secrets.json
+cex-keys.txt
 
 # Logs
 *.log
