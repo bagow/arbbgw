@@ -317,7 +317,6 @@ async function handleFetch(request, env, ctx) {
         const realStats = await getFullStats(env, 'real-default');
 
         const profileIdParam = url.searchParams.get('profile_id');
-        const username = checkBasicAuth(request, env);
 
         const mapRow = await env.DB.prepare(`SELECT value, expires_at FROM server_cache WHERE key = 'exchange_maps'`).first();
         let maps = { data: {} };

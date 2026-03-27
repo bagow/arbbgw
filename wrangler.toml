@@ -16,6 +16,7 @@ database_id = "39c770d8-76a9-4f9d-8a62-0dcb23978bfc"
 # Secrets (set with wrangler secret put):
 #   npx wrangler secret put COLLECTOR_TOKEN
 #   npx wrangler secret put PAPER_TRADER_TOKEN
+[vars]
 PAPER_TRADER_URL = "http://92.5.127.87:8080"
 REAL_TRADER_URL = "http://92.5.127.87:3002"
 
