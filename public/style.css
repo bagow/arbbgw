@@ -85,41 +85,6 @@ body {
 }
 
 
-/* ── Header ─────────────────────────────────────────────────────────────────── */
-.trading-header {
-  height: 44px;
-  display: flex;
-  align-items: center;
-  padding: 0 16px;
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.logo {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  user-select: none;
-}
-
-.logo-icon {
-  font-size: 1.2rem;
-  color: var(--accent);
-  font-weight: 700;
-}
-
-.logo-text {
-  font-family: 'Outfit', sans-serif;
-  font-weight: 700;
-  font-size: 1.1rem;
-  letter-spacing: -0.02em;
-  background: linear-gradient(135deg, #fff 0%, var(--text-sub) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
 /* Deleted topbar styles */
 
 .status-bar {

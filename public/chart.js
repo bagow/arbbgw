@@ -269,7 +269,7 @@ async function fetchSnapshot() {
 }
 
 // ─── Exchange filter bar (scanner) ────────────────────────────────────────────
-const exchangeFiltersEl = $('exchange-filters');
+const exchangeFiltersEl = scanner$('exchange-filters');
 
 function renderExchangeFilters() {
     // Collect unique exchanges present in snapshot

@@ -7,8 +7,6 @@
  */
 'use strict';
 
-const API_BASE = '';
-
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let profiles = [];       // all profiles from server
