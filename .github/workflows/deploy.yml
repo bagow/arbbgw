@@ -3,56 +3,173 @@ name: Deploy Crypto Arbitrage Stack
 on:
   push:
     branches: [ main ]
+  workflow_dispatch: # Позволяет запускать вручную из вкладки Actions
+    inputs:
+      deploy_collector:
+        description: 'Deploy rust-collector'
+        type: boolean
+        default: false
+      deploy_paper:
+        description: 'Deploy paper-trader'
+        type: boolean
+        default: false
+      deploy_real:
+        description: 'Deploy real-trader'
+        type: boolean
+        default: false
+      deploy_cloudflare:
+        description: 'Deploy Cloudflare Worker & Assets'
+        type: boolean
+        default: false
 
 jobs:
-  deploy:
+  # --- 1. Проверка изменений (чтобы не деплоить лишнее) ---
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      collector: ${{ steps.filter.outputs.collector }}
+      paper: ${{ steps.filter.outputs.paper }}
+      real: ${{ steps.filter.outputs.real }}
+      cloudflare: ${{ steps.filter.outputs.cloudflare }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            collector:
+              - 'rust-collector/**'
+              - '.github/workflows/deploy.yml'
+            paper:
+              - 'paper-trader/**'
+              - '.github/workflows/deploy.yml'
+            real:
+              - 'real-trader/**'
+              - '.github/workflows/deploy.yml'
+            cloudflare:
+              - 'src/**'
+              - 'public/**'
+              - 'wrangler.toml'
+              - '.github/workflows/deploy.yml'
+
+  # --- 2. Деплой rust-collector ---
+  deploy-collector:
+    needs: changes
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_collector == 'true' ||
+      github.event_name == 'push' && (needs.changes.outputs.collector == 'true')
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # --- 1. Сборка Rust (VPS часть) ---
+      - uses: actions/checkout@v4
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-
       - name: Build rust-collector
         run: cargo build --release --manifest-path rust-collector/Cargo.toml
-
-      - name: Build paper-trader
-        run: cargo build --release --manifest-path paper-trader/Cargo.toml
-
-      - name: Build real-trader
-        run: cargo build --release --manifest-path real-trader/Cargo.toml
-
-      # --- 2. Загрузка на VPS и перезапуск ---
-      - name: Copy binaries to VPS
+      - name: Copy to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "rust-collector/target/release/rust-collector,paper-trader/target/release/paper-trader,real-trader/target/release/real-trader"
-          target: "/tmp/deploy"
-          strip_components: 3 # Чтобы в /tmp/deploy оказались только файлы
-
-      - name: Install binaries and Restart services
+          source: "rust-collector/target/release/rust-collector"
+          target: "/tmp/deploy/collector"
+          strip_components: 3
+      - name: Install and Restart
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
-            sudo mv /tmp/deploy/rust-collector /usr/local/bin/
-            sudo mv /tmp/deploy/paper-trader /usr/local/bin/
-            sudo mv /tmp/deploy/real-trader /usr/local/bin/
-            sudo chown root:root /usr/local/bin/rust-collector /usr/local/bin/paper-trader /usr/local/bin/real-trader
-            sudo chmod +x /usr/local/bin/rust-collector /usr/local/bin/paper-trader /usr/local/bin/real-trader
-            sudo restorecon -v /usr/local/bin/rust-collector /usr/local/bin/paper-trader /usr/local/bin/real-trader
-            sudo systemctl restart rust-collector paper-trader real-trader
-            sudo systemctl status rust-collector paper-trader real-trader
+            sudo mv /tmp/deploy/collector/rust-collector /usr/local/bin/
+            sudo chown root:root /usr/local/bin/rust-collector
+            sudo chmod +x /usr/local/bin/rust-collector
+            sudo restorecon -v /usr/local/bin/rust-collector
+            sudo systemctl restart rust-collector
+            sudo systemctl status rust-collector
 
-      # --- 3. Деплой Cloudflare (Worker & Dashboard) ---
-      - name: Deploy Cloudflare Worker & Assets
+  # --- 3. Деплой paper-trader ---
+  deploy-paper:
+    needs: changes
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_paper == 'true' ||
+      github.event_name == 'push' && (needs.changes.outputs.paper == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build paper-trader
+        run: cargo build --release --manifest-path paper-trader/Cargo.toml
+      - name: Copy to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          source: "paper-trader/target/release/paper-trader"
+          target: "/tmp/deploy/paper"
+          strip_components: 3
+      - name: Install and Restart
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          script: |
+            sudo mv /tmp/deploy/paper/paper-trader /usr/local/bin/
+            sudo chown root:root /usr/local/bin/paper-trader
+            sudo chmod +x /usr/local/bin/paper-trader
+            sudo restorecon -v /usr/local/bin/paper-trader
+            sudo systemctl restart paper-trader
+            sudo systemctl status paper-trader
+
+  # --- 4. Деплой real-trader ---
+  deploy-real:
+    needs: changes
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_real == 'true' ||
+      github.event_name == 'push' && (needs.changes.outputs.real == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build real-trader
+        run: cargo build --release --manifest-path real-trader/Cargo.toml
+      - name: Copy to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          source: "real-trader/target/release/real-trader"
+          target: "/tmp/deploy/real"
+          strip_components: 3
+      - name: Install and Restart
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          script: |
+            sudo mv /tmp/deploy/real/real-trader /usr/local/bin/
+            sudo chown root:root /usr/local/bin/real-trader
+            sudo chmod +x /usr/local/bin/real-trader
+            sudo restorecon -v /usr/local/bin/real-trader
+            sudo systemctl restart real-trader
+            sudo systemctl status real-trader
+
+  # --- 5. Деплой в Cloudflare ---
+  deploy-cloudflare:
+    needs: changes
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_cloudflare == 'true' ||
+      github.event_name == 'push' && needs.changes.outputs.cloudflare == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Worker & Assets
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
