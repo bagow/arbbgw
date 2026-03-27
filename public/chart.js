@@ -1012,20 +1012,34 @@ function scheduleRefresh() {
 /** Load min/max spread and refresh interval from the shared Trading Settings OR a specific profile. */
 async function loadScannerSettings(profileId = null) {
     try {
-        const url = profileId
-            ? `${API_BASE}/api/profiles/${profileId}`
-            : `${API_BASE}/api/trading/settings`;
-        const res = await fetch(url);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data && Object.keys(data).length > 0) {
-            state.threshold = parseFloat(data.min_entry_spread) || 1;
-            state.maxSpread = parseFloat(data.max_entry_spread) || 10;
-            const intervalSecs = parseInt(data.collector_interval_secs) || 5;
-            state.refreshMs = Math.max(5, intervalSecs) * 1000;
+        // 1. Try profile-specific settings first
+        if (profileId) {
+            const res = await fetch(`${API_BASE}/api/profiles/${profileId}`);
+            if (res.ok) {
+                const data = await res.json();
+                if (data && data.min_entry_spread != null) {
+                    state.threshold = parseFloat(data.min_entry_spread);
+                    state.maxSpread = parseFloat(data.max_entry_spread) || 10;
+                    state.refreshMs = Math.max(5, parseInt(data.collector_interval_secs) || 5) * 1000;
+                    console.log(`Scanner: loaded profile ${profileId} settings (min: ${state.threshold}%)`);
+                    return;
+                }
+            }
+        }
+
+        // 2. Fallback to global settings
+        const gRes = await fetch(`${API_BASE}/api/trading/settings`);
+        if (gRes.ok) {
+            const gData = await gRes.json();
+            state.threshold = parseFloat(gData.min_entry_spread) || 1;
+            state.maxSpread = parseFloat(gData.max_entry_spread) || 10;
+            state.refreshMs = Math.max(5, parseInt(gData.collector_interval_secs) || 5) * 1000;
+            console.log(`Scanner: loaded global settings (min: ${state.threshold}%)`);
+        } else {
+            console.warn('Scanner: global settings failed, using defaults');
         }
     } catch (e) {
-        console.warn('Could not load scanner settings, using defaults:', e);
+        console.warn('Scanner: failed to load settings:', e);
     }
 }
 

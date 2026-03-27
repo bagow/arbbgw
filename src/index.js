@@ -638,50 +638,55 @@ async function handleFetch(request, env, ctx) {
     }
 
     const profilePatchMatch = path.match(/^\/api\/profiles\/([^/]+)$/);
-    if (profilePatchMatch && request.method === 'PATCH') {
+    if (profilePatchMatch) {
+        const profileId = profilePatchMatch[1];
         const [authErr, username] = requireAuthUser(request, env);
         if (authErr) return authErr;
-        const profileId = profilePatchMatch[1];
+
         // Verify ownership (allow defaults for backward compat)
         if (profileId !== 'paper-default' && profileId !== 'real-default') {
             const owner = await env.DB.prepare(`SELECT owner FROM trading_profiles WHERE id=?`).bind(profileId).first();
             if (owner && owner.owner !== username) return jsonResponse({ error: 'Forbidden' }, 403);
         }
-        const body = await request.json();
-        const fields = [];
-        const vals = [];
-        const allowed = ['name','mode','is_active','min_entry_spread','max_entry_spread','trade_volume',
-            'take_profit_percent','trailing_stop_percent','max_active_trades','commission_rate',
-            'slippage_percent','funding_rate_8h','min_volume_millions','collector_interval_secs','pending_commands'];
-        for (const f of allowed) {
-            if (body[f] !== undefined) {
-                fields.push(`${f}=?`);
-                if (f === 'is_active') vals.push(body[f] ? 1 : 0);
-                else if (['max_active_trades','min_volume_millions','collector_interval_secs'].includes(f)) vals.push(parseInt(body[f]));
-                else if (f !== 'name' && f !== 'mode' && f !== 'pending_commands') vals.push(parseFloat(body[f]));
-                else vals.push(body[f]);
-            }
-        }
-        if (!fields.length) return jsonResponse({ error: 'No fields to update' }, 400);
-        fields.push('updated_at=?');
-        vals.push(Date.now(), profileId);
-        await env.DB.prepare(`UPDATE trading_profiles SET ${fields.join(',')} WHERE id=?`).bind(...vals).run();
-        const profile = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE id=?`).bind(profileId).first();
-        return jsonResponse(profile);
-    }
 
-    if (profilePatchMatch && request.method === 'DELETE') {
-        const [authErr, username] = requireAuthUser(request, env);
-        if (authErr) return authErr;
-        const profileId = profilePatchMatch[1];
-        if (profileId === 'paper-default' || profileId === 'real-default')
-            return jsonResponse({ error: 'Cannot delete default profiles' }, 400);
-        // Verify ownership
-        const owner = await env.DB.prepare(`SELECT owner FROM trading_profiles WHERE id=?`).bind(profileId).first();
-        if (owner && owner.owner !== username) return jsonResponse({ error: 'Forbidden' }, 403);
-        await env.DB.prepare(`DELETE FROM trading_profiles WHERE id=?`).bind(profileId).run();
-        await env.DB.prepare(`DELETE FROM trades WHERE profile_id=?`).bind(profileId).run();
-        return jsonResponse({ success: true });
+        if (request.method === 'GET') {
+            const profile = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE id=?`).bind(profileId).first();
+            if (!profile) return jsonResponse({ error: 'Not Found' }, 404);
+            profile.is_active = Boolean(profile.is_active);
+            return jsonResponse(profile);
+        }
+
+        if (request.method === 'PATCH') {
+            const body = await request.json();
+            const fields = [];
+            const vals = [];
+            const allowed = ['name','mode','is_active','min_entry_spread','max_entry_spread','trade_volume',
+                'take_profit_percent','trailing_stop_percent','max_active_trades','commission_rate',
+                'slippage_percent','funding_rate_8h','min_volume_millions','collector_interval_secs','pending_commands'];
+            for (const f of allowed) {
+                if (body[f] !== undefined) {
+                    fields.push(`${f}=?`);
+                    if (f === 'is_active') vals.push(body[f] ? 1 : 0);
+                    else if (['max_active_trades','min_volume_millions','collector_interval_secs'].includes(f)) vals.push(parseInt(body[f]));
+                    else if (f !== 'name' && f !== 'mode' && f !== 'pending_commands') vals.push(parseFloat(body[f]));
+                    else vals.push(body[f]);
+                }
+            }
+            if (!fields.length) return jsonResponse({ error: 'No fields to update' }, 400);
+            fields.push('updated_at=?');
+            vals.push(Date.now(), profileId);
+            await env.DB.prepare(`UPDATE trading_profiles SET ${fields.join(',')} WHERE id=?`).bind(...vals).run();
+            const profile = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE id=?`).bind(profileId).first();
+            return jsonResponse(profile);
+        }
+
+        if (request.method === 'DELETE') {
+            if (profileId === 'paper-default' || profileId === 'real-default')
+                return jsonResponse({ error: 'Cannot delete default profiles' }, 400);
+            await env.DB.prepare(`DELETE FROM trading_profiles WHERE id=?`).bind(profileId).run();
+            await env.DB.prepare(`DELETE FROM trades WHERE profile_id=?`).bind(profileId).run();
+            return jsonResponse({ success: true });
+        }
     }
 
     // ── FALLBACK ──────────────────────────────────────────────────────────────
