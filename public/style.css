@@ -1277,9 +1277,16 @@ body.iframe-mode {
   overflow: hidden;
 }
 
-body.iframe-mode .topbar,
-body.iframe-mode .layout {
+body.iframe-mode .topbar {
   display: none !important;
+}
+
+body.iframe-mode .layout {
+  display: flex !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
 }
 
 body.iframe-mode .modal-backdrop {
