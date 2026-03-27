@@ -210,17 +210,17 @@ function renderPanel(profile, active, history, stats, exchanges) {
         </div>
 
         <!-- Scanner sub-panel -->
-        <div class="mt-content" id="mt-sub-scanner" style="display:${activeSubTabId==='scanner'?'block':'none'}; flex:1;">
-            <iframe src="chart.html?profile_id=${profile.id}&iframe=1" style="width:100%; height:100%; border:none; background:var(--bg);"></iframe>
+        <div class="mt-content" id="mt-sub-scanner" style="display:${activeSubTabId==='scanner'?'flex':'none'}; flex:1; min-height:0;">
+            <iframe src="chart.html?profile_id=${profile.id}&iframe=1" style="width:100%; height:100%; border:none; background:var(--bg); display:block; flex:1;"></iframe>
         </div>
 
         <!-- Dashboard sub-panel -->
-        <div class="mt-content" id="mt-sub-dashboard" style="display:${activeSubTabId==='dashboard'?'block':'none'}">
-            ${stats && stats.total_trades > 0 ? renderDashboardHTML(profile.id) : '<div class="text-sub" style="padding:48px;text-align:center;">📊 No closed trades found for this profile yet.<br/><span style="font-size:0.8rem;">Stats will appear here once the first trade is completed.</span></div>'}
+        <div class="mt-content" id="mt-sub-dashboard" style="display:${activeSubTabId==='dashboard'?'flex':'none'}; flex:1; flex-direction:column;">
+            ${stats && stats.total_trades > 0 ? renderDashboardHTML(profile.id) : '<div class="text-sub" style="padding:48px;text-align:center;flex:1;">📊 No closed trades found for this profile yet.<br/><span style="font-size:0.8rem;">Stats will appear here once the first trade is completed.</span></div>'}
         </div>
 
         <!-- Active trades sub-panel -->
-        <div class="mt-content" id="mt-sub-active" style="display:${activeSubTabId==='active'?'block':'none'}">
+        <div class="mt-content" id="mt-sub-active" style="display:${activeSubTabId==='active'?'flex':'none'}; flex:1; flex-direction:column;">
             <div class="trading-table-wrap">
                 <table>
                     <thead><tr>
@@ -245,7 +245,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
         </div>
 
         <!-- History sub-panel -->
-        <div class="mt-content" id="mt-sub-history" style="display:${activeSubTabId==='history'?'block':'none'}">
+        <div class="mt-content" id="mt-sub-history" style="display:${activeSubTabId==='history'?'flex':'none'}; flex:1; flex-direction:column;">
             <div class="trading-table-wrap">
                 <table>
                     <thead><tr>
