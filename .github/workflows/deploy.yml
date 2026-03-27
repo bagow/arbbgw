@@ -56,4 +56,4 @@ jobs:
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          command: deploy
+          command: deploy --var PASS_DIMA:${{ secrets.PASS_DIMA }} --var PASS_SERGEI:${{ secrets.PASS_SERGEI }}
