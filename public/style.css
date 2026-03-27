@@ -85,11 +85,11 @@ body {
   position: sticky;
   top: 0;
   z-index: 50;
-  height: 54px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 20px;
+  padding: 0 16px;
   background: rgba(10, 12, 16, .92);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
@@ -99,11 +99,11 @@ body {
 .topbar-left {
   display: flex;
   align-items: center;
-  gap: 32px;
+  gap: 24px;
 }
 
 .logo {
-  font-size: 1.15rem;
+  font-size: 1.05rem;
   font-weight: 700;
   color: var(--text);
   letter-spacing: -0.5px;
@@ -114,9 +114,7 @@ body {
 }
 
 .nav-menu {
-  display: flex;
-  gap: 12px;
-  align-items: center;
+  display: none; /* Removed from topbar */
 }
 
 .nav-btn {

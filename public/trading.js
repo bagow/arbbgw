@@ -12,6 +12,7 @@ const API_BASE = '';
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let profiles = [];       // all profiles from server
+let activeTabId = null;  // currently visible profile id
 let pollTimer = null;
 let lastUnified = null;  // cached /api/unified response
 let activeSubTabId = 'active'; // Fix navigation jumping by persisting sub-tab
@@ -184,6 +185,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
     panel.innerHTML = `
         <!-- Sub-nav for this tab -->
         <div class="mt-subnav">
+            <a href="chart.html" class="mt-nav-btn" style="text-decoration:none">Scanner</a>
             <button class="mt-nav-btn ${activeSubTabId==='dashboard'?'mt-nav-btn--active':''}" data-sub="dashboard" onclick="showSubTab(this,'dashboard')">Dashboard</button>
             <button class="mt-nav-btn ${activeSubTabId==='active'?'mt-nav-btn--active':''}" data-sub="active" onclick="showSubTab(this,'active')">Active Trades</button>
             <button class="mt-nav-btn ${activeSubTabId==='history'?'mt-nav-btn--active':''}" data-sub="history" onclick="showSubTab(this,'history')">History</button>
