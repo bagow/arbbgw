@@ -4,21 +4,33 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CEX Arb — Trading</title>
-    <link rel="stylesheet" href="style.css?v=4" />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="style.css?v=5" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 </head>
 <body>
-    <div class="tab-bar" id="tab-bar" style="position:fixed;bottom:0;left:0;right:0;top:auto;z-index:10000;display:flex;">
-        <!-- tabs injected by JS -->
-        <button class="tab-add-btn" id="tab-add-btn" title="New trading profile">＋</button>
-    </div>
-
+    <!-- ── Header ────────────────────────────────────────────────────────────── -->
+    <header class="trading-header">
+        <div class="logo">
+            <span class="logo-icon">▲</span>
+            <span class="logo-text">CEX Arb</span>
+        </div>
+    </header>
 
     <!-- ── Tab Panel Area ────────────────────────────────────────────────────── -->
-    <div id="panel-container" class="mt-layout"></div>
+    <div id="panel-container" class="mt-layout">
+        <div class="mt-panel" id="mt-panel">
+            <div class="mt-loading">
+                <div class="spinner"></div>
+                <span>Connecting to arbitrage node…</span>
+            </div>
+        </div>
+    </div>
 
     <!-- ── Bottom Tab Bar ────────────────────────────────────────────────────── -->
+    <div class="tab-bar" id="tab-bar" style="position:fixed;bottom:0;left:0;right:0;top:auto;z-index:10000;display:flex;">
+        <button class="tab-add-btn" id="tab-add-btn" title="New trading profile">＋</button>
+    </div>
 
     <!-- ── New Tab Modal ─────────────────────────────────────────────────────── -->
     <div id="new-tab-modal" class="modal-backdrop hidden">
@@ -42,31 +54,83 @@
                 </div>
             </div>
             <div style="display:flex;gap:12px;">
-                <button id="nt-cancel" class="trading-save-btn outline-btn" style="flex:1;margin:0;background:transparent;color:var(--text-sub);border-color:var(--border-dim);">Cancel</button>
+                <button id="nt-cancel" class="trading-save-btn outline-btn" style="flex:1;margin:0;">Cancel</button>
                 <button id="nt-create" class="trading-save-btn" style="flex:2;margin:0;">Create Profile</button>
             </div>
         </div>
     </div>
 
-    <!-- ── Chart Modal ───────────────────────────────────────────────────────── -->
-    <div id="chart-modal" class="modal-backdrop hidden" style="z-index:1000;padding:0;background:var(--bg-panel);">
-        <div class="modal" style="width:100vw;height:100vh;max-width:none;border-radius:0;padding:0;overflow:hidden;position:relative;border:none;">
-            <iframe id="chart-frame" style="width:100%;height:100%;border:none;"></iframe>
+    <!-- ── Chart Modal (Integrated) ────────────────────────────────────────── -->
+    <div id="modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+        <div class="modal">
+            <div class="modal-header">
+                <div>
+                    <div class="modal-title" id="modal-title">–</div>
+                    <div class="modal-sub" id="modal-sub">–</div>
+                </div>
+                <div class="modal-header-right">
+                    <div class="tf-bar">
+                        <button class="tf-btn" data-tf="15" id="tf-15s">15s</button>
+                        <button class="tf-btn tf-btn--active" data-tf="60" id="tf-1m">1m</button>
+                        <button class="tf-btn" data-tf="180" id="tf-3m">3m</button>
+                        <button class="tf-btn" data-tf="300" id="tf-5m">5m</button>
+                        <button class="tf-btn" data-tf="900" id="tf-15m">15m</button>
+                    </div>
+                    <div class="ws-bar">
+                        <span class="ws-label">Live:</span>
+                        <label class="ws-toggle"><input type="radio" name="ws-exchange" value="a" checked /> <span id="ws-label-a">Exch A</span></label>
+                        <label class="ws-toggle"><input type="radio" name="ws-exchange" value="b" /> <span id="ws-label-b">Exch B</span></label>
+                        <span id="ws-status" class="ws-indicator ws-indicator--off">●</span>
+                    </div>
+                    <a id="tv-link" class="tv-btn" href="#" target="_blank" rel="noopener noreferrer">TV</a>
+                    <button class="modal-close" id="modal-close">✕</button>
+                </div>
+            </div>
+            <div id="chart-legend" class="chart-legend"></div>
+            <div class="charts-wrap">
+                <div class="chart-row chart-row--price">
+                    <div class="chart-row-label" id="label-prices">Price (USD)</div>
+                    <div class="chart-svg-wrap" id="price-wrap">
+                        <svg id="chart-prices" class="chart-svg" xmlns="http://www.w3.org/2000/svg">
+                            <g id="grid-p" class="grid"></g>
+                            <g id="ylabel-p" class="axis-labels"></g>
+                            <g id="price-lines"></g>
+                            <rect id="overlay-p" fill="transparent" style="cursor:crosshair" />
+                        </svg>
+                    </div>
+                </div>
+                <div class="chart-row chart-row--hist">
+                    <div class="chart-row-label">Δ Spread</div>
+                    <div class="chart-svg-wrap" id="hist-wrap">
+                        <svg id="chart-hist" class="chart-svg" xmlns="http://www.w3.org/2000/svg">
+                            <g id="grid-h" class="grid"></g>
+                            <g id="ylabel-h" class="axis-labels"></g>
+                            <g id="xlabel-h" class="axis-labels"></g>
+                            <g id="bars-hist"></g>
+                            <g id="bars-live"></g>
+                            <line id="zero-line" class="zero-line" />
+                            <rect id="overlay-h" fill="transparent" style="cursor:crosshair" />
+                        </svg>
+                    </div>
+                </div>
+                <div id="chart-volume-info" class="volume-info"></div>
+            </div>
+            <div class="legend" id="legend-dynamic"></div>
         </div>
     </div>
 
     <!-- ── Exchange Modal ────────────────────────────────────────────────────── -->
-    <div id="exchange-modal" class="modal-backdrop hidden" style="z-index:1001;">
-        <div class="modal" style="max-width:600px;max-height:80vh;display:flex;flex-direction:column;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+    <div id="exchange-modal" class="modal-backdrop hidden">
+        <div class="modal" style="max-width:600px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:16px;">
                 <h3 id="exchange-modal-title" style="margin:0;">Exchange</h3>
                 <button id="close-exchange-modal" style="background:none;border:none;color:var(--text-sub);cursor:pointer;font-size:1.5rem;">&times;</button>
             </div>
-            <p id="exchange-modal-status" class="text-sub" style="margin-bottom:16px;font-size:.9rem;"></p>
-            <div id="exchange-modal-content" style="overflow-y:auto;background:var(--bg-row-alt);padding:12px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:.85rem;color:var(--text-sub);white-space:pre-wrap;flex:1;"></div>
+            <div id="exchange-modal-content" style="overflow-y:auto;background:var(--bg-row-alt);padding:12px;border-radius:8px;font-family:monospace;white-space:pre-wrap;"></div>
         </div>
     </div>
 
-    <script src="trading.js"></script>
+    <script src="chart.js?v=5"></script>
+    <script src="trading.js?v=5"></script>
 </body>
 </html>

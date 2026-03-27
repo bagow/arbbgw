@@ -37,8 +37,6 @@ async function boot() {
     renderTabBar();
     if (activeTabId) {
         await switchTab(activeTabId);
-        // Initialize integrated scanner state
-        if (window.initScanner) window.initScanner(activeTabId);
     }
     startPoll();
 }
@@ -179,6 +177,10 @@ async function refreshActiveTab() {
 
 function renderPanel(profile, active, history, stats, exchanges) {
     const panel = document.getElementById('mt-panel');
+    if (!panel) {
+        console.error('CRITICAL: mt-panel not found in DOM.');
+        return;
+    }
 
     // ─── Polling Update: Only refresh dynamic data ──────────────────────────
     if (panel.dataset.activeProfileId === profile.id) {
@@ -308,6 +310,11 @@ function renderPanel(profile, active, history, stats, exchanges) {
         renderActiveTable(profile.id, active);
         renderHistoryTable(profile.id, history);
         if (stats && stats.total_trades > 0) renderDashboardCharts(profile.id, stats);
+    }
+
+    // After full re-render, re-hook scanner references if on scanner tab
+    if (activeSubTabId === 'scanner' && window.initScanner) {
+        window.initScanner(profile.id);
     }
 }
 
@@ -689,6 +696,11 @@ window.showSubTab = function (btn, tab) {
     document.querySelectorAll('.mt-content').forEach(c => c.style.display = 'none');
     const el = document.getElementById(`mt-sub-${tab}`);
     if (el) el.style.display = 'block';
+
+    // (Re)init scanner when tab is shown
+    if (tab === 'scanner' && window.initScanner) {
+        window.initScanner(activeTabId);
+    }
 };
 
 window.saveSettings = async function (profileId) {
@@ -819,4 +831,4 @@ const fmtDuration = ms => { const s=Math.floor(ms/1000); if(s<60) return s+'s'; 
 const escHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-boot();
+window.addEventListener('DOMContentLoaded', boot);
