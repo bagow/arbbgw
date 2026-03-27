@@ -1,0 +1,15 @@
+[Unit]
+Description=CEX Arbitrage Real Trader Engine
+After=network.target
+
+[Service]
+Type=simple
+User=opc
+WorkingDirectory=/tmp
+ExecStart=/usr/local/bin/real-trader
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/etc/real-trader.env
+
+[Install]
+WantedBy=multi-user.target

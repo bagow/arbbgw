@@ -1,0 +1,950 @@
+//! paper-trader — Standalone paper trading engine
+//!
+//! HTTP endpoints:
+//!   POST /internal/spreads              ← receives spreads from Cloudflare Worker
+//!   GET  /api/trading/trades            ← active trades + stats (closed served from D1 by Worker)
+//!   DELETE /api/trading/trades          ← clear all open trades
+//!
+//! The engine:
+//!   - Reads settings from Cloudflare Worker GET /api/trading/settings
+//!   - Processes SpreadRows against open SQLite trades
+//!   - On trade close → archives to Cloudflare D1 via POST /api/archive
+
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+
+use anyhow::{Context, Result};
+use axum::{
+    extract::{State, Json},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{delete, get, post},
+    Router,
+};
+use reqwest::Client;
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio::sync::Mutex;
+use tokio_rusqlite::Connection;
+use tower_http::cors::{Any, CorsLayer};
+use tracing::{error, info, warn};
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TickerData {
+    pub bid: f64,
+    pub ask: f64,
+    pub price: f64,
+    pub vol: f64,
+    #[serde(rename = "fundingRate", default)]
+    pub funding_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpreadRow {
+    pub pair: String,
+    #[serde(rename = "exchangeA")]
+    pub exchange_a: String,
+    #[serde(rename = "exchangeB")]
+    pub exchange_b: String,
+    #[serde(rename = "priceA")]
+    pub price_a: f64,
+    #[serde(rename = "priceB")]
+    pub price_b: f64,
+    #[serde(rename = "bidA")]
+    pub bid_a: f64,
+    #[serde(rename = "askA")]
+    pub ask_a: f64,
+    #[serde(rename = "bidB")]
+    pub bid_b: f64,
+    #[serde(rename = "askB")]
+    pub ask_b: f64,
+    #[serde(rename = "volA", default)]
+    pub vol_a: f64,
+    #[serde(rename = "volB", default)]
+    pub vol_b: f64,
+    #[serde(rename = "fundingA", default)]
+    pub funding_a: f64,
+    #[serde(rename = "fundingB", default)]
+    pub funding_b: f64,
+    pub spread: f64,
+    pub direction: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpreadPayload {
+    pub spreads: Vec<SpreadRow>,
+    pub maps: std::collections::HashMap<String, std::collections::HashMap<String, TickerData>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradingSettings {
+    pub is_active: bool,
+    pub min_entry_spread: f64,
+    pub max_entry_spread: f64,
+    pub trade_volume: f64,
+    pub take_profit_percent: f64,
+    pub trailing_stop_percent: f64,
+    pub max_active_trades: i64,
+    pub commission_rate: f64,
+    pub slippage_percent: f64,
+    pub funding_rate_8h: f64,
+    pub min_volume_millions: f64,
+    pub collector_interval_secs: i64,
+    pub pending_commands: Option<String>,
+}
+
+impl Default for TradingSettings {
+    fn default() -> Self {
+        Self {
+            is_active: false,
+            min_entry_spread: 0.3,
+            max_entry_spread: 5.0,
+            trade_volume: 1000.0,
+            take_profit_percent: 0.1,
+            trailing_stop_percent: 0.5,
+            max_active_trades: 5,
+            commission_rate: 0.45,
+            slippage_percent: 0.1,
+            funding_rate_8h: 0.01,
+            min_volume_millions: 10.0,
+            collector_interval_secs: 5,
+            pending_commands: None,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Trade {
+    pub id: i64,
+    pub pair: String,
+    pub exchange_a: String,
+    pub exchange_b: String,
+    pub direction: String,
+    pub volume: f64,
+    pub entry_price_a: f64,
+    pub entry_price_b: f64,
+    pub entry_spread: f64,
+    pub entry_time: i64,
+    pub highest_spread_reached: f64,
+    pub status: String,
+    pub exit_price_a: Option<f64>,
+    pub exit_price_b: Option<f64>,
+    pub exit_spread: Option<f64>,
+    pub exit_time: Option<i64>,
+    pub pnl: Option<f64>,
+    pub commission_cost: Option<f64>,
+    pub funding_cost: Option<f64>,
+    pub last_price_a: Option<f64>,
+    pub last_price_b: Option<f64>,
+    pub last_spread: Option<f64>,
+    pub curr_gross_pnl: Option<f64>,
+    pub pnl_a: Option<f64>,
+    pub pnl_b: Option<f64>,
+    pub close_reason: Option<String>,
+    // enriched fields (not stored in DB directly)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_price_a: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_price_b: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_spread: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_pnl: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gross_pnl: Option<f64>,
+}
+
+// ─── App state ────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct AppState {
+    db: Connection,
+    http: Client,
+    worker_url: String,
+    collector_token: String,
+    internal_token: String,
+    engine_lock: Arc<Mutex<()>>,
+    /// Cached settings to reduce Worker load
+    settings_cache: Arc<Mutex<(Option<TradingSettings>, std::time::Instant)>>,
+    /// Throttling for active trades push
+    last_push_time: Arc<Mutex<std::time::Instant>>,
+}
+
+// ─── DB init ──────────────────────────────────────────────────────────────────
+
+async fn init_db(db: &Connection) -> Result<()> {
+    db.call(|conn| {
+        conn.execute_batch("
+            PRAGMA journal_mode=WAL;
+
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pair TEXT NOT NULL,
+                exchange_a TEXT NOT NULL,
+                exchange_b TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                volume REAL NOT NULL,
+                entry_price_a REAL NOT NULL,
+                entry_price_b REAL NOT NULL,
+                entry_spread REAL NOT NULL,
+                entry_time INTEGER NOT NULL,
+                highest_spread_reached REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'OPEN',
+                exit_price_a REAL,
+                exit_price_b REAL,
+                exit_spread REAL,
+                exit_time INTEGER,
+                pnl REAL,
+                commission_cost REAL,
+                funding_cost REAL,
+                last_price_a REAL,
+                last_price_b REAL,
+                last_spread REAL,
+                curr_gross_pnl REAL,
+                pnl_a REAL,
+                pnl_b REAL,
+                close_reason TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+        ").map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+    }).await?;
+    Ok(())
+}
+
+// ─── Read Trade from row ──────────────────────────────────────────────────────
+
+fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
+    Ok(Trade {
+        id: row.get(0)?,
+        pair: row.get(1)?,
+        exchange_a: row.get(2)?,
+        exchange_b: row.get(3)?,
+        direction: row.get(4)?,
+        volume: row.get(5)?,
+        entry_price_a: row.get(6)?,
+        entry_price_b: row.get(7)?,
+        entry_spread: row.get(8)?,
+        entry_time: row.get(9)?,
+        highest_spread_reached: row.get(10)?,
+        status: row.get(11)?,
+        exit_price_a: row.get(12)?,
+        exit_price_b: row.get(13)?,
+        exit_spread: row.get(14)?,
+        exit_time: row.get(15)?,
+        pnl: row.get(16)?,
+        commission_cost: row.get(17)?,
+        funding_cost: row.get(18)?,
+        last_price_a: row.get(19)?,
+        last_price_b: row.get(20)?,
+        last_spread: row.get(21)?,
+        curr_gross_pnl: row.get(22)?,
+        pnl_a: row.get(23).ok(),
+        pnl_b: row.get(24).ok(),
+        close_reason: row.get(25).ok(),
+        current_price_a: None,
+        current_price_b: None,
+        current_spread: None,
+        current_pnl: None,
+        gross_pnl: None,
+    })
+}
+
+// ─── Trading Engine ───────────────────────────────────────────────────────────
+
+async fn ack_command(state: &AppState, command: &str) {
+    let url = format!("{}/api/trading/commands/ack", state.worker_url.trim_end_matches('/'));
+    let payload = json!({ "command": command });
+    let _ = state.http
+        .post(&url)
+        .bearer_auth(&state.internal_token)
+        .json(&payload)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+}
+
+async fn fetch_settings(state: &AppState) -> TradingSettings {
+    {
+        let cache = state.settings_cache.lock().await;
+        if let Some(s) = &cache.0 {
+            if cache.1.elapsed() < Duration::from_secs(60) {
+                return s.clone();
+            }
+        }
+    }
+
+    let url = format!("{}/api/trading/settings", state.worker_url.trim_end_matches('/'));
+    let settings = match state.http.get(&url).timeout(Duration::from_secs(5)).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            match resp.json::<TradingSettings>().await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Failed to parse settings JSON (status {}): {} — using defaults", status, e);
+                    TradingSettings::default()
+                }
+            }
+        },
+        Err(e) => {
+            warn!("Failed to fetch settings from Worker: {} — using defaults", e);
+            TradingSettings::default()
+        }
+    };
+
+    // Process pending commands if any
+    if let Some(cmd) = &settings.pending_commands {
+        if cmd == "CLEAR_TRADES" {
+            info!("Received CLEAR_TRADES command from Worker, wiping local trades...");
+            let _ = state.db.call(|conn| {
+                conn.execute("DELETE FROM trades", []).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+            }).await;
+            
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                ack_command(&state_clone, "CLEAR_TRADES").await;
+            });
+        }
+    }
+
+    let mut cache = state.settings_cache.lock().await;
+    *cache = (Some(settings.clone()), std::time::Instant::now());
+    settings
+}
+
+async fn archive_trade_to_d1(http: &Client, worker_url: &str, token: &str, trade: &Trade) {
+    let url = format!("{}/api/archive", worker_url.trim_end_matches('/'));
+    if let Err(e) = http
+        .post(&url)
+        .bearer_auth(token)
+        .json(trade)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
+        error!("Failed to archive trade {} to D1: {}", trade.id, e);
+    } else {
+        info!("Archived trade {} ({}) to D1", trade.id, trade.pair);
+    }
+}
+
+async fn push_active_trades_to_worker(http: &Client, worker_url: &str, token: &str, trades: &[Trade]) {
+    let url = format!("{}/api/trading/active", worker_url.trim_end_matches('/'));
+    if let Err(e) = http
+        .post(&url)
+        .bearer_auth(token)
+        .json(trades)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    {
+        error!("Failed to push {} active trades to Worker: {}", trades.len(), e);
+    }
+}
+
+async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
+    let _lock = state.engine_lock.lock().await;
+
+    let settings = fetch_settings(state).await;
+    if !settings.is_active {
+        return;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    // --- Load open trades ---
+    let open_trades: Vec<Trade> = match state
+        .db
+        .call(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id,pair,exchange_a,exchange_b,direction,volume,
+                        entry_price_a,entry_price_b,entry_spread,entry_time,
+                        highest_spread_reached,status,
+                        exit_price_a,exit_price_b,exit_spread,exit_time,pnl,
+                        commission_cost,funding_cost,
+                        last_price_a,last_price_b,last_spread,curr_gross_pnl,
+                        pnl_a,pnl_b,close_reason
+                 FROM trades WHERE status='OPEN'",
+            )?;
+            let rows = stmt
+                .query_map([], row_to_trade)?
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>();
+            Ok(rows)
+        })
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            error!("DB error loading trades: {}", e);
+            return;
+        }
+    };
+
+    let mut num_active = open_trades.len() as i64;
+    let mut open_pair_keys: std::collections::HashSet<String> = open_trades
+        .iter()
+        .map(|t| format!("{}_{}_{}", t.pair, t.exchange_a, t.exchange_b))
+        .collect();
+    let mut open_tickers: std::collections::HashSet<String> =
+        open_trades.iter().map(|t| t.pair.clone()).collect();
+
+    let maps = &payload.maps;
+
+    // Helper: look up TickerData from maps
+    let get_ticker = |exchange: &str, pair: &str| -> Option<&TickerData> {
+        maps.get(exchange)?.get(pair)
+    };
+
+    // --- Process open trades ---
+    for trade in &open_trades {
+        let data_a = match get_ticker(&trade.exchange_a, &trade.pair) {
+            Some(d) => d,
+            None => continue,
+        };
+        let data_b = match get_ticker(&trade.exchange_b, &trade.pair) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
+
+        let execution_spread = if is_a_higher {
+            if data_b.ask > 0.0 {
+                (data_a.bid - data_b.ask) / data_b.ask * 100.0
+            } else {
+                0.0
+            }
+        } else {
+            if data_a.ask > 0.0 {
+                (data_b.bid - data_a.ask) / data_a.ask * 100.0
+            } else {
+                0.0
+            }
+        };
+
+        let mid_spread = if is_a_higher {
+            (data_a.price - data_b.price) / data_b.price * 100.0
+        } else {
+            (data_b.price - data_a.price) / data_a.price * 100.0
+        };
+
+        let slippage = settings.slippage_percent / 100.0;
+        let c_price_a = data_a.price;
+        let c_price_b = data_b.price;
+
+        let exit_price_a = if is_a_higher {
+            c_price_a * (1.0 + slippage)
+        } else {
+            c_price_a * (1.0 - slippage)
+        };
+        let exit_price_b = if is_a_higher {
+            c_price_b * (1.0 - slippage)
+        } else {
+            c_price_b * (1.0 + slippage)
+        };
+
+        let coins_a = trade.volume / trade.entry_price_a;
+        let coins_b = trade.volume / trade.entry_price_b;
+
+        let pnl_a = if is_a_higher {
+            (trade.entry_price_a - exit_price_a) * coins_a
+        } else {
+            (exit_price_a - trade.entry_price_a) * coins_a
+        };
+        let pnl_b = if is_a_higher {
+            (exit_price_b - trade.entry_price_b) * coins_b
+        } else {
+            (trade.entry_price_b - exit_price_b) * coins_b
+        };
+        let gross_pnl = pnl_a + pnl_b;
+
+        let hours_open = (now - trade.entry_time) as f64 / 3_600_000.0;
+        let comm_cost = trade.volume * (settings.commission_rate / 100.0) * 4.0;
+
+        let funding_cost_a = trade.volume
+            * (data_a.funding_rate)
+            * (if !is_a_higher { 1.0 } else { -1.0 })
+            * (hours_open / 8.0);
+        let funding_cost_b = trade.volume
+            * (data_b.funding_rate)
+            * (if is_a_higher { 1.0 } else { -1.0 })
+            * (hours_open / 8.0);
+        let funding_cost = funding_cost_a + funding_cost_b;
+
+        let net_pnl = gross_pnl - comm_cost - funding_cost;
+
+        // Update best PnL
+        let prev_best = if trade.highest_spread_reached.abs() > 50.0 {
+            net_pnl
+        } else {
+            trade.highest_spread_reached
+        };
+        let best_pnl = if net_pnl > prev_best { net_pnl } else { prev_best };
+        let update_best = net_pnl > prev_best;
+
+        // Exit conditions
+        let target_pnl_usd = trade.volume * (settings.take_profit_percent / 100.0);
+        let stop_drop_usd = trade.volume * (settings.trailing_stop_percent / 100.0);
+
+        let triggered_tp = net_pnl >= target_pnl_usd;
+        let triggered_stop = (best_pnl - net_pnl) >= stop_drop_usd;
+        let triggered_zero_spread = mid_spread <= 0.0;
+
+        if triggered_tp || triggered_stop || triggered_zero_spread {
+            // Close the trade
+            let reason = if triggered_tp {
+                "TP"
+            } else if triggered_stop {
+                "STOP"
+            } else {
+                "ZERO_SPREAD"
+            };
+            info!(
+                "Closing trade {} {} — reason={} net_pnl={:.4}",
+                trade.id, trade.pair, reason, net_pnl
+            );
+
+            let trade_id = trade.id;
+            let ep_a = exit_price_a;
+            let ep_b = exit_price_b;
+            let cs = mid_spread; // Log mid_spread as the exit spread to match chart
+            let cc = comm_cost;
+            let fc = funding_cost;
+
+            if let Err(e) = state
+                .db
+                .call(move |conn| {
+                    conn.execute(
+                        "UPDATE trades SET status='CLOSED',
+                            exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,
+                            pnl=?,commission_cost=?,funding_cost=?,highest_spread_reached=?,
+                            pnl_a=?,pnl_b=?,close_reason=?
+                         WHERE id=?",
+                        params![ep_a, ep_b, cs, now, net_pnl, cc, fc, best_pnl, pnl_a, pnl_b, reason, trade_id],
+                    ).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+                })
+                .await
+            {
+                error!("DB error closing trade {}: {}", trade.id, e);
+                continue;
+            }
+
+            // Build full closed trade for archive
+            let mut closed = trade.clone();
+            closed.status = "CLOSED".to_string();
+            closed.close_reason = Some(reason.to_string());
+            closed.exit_price_a = Some(exit_price_a);
+            closed.exit_price_b = Some(exit_price_b);
+            closed.exit_spread = Some(mid_spread);
+            closed.exit_time = Some(now);
+            closed.pnl = Some(net_pnl);
+            closed.pnl_a = Some(pnl_a);
+            closed.pnl_b = Some(pnl_b);
+            closed.commission_cost = Some(comm_cost);
+            closed.funding_cost = Some(funding_cost);
+            closed.highest_spread_reached = best_pnl;
+
+            /* 
+            // Archive to D1 asynchronously (Now using shared DB directly, no need for archive)
+            let http = state.http.clone();
+            let worker_url = state.worker_url.clone();
+            let token = state.collector_token.clone();
+            tokio::spawn(async move {
+                archive_trade_to_d1(&http, &worker_url, &token, &closed).await;
+            });
+            */
+
+            /*
+            // Remove from local DB (archived to D1)
+            let trade_id = trade.id;
+            let db = state.db.clone();
+            tokio::spawn(async move {
+                if let Err(e) = db
+                    .call(move |conn| {
+                        conn.execute("DELETE FROM trades WHERE id=?", params![trade_id])
+                            .map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+                    })
+                    .await
+                {
+                    error!("Failed to delete closed trade {} from SQLite: {}", trade_id, e);
+                }
+            });
+            */
+
+            num_active -= 1;
+            let key = format!("{}_{}_{}", trade.pair, trade.exchange_a, trade.exchange_b);
+            open_pair_keys.remove(&key);
+            open_tickers.remove(&trade.pair);
+        } else {
+            // Update live prices
+            let trade_id = trade.id;
+            if let Err(e) = state
+                .db
+                .call(move |conn| {
+                    conn.execute(
+                        "UPDATE trades SET highest_spread_reached=?, last_price_a=?, last_price_b=?, last_spread=?, curr_gross_pnl=?, pnl_a=?, pnl_b=? WHERE id=?",
+                        params![best_pnl, c_price_a, c_price_b, mid_spread, gross_pnl, pnl_a, pnl_b, trade_id],
+                    ).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+                })
+                .await
+            {
+                error!("DB error updating trade {}: {}", trade.id, e);
+            }
+        }
+    }
+
+    // --- Open new trades ---
+    for row in &payload.spreads {
+        if num_active >= settings.max_active_trades {
+            break;
+        }
+        if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread {
+            continue;
+        }
+        if open_tickers.contains(&row.pair) {
+            continue;
+        }
+
+        let key = format!("{}_{}_{}", row.pair, row.exchange_a, row.exchange_b);
+        let key_rev = format!("{}_{}_{}", row.pair, row.exchange_b, row.exchange_a);
+        if open_pair_keys.contains(&key) || open_pair_keys.contains(&key_rev) {
+            continue;
+        }
+
+        let slippage = settings.slippage_percent / 100.0;
+        let is_a_higher = row.direction.starts_with(&row.exchange_a);
+
+        let entry_price_a = if is_a_higher {
+            row.price_a * (1.0 - slippage)
+        } else {
+            row.price_a * (1.0 + slippage)
+        };
+        let entry_price_b = if is_a_higher {
+            row.price_b * (1.0 + slippage)
+        } else {
+            row.price_b * (1.0 - slippage)
+        };
+
+        let pair = row.pair.clone();
+        let ex_a = row.exchange_a.clone();
+        let ex_b = row.exchange_b.clone();
+        let dir = row.direction.clone();
+        let vol = settings.trade_volume;
+        let spread = row.spread;
+
+        info!(
+            "Opening trade {} {} {} spread={:.4}%",
+            pair, ex_a, ex_b, spread
+        );
+
+        match state
+            .db
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,
+                                         entry_price_a,entry_price_b,entry_spread,entry_time,
+                                         highest_spread_reached,status,pnl_a,pnl_b,close_reason)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    params![
+                        pair, ex_a, ex_b, dir, vol,
+                        entry_price_a, entry_price_b, spread, now,
+                        -9999.0, "OPEN", 0.0, 0.0, None::<String>
+                    ],
+                ).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+            })
+            .await
+        {
+            Ok(_) => {
+                num_active += 1;
+                open_pair_keys.insert(key);
+                open_tickers.insert(row.pair.clone());
+            }
+            Err(e) => error!("DB error opening trade: {}", e),
+        }
+    }
+
+    // --- Final Step: Push current active state to Cloudflare Worker ---
+    // Reload from DB to get the most accurate enriched state
+    let final_trades: Vec<Trade> = match state
+        .db
+        .call(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id,pair,exchange_a,exchange_b,direction,volume,
+                        entry_price_a,entry_price_b,entry_spread,entry_time,
+                        highest_spread_reached,status,
+                        exit_price_a,exit_price_b,exit_spread,exit_time,pnl,
+                        commission_cost,funding_cost,
+                        last_price_a,last_price_b,last_spread,curr_gross_pnl,
+                        pnl_a,pnl_b,close_reason
+                 FROM trades WHERE status='OPEN'",
+            )?;
+            let rows = stmt
+                .query_map([], row_to_trade)?
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>();
+            Ok(rows)
+        })
+        .await
+    {
+        Ok(mut t) => {
+            // Enrich with PnL before pushing
+            for tr in t.iter_mut() {
+                if let (Some(c_price_a), Some(c_price_b), Some(c_spread)) = (tr.last_price_a, tr.last_price_b, tr.last_spread) {
+                    let is_a_higher = tr.direction.starts_with(&tr.exchange_a);
+                    let slippage = 0.001;
+                    let ep_a = if is_a_higher { c_price_a * (1.0 + slippage) } else { c_price_a * (1.0 - slippage) };
+                    let ep_b = if is_a_higher { c_price_b * (1.0 - slippage) } else { c_price_b * (1.0 + slippage) };
+                    let coins_a = tr.volume / tr.entry_price_a;
+                    let coins_b = tr.volume / tr.entry_price_b;
+                    let pnl_a = if is_a_higher { (tr.entry_price_a - ep_a) * coins_a } else { (ep_a - tr.entry_price_a) * coins_a };
+                    let pnl_b = if is_a_higher { (ep_b - tr.entry_price_b) * coins_b } else { (tr.entry_price_b - ep_b) * coins_b };
+                    let gross = pnl_a + pnl_b;
+                    let comm = tr.volume * 0.0045 * 4.0;
+                    tr.current_price_a = Some(c_price_a);
+                    tr.current_price_b = Some(c_price_b);
+                    tr.current_spread = Some(c_spread);
+                    tr.gross_pnl = Some(tr.curr_gross_pnl.unwrap_or(gross));
+                    tr.current_pnl = Some(tr.curr_gross_pnl.unwrap_or(gross) - comm);
+                    tr.pnl_a = Some(pnl_a);
+                    tr.pnl_b = Some(pnl_b);
+                }
+            }
+            t
+        },
+        Err(_) => vec![],
+    };
+
+    let http = state.http.clone();
+    let worker_url = state.worker_url.clone();
+    let token = state.collector_token.clone();
+    
+    // Only push if something changed (size changed) or if 30s passed
+    let mut should_push = false;
+    {
+        let mut last_push = state.last_push_time.lock().await;
+        if last_push.elapsed() > Duration::from_secs(30) || final_trades.len() != open_trades.len() {
+            should_push = true;
+            *last_push = std::time::Instant::now();
+        }
+    }
+
+    if should_push {
+        tokio::spawn(async move {
+            push_active_trades_to_worker(&http, &worker_url, &token, &final_trades).await;
+        });
+    }
+}
+
+// ─── Axum helpers ─────────────────────────────────────────────────────────────
+
+fn json_ok(data: impl Serialize) -> Response {
+    (StatusCode::OK, axum::Json(data)).into_response()
+}
+
+fn json_err(status: StatusCode, msg: &str) -> Response {
+    (status, axum::Json(json!({ "error": msg }))).into_response()
+}
+
+fn check_internal_token(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == format!("Bearer {}", expected))
+        .unwrap_or(false)
+}
+
+// ─── Handlers ────────────────────────────────────────────────────────────────
+
+/// POST /internal/spreads — called by Cloudflare Worker after each rust-collector push
+async fn handle_internal_spreads(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<SpreadPayload>,
+) -> Response {
+    if !check_internal_token(&headers, &state.internal_token) {
+        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
+    }
+
+    // Run engine in the background so we don't block the Worker's waitUntil
+    let spreads_count = payload.spreads.len();
+    info!("Received {} spreads from rust-collector", spreads_count);
+    let state2 = state.clone();
+    tokio::spawn(async move {
+        run_trading_engine(&state2, &payload).await;
+    });
+
+    json_ok(json!({ "ok": true, "spreads": spreads_count }))
+}
+
+/// GET /api/trading/trades — active trades enriched with current prices
+async fn handle_get_trades(State(state): State<AppState>) -> Response {
+    let trades = match state
+        .db
+        .call(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id,pair,exchange_a,exchange_b,direction,volume,
+                        entry_price_a,entry_price_b,entry_spread,entry_time,
+                        highest_spread_reached,status,
+                        exit_price_a,exit_price_b,exit_spread,exit_time,pnl,
+                        commission_cost,funding_cost,
+                        last_price_a,last_price_b,last_spread,curr_gross_pnl,
+                        pnl_a,pnl_b,close_reason
+                 FROM trades WHERE status='OPEN' ORDER BY entry_time DESC",
+            )?;
+            let rows = stmt
+                .query_map([], row_to_trade)?
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>();
+            Ok(rows)
+        })
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            error!("DB error: {}", e);
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, "DB error");
+        }
+    };
+
+    // Enrich active trades with last known live prices from SQLite cache columns
+    let mut active = trades;
+    for t in active.iter_mut() {
+        if let (Some(c_price_a), Some(c_price_b), Some(c_spread)) =
+            (t.last_price_a, t.last_price_b, t.last_spread)
+        {
+            let is_a_higher = t.direction.starts_with(&t.exchange_a);
+            let slippage = 0.001; // 0.1% default since we don't have settings here
+            let ep_a = if is_a_higher { c_price_a * (1.0 + slippage) } else { c_price_a * (1.0 - slippage) };
+            let ep_b = if is_a_higher { c_price_b * (1.0 - slippage) } else { c_price_b * (1.0 + slippage) };
+            let coins_a = t.volume / t.entry_price_a;
+            let coins_b = t.volume / t.entry_price_b;
+            let pnl_a = if is_a_higher { (t.entry_price_a - ep_a) * coins_a } else { (ep_a - t.entry_price_a) * coins_a };
+            let pnl_b = if is_a_higher { (ep_b - t.entry_price_b) * coins_b } else { (t.entry_price_b - ep_b) * coins_b };
+            let gross = pnl_a + pnl_b;
+            let comm = t.volume * 0.0045 * 4.0;
+            t.current_price_a = Some(c_price_a);
+            t.current_price_b = Some(c_price_b);
+            t.current_spread = Some(c_spread);
+            t.gross_pnl = Some(t.curr_gross_pnl.unwrap_or(gross));
+            t.current_pnl = Some(t.curr_gross_pnl.unwrap_or(gross) - comm);
+        }
+    }
+
+    json_ok(json!({ "active": active }))
+}
+
+/// DELETE /api/trading/trades — wipe all open trades
+async fn handle_delete_trades(State(state): State<AppState>) -> Response {
+    match state
+        .db
+        .call(|conn| {
+            conn.execute("DELETE FROM trades", [])
+                .map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+        })
+        .await
+    {
+        Ok(n) => json_ok(json!({ "success": true, "deleted": n })),
+        Err(e) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("DB error: {}", e),
+        ),
+    }
+}
+
+// ─── Config ───────────────────────────────────────────────────────────────────
+
+struct Config {
+    port: u16,
+    internal_token: String,
+    worker_url: String,
+    collector_token: String,
+    db_path: String,
+}
+
+impl Config {
+    fn from_env() -> Self {
+        Config {
+            port: std::env::var("PAPER_TRADER_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8080),
+            internal_token: std::env::var("INTERNAL_TOKEN").unwrap_or_default(),
+            worker_url: std::env::var("WORKER_URL")
+                .unwrap_or_else(|_| "https://cex-spread-scanner.workers.dev".into()),
+            collector_token: std::env::var("COLLECTOR_TOKEN").unwrap_or_default(),
+            db_path: std::env::var("DB_PATH").unwrap_or_else(|_| "./trades.db".into()),
+        }
+    }
+}
+
+// ─── main ─────────────────────────────────────────────────────────────────────
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let _ = dotenvy::dotenv();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let cfg = Config::from_env();
+
+    info!(
+        "Starting paper-trader on port {} | db={}",
+        cfg.port, cfg.db_path
+    );
+    if cfg.internal_token.is_empty() {
+        warn!("INTERNAL_TOKEN is empty — /internal/spreads will reject all requests!");
+    }
+
+    let db = Connection::open(&cfg.db_path)
+        .await
+        .context("Failed to open SQLite")?;
+
+    init_db(&db).await?;
+
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+
+    let state = AppState {
+        db,
+        http,
+        worker_url: cfg.worker_url,
+        collector_token: cfg.collector_token,
+        internal_token: cfg.internal_token,
+        engine_lock: Arc::new(Mutex::new(())),
+        settings_cache: Arc::new(Mutex::new((None, std::time::Instant::now()))),
+        last_push_time: Arc::new(Mutex::new(std::time::Instant::now())),
+    };
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let app = Router::new()
+        .route("/internal/spreads", post(handle_internal_spreads))
+        .route("/api/trading/trades", get(handle_get_trades))
+        .route("/api/trading/trades", delete(handle_delete_trades))
+        .layer(cors)
+        .with_state(state);
+
+    let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port).parse()?;
+    info!("Listening on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Real Trader — Standalone real trading engine
+After=network.target
+
+[Service]
+Type=simple
+User=opc
+WorkingDirectory=/home/opc
+EnvironmentFile=/etc/real-trader.env
+ExecStart=/usr/local/bin/real-trader
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=CEX Arbitrage Paper Trader Engine
+After=network.target
+
+[Service]
+Type=simple
+User=opc
+WorkingDirectory=/home/opc/paper-trader
+ExecStart=/usr/local/bin/paper-trader
+Restart=always
+RestartSec=5
+EnvironmentFile=/etc/paper-trader.env
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

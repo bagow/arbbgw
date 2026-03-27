@@ -1,0 +1,15 @@
+{
+  "name": "cex-spread-scanner",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create spread_db",
+    "db:migrate": "wrangler d1 migrations apply spread_db --remote",
+    "db:migrate:local": "wrangler d1 migrations apply spread_db --local"
+  },
+  "devDependencies": {
+    "wrangler": "^4.76.0"
+  }
+}

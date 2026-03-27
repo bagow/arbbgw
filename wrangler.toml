@@ -1,0 +1,27 @@
+name = "cex-spread-scanner"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+workers_dev = true
+
+# KV namespace (kept for backward-compat, not actively used)
+kv_namespaces = [
+  { binding = "KV", id = "bef96647b560422192b017ffee4adb72" }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "spread_db"
+database_id = "39c770d8-76a9-4f9d-8a62-0dcb23978bfc"
+
+# Secrets (set with wrangler secret put):
+#   npx wrangler secret put COLLECTOR_TOKEN
+#   npx wrangler secret put PAPER_TRADER_TOKEN
+PAPER_TRADER_URL = "http://92.5.127.87:8080"
+REAL_TRADER_URL = "http://92.5.127.87:3002"
+
+# Note: PASS_DIMA and PASS_SERGEI must be set via `npx wrangler secret put`
+# or through GitHub Secrets during deployment to ensure they stay out of Git.
+
+# Static assets (dashboard frontend)
+[assets]
+directory = "./public"

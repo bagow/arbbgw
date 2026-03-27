@@ -1,0 +1,15 @@
+{
+  "name": "cex-api",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "CEX Spread Scanner - VPS API Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "express": "^4.18.3",
+    "node-fetch": "^3.3.2"
+  }
+}

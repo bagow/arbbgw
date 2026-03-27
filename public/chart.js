@@ -1,0 +1,1067 @@
+/**
+ * app.js – CEX Spread Screener v5 (multi-exchange overlay)
+ *
+ * Price panel: klines from ALL available exchanges for the pair,
+ * each with its own color. Shows which exchange is deviating.
+ *
+ * Spread histogram: signed % between the two exchanges from the clicked row.
+ *
+ * Data source: exchange REST kline APIs (instant, no D1 needed).
+ */
+'use strict';
+
+// ─── Backend URL (VPS via Cloudflare Tunnel) ──────────────────────────────────
+const API_BASE = '';
+
+// ─── Exchange config ───────────────────────────────────────────────────────────
+const KNOWN_EXCHANGES = ['binance', 'bybit', 'okx', 'gate', 'bitget', 'mexc', 'htx', 'bingx', 'kucoin', 'xt', 'coinex'];
+
+const EXCHANGE_COLORS = {
+    binance: '#f97316',  // orange
+    bybit: '#60a5fa',  // blue
+    okx: '#34d399',  // green
+    gate: '#a78bfa',  // violet
+    bitget: '#f43f5e',  // rose
+    mexc: '#22d3ee',  // cyan
+    htx: '#fb923c',  // amber
+    bingx: '#86efac',  // light green
+    kucoin: '#0ea5e9', // sky blue
+    xt: '#eab308',   // yellow
+    coinex: '#d946ef'  // fuchsia
+};
+
+// Passed to /api/klines proxy — server maps to exchange-specific codes
+const TF_LABELS = { 15: '15s', 60: '1m', 180: '3m', 300: '5m', 900: '15m' };
+
+// ─── Layout constants ─────────────────────────────────────────────────────────
+const PAD = { top: 10, right: 60, bottom: 4, left: 64 };
+const PAD_H = { top: 8, right: 60, bottom: 28, left: 64 };
+
+// ─── State ────────────────────────────────────────────────────────────────────
+const state = {
+    snapshot: [],
+    sortKey: 'spread',
+    sortDir: -1,
+    activeRowKey: null,
+    activeRow: null,
+    // Loaded from /api/trading/settings on init
+    threshold: 1,
+    maxSpread: 10,
+    refreshMs: 10_000,
+    refreshTimer: null,
+    klines: {},
+    liveTicks: {},
+    wsTarget: 'a',
+    ws: null,
+    timeframeSec: 60,
+    loadKey: null,
+    hiddenExchanges: new Set(), // chart modal: exchanges hidden on price panel
+    activeExchanges: new Set(KNOWN_EXCHANGES), // scanner: exchanges shown in table
+
+    // SVG Interaction State
+    visibleMinT: null,
+    visibleMaxT: null,
+    isDragging: false,
+    lastDragX: 0,
+    isLoadingHistory: false,
+};
+
+// ─── DOM refs ─────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const tableBody = $('spread-tbody');
+const pairCount = $('pair-count');
+const statusDot = $('global-status');
+const statusText = $('status-text');
+const lastUpdate = $('last-update');
+const modalBackdrop = $('modal-backdrop');
+const modalTitle = $('modal-title');
+const modalSub = $('modal-sub');
+const modalClose = $('modal-close');
+const legendDyn = $('legend-dynamic');
+const wsLabelA = $('ws-label-a');
+const wsLabelB = $('ws-label-b');
+const wsStatus = $('ws-status');
+const svgP = $('chart-prices');
+const svgH = $('chart-hist');
+const priceLinesG = $('price-lines');
+
+// ─── SVG helpers ──────────────────────────────────────────────────────────────
+function svgEl(tag, attrs = {}) {
+    const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    return e;
+}
+function svgDims(el) {
+    const r = el.getBoundingClientRect();
+    return { W: r.width || 700, H: r.height || 220 };
+}
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+function fmtPrice(n) {
+    if (n == null || isNaN(n)) return '–';
+    if (n >= 1000) return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+    if (n >= 1) return n.toFixed(4);
+    return n.toFixed(6);
+}
+function fmtSpread(n) { return (n ?? 0).toFixed(4) + '%'; }
+function fmtTime(ts) { return new Date(ts).toLocaleTimeString('en-GB', { timeZone: 'Europe/Kyiv', hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+function rowKey(r) { return `${r.pair}_${r.exchangeA}_${r.exchangeB}`; }
+function signedSpread(pA, pB) {
+    if (!pA || !pB) return 0;
+    return ((pA - pB) / ((pA + pB) / 2)) * 100;
+}
+
+const TV_EXCHANGES = {
+    binance: 'BINANCE',
+    bybit: 'BYBIT',
+    okx: 'OKX',
+    gate: 'GATEIO',
+    mexc: 'MEXC',
+    bitget: 'BITGET',
+    htx: 'HTX',
+    bingx: 'BINGX',
+    kucoin: 'KUCOIN',
+    xt: 'XT',
+    coinex: 'COINEX'
+};
+
+// ─── Exchange kline fetch ─────────────────────────────────────────────────────
+const BIN_IV = { 1: '1m', 60: '1m', 180: '3m', 300: '5m', 900: '15m' };
+const BYB_IV = { 1: '1', 60: '1', 180: '3', 300: '5', 900: '15' };
+const OKX_IV = { 1: '1m', 60: '1m', 180: '3m', 300: '5m', 900: '15m' };
+
+async function fetchKlines(exchange, pair, tfSec, endTime = null) {
+    // For 15s, we must use internal history from the Worker
+    if (tfSec === 15) {
+        // We only fetch history for the two exchanges in the active row to save bandwidth
+        // But here we might need klines for many exchanges. 
+        // Simplest: 15s is ONLY for the active pair comparison.
+        if (state.activeRow && (exchange === state.activeRow.exchangeA || exchange === state.activeRow.exchangeB)) {
+            try {
+                const res = await fetch(`${API_BASE}/api/history/${pair}/${state.activeRow.exchangeA}/${state.activeRow.exchangeB}`);
+                const json = await res.json();
+                const history = json.history || [];
+                // Map history to kline format {ts, close}
+                return history.map(h => ({
+                    ts: h.timestamp,
+                    close: exchange === state.activeRow.exchangeA ? h.price_a : h.price_b
+                }));
+            } catch (e) {
+                console.error('Failed to fetch 15s internal history:', e);
+                return [];
+            }
+        }
+        // Fallback to 1m for other exchanges if 15s selected
+        tfSec = 60;
+    }
+
+    const proxyInterval = TF_LABELS[tfSec] || '1m';
+    try {
+        // All exchanges are routed via Worker proxy as per AGENT_README.md
+        const endQ = endTime ? `?endTime=${endTime}` : '';
+        const res = await fetch(`${API_BASE}/api/klines/${exchange}/${pair}/${proxyInterval}/500${endQ}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        return (json.klines || []).filter(c => c.close > 0);
+    } catch (e) {
+        console.error(`Failed to fetch klines for ${exchange}:`, e.message);
+        return [];
+    }
+}
+
+/** Fetch klines from ALL known exchanges in parallel for the given pair. */
+async function loadChartData(row) {
+    const key = rowKey(row);
+    state.loadKey = key;
+
+    const results = await Promise.all(
+        KNOWN_EXCHANGES.map(ex => fetchKlines(ex, row.pair, state.timeframeSec)
+            .then(kl => [ex, kl])
+        )
+    );
+
+    if (state.loadKey !== key) return; // stale
+
+    state.klines = {};
+    for (const [ex, kl] of results) {
+        if (kl.length > 0) state.klines[ex] = kl;
+    }
+
+    // Fallback: If 15s was selected but main exchanges have NO data, try 1m
+    if (state.timeframeSec === 15 && row) {
+        const hasA = (state.klines[row.exchangeA] || []).length > 0;
+        const hasB = (state.klines[row.exchangeB] || []).length > 0;
+        if (!hasA && !hasB) {
+            console.warn('15s history empty, falling back to 1m');
+            state.timeframeSec = 60;
+            // Update UI buttons if they exist
+            document.querySelectorAll('.tf-btn').forEach(b => {
+                b.classList.remove('tf-btn--active');
+                if (b.dataset.tf === '60') b.classList.add('tf-btn--active');
+            });
+            return loadChartData(row);
+        }
+    }
+    state.liveTicks = {};
+    
+    // Reset pan/zoom on completely new pair load
+    state.visibleMinT = null;
+    state.visibleMaxT = null;
+    
+    // Auto-zoom heavily if 15s timeframe is selected OR if viewing a specific trade
+    if (window.targetEntryTime && state.visibleMinT === null) {
+        const entry = window.targetEntryTime;
+        const exit = window.targetExitTime || Date.now();
+        const mid = (entry + exit) / 2;
+        const duration = Math.max(60000, exit - entry);
+        // Show 10x the duration or at least 10 minutes
+        const halfSpan = Math.max(duration * 5, 5 * 60 * 1000); 
+        state.visibleMinT = mid - halfSpan;
+        state.visibleMaxT = mid + halfSpan;
+    } else if (state.timeframeSec === 15 && state.visibleMinT === null) {
+        state.visibleMaxT = Date.now();
+        state.visibleMinT = state.visibleMaxT - 15 * 60_000; // 15 minutes width
+    }
+
+    drawCharts();
+}
+
+// ─── Status ───────────────────────────────────────────────────────────────────
+function setStatus(s, msg) {
+    if (statusDot) statusDot.className = `dot dot--${s}`;
+    if (statusText) statusText.textContent = msg;
+}
+
+// ─── Snapshot ─────────────────────────────────────────────────────────────────
+async function fetchSnapshot() {
+    setStatus('loading', 'Fetching data…');
+    try {
+        const url = `${API_BASE}/api/unified?min=${state.threshold}&max=${state.maxSpread}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        
+        // 1. Snapshot
+        state.snapshot = (json.snapshot?.data || []).filter(r => r.spread >= state.threshold);
+        
+        // 2. Discover exchanges
+        const seen = new Set(state.snapshot.flatMap(r => [r.exchangeA, r.exchangeB]));
+        seen.forEach(ex => state.activeExchanges.add(ex));
+        renderExchangeFilters();
+        renderTable();
+
+        // 3. Last update
+        lastUpdate && (lastUpdate.textContent = fmtTime(json.snapshot?.ts || Date.now()));
+        setStatus('ok', `${state.snapshot.length} pairs above ${state.threshold}%`);
+
+        // 4. (Optional) External state updates if needed (e.g. active trades badge)
+    } catch (e) { setStatus('error', `Error: ${e.message}`); }
+}
+
+// ─── Exchange filter bar (scanner) ────────────────────────────────────────────
+const exchangeFiltersEl = $('exchange-filters');
+
+function renderExchangeFilters() {
+    // Collect unique exchanges present in snapshot
+    const inSnapshot = [...new Set(state.snapshot.flatMap(r => [r.exchangeA, r.exchangeB]))];
+    if (!inSnapshot.length) { exchangeFiltersEl.innerHTML = ''; return; }
+
+    exchangeFiltersEl.innerHTML = '';
+
+    // One pill per exchange
+    for (const ex of inSnapshot) {
+        const color = EXCHANGE_COLORS[ex] || '#94a3b8';
+        const active = state.activeExchanges.has(ex);
+        const btn = document.createElement('button');
+        btn.className = 'ex-filter-btn' + (active ? '' : ' ex-off');
+        btn.style.cssText = `color:${color};border-color:${color}`;
+        btn.innerHTML = `<span class="dot-icon" style="background:${color}"></span>${ex}`;
+        btn.title = active ? `Hide ${ex}` : `Show ${ex}`;
+        btn.addEventListener('click', () => {
+            if (state.activeExchanges.has(ex)) state.activeExchanges.delete(ex);
+            else state.activeExchanges.add(ex);
+            renderExchangeFilters();
+            renderTable();
+        });
+        exchangeFiltersEl.appendChild(btn);
+    }
+
+    // Shortcut: All / None
+    const sep = document.createElement('span'); sep.className = 'ex-filter-sep';
+    exchangeFiltersEl.appendChild(sep);
+
+    const makeCtrl = (label, onClick) => {
+        const b = document.createElement('button');
+        b.className = 'ex-filter-ctrl'; b.textContent = label;
+        b.addEventListener('click', onClick); return b;
+    };
+    exchangeFiltersEl.appendChild(makeCtrl('All', () => {
+        inSnapshot.forEach(ex => state.activeExchanges.add(ex));
+        renderExchangeFilters(); renderTable();
+    }));
+    exchangeFiltersEl.appendChild(makeCtrl('None', () => {
+        inSnapshot.forEach(ex => state.activeExchanges.delete(ex));
+        renderExchangeFilters(); renderTable();
+    }));
+}
+
+// ─── Table ────────────────────────────────────────────────────────────────────
+function renderTable() {
+    // Only rows where BOTH exchanges are active in the filter
+    const filtered = state.snapshot.filter(r =>
+        state.activeExchanges.has(r.exchangeA) && state.activeExchanges.has(r.exchangeB)
+    );
+    const sorted = [...filtered].sort((a, b) => {
+        const av = a[state.sortKey] ?? 0, bv = b[state.sortKey] ?? 0;
+        return typeof av === 'string' ? av.localeCompare(bv) * state.sortDir : (av - bv) * state.sortDir;
+    });
+    pairCount.textContent = `${sorted.length} pairs`;
+    tableBody.innerHTML = '';
+    if (!sorted.length) {
+        tableBody.innerHTML = `<tr class="placeholder-row"><td colspan="7">No pairs above threshold</td></tr>`;
+        return;
+    }
+    for (const row of sorted) {
+        const key = rowKey(row);
+        const tr = document.createElement('tr');
+        if (key === state.activeRowKey) tr.classList.add('active-row');
+        const sc = row.spread >= 0.5 ? 'spread--high' : row.spread >= 0.2 ? 'spread--medium' : 'spread--low';
+        tr.innerHTML = `
+          <td>${row.pair}</td><td>${row.exchangeA}</td><td>${row.exchangeB}</td>
+          <td>${fmtPrice(row.priceA)}</td><td>${fmtPrice(row.priceB)}</td>
+          <td class="spread-cell ${sc}">${fmtSpread(row.spread)}</td>
+          <td class="dir-cell">${row.direction || '–'}</td>`;
+        tr.addEventListener('click', () => openModal(row));
+        tableBody.appendChild(tr);
+    }
+}
+
+document.querySelectorAll('thead th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+        const key = th.dataset.sort;
+        document.querySelectorAll('thead th').forEach(h => h.classList.remove('sorted-asc', 'sorted-desc'));
+        state.sortDir = (state.sortKey === key) ? state.sortDir * -1 : -1;
+        state.sortKey = key;
+        th.classList.add(state.sortDir === -1 ? 'sorted-desc' : 'sorted-asc');
+        renderTable();
+    });
+});
+
+// ─── Modal ────────────────────────────────────────────────────────────────────
+function openModal(row) {
+    state.activeRowKey = rowKey(row);
+    state.activeRow = row;
+    state.klines = {};
+    state.liveTicks = {};
+    // By default show only the pair's two exchanges; hide all others
+    state.hiddenExchanges = new Set(
+        KNOWN_EXCHANGES.filter(ex => ex !== row.exchangeA && ex !== row.exchangeB)
+    );
+
+    modalTitle.textContent = row.pair;
+    updateModalSub();
+    updateTVLink(row);
+    updateVolumeInfo(row);
+    wsLabelA.textContent = row.exchangeA;
+    wsLabelB.textContent = row.exchangeB;
+
+    modalBackdrop.classList.remove('hidden');
+    renderTable();
+
+    loadChartData(row).then(() => connectWS(row));
+}
+
+function updateModalSub() {
+    const row = state.activeRow;
+    if (!row) return;
+    const exFound = Object.keys(state.klines).join(' / ') || '…';
+    modalSub.textContent = `${row.pair} · ${exFound} · ${state.timeframeSec / 60}m · spread: ${row.exchangeA} vs ${row.exchangeB}`;
+}
+
+function updateTVLink(row) {
+    const tvLink = $('tv-link');
+    if (!tvLink || !row) return;
+
+    const exA = TV_EXCHANGES[row.exchangeA] || row.exchangeA.toUpperCase();
+    const exB = TV_EXCHANGES[row.exchangeB] || row.exchangeB.toUpperCase();
+    const ticker = row.pair.toUpperCase() + '.P';
+
+    const formula = `((${exA}:${ticker} - ${exB}:${ticker}) / ${exB}:${ticker}) * 100`;
+    tvLink.href = `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(formula)}`;
+}
+
+function updateVolumeInfo(row) {
+    const volEl = $('chart-volume-info');
+    if (!volEl || !row) return;
+
+    // Try to find volume in snapshot if current row has 0
+    let vA = row.volA;
+    let vB = row.volB;
+    if ((!vA || !vB) && state.snapshot.length > 0) {
+        // Find ANY row for this pair to extract volume for exA and exB
+        const allForPair = state.snapshot.filter(r => r.pair === row.pair);
+        if (!vA) {
+            const rowWithA = allForPair.find(r => r.exchangeA === exA || r.exchangeB === exA);
+            if (rowWithA) vA = (rowWithA.exchangeA === exA) ? rowWithA.volA : rowWithA.volB;
+        }
+        if (!vB) {
+            const rowWithB = allForPair.find(r => r.exchangeA === exB || r.exchangeB === exB);
+            if (rowWithB) vB = (rowWithB.exchangeA === exB) ? rowWithB.volA : rowWithB.volB;
+        }
+    }
+
+    const fmtVol = v => {
+        if (v == null || isNaN(v) || v <= 0) return 'N/A';
+        if (v >= 1e9) return '$' + (v / 1e9).toFixed(2) + 'B';
+        if (v >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'M';
+        if (v >= 1e3) return '$' + (v / 1e3).toFixed(1) + 'k';
+        return '$' + Number(v).toFixed(0);
+    };
+
+    const exA = row.exchangeA;
+    const exB = row.exchangeB;
+    const colA = EXCHANGE_COLORS[exA] || '#60a5fa';
+    const colB = EXCHANGE_COLORS[exB] || '#34d399';
+
+    volEl.innerHTML = `
+        <div class="volume-item">
+            <span class="dot-icon" style="background:${colA}"></span>
+            <span>${exA} 24h Vol:</span>
+            <span class="volume-val">${fmtVol(vA)}</span>
+        </div>
+        <div class="volume-item">
+            <span class="dot-icon" style="background:${colB}"></span>
+            <span>${exB} 24h Vol:</span>
+            <span class="volume-val">${fmtVol(vB)}</span>
+        </div>
+    `;
+}
+
+function closeModal() {
+    state.loadKey = null;
+    state.activeRowKey = null;
+    state.activeRow = null;
+    state.klines = {};
+    state.liveTicks = {};
+    state.hiddenExchanges = new Set();
+    modalBackdrop.classList.add('hidden');
+
+    if (document.body.classList.contains('iframe-mode')) {
+        window.parent.postMessage({ type: 'CLOSE_CHART_MODAL' }, '*');
+    }
+
+    disconnectWS(); clearCharts(); renderTable();
+}
+modalClose.addEventListener('click', closeModal);
+modalBackdrop.addEventListener('click', e => { if (e.target === modalBackdrop) closeModal(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+// ─── Timeframe buttons ────────────────────────────────────────────────────────
+document.querySelectorAll('.tf-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('tf-btn--active'));
+        btn.classList.add('tf-btn--active');
+        state.timeframeSec = parseInt(btn.dataset.tf, 10);
+        if (state.activeRow) loadChartData(state.activeRow);
+    });
+});
+
+// ─── Chart rendering ──────────────────────────────────────────────────────────
+function clearCharts() {
+    priceLinesG.innerHTML = '';
+    svgP.querySelectorAll('.inline-label').forEach(e => e.remove());
+    ['grid-p', 'ylabel-p', 'bars-hist', 'bars-live', 'grid-h', 'ylabel-h', 'xlabel-h']
+        .forEach(id => { const el = $(id); if (el) el.innerHTML = ''; });
+    if (legendDyn) legendDyn.innerHTML = '';
+}
+
+function drawCharts() {
+    const klines = state.klines;
+    const live = state.liveTicks;
+    const row = state.activeRow;
+    if (!row) return;
+
+    // Only consider visible exchanges for X and Y domain
+    const visibleEx = Object.keys(klines).filter(ex => !state.hiddenExchanges.has(ex));
+
+    const allTs = [
+        ...visibleEx.flatMap(ex => (klines[ex] || []).map(p => p.ts)),
+        ...visibleEx.flatMap(ex => (live[ex] || []).map(p => p.ts)),
+    ];
+    if (!allTs.length) return;
+
+    const dataMinT = Math.min(...allTs);
+    const dataMaxT = Math.max(...allTs) || dataMinT + 1;
+    
+    // Use user-defined zoom bounds if present, otherwise default to full data
+    if (state.visibleMinT === null) state.visibleMinT = dataMinT;
+    if (state.visibleMaxT === null) state.visibleMaxT = dataMaxT;
+    
+    // Strict clamp so we can't pan into the future past live data
+    if (state.visibleMaxT > dataMaxT + 60000) {
+        const span = state.visibleMaxT - state.visibleMinT;
+        state.visibleMaxT = dataMaxT + 60000;
+        state.visibleMinT = state.visibleMaxT - span;
+    }
+
+    const minT = state.visibleMinT;
+    const maxT = state.visibleMaxT;
+
+    drawPricePanel(klines, live, minT, maxT, row, dataMinT);
+    drawHistPanel(klines, live, minT, maxT, row);
+    updateLegend(klines, row);
+    updateModalSub();
+}
+
+// ─── Price panel ──────────────────────────────────────────────────────────────
+function drawPricePanel(klines, live, minT, maxT, row, dataMinT) {
+    const { W, H } = svgDims(svgP);
+    const iW = W - PAD.left - PAD.right;
+    const iH = H - PAD.top - PAD.bottom;
+
+    // Determine visible exchanges first (needed for Y scale AND drawing)
+    const highlight = new Set([row.exchangeA, row.exchangeB]);
+    const allEx = Object.keys(klines).filter(ex => !state.hiddenExchanges.has(ex));
+
+    // Y range using ONLY visible exchanges and visible TIME WINDOW
+    const allVals = [
+        ...allEx.flatMap(ex => (klines[ex] || []).filter(p => p.ts >= minT && p.ts <= maxT).map(p => p.close)),
+        ...allEx.flatMap(ex => (live[ex] || []).filter(p => p.ts >= minT && p.ts <= maxT).map(p => p.close)),
+    ].filter(v => v > 0);
+    if (!allVals.length) return; // If completely panned out of bounds with no data, avoid crash
+
+    let minV = Math.min(...allVals), maxV = Math.max(...allVals);
+    const rng = (maxV - minV) * 0.1 || maxV * 0.02 || 0.000001;
+    minV -= rng; maxV += rng;
+
+    const xOf = ts => PAD.left + ((ts - minT) / (maxT - minT || 1)) * iW;
+    const yOf = v => PAD.top + (1 - (v - minV) / (maxV - minV)) * iH;
+
+    // Grid + Y labels
+    const gridEl = $('grid-p'), ylEl = $('ylabel-p');
+    gridEl.innerHTML = ''; ylEl.innerHTML = '';
+    for (let i = 0; i <= 5; i++) {
+        const v = minV + (maxV - minV) * (i / 5);
+        const y = yOf(v);
+        gridEl.appendChild(svgEl('line', { x1: PAD.left, y1: y, x2: PAD.left + iW, y2: y }));
+        const t = svgEl('text', { x: PAD.left - 5, y: y + 3, 'text-anchor': 'end' });
+        t.textContent = fmtPrice(v);
+        ylEl.appendChild(t);
+    }
+
+    // Clear and redraw price lines
+    priceLinesG.innerHTML = '';
+
+    // Highlighted exchanges (from the selected row) — already computed above
+
+    // Draw non-highlighted first (background), highlighted on top
+    const drawOrder = [
+        ...allEx.filter(ex => !highlight.has(ex)),
+        ...allEx.filter(ex => highlight.has(ex)),
+    ];
+
+    for (const ex of drawOrder) {
+        const kl = klines[ex] || [];
+        const lk = live[ex] || [];
+        const color = EXCHANGE_COLORS[ex] || '#94a3b8';
+        const isHL = highlight.has(ex);
+        const sw = isHL ? 2.0 : 1.2;
+        const opac = isHL ? '1' : '0.45';
+
+        // History line
+        const ptHist = kl.filter(p => p.close > 0)
+            .map(p => `${xOf(p.ts).toFixed(1)},${yOf(p.close).toFixed(1)}`).join(' ');
+        if (ptHist) {
+            priceLinesG.appendChild(svgEl('polyline', {
+                points: ptHist, fill: 'none',
+                stroke: color, 'stroke-width': sw, opacity: opac,
+                'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+            }));
+        }
+
+        // Live ticks (dashed)
+        const ptLive = lk.filter(p => p.close > 0)
+            .map(p => `${xOf(p.ts).toFixed(1)},${yOf(p.close).toFixed(1)}`).join(' ');
+        if (ptLive) {
+            priceLinesG.appendChild(svgEl('polyline', {
+                points: ptLive, fill: 'none',
+                stroke: color, 'stroke-width': sw, opacity: opac,
+                'stroke-dasharray': '4 2', 'stroke-linecap': 'round',
+            }));
+        }
+    }
+
+    // Overlay on top
+    const ov = $('overlay-p');
+    ov.setAttribute('x', 0); ov.setAttribute('y', 0);
+    ov.setAttribute('width', W); ov.setAttribute('height', H);
+    svgP.appendChild(ov);
+}
+
+// ─── Histogram panel (A vs B from selected row) ───────────────────────────────
+function drawHistPanel(klines, live, minT, maxT, row) {
+    const { W, H } = svgDims(svgH);
+    const iW = W - PAD_H.left - PAD_H.right;
+    const iH = H - PAD_H.top - PAD_H.bottom;
+
+    const klA = klines[row.exchangeA] || [];
+    const klB = klines[row.exchangeB] || [];
+
+    // Merge by timestamp
+    const mapB = new Map(klB.map(c => [c.ts, c.close]));
+    const histS = klA
+        .filter(c => mapB.has(c.ts))
+        .map(c => ({ ts: c.ts, v: signedSpread(c.close, mapB.get(c.ts)) }));
+
+    // Live: use liveTicks if available, else skip
+    const liveA = live[row.exchangeA] || [];
+    const liveB = live[row.exchangeB] || [];
+    const mapLB = new Map(liveB.map(c => [c.ts, c.close]));
+    const liveS = liveA
+        .filter(c => mapLB.has(c.ts))
+        .map(c => ({ ts: c.ts, v: signedSpread(c.close, mapLB.get(c.ts)) }));
+
+    const allS = [...histS, ...liveS];
+    if (!allS.length) return;
+
+    const visibleVals = allS.filter(p => p.ts >= minT && p.ts <= maxT).map(p => p.v);
+    if (!visibleVals.length) return;
+    
+    const absMax = Math.max(Math.abs(Math.min(...visibleVals)), Math.abs(Math.max(...visibleVals))) * 1.2 || 0.1;
+    const minV = -absMax, maxV = absMax;
+
+    const xOf = ts => PAD_H.left + ((ts - minT) / (maxT - minT || 1)) * iW;
+    const yOf = v => PAD_H.top + (1 - (v - minV) / (maxV - minV)) * iH;
+    const yZero = yOf(0);
+
+    const gridEl = $('grid-h'), ylEl = $('ylabel-h'), xlEl = $('xlabel-h');
+    gridEl.innerHTML = ''; ylEl.innerHTML = ''; xlEl.innerHTML = '';
+
+    for (let i = 0; i <= 4; i++) {
+        const v = minV + (maxV - minV) * (i / 4);
+        const y = yOf(v);
+        gridEl.appendChild(svgEl('line', { x1: PAD_H.left, y1: y, x2: PAD_H.left + iW, y2: y }));
+        const t = svgEl('text', { x: PAD_H.left - 5, y: y + 3, 'text-anchor': 'end' });
+        t.textContent = v.toFixed(3) + '%';
+        ylEl.appendChild(t);
+    }
+    for (let i = 0; i <= 5; i++) {
+        const ts = minT + (maxT - minT) * (i / 5);
+        const t = svgEl('text', { x: xOf(ts), y: H - PAD_H.bottom + 14, 'text-anchor': 'middle' });
+        t.textContent = fmtTime(ts);
+        xlEl.appendChild(t);
+    }
+
+    const zl = $('zero-line');
+    zl.setAttribute('x1', PAD_H.left); zl.setAttribute('y1', yZero);
+    zl.setAttribute('x2', PAD_H.left + iW); zl.setAttribute('y2', yZero);
+
+    let barW = 4;
+    if (allS.length > 1) {
+        barW = Math.max(2, Math.min(18, (iW / (allS.length - 1)) * 0.7));
+    }
+
+    const colA = EXCHANGE_COLORS[row.exchangeA] || '#60a5fa';
+    const colB = EXCHANGE_COLORS[row.exchangeB] || '#34d399';
+
+    const barsHist = $('bars-hist'); barsHist.innerHTML = '';
+    for (const p of histS) {
+        const x = xOf(p.ts) - barW / 2;
+        const y = p.v >= 0 ? yOf(p.v) : yZero;
+        const h = Math.max(1, Math.abs(yOf(p.v) - yZero));
+        // Green uses exch A color (A > B), Red uses exch B color (B > A)
+        barsHist.appendChild(svgEl('rect', {
+            x, y, width: barW, height: h,
+            fill: p.v >= 0 ? colA + 'cc' : colB + 'cc',
+        }));
+    }
+
+    const barsLive = $('bars-live'); barsLive.innerHTML = '';
+    for (const p of liveS) {
+        const x = xOf(p.ts) - barW / 2;
+        const y = p.v >= 0 ? yOf(p.v) : yZero;
+        const h = Math.max(1, Math.abs(yOf(p.v) - yZero));
+        barsLive.appendChild(svgEl('rect', {
+            x, y, width: barW, height: h,
+            fill: p.v >= 0 ? colA : colB,
+        }));
+    }
+
+    const ov = $('overlay-h');
+    ov.setAttribute('x', 0); ov.setAttribute('y', 0);
+    ov.setAttribute('width', W); ov.setAttribute('height', H);
+
+    // Draw Entry/Exit Markers if present via URL params
+    const drawMarker = (ts, label, color, yOffset) => {
+        if (!ts || ts < minT || ts > maxT) return;
+        const x = xOf(ts);
+        barsHist.appendChild(svgEl('line', { x1: x, y1: PAD_H.top, x2: x, y2: H - PAD_H.bottom, stroke: color, 'stroke-dasharray': '4 4', 'stroke-width': 1.5, opacity: 0.8 }));
+        const t = svgEl('text', { x: x + 6, y: PAD_H.top + yOffset, fill: color, 'font-size': '11px', 'font-weight': 'bold' });
+        t.textContent = label;
+        barsHist.appendChild(t);
+    };
+
+    if (window.targetEntryTime) drawMarker(window.targetEntryTime, 'ENTRY', '#eab308', 12);
+    if (window.targetExitTime) drawMarker(window.targetExitTime, 'EXIT', '#f43f5e', 26);
+}
+
+// ─── Chart legend (clickable per-exchange toggles) ───────────────────────────
+const chartLegend = $('chart-legend');
+
+function updateLegend(klines, row) {
+    chartLegend.innerHTML = '';
+
+    // Exchange toggle buttons
+    const allEx = new Set([...Object.keys(klines), row.exchangeA, row.exchangeB]);
+    for (const ex of allEx) {
+        const color = EXCHANGE_COLORS[ex] || '#94a3b8';
+        const isHL = ex === row.exchangeA || ex === row.exchangeB;
+        const hidden = state.hiddenExchanges.has(ex);
+        const hasData = (klines[ex] || []).length > 0;
+
+        const btn = document.createElement('button');
+        btn.className = 'chart-legend-btn' + (hidden ? ' hidden-ex' : '');
+        btn.style.cssText = `color:${color};border-color:${color};font-weight:${isHL ? 700 : 400}`;
+        if (!hasData) btn.style.opacity = '0.35';
+        
+        btn.title = hidden ? `Show ${ex}` : `Hide ${ex}`;
+        if (!hasData) btn.title += ' (No data)';
+        
+        btn.innerHTML = `<span class="dot-icon" style="background:${color}"></span>${ex}`;
+        btn.addEventListener('click', () => {
+            if (state.hiddenExchanges.has(ex)) state.hiddenExchanges.delete(ex);
+            else state.hiddenExchanges.add(ex);
+            drawCharts();
+        });
+        chartLegend.appendChild(btn);
+    }
+
+    // ─ Control buttons: Show all / Only pair ─────────────────────────────────
+    const pairSet = new Set([row.exchangeA, row.exchangeB]);
+    const allKeys = Object.keys(klines);
+    const hasHidden = allKeys.some(ex => !pairSet.has(ex) && state.hiddenExchanges.has(ex));
+
+    const makeCtrl = (label, title, onClick) => {
+        const b = document.createElement('button');
+        b.className = 'chart-legend-btn';
+        b.style.cssText = 'color:var(--text-sub);border-color:var(--border);font-weight:400;font-size:.68rem';
+        b.title = title;
+        b.textContent = label;
+        b.addEventListener('click', onClick);
+        return b;
+    };
+
+    if (hasHidden) {
+        chartLegend.appendChild(makeCtrl('+ show all', 'Show all exchanges', () => {
+            state.hiddenExchanges.clear();
+            drawCharts();
+        }));
+    } else if (allKeys.length > 2) {
+        chartLegend.appendChild(makeCtrl('− only pair', 'Hide non-pair exchanges', () => {
+            state.hiddenExchanges = new Set(allKeys.filter(ex => !pairSet.has(ex)));
+            drawCharts();
+        }));
+    }
+
+    // ─ Separator + spread direction labels ─────────────────────────────────
+    if (row) {
+        const sep = document.createElement('span');
+        sep.className = 'chart-legend-sep';
+        chartLegend.appendChild(sep);
+
+        const colA = EXCHANGE_COLORS[row.exchangeA] || '#60a5fa';
+        const colB = EXCHANGE_COLORS[row.exchangeB] || '#34d399';
+        [[colA, `▲ ${row.exchangeA} > ${row.exchangeB}`],
+        [colB, `▼ ${row.exchangeB} > ${row.exchangeA}`]].forEach(([col, txt]) => {
+            const s = document.createElement('span');
+            s.className = 'chart-legend-label';
+            s.style.color = col;
+            s.textContent = txt;
+            chartLegend.appendChild(s);
+        });
+    }
+
+    if (legendDyn) legendDyn.innerHTML = '';
+}
+
+// ResizeObserver
+const ro = new ResizeObserver(() => { if (state.activeRow) drawCharts(); });
+ro.observe(document.body);
+
+// ─── SVG Interaction (Zoom & Pan) ──────────────────────────────────────────────
+async function loadOlderHistory() {
+    if (state.isLoadingHistory || !state.activeRow) return;
+    state.isLoadingHistory = true;
+    
+    // Find the absolute minimum loaded timestamp
+    const visibleEx = Object.keys(state.klines).filter(ex => !state.hiddenExchanges.has(ex));
+    const allTs = visibleEx.flatMap(ex => (state.klines[ex] || []).map(p => p.ts));
+    const absoluteMinT = allTs.length ? Math.min(...allTs) : state.visibleMinT;
+    
+    // Fetch older data for all known exchanges
+    const results = await Promise.all(
+        KNOWN_EXCHANGES.map(ex => fetchKlines(ex, state.activeRow.pair, state.timeframeSec, absoluteMinT)
+            .then(kl => [ex, kl])
+        )
+    );
+    
+    let added = false;
+    for (const [ex, kl] of results) {
+        if (kl.length > 0) {
+            // merge and sort
+            const existing = state.klines[ex] || [];
+            const merged = [...kl, ...existing].sort((a,b) => a.ts - b.ts);
+            // remove duplicates just in case
+            state.klines[ex] = merged.filter((item, pos, ary) => !pos || item.ts !== ary[pos - 1].ts);
+            added = true;
+        }
+    }
+    
+    if (added) drawCharts();
+    
+    // Release lock after a short delay to prevent spamming
+    setTimeout(() => { state.isLoadingHistory = false; }, 1000);
+}
+
+function handleChartZoom(e) {
+    if (!state.visibleMinT || !state.visibleMaxT) return;
+    e.preventDefault();
+    
+    const { W } = svgDims(svgP);
+    const iW = W - PAD.left - PAD.right;
+    
+    // where is the mouse horizontally inside the graph area?
+    const rect = svgP.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left - PAD.left;
+    const ratio = Math.max(0, Math.min(1, mouseX / iW));
+    
+    const span = state.visibleMaxT - state.visibleMinT;
+    const focalTime = state.visibleMinT + span * ratio;
+    
+    // zoom factor
+    const zoom = e.deltaY > 0 ? 1.2 : 0.8;
+    const newSpan = span * zoom;
+    
+    // Min zoom out: max 14 days, Min zoom in: 10 minutes (for 1m timeframe)
+    if (newSpan > 14 * 24 * 3600 * 1000 || newSpan < 10 * 60 * 1000) return;
+    
+    state.visibleMinT = focalTime - newSpan * ratio;
+    state.visibleMaxT = focalTime + newSpan * (1 - ratio);
+    
+    drawCharts();
+}
+
+function handleChartPanStart(e) {
+    if (e.button !== 0) return; // Only left click
+    state.isDragging = true;
+    state.lastDragX = e.clientX;
+    svgP.style.cursor = 'grabbing';
+    svgH.style.cursor = 'grabbing';
+}
+
+function handleChartPanMove(e) {
+    if (!state.isDragging || !state.visibleMinT) return;
+    
+    const dx = e.clientX - state.lastDragX;
+    state.lastDragX = e.clientX;
+    
+    const { W } = svgDims(svgP);
+    const iW = W - PAD.left - PAD.right;
+    const span = state.visibleMaxT - state.visibleMinT;
+    
+    const dt = -(dx / iW) * span;
+    
+    state.visibleMinT += dt;
+    state.visibleMaxT += dt;
+    
+    drawCharts();
+    
+    // If we've panned within 20% of the left edge, load more history
+    const visibleEx = Object.keys(state.klines).filter(ex => !state.hiddenExchanges.has(ex));
+    const allTs = visibleEx.flatMap(ex => (state.klines[ex] || []).map(p => p.ts));
+    const absoluteMinT = allTs.length ? Math.min(...allTs) : state.visibleMinT;
+    
+    if (state.visibleMinT < absoluteMinT + (span * 0.2)) {
+        loadOlderHistory();
+    }
+}
+
+function handleChartPanEnd() {
+    state.isDragging = false;
+    svgP.style.cursor = 'crosshair';
+    svgH.style.cursor = 'crosshair';
+}
+
+svgP.addEventListener('wheel', handleChartZoom, { passive: false });
+svgH.addEventListener('wheel', handleChartZoom, { passive: false });
+
+svgP.addEventListener('mousedown', handleChartPanStart);
+svgH.addEventListener('mousedown', handleChartPanStart);
+
+let crosshairP = { x: null, y: null };
+let crosshairH = { x: null, y: null };
+
+function initCrosshairs() {
+    ['p', 'h'].forEach(id => {
+        const svg = id === 'p' ? svgP : svgH;
+        // Use insertBefore to put crosshairs right above the overlay rect
+        const overlay = $(`overlay-${id}`);
+        const xLine = svgEl('line', { class: 'crosshair', 'stroke-dasharray': '2 2', stroke: 'rgba(255,255,255,0.2)', 'stroke-width': 1, 'pointer-events': 'none', display: 'none' });
+        const yLine = svgEl('line', { class: 'crosshair', 'stroke-dasharray': '2 2', stroke: 'rgba(255,255,255,0.2)', 'stroke-width': 1, 'pointer-events': 'none', display: 'none' });
+        svg.insertBefore(xLine, overlay);
+        svg.insertBefore(yLine, overlay);
+        
+        if (id === 'p') {
+            crosshairP.x = xLine; crosshairP.y = yLine;
+        } else {
+            crosshairH.x = xLine; crosshairH.y = yLine;
+        }
+        
+        svg.addEventListener('mousemove', e => {
+            if (state.isDragging) return;
+            const ch = id === 'p' ? crosshairP : crosshairH;
+            const rect = svg.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            ch.x.setAttribute('x1', x); ch.x.setAttribute('y1', 0);
+            ch.x.setAttribute('x2', x); ch.x.setAttribute('y2', rect.height);
+            ch.y.setAttribute('x1', 0); ch.y.setAttribute('y1', y);
+            ch.y.setAttribute('x2', rect.width); ch.y.setAttribute('y2', y);
+            ch.x.style.display = 'block';
+            ch.y.style.display = 'block';
+        });
+        
+        svg.addEventListener('mouseleave', () => {
+            const ch = id === 'p' ? crosshairP : crosshairH;
+            ch.x.style.display = 'none';
+            ch.y.style.display = 'none';
+        });
+    });
+}
+initCrosshairs();
+
+window.addEventListener('mousemove', handleChartPanMove);
+window.addEventListener('mouseup', handleChartPanEnd);
+
+// ─── WebSocket ────────────────────────────────────────────────────────────────
+function wsConfig(exchange, pair) {
+    const sym = pair.toLowerCase();
+    if (exchange === 'binance') {
+        return {
+            url: `wss://fstream.binance.com/ws/${sym}@markPrice`,
+            extract: msg => { const d = JSON.parse(msg.data); return d.p ? parseFloat(d.p) : null; },
+        };
+    } else if (exchange === 'bybit') {
+        return {
+            url: `wss://stream.bybit.com/v5/public/linear`,
+            onOpen: ws => ws.send(JSON.stringify({ op: 'subscribe', args: [`tickers.${pair.toUpperCase()}`] })),
+            extract: msg => { const d = JSON.parse(msg.data); const p = d?.data?.lastPrice; return p ? parseFloat(p) : null; },
+        };
+    } else {
+        const instId = pair.replace(/^([A-Z0-9]+)(USDT)$/, '$1-USDT-SWAP');
+        return {
+            url: `wss://ws.okx.com:8443/ws/v5/public`,
+            onOpen: ws => ws.send(JSON.stringify({ op: 'subscribe', args: [{ channel: 'mark-price', instId }] })),
+            extract: msg => { const d = JSON.parse(msg.data); const p = d?.data?.[0]?.markPx; return p ? parseFloat(p) : null; },
+        };
+    }
+}
+
+function connectWS(row) {
+    disconnectWS();
+    const exTarget = state.wsTarget === 'a' ? row.exchangeA : row.exchangeB;
+    const cfg = wsConfig(exTarget, row.pair);
+    let ws;
+    try { ws = new WebSocket(cfg.url); } catch { wsStatus.className = 'ws-indicator ws-indicator--err'; return; }
+
+    ws.onopen = () => { wsStatus.className = 'ws-indicator ws-indicator--on'; if (cfg.onOpen) cfg.onOpen(ws); };
+    ws.onmessage = e => {
+        let price;
+        try { price = cfg.extract(e); } catch { return; }
+        if (!price || isNaN(price) || price <= 0) return;
+        if (!state.liveTicks[exTarget]) state.liveTicks[exTarget] = [];
+        state.liveTicks[exTarget].push({ ts: Date.now(), close: price });
+        const cutoff = Date.now() - 30 * 60_000;
+        state.liveTicks[exTarget] = state.liveTicks[exTarget].filter(p => p.ts >= cutoff);
+        drawCharts();
+    };
+    ws.onerror = () => { wsStatus.className = 'ws-indicator ws-indicator--err'; };
+    ws.onclose = () => {
+        wsStatus.className = 'ws-indicator ws-indicator--off';
+        setTimeout(() => { if (state.activeRow && state.ws === ws) connectWS(state.activeRow); }, 5_000);
+    };
+    state.ws = ws;
+}
+
+function disconnectWS() {
+    wsStatus.className = 'ws-indicator ws-indicator--off';
+    if (state.ws) { state.ws.onclose = null; state.ws.close(); state.ws = null; }
+}
+
+document.querySelectorAll('input[name="ws-exchange"]').forEach(r => {
+    r.addEventListener('change', () => { state.wsTarget = r.value; if (state.activeRow) connectWS(state.activeRow); });
+});
+
+// ─── Controls ─────────────────────────────────────────────────────────────────
+function scheduleRefresh() {
+    if (state.refreshTimer) clearInterval(state.refreshTimer);
+    state.refreshTimer = setInterval(fetchSnapshot, state.refreshMs);
+}
+
+/** Load min/max spread and refresh interval from the shared Trading Settings. */
+async function loadScannerSettings() {
+    try {
+        const res = await fetch(`${API_BASE}/api/trading/settings`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && Object.keys(data).length > 0) {
+            state.threshold = parseFloat(data.min_entry_spread) || 1;
+            state.maxSpread = parseFloat(data.max_entry_spread) || 10;
+            const intervalSecs = parseInt(data.collector_interval_secs) || 5;
+            state.refreshMs = Math.max(5, intervalSecs) * 1000;
+        }
+    } catch (e) {
+        console.warn('Could not load scanner settings from API, using defaults:', e);
+    }
+}
+
+(async function init() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('iframe') === '1') {
+        document.body.classList.add('iframe-mode');
+        // Auto-refresh snapshot disabled in iframe chart mode to save resources
+        state.refreshMs = 9999999;
+    } else {
+        await loadScannerSettings();
+    }
+
+    if (params.has('chart')) {
+        const pair = params.get('chart');
+        const exA = params.get('exA') || 'binance';
+        const exB = params.get('exB') || 'bybit';
+        window.targetEntryTime = parseInt(params.get('entry')) || null;
+        window.targetExitTime = parseInt(params.get('exit')) || null;
+
+        // Load snapshot even in chart mode so we have volume data
+        fetchSnapshot().then(() => {
+            // Ensure exchanges are considered "known" so klines can be fetched
+            state.activeExchanges.add(exA);
+            state.activeExchanges.add(exB);
+
+            const isHistory = params.has('exit');
+            state.timeframeSec = isHistory ? 60 : 15;
+            
+            document.querySelectorAll('.tf-btn').forEach(b => {
+                b.classList.remove('tf-btn--active');
+                if (b.dataset.tf === String(state.timeframeSec)) b.classList.add('tf-btn--active');
+            });
+
+            const fakeRow = { pair, exchangeA: exA, exchangeB: exB, priceA: 0, priceB: 0, spread: 0, volA: 0, volB: 0, direction: '' };
+            setTimeout(() => openModal(fakeRow), 300);
+        });
+    } else {
+        await fetchSnapshot();
+        scheduleRefresh();
+    }
+})();
