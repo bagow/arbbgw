@@ -407,8 +407,15 @@ async function handleFetch(request, env, ctx) {
     if (path === '/api/trading/settings') {
         if (request.method === 'GET') {
             const settings = await env.DB.prepare(`SELECT * FROM trading_settings WHERE id = 'default'`).first();
-            if (settings?.is_active !== undefined) settings.is_active = Boolean(settings.is_active);
-            return jsonResponse(settings || {});
+            const defaults = {
+                is_active: false, min_entry_spread: 1.0, max_entry_spread: 10.0,
+                trade_volume: 1000.0, take_profit_percent: 0.1, trailing_stop_percent: 0.5,
+                max_active_trades: 5, commission_rate: 0.45, funding_rate_8h: 0.01,
+                slippage_percent: 0.1, min_volume_millions: 10, collector_interval_secs: 5,
+            };
+            const out = { ...defaults, ...(settings || {}) };
+            if (out.is_active !== undefined) out.is_active = Boolean(out.is_active);
+            return jsonResponse(out);
         } else if (request.method === 'POST') {
             const body = await request.json();
             const {
@@ -515,14 +522,15 @@ async function handleFetch(request, env, ctx) {
     if (path === '/api/real-trader/settings') {
         if (request.method === 'GET') {
             const row = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE id='real-default'`).first();
-            if (row?.is_active !== undefined) row.is_active = Boolean(row.is_active);
-            return jsonResponse(row || {
+            const defaults = {
                 is_active: false, min_entry_spread: 1.0, max_entry_spread: 10.0,
                 trade_volume: 100.0, take_profit_percent: 0.2, trailing_stop_percent: 0.3,
                 max_active_trades: 3, commission_rate: 0.05, slippage_percent: 0.05,
                 funding_rate_8h: 0.01, min_volume_millions: 10, collector_interval_secs: 5,
-                pending_commands: null,
-            });
+            };
+            const out = { ...defaults, ...(row || {}) };
+            if (out.is_active !== undefined) out.is_active = Boolean(out.is_active);
+            return jsonResponse(out);
         } else if (request.method === 'POST') {
             const body = await request.json();
             await env.DB.prepare(`
@@ -719,7 +727,14 @@ async function getFullStats(env, profileId = 'paper-default') {
     `).all();
 
     return {
-        ...basic,
+        total_pnl: basic.total_pnl || 0,
+        total_trades: basic.total_trades || 0,
+        avg_pnl: basic.avg_pnl || 0,
+        wins: basic.wins || 0,
+        losses: basic.losses || 0,
+        avg_duration: basic.avg_duration || 0,
+        gross_profit: basic.gross_profit || 0,
+        gross_loss: basic.gross_loss || 0,
         pnl_by_exchange: (pnlEx.results || []).reduce((a, r) => { a[r.ex] = r.p; return a; }, {}),
         count_by_exchange: (pnlEx.results || []).reduce((a, r) => { a[r.ex] = r.c; return a; }, {}),
         pnl_by_pair: byPair.results || [],

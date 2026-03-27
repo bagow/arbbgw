@@ -85,10 +85,10 @@ body {
   position: sticky;
   top: 0;
   z-index: 50;
-  height: var(--topbar-h);
+  height: 54px;
   display: flex;
   align-items: center;
-  gap: 24px;
+  justify-content: space-between;
   padding: 0 20px;
   background: rgba(10, 12, 16, .92);
   backdrop-filter: blur(12px);
@@ -96,11 +96,27 @@ body {
   flex-shrink: 0;
 }
 
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+}
+
+.logo {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.5px;
+  background: linear-gradient(to right, #fff, var(--accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
 .nav-menu {
   display: flex;
-  gap: 8px;
+  gap: 12px;
   align-items: center;
-  flex: 1;
 }
 
 .nav-btn {

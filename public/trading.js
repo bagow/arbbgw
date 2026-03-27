@@ -12,9 +12,9 @@ const API_BASE = '';
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let profiles = [];       // all profiles from server
-let activeTabId = null;  // currently visible profile id
 let pollTimer = null;
 let lastUnified = null;  // cached /api/unified response
+let activeSubTabId = 'active'; // Fix navigation jumping by persisting sub-tab
 
 // Expanded trade rows per profile
 const expandedRows = {};  // profileId -> Set of trade row ids
@@ -184,10 +184,10 @@ function renderPanel(profile, active, history, stats, exchanges) {
     panel.innerHTML = `
         <!-- Sub-nav for this tab -->
         <div class="mt-subnav">
-            <button class="mt-nav-btn" data-sub="dashboard" onclick="showSubTab(this,'dashboard')">Dashboard</button>
-            <button class="mt-nav-btn mt-nav-btn--active" data-sub="active" onclick="showSubTab(this,'active')">Active Trades</button>
-            <button class="mt-nav-btn" data-sub="history" onclick="showSubTab(this,'history')">History</button>
-            <button class="mt-nav-btn" data-sub="settings" onclick="showSubTab(this,'settings')">Settings</button>
+            <button class="mt-nav-btn ${activeSubTabId==='dashboard'?'mt-nav-btn--active':''}" data-sub="dashboard" onclick="showSubTab(this,'dashboard')">Dashboard</button>
+            <button class="mt-nav-btn ${activeSubTabId==='active'?'mt-nav-btn--active':''}" data-sub="active" onclick="showSubTab(this,'active')">Active Trades</button>
+            <button class="mt-nav-btn ${activeSubTabId==='history'?'mt-nav-btn--active':''}" data-sub="history" onclick="showSubTab(this,'history')">History</button>
+            <button class="mt-nav-btn ${activeSubTabId==='settings'?'mt-nav-btn--active':''}" data-sub="settings" onclick="showSubTab(this,'settings')">Settings</button>
             <div style="margin-left:auto;display:flex;align-items:center;gap:10px;">
                 ${active !== null ? `
                 <span style="font-size:.8rem;color:var(--text-sub);">
@@ -204,12 +204,12 @@ function renderPanel(profile, active, history, stats, exchanges) {
         </div>
 
         <!-- Dashboard sub-panel -->
-        <div class="mt-content" id="mt-sub-dashboard" style="display:none">
-            ${stats ? renderDashboardHTML(profile.id) : '<p class="text-sub" style="padding:24px;">No trade data yet.</p>'}
+        <div class="mt-content" id="mt-sub-dashboard" style="display:${activeSubTabId==='dashboard'?'block':'none'}">
+            ${stats && stats.total_trades > 0 ? renderDashboardHTML(profile.id) : '<div class="text-sub" style="padding:48px;text-align:center;">📊 No closed trades found for this profile yet.<br/><span style="font-size:0.8rem;">Stats will appear here once the first trade is completed.</span></div>'}
         </div>
 
         <!-- Active trades sub-panel -->
-        <div class="mt-content" id="mt-sub-active">
+        <div class="mt-content" id="mt-sub-active" style="display:${activeSubTabId==='active'?'block':'none'}">
             <div class="trading-table-wrap">
                 <table>
                     <thead><tr>
@@ -234,7 +234,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
         </div>
 
         <!-- History sub-panel -->
-        <div class="mt-content" id="mt-sub-history" style="display:none">
+        <div class="mt-content" id="mt-sub-history" style="display:${activeSubTabId==='history'?'block':'none'}">
             <div class="trading-table-wrap">
                 <table>
                     <thead><tr>
@@ -260,7 +260,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
         </div>
 
         <!-- Settings sub-panel -->
-        <div class="mt-content" id="mt-sub-settings" style="display:none">
+        <div class="mt-content" id="mt-sub-settings" style="display:${activeSubTabId==='settings'?'block':'none'}">
             ${renderSettingsForm(profile)}
         </div>
     `;
@@ -617,6 +617,7 @@ window.toggleRow = function (profileId, id) {
 };
 
 window.showSubTab = function (btn, tab) {
+    activeSubTabId = tab; // Save user choice globally
     document.querySelectorAll('.mt-nav-btn').forEach(b => b.classList.remove('mt-nav-btn--active'));
     btn.classList.add('mt-nav-btn--active');
     document.querySelectorAll('.mt-content').forEach(c => c.style.display = 'none');
