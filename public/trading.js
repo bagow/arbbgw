@@ -15,7 +15,7 @@ let profiles = [];       // all profiles from server
 let activeTabId = null;  // currently visible profile id
 let pollTimer = null;
 let lastUnified = null;  // cached /api/unified response
-let activeSubTabId = 'scanner'; // Default to Scanner as requested
+let activeSubTabId = 'dashboard'; // Dashboard is first by default
 
 // Expanded trade rows per profile
 const expandedRows = {};  // profileId -> Set of trade row ids
@@ -35,7 +35,11 @@ async function boot() {
         activeTabId = profiles[0].id;
     }
     renderTabBar();
-    if (activeTabId) await switchTab(activeTabId);
+    if (activeTabId) {
+        await switchTab(activeTabId);
+        // Initialize integrated scanner state
+        if (window.initScanner) window.initScanner(activeTabId);
+    }
     startPoll();
 }
 
@@ -198,8 +202,8 @@ function renderPanel(profile, active, history, stats, exchanges) {
 
     panel.innerHTML = `
         <div class="mt-subnav">
-            <button class="mt-nav-btn ${activeSubTabId==='scanner'?'mt-nav-btn--active':''}" data-sub="scanner" onclick="showSubTab(this,'scanner')">Scanner</button>
             <button class="mt-nav-btn ${activeSubTabId==='dashboard'?'mt-nav-btn--active':''}" data-sub="dashboard" onclick="showSubTab(this,'dashboard')">Dashboard</button>
+            <button class="mt-nav-btn ${activeSubTabId==='scanner'?'mt-nav-btn--active':''}" data-sub="scanner" onclick="showSubTab(this,'scanner')">Scanner</button>
             <button class="mt-nav-btn ${activeSubTabId==='active'?'mt-nav-btn--active':''}" data-sub="active" onclick="showSubTab(this,'active')">Active Trades</button>
             <button class="mt-nav-btn ${activeSubTabId==='history'?'mt-nav-btn--active':''}" data-sub="history" onclick="showSubTab(this,'history')">History</button>
             <button class="mt-nav-btn ${activeSubTabId==='settings'?'mt-nav-btn--active':''}" data-sub="settings" onclick="showSubTab(this,'settings')">Settings</button>
@@ -209,14 +213,38 @@ function renderPanel(profile, active, history, stats, exchanges) {
             </div>
         </div>
 
-        <!-- Scanner sub-panel -->
-        <div class="mt-content" id="mt-sub-scanner" style="display:${activeSubTabId==='scanner'?'flex':'none'}; flex:1; min-height:0;">
-            <iframe src="chart.html?profile_id=${profile.id}&iframe=1" style="width:100%; height:100%; border:none; background:var(--bg); display:block; flex:1;"></iframe>
-        </div>
-
         <!-- Dashboard sub-panel -->
         <div class="mt-content" id="mt-sub-dashboard" style="display:${activeSubTabId==='dashboard'?'flex':'none'}; flex:1; flex-direction:column;">
             ${stats && stats.total_trades > 0 ? renderDashboardHTML(profile.id) : '<div class="text-sub" style="padding:48px;text-align:center;flex:1;">📊 No closed trades found for this profile yet.<br/><span style="font-size:0.8rem;">Stats will appear here once the first trade is completed.</span></div>'}
+        </div>
+
+        <!-- Scanner sub-panel (Integrated) -->
+        <div class="mt-content" id="mt-sub-scanner" style="display:${activeSubTabId==='scanner'?'flex':'none'}; flex:1; flex-direction:column; min-height:0;">
+            <div class="panel-header" style="padding:10px 15px; border-bottom:1px solid var(--border-dim); background:var(--bg-panel);">
+                <h1 class="panel-title" style="font-size:1rem;">Live Spreads</h1>
+                <span class="panel-sub" id="pair-count" style="margin-left:auto; font-size:0.8rem;">–</span>
+            </div>
+            <div id="exchange-filters" class="exchange-filters" style="padding:8px 15px; background:var(--bg-panel); border-bottom:1px solid var(--border-dim);"></div>
+            <div class="trading-table-wrap" style="flex:1; overflow-y:auto;">
+                <table id="spread-table">
+                    <thead>
+                        <tr>
+                            <th data-sort="pair">Pair</th>
+                            <th data-sort="exchangeA">Exch A</th>
+                            <th data-sort="exchangeB">Exch B</th>
+                            <th data-sort="priceA">Price A</th>
+                            <th data-sort="priceB">Price B</th>
+                            <th data-sort="spread" class="sorted-desc">Spread %</th>
+                            <th>Dir</th>
+                        </tr>
+                    </thead>
+                    <tbody id="spread-tbody">
+                        <tr class="placeholder-row">
+                            <td colspan="7" style="text-align:center; padding:40px; color:var(--text-sub);">⟳ Initializing scanner…</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
 
         <!-- Active trades sub-panel -->
@@ -616,7 +644,10 @@ function renderHistoryTable(profileId, history) {
                             <div class="td-line"><span>Comm. Paid:</span> <strong style="color:var(--red)">${fmtCost(t.commission_cost)}</strong></div>
                             <div class="td-line"><span>Funding:</span> <strong style="color:${(t.funding_cost??0)<=0?'var(--green)':'var(--red)'}">${fmtCost(t.funding_cost)}</strong></div>
                             <div class="td-total-pnl">Net PnL: <span style="color:${pnlColor}">${pnlStr}</span> <span class="text-sub" style="font-weight:400;font-size:.8rem;">(${fmtDuration(t.exit_time-t.entry_time)})</span></div>
-                            <div style="margin-top:12px;"><button type="button" class="trading-save-btn outline-btn" style="margin:0;width:100%;padding:8px;font-size:12px;" onclick="openChartIframe('${t.pair}','${t.exchange_a}','${t.exchange_b}',${t.entry_time},${t.exit_time})">📊 View Chart</button></div>
+                            <div style="margin-top:12px;">
+                                <button type="button" class="trading-save-btn outline-btn" style="margin:0;width:100%;padding:8px;font-size:12px;" 
+                                    onclick='openModal({pair:"${t.pair}",exchangeA:"${t.exchange_a}",exchangeB:"${t.exchange_b}",priceA:${t.price_a},priceB:${t.price_b},spread:${t.entry_spread},volA:0,volB:0,direction:"${t.direction}",entryTime:${t.entry_time},exitTime:${t.exit_time}})'>📊 View Chart</button>
+                            </div>
                         </div>
                     </div>
                 </td>
@@ -755,29 +786,8 @@ document.getElementById('tab-bar').addEventListener('click', async (e) => {
     if (activeTabId) await switchTab(activeTabId);
 });
 
-// ─── Chart iframe ─────────────────────────────────────────────────────────────
-
-window.openChartIframe = function (pair, exA, exB, entryTime, exitTime) {
-    const modal = document.getElementById('chart-modal');
-    const iframe = document.getElementById('chart-frame');
-    if (!modal || !iframe) return;
-    let url = `/chart.html?iframe=1&chart=${pair}&exA=${exA}&exB=${exB}&entry=${entryTime}`;
-    if (exitTime && exitTime !== 'null') url += `&exit=${exitTime}`;
-    iframe.src = url;
-    modal.classList.remove('hidden');
-};
-
-document.getElementById('chart-modal').addEventListener('click', e => {
-    if (e.target === e.currentTarget || e.target.id === 'chart-frame') {
-        // only close via postMessage
-    }
-});
-window.addEventListener('message', e => {
-    if (e.data?.type === 'CLOSE_CHART_MODAL') {
-        document.getElementById('chart-modal').classList.add('hidden');
-        document.getElementById('chart-frame').src = '';
-    }
-});
+// ─── Chart Modal (Integrated) ────────────────────────────────────────────────
+// Handled by chart.js globals: window.openModal, window.closeModal
 
 // ─── Exchange modal ───────────────────────────────────────────────────────────
 

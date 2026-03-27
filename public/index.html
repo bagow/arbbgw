@@ -4,10 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CEX Arb — Trading</title>
-    <link rel="stylesheet" href="style.css?v=3">
+    <link rel="stylesheet" href="style.css?v=4" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <div class="tab-bar" id="tab-bar" style="position:fixed;bottom:0;left:0;right:0;top:auto;z-index:10000;display:flex;">
@@ -17,12 +16,7 @@
 
 
     <!-- ── Tab Panel Area ────────────────────────────────────────────────────── -->
-    <div class="mt-layout">
-        <div class="mt-panel" id="mt-panel">
-            <!-- Injected by JS: sub-nav + content for active tab -->
-            <div class="mt-loading">Loading profiles…</div>
-        </div>
-    </div>
+    <div id="panel-container" class="mt-layout"></div>
 
     <!-- ── Bottom Tab Bar ────────────────────────────────────────────────────── -->
 

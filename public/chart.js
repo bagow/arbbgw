@@ -38,7 +38,7 @@ const PAD = { top: 10, right: 60, bottom: 4, left: 64 };
 const PAD_H = { top: 8, right: 60, bottom: 28, left: 64 };
 
 // ─── State ────────────────────────────────────────────────────────────────────
-const state = {
+const scannerState = {
     snapshot: [],
     sortKey: 'spread',
     sortDir: -1,
@@ -67,23 +67,33 @@ const state = {
 };
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
-const $ = id => document.getElementById(id);
-const tableBody = $('spread-tbody');
-const pairCount = $('pair-count');
-const statusDot = $('global-status');
-const statusText = $('status-text');
-const lastUpdate = $('last-update');
-const modalBackdrop = $('modal-backdrop');
-const modalTitle = $('modal-title');
-const modalSub = $('modal-sub');
-const modalClose = $('modal-close');
-const legendDyn = $('legend-dynamic');
-const wsLabelA = $('ws-label-a');
-const wsLabelB = $('ws-label-b');
-const wsStatus = $('ws-status');
-const svgP = $('chart-prices');
-const svgH = $('chart-hist');
-const priceLinesG = $('price-lines');
+// ─── DOM refs (lazy-loaded on init) ───────────────────────────────────────────
+const scanner$ = id => document.getElementById(id);
+let refs = {};
+
+function initRefs() {
+    refs = {
+        tableBody: scanner$('spread-tbody'),
+        pairCount: scanner$('pair-count'),
+        statusDot: scanner$('global-status'),
+        statusText: scanner$('status-text'),
+        lastUpdate: scanner$('last-update'),
+        modalBackdrop: scanner$('modal-backdrop'),
+        modalTitle: scanner$('modal-title'),
+        modalSub: scanner$('modal-sub'),
+        modalClose: scanner$('modal-close'),
+        legendDyn: scanner$('legend-dynamic'),
+        wsLabelA: scanner$('ws-label-a'),
+        wsLabelB: scanner$('ws-label-b'),
+        wsStatus: scanner$('ws-status'),
+        svgP: scanner$('chart-prices'),
+        svgH: scanner$('chart-hist'),
+        priceLinesG: scanner$('price-lines'),
+    };
+    
+    // Wire up close button if it exists
+    if (refs.modalClose) refs.modalClose.onclick = () => window.closeModal();
+}
 
 // ─── SVG helpers ──────────────────────────────────────────────────────────────
 function svgEl(tag, attrs = {}) {
@@ -136,15 +146,15 @@ async function fetchKlines(exchange, pair, tfSec, endTime = null) {
         // We only fetch history for the two exchanges in the active row to save bandwidth
         // But here we might need klines for many exchanges. 
         // Simplest: 15s is ONLY for the active pair comparison.
-        if (state.activeRow && (exchange === state.activeRow.exchangeA || exchange === state.activeRow.exchangeB)) {
+        if (scannerState.activeRow && (exchange === scannerState.activeRow.exchangeA || exchange === scannerState.activeRow.exchangeB)) {
             try {
-                const res = await fetch(`${API_BASE}/api/history/${pair}/${state.activeRow.exchangeA}/${state.activeRow.exchangeB}`);
+                const res = await fetch(`${API_BASE}/api/history/${pair}/${scannerState.activeRow.exchangeA}/${scannerState.activeRow.exchangeB}`);
                 const json = await res.json();
                 const history = json.history || [];
                 // Map history to kline format {ts, close}
                 return history.map(h => ({
                     ts: h.timestamp,
-                    close: exchange === state.activeRow.exchangeA ? h.price_a : h.price_b
+                    close: exchange === scannerState.activeRow.exchangeA ? h.price_a : h.price_b
                 }));
             } catch (e) {
                 console.error('Failed to fetch 15s internal history:', e);
@@ -172,28 +182,28 @@ async function fetchKlines(exchange, pair, tfSec, endTime = null) {
 /** Fetch klines from ALL known exchanges in parallel for the given pair. */
 async function loadChartData(row) {
     const key = rowKey(row);
-    state.loadKey = key;
+    scannerState.loadKey = key;
 
     const results = await Promise.all(
-        KNOWN_EXCHANGES.map(ex => fetchKlines(ex, row.pair, state.timeframeSec)
+        KNOWN_EXCHANGES.map(ex => fetchKlines(ex, row.pair, scannerState.timeframeSec)
             .then(kl => [ex, kl])
         )
     );
 
-    if (state.loadKey !== key) return; // stale
+    if (scannerState.loadKey !== key) return; // stale
 
-    state.klines = {};
+    scannerState.klines = {};
     for (const [ex, kl] of results) {
-        if (kl.length > 0) state.klines[ex] = kl;
+        if (kl.length > 0) scannerState.klines[ex] = kl;
     }
 
     // Fallback: If 15s was selected but main exchanges have NO data, try 1m
-    if (state.timeframeSec === 15 && row) {
-        const hasA = (state.klines[row.exchangeA] || []).length > 0;
-        const hasB = (state.klines[row.exchangeB] || []).length > 0;
+    if (scannerState.timeframeSec === 15 && row) {
+        const hasA = (scannerState.klines[row.exchangeA] || []).length > 0;
+        const hasB = (scannerState.klines[row.exchangeB] || []).length > 0;
         if (!hasA && !hasB) {
             console.warn('15s history empty, falling back to 1m');
-            state.timeframeSec = 60;
+            scannerState.timeframeSec = 60;
             // Update UI buttons if they exist
             document.querySelectorAll('.tf-btn').forEach(b => {
                 b.classList.remove('tf-btn--active');
@@ -202,25 +212,25 @@ async function loadChartData(row) {
             return loadChartData(row);
         }
     }
-    state.liveTicks = {};
+    scannerState.liveTicks = {};
     
     // Reset pan/zoom on completely new pair load
-    state.visibleMinT = null;
-    state.visibleMaxT = null;
+    scannerState.visibleMinT = null;
+    scannerState.visibleMaxT = null;
     
     // Auto-zoom heavily if 15s timeframe is selected OR if viewing a specific trade
-    if (window.targetEntryTime && state.visibleMinT === null) {
+    if (window.targetEntryTime && scannerState.visibleMinT === null) {
         const entry = window.targetEntryTime;
         const exit = window.targetExitTime || Date.now();
         const mid = (entry + exit) / 2;
         const duration = Math.max(60000, exit - entry);
         // Show 10x the duration or at least 10 minutes
         const halfSpan = Math.max(duration * 5, 5 * 60 * 1000); 
-        state.visibleMinT = mid - halfSpan;
-        state.visibleMaxT = mid + halfSpan;
-    } else if (state.timeframeSec === 15 && state.visibleMinT === null) {
-        state.visibleMaxT = Date.now();
-        state.visibleMinT = state.visibleMaxT - 15 * 60_000; // 15 minutes width
+        scannerState.visibleMinT = mid - halfSpan;
+        scannerState.visibleMaxT = mid + halfSpan;
+    } else if (scannerState.timeframeSec === 15 && scannerState.visibleMinT === null) {
+        scannerState.visibleMaxT = Date.now();
+        scannerState.visibleMinT = scannerState.visibleMaxT - 15 * 60_000; // 15 minutes width
     }
 
     drawCharts();
@@ -236,23 +246,23 @@ function setStatus(s, msg) {
 async function fetchSnapshot() {
     setStatus('loading', 'Fetching data…');
     try {
-        const url = `${API_BASE}/api/unified?min=${state.threshold}&max=${state.maxSpread}`;
+        const url = `${API_BASE}/api/unified?min=${scannerState.threshold}&max=${scannerState.maxSpread}`;
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         
         // 1. Snapshot
-        state.snapshot = (json.snapshot?.data || []).filter(r => r.spread >= state.threshold);
+        scannerState.snapshot = (json.snapshot?.data || []).filter(r => r.spread >= scannerState.threshold);
         
         // 2. Discover exchanges
-        const seen = new Set(state.snapshot.flatMap(r => [r.exchangeA, r.exchangeB]));
-        seen.forEach(ex => state.activeExchanges.add(ex));
+        const seen = new Set(scannerState.snapshot.flatMap(r => [r.exchangeA, r.exchangeB]));
+        seen.forEach(ex => scannerState.activeExchanges.add(ex));
         renderExchangeFilters();
         renderTable();
 
         // 3. Last update
         lastUpdate && (lastUpdate.textContent = fmtTime(json.snapshot?.ts || Date.now()));
-        setStatus('ok', `${state.snapshot.length} pairs above ${state.threshold}%`);
+        setStatus('ok', `${scannerState.snapshot.length} pairs above ${scannerState.threshold}%`);
 
         // 4. (Optional) External state updates if needed (e.g. active trades badge)
     } catch (e) { setStatus('error', `Error: ${e.message}`); }
@@ -263,7 +273,7 @@ const exchangeFiltersEl = $('exchange-filters');
 
 function renderExchangeFilters() {
     // Collect unique exchanges present in snapshot
-    const inSnapshot = [...new Set(state.snapshot.flatMap(r => [r.exchangeA, r.exchangeB]))];
+    const inSnapshot = [...new Set(scannerState.snapshot.flatMap(r => [r.exchangeA, r.exchangeB]))];
     if (!inSnapshot.length) { exchangeFiltersEl.innerHTML = ''; return; }
 
     exchangeFiltersEl.innerHTML = '';
@@ -271,15 +281,15 @@ function renderExchangeFilters() {
     // One pill per exchange
     for (const ex of inSnapshot) {
         const color = EXCHANGE_COLORS[ex] || '#94a3b8';
-        const active = state.activeExchanges.has(ex);
+        const active = scannerState.activeExchanges.has(ex);
         const btn = document.createElement('button');
         btn.className = 'ex-filter-btn' + (active ? '' : ' ex-off');
         btn.style.cssText = `color:${color};border-color:${color}`;
         btn.innerHTML = `<span class="dot-icon" style="background:${color}"></span>${ex}`;
         btn.title = active ? `Hide ${ex}` : `Show ${ex}`;
         btn.addEventListener('click', () => {
-            if (state.activeExchanges.has(ex)) state.activeExchanges.delete(ex);
-            else state.activeExchanges.add(ex);
+            if (scannerState.activeExchanges.has(ex)) scannerState.activeExchanges.delete(ex);
+            else scannerState.activeExchanges.add(ex);
             renderExchangeFilters();
             renderTable();
         });
@@ -296,11 +306,11 @@ function renderExchangeFilters() {
         b.addEventListener('click', onClick); return b;
     };
     exchangeFiltersEl.appendChild(makeCtrl('All', () => {
-        inSnapshot.forEach(ex => state.activeExchanges.add(ex));
+        inSnapshot.forEach(ex => scannerState.activeExchanges.add(ex));
         renderExchangeFilters(); renderTable();
     }));
     exchangeFiltersEl.appendChild(makeCtrl('None', () => {
-        inSnapshot.forEach(ex => state.activeExchanges.delete(ex));
+        inSnapshot.forEach(ex => scannerState.activeExchanges.delete(ex));
         renderExchangeFilters(); renderTable();
     }));
 }
@@ -308,23 +318,23 @@ function renderExchangeFilters() {
 // ─── Table ────────────────────────────────────────────────────────────────────
 function renderTable() {
     // Only rows where BOTH exchanges are active in the filter
-    const filtered = state.snapshot.filter(r =>
-        state.activeExchanges.has(r.exchangeA) && state.activeExchanges.has(r.exchangeB)
+    const filtered = scannerState.snapshot.filter(r =>
+        scannerState.activeExchanges.has(r.exchangeA) && scannerState.activeExchanges.has(r.exchangeB)
     );
     const sorted = [...filtered].sort((a, b) => {
-        const av = a[state.sortKey] ?? 0, bv = b[state.sortKey] ?? 0;
-        return typeof av === 'string' ? av.localeCompare(bv) * state.sortDir : (av - bv) * state.sortDir;
+        const av = a[scannerState.sortKey] ?? 0, bv = b[scannerState.sortKey] ?? 0;
+        return typeof av === 'string' ? av.localeCompare(bv) * scannerState.sortDir : (av - bv) * scannerState.sortDir;
     });
     pairCount.textContent = `${sorted.length} pairs`;
-    tableBody.innerHTML = '';
+    refs.tableBody.innerHTML = '';
     if (!sorted.length) {
-        tableBody.innerHTML = `<tr class="placeholder-row"><td colspan="7">No pairs above threshold</td></tr>`;
+        refs.tableBody.innerHTML = `<tr class="placeholder-row"><td colspan="7">No pairs above threshold</td></tr>`;
         return;
     }
     for (const row of sorted) {
         const key = rowKey(row);
         const tr = document.createElement('tr');
-        if (key === state.activeRowKey) tr.classList.add('active-row');
+        if (key === scannerState.activeRowKey) tr.classList.add('active-row');
         const sc = row.spread >= 0.5 ? 'spread--high' : row.spread >= 0.2 ? 'spread--medium' : 'spread--low';
         tr.innerHTML = `
           <td>${row.pair}</td><td>${row.exchangeA}</td><td>${row.exchangeB}</td>
@@ -332,7 +342,7 @@ function renderTable() {
           <td class="spread-cell ${sc}">${fmtSpread(row.spread)}</td>
           <td class="dir-cell">${row.direction || '–'}</td>`;
         tr.addEventListener('click', () => openModal(row));
-        tableBody.appendChild(tr);
+        refs.tableBody.appendChild(tr);
     }
 }
 
@@ -340,21 +350,23 @@ document.querySelectorAll('thead th[data-sort]').forEach(th => {
     th.addEventListener('click', () => {
         const key = th.dataset.sort;
         document.querySelectorAll('thead th').forEach(h => h.classList.remove('sorted-asc', 'sorted-desc'));
-        state.sortDir = (state.sortKey === key) ? state.sortDir * -1 : -1;
-        state.sortKey = key;
-        th.classList.add(state.sortDir === -1 ? 'sorted-desc' : 'sorted-asc');
+        scannerState.sortDir = (scannerState.sortKey === key) ? scannerState.sortDir * -1 : -1;
+        scannerState.sortKey = key;
+        th.classList.add(scannerState.sortDir === -1 ? 'sorted-desc' : 'sorted-asc');
         renderTable();
     });
 });
 
 // ─── Modal ────────────────────────────────────────────────────────────────────
-function openModal(row) {
-    state.activeRowKey = rowKey(row);
-    state.activeRow = row;
-    state.klines = {};
-    state.liveTicks = {};
+window.openModal = async function(row) {
+    if (scannerState.isModalOpen) return;
+    scannerState.isModalOpen = true;
+    scannerState.activeRowKey = rowKey(row);
+    scannerState.activeRow = row;
+    scannerState.klines = {};
+    scannerState.liveTicks = {};
     // By default show only the pair's two exchanges; hide all others
-    state.hiddenExchanges = new Set(
+    scannerState.hiddenExchanges = new Set(
         KNOWN_EXCHANGES.filter(ex => ex !== row.exchangeA && ex !== row.exchangeB)
     );
 
@@ -372,10 +384,10 @@ function openModal(row) {
 }
 
 function updateModalSub() {
-    const row = state.activeRow;
+    const row = scannerState.activeRow;
     if (!row) return;
-    const exFound = Object.keys(state.klines).join(' / ') || '…';
-    modalSub.textContent = `${row.pair} · ${exFound} · ${state.timeframeSec / 60}m · spread: ${row.exchangeA} vs ${row.exchangeB}`;
+    const exFound = Object.keys(scannerState.klines).join(' / ') || '…';
+    modalSub.textContent = `${row.pair} · ${exFound} · ${scannerState.timeframeSec / 60}m · spread: ${row.exchangeA} vs ${row.exchangeB}`;
 }
 
 function updateTVLink(row) {
@@ -397,9 +409,9 @@ function updateVolumeInfo(row) {
     // Try to find volume in snapshot if current row has 0
     let vA = row.volA;
     let vB = row.volB;
-    if ((!vA || !vB) && state.snapshot.length > 0) {
+    if ((!vA || !vB) && scannerState.snapshot.length > 0) {
         // Find ANY row for this pair to extract volume for exA and exB
-        const allForPair = state.snapshot.filter(r => r.pair === row.pair);
+        const allForPair = scannerState.snapshot.filter(r => r.pair === row.pair);
         if (!vA) {
             const rowWithA = allForPair.find(r => r.exchangeA === exA || r.exchangeB === exA);
             if (rowWithA) vA = (rowWithA.exchangeA === exA) ? rowWithA.volA : rowWithA.volB;
@@ -437,13 +449,15 @@ function updateVolumeInfo(row) {
     `;
 }
 
-function closeModal() {
-    state.loadKey = null;
-    state.activeRowKey = null;
-    state.activeRow = null;
-    state.klines = {};
-    state.liveTicks = {};
-    state.hiddenExchanges = new Set();
+window.closeModal = function() {
+    if (!scannerState.isModalOpen) return;
+    scannerState.isModalOpen = false;
+    scannerState.loadKey = null;
+    scannerState.activeRowKey = null;
+    scannerState.activeRow = null;
+    scannerState.klines = {};
+    scannerState.liveTicks = {};
+    scannerState.hiddenExchanges = new Set();
     modalBackdrop.classList.add('hidden');
 
     if (document.body.classList.contains('iframe-mode')) {
@@ -461,8 +475,8 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
     btn.addEventListener('click', () => {
         document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('tf-btn--active'));
         btn.classList.add('tf-btn--active');
-        state.timeframeSec = parseInt(btn.dataset.tf, 10);
-        if (state.activeRow) loadChartData(state.activeRow);
+        scannerState.timeframeSec = parseInt(btn.dataset.tf, 10);
+        if (scannerState.activeRow) loadChartData(scannerState.activeRow);
     });
 });
 
@@ -471,18 +485,18 @@ function clearCharts() {
     priceLinesG.innerHTML = '';
     svgP.querySelectorAll('.inline-label').forEach(e => e.remove());
     ['grid-p', 'ylabel-p', 'bars-hist', 'bars-live', 'grid-h', 'ylabel-h', 'xlabel-h']
-        .forEach(id => { const el = $(id); if (el) el.innerHTML = ''; });
+        .forEach(id => { const el = scanner$(id); if (el) el.innerHTML = ''; });
     if (legendDyn) legendDyn.innerHTML = '';
 }
 
 function drawCharts() {
-    const klines = state.klines;
-    const live = state.liveTicks;
-    const row = state.activeRow;
+    const klines = scannerState.klines;
+    const live = scannerState.liveTicks;
+    const row = scannerState.activeRow;
     if (!row) return;
 
     // Only consider visible exchanges for X and Y domain
-    const visibleEx = Object.keys(klines).filter(ex => !state.hiddenExchanges.has(ex));
+    const visibleEx = Object.keys(klines).filter(ex => !scannerState.hiddenExchanges.has(ex));
 
     const allTs = [
         ...visibleEx.flatMap(ex => (klines[ex] || []).map(p => p.ts)),
@@ -494,18 +508,18 @@ function drawCharts() {
     const dataMaxT = Math.max(...allTs) || dataMinT + 1;
     
     // Use user-defined zoom bounds if present, otherwise default to full data
-    if (state.visibleMinT === null) state.visibleMinT = dataMinT;
-    if (state.visibleMaxT === null) state.visibleMaxT = dataMaxT;
+    if (scannerState.visibleMinT === null) scannerState.visibleMinT = dataMinT;
+    if (scannerState.visibleMaxT === null) scannerState.visibleMaxT = dataMaxT;
     
     // Strict clamp so we can't pan into the future past live data
-    if (state.visibleMaxT > dataMaxT + 60000) {
-        const span = state.visibleMaxT - state.visibleMinT;
-        state.visibleMaxT = dataMaxT + 60000;
-        state.visibleMinT = state.visibleMaxT - span;
+    if (scannerState.visibleMaxT > dataMaxT + 60000) {
+        const span = scannerState.visibleMaxT - scannerState.visibleMinT;
+        scannerState.visibleMaxT = dataMaxT + 60000;
+        scannerState.visibleMinT = scannerState.visibleMaxT - span;
     }
 
-    const minT = state.visibleMinT;
-    const maxT = state.visibleMaxT;
+    const minT = scannerState.visibleMinT;
+    const maxT = scannerState.visibleMaxT;
 
     drawPricePanel(klines, live, minT, maxT, row, dataMinT);
     drawHistPanel(klines, live, minT, maxT, row);
@@ -521,7 +535,7 @@ function drawPricePanel(klines, live, minT, maxT, row, dataMinT) {
 
     // Determine visible exchanges first (needed for Y scale AND drawing)
     const highlight = new Set([row.exchangeA, row.exchangeB]);
-    const allEx = Object.keys(klines).filter(ex => !state.hiddenExchanges.has(ex));
+    const allEx = Object.keys(klines).filter(ex => !scannerState.hiddenExchanges.has(ex));
 
     // Y range using ONLY visible exchanges and visible TIME WINDOW
     const allVals = [
@@ -716,7 +730,7 @@ function updateLegend(klines, row) {
     for (const ex of allEx) {
         const color = EXCHANGE_COLORS[ex] || '#94a3b8';
         const isHL = ex === row.exchangeA || ex === row.exchangeB;
-        const hidden = state.hiddenExchanges.has(ex);
+        const hidden = scannerState.hiddenExchanges.has(ex);
         const hasData = (klines[ex] || []).length > 0;
 
         const btn = document.createElement('button');
@@ -729,8 +743,8 @@ function updateLegend(klines, row) {
         
         btn.innerHTML = `<span class="dot-icon" style="background:${color}"></span>${ex}`;
         btn.addEventListener('click', () => {
-            if (state.hiddenExchanges.has(ex)) state.hiddenExchanges.delete(ex);
-            else state.hiddenExchanges.add(ex);
+            if (scannerState.hiddenExchanges.has(ex)) scannerState.hiddenExchanges.delete(ex);
+            else scannerState.hiddenExchanges.add(ex);
             drawCharts();
         });
         chartLegend.appendChild(btn);
@@ -739,7 +753,7 @@ function updateLegend(klines, row) {
     // ─ Control buttons: Show all / Only pair ─────────────────────────────────
     const pairSet = new Set([row.exchangeA, row.exchangeB]);
     const allKeys = Object.keys(klines);
-    const hasHidden = allKeys.some(ex => !pairSet.has(ex) && state.hiddenExchanges.has(ex));
+    const hasHidden = allKeys.some(ex => !pairSet.has(ex) && scannerState.hiddenExchanges.has(ex));
 
     const makeCtrl = (label, title, onClick) => {
         const b = document.createElement('button');
@@ -753,12 +767,12 @@ function updateLegend(klines, row) {
 
     if (hasHidden) {
         chartLegend.appendChild(makeCtrl('+ show all', 'Show all exchanges', () => {
-            state.hiddenExchanges.clear();
+            scannerState.hiddenExchanges.clear();
             drawCharts();
         }));
     } else if (allKeys.length > 2) {
         chartLegend.appendChild(makeCtrl('− only pair', 'Hide non-pair exchanges', () => {
-            state.hiddenExchanges = new Set(allKeys.filter(ex => !pairSet.has(ex)));
+            scannerState.hiddenExchanges = new Set(allKeys.filter(ex => !pairSet.has(ex)));
             drawCharts();
         }));
     }
@@ -785,22 +799,22 @@ function updateLegend(klines, row) {
 }
 
 // ResizeObserver
-const ro = new ResizeObserver(() => { if (state.activeRow) drawCharts(); });
+const ro = new ResizeObserver(() => { if (scannerState.activeRow) drawCharts(); });
 ro.observe(document.body);
 
 // ─── SVG Interaction (Zoom & Pan) ──────────────────────────────────────────────
 async function loadOlderHistory() {
-    if (state.isLoadingHistory || !state.activeRow) return;
-    state.isLoadingHistory = true;
+    if (scannerState.isLoadingHistory || !scannerState.activeRow) return;
+    scannerState.isLoadingHistory = true;
     
     // Find the absolute minimum loaded timestamp
-    const visibleEx = Object.keys(state.klines).filter(ex => !state.hiddenExchanges.has(ex));
-    const allTs = visibleEx.flatMap(ex => (state.klines[ex] || []).map(p => p.ts));
-    const absoluteMinT = allTs.length ? Math.min(...allTs) : state.visibleMinT;
+    const visibleEx = Object.keys(scannerState.klines).filter(ex => !scannerState.hiddenExchanges.has(ex));
+    const allTs = visibleEx.flatMap(ex => (scannerState.klines[ex] || []).map(p => p.ts));
+    const absoluteMinT = allTs.length ? Math.min(...allTs) : scannerState.visibleMinT;
     
     // Fetch older data for all known exchanges
     const results = await Promise.all(
-        KNOWN_EXCHANGES.map(ex => fetchKlines(ex, state.activeRow.pair, state.timeframeSec, absoluteMinT)
+        KNOWN_EXCHANGES.map(ex => fetchKlines(ex, scannerState.activeRow.pair, scannerState.timeframeSec, absoluteMinT)
             .then(kl => [ex, kl])
         )
     );
@@ -809,10 +823,10 @@ async function loadOlderHistory() {
     for (const [ex, kl] of results) {
         if (kl.length > 0) {
             // merge and sort
-            const existing = state.klines[ex] || [];
+            const existing = scannerState.klines[ex] || [];
             const merged = [...kl, ...existing].sort((a,b) => a.ts - b.ts);
             // remove duplicates just in case
-            state.klines[ex] = merged.filter((item, pos, ary) => !pos || item.ts !== ary[pos - 1].ts);
+            scannerState.klines[ex] = merged.filter((item, pos, ary) => !pos || item.ts !== ary[pos - 1].ts);
             added = true;
         }
     }
@@ -820,11 +834,11 @@ async function loadOlderHistory() {
     if (added) drawCharts();
     
     // Release lock after a short delay to prevent spamming
-    setTimeout(() => { state.isLoadingHistory = false; }, 1000);
+    setTimeout(() => { scannerState.isLoadingHistory = false; }, 1000);
 }
 
 function handleChartZoom(e) {
-    if (!state.visibleMinT || !state.visibleMaxT) return;
+    if (!scannerState.visibleMinT || !scannerState.visibleMaxT) return;
     e.preventDefault();
     
     const { W } = svgDims(svgP);
@@ -835,8 +849,8 @@ function handleChartZoom(e) {
     const mouseX = e.clientX - rect.left - PAD.left;
     const ratio = Math.max(0, Math.min(1, mouseX / iW));
     
-    const span = state.visibleMaxT - state.visibleMinT;
-    const focalTime = state.visibleMinT + span * ratio;
+    const span = scannerState.visibleMaxT - scannerState.visibleMinT;
+    const focalTime = scannerState.visibleMinT + span * ratio;
     
     // zoom factor
     const zoom = e.deltaY > 0 ? 1.2 : 0.8;
@@ -845,49 +859,49 @@ function handleChartZoom(e) {
     // Min zoom out: max 14 days, Min zoom in: 10 minutes (for 1m timeframe)
     if (newSpan > 14 * 24 * 3600 * 1000 || newSpan < 10 * 60 * 1000) return;
     
-    state.visibleMinT = focalTime - newSpan * ratio;
-    state.visibleMaxT = focalTime + newSpan * (1 - ratio);
+    scannerState.visibleMinT = focalTime - newSpan * ratio;
+    scannerState.visibleMaxT = focalTime + newSpan * (1 - ratio);
     
     drawCharts();
 }
 
 function handleChartPanStart(e) {
     if (e.button !== 0) return; // Only left click
-    state.isDragging = true;
-    state.lastDragX = e.clientX;
+    scannerState.isDragging = true;
+    scannerState.lastDragX = e.clientX;
     svgP.style.cursor = 'grabbing';
     svgH.style.cursor = 'grabbing';
 }
 
 function handleChartPanMove(e) {
-    if (!state.isDragging || !state.visibleMinT) return;
+    if (!scannerState.isDragging || !scannerState.visibleMinT) return;
     
-    const dx = e.clientX - state.lastDragX;
-    state.lastDragX = e.clientX;
+    const dx = e.clientX - scannerState.lastDragX;
+    scannerState.lastDragX = e.clientX;
     
     const { W } = svgDims(svgP);
     const iW = W - PAD.left - PAD.right;
-    const span = state.visibleMaxT - state.visibleMinT;
+    const span = scannerState.visibleMaxT - scannerState.visibleMinT;
     
     const dt = -(dx / iW) * span;
     
-    state.visibleMinT += dt;
-    state.visibleMaxT += dt;
+    scannerState.visibleMinT += dt;
+    scannerState.visibleMaxT += dt;
     
     drawCharts();
     
     // If we've panned within 20% of the left edge, load more history
-    const visibleEx = Object.keys(state.klines).filter(ex => !state.hiddenExchanges.has(ex));
-    const allTs = visibleEx.flatMap(ex => (state.klines[ex] || []).map(p => p.ts));
-    const absoluteMinT = allTs.length ? Math.min(...allTs) : state.visibleMinT;
+    const visibleEx = Object.keys(scannerState.klines).filter(ex => !scannerState.hiddenExchanges.has(ex));
+    const allTs = visibleEx.flatMap(ex => (scannerState.klines[ex] || []).map(p => p.ts));
+    const absoluteMinT = allTs.length ? Math.min(...allTs) : scannerState.visibleMinT;
     
-    if (state.visibleMinT < absoluteMinT + (span * 0.2)) {
+    if (scannerState.visibleMinT < absoluteMinT + (span * 0.2)) {
         loadOlderHistory();
     }
 }
 
 function handleChartPanEnd() {
-    state.isDragging = false;
+    scannerState.isDragging = false;
     svgP.style.cursor = 'crosshair';
     svgH.style.cursor = 'crosshair';
 }
@@ -918,7 +932,7 @@ function initCrosshairs() {
         }
         
         svg.addEventListener('mousemove', e => {
-            if (state.isDragging) return;
+            if (scannerState.isDragging) return;
             const ch = id === 'p' ? crosshairP : crosshairH;
             const rect = svg.getBoundingClientRect();
             const x = e.clientX - rect.left;
@@ -970,7 +984,7 @@ function wsConfig(exchange, pair) {
 
 function connectWS(row) {
     disconnectWS();
-    const exTarget = state.wsTarget === 'a' ? row.exchangeA : row.exchangeB;
+    const exTarget = scannerState.wsTarget === 'a' ? row.exchangeA : row.exchangeB;
     const cfg = wsConfig(exTarget, row.pair);
     let ws;
     try { ws = new WebSocket(cfg.url); } catch { wsStatus.className = 'ws-indicator ws-indicator--err'; return; }
@@ -980,33 +994,33 @@ function connectWS(row) {
         let price;
         try { price = cfg.extract(e); } catch { return; }
         if (!price || isNaN(price) || price <= 0) return;
-        if (!state.liveTicks[exTarget]) state.liveTicks[exTarget] = [];
-        state.liveTicks[exTarget].push({ ts: Date.now(), close: price });
+        if (!scannerState.liveTicks[exTarget]) scannerState.liveTicks[exTarget] = [];
+        scannerState.liveTicks[exTarget].push({ ts: Date.now(), close: price });
         const cutoff = Date.now() - 30 * 60_000;
-        state.liveTicks[exTarget] = state.liveTicks[exTarget].filter(p => p.ts >= cutoff);
+        scannerState.liveTicks[exTarget] = scannerState.liveTicks[exTarget].filter(p => p.ts >= cutoff);
         drawCharts();
     };
     ws.onerror = () => { wsStatus.className = 'ws-indicator ws-indicator--err'; };
     ws.onclose = () => {
         wsStatus.className = 'ws-indicator ws-indicator--off';
-        setTimeout(() => { if (state.activeRow && state.ws === ws) connectWS(state.activeRow); }, 5_000);
+        setTimeout(() => { if (scannerState.activeRow && scannerState.ws === ws) connectWS(scannerState.activeRow); }, 5_000);
     };
-    state.ws = ws;
+    scannerState.ws = ws;
 }
 
 function disconnectWS() {
     wsStatus.className = 'ws-indicator ws-indicator--off';
-    if (state.ws) { state.ws.onclose = null; state.ws.close(); state.ws = null; }
+    if (scannerState.ws) { scannerState.ws.onclose = null; scannerState.ws.close(); scannerState.ws = null; }
 }
 
 document.querySelectorAll('input[name="ws-exchange"]').forEach(r => {
-    r.addEventListener('change', () => { state.wsTarget = r.value; if (state.activeRow) connectWS(state.activeRow); });
+    r.addEventListener('change', () => { scannerState.wsTarget = r.value; if (scannerState.activeRow) connectWS(scannerState.activeRow); });
 });
 
 // ─── Controls ─────────────────────────────────────────────────────────────────
 function scheduleRefresh() {
-    if (state.refreshTimer) clearInterval(state.refreshTimer);
-    state.refreshTimer = setInterval(fetchSnapshot, state.refreshMs);
+    if (scannerState.refreshTimer) clearInterval(scannerState.refreshTimer);
+    scannerState.refreshTimer = setInterval(fetchSnapshot, scannerState.refreshMs);
 }
 
 /** Load min/max spread and refresh interval from the shared Trading Settings OR a specific profile. */
@@ -1018,10 +1032,10 @@ async function loadScannerSettings(profileId = null) {
             if (res.ok) {
                 const data = await res.json();
                 if (data && data.min_entry_spread != null) {
-                    state.threshold = parseFloat(data.min_entry_spread);
-                    state.maxSpread = parseFloat(data.max_entry_spread) || 10;
-                    state.refreshMs = Math.max(5, parseInt(data.collector_interval_secs) || 5) * 1000;
-                    console.log(`Scanner: loaded profile ${profileId} settings (min: ${state.threshold}%)`);
+                    scannerState.threshold = parseFloat(data.min_entry_spread);
+                    scannerState.maxSpread = parseFloat(data.max_entry_spread) || 10;
+                    scannerState.refreshMs = Math.max(5, parseInt(data.collector_interval_secs) || 5) * 1000;
+                    console.log(`Scanner: loaded profile ${profileId} settings (min: ${scannerState.threshold}%)`);
                     return;
                 }
             }
@@ -1031,10 +1045,10 @@ async function loadScannerSettings(profileId = null) {
         const gRes = await fetch(`${API_BASE}/api/trading/settings`);
         if (gRes.ok) {
             const gData = await gRes.json();
-            state.threshold = parseFloat(gData.min_entry_spread) || 1;
-            state.maxSpread = parseFloat(gData.max_entry_spread) || 10;
-            state.refreshMs = Math.max(5, parseInt(gData.collector_interval_secs) || 5) * 1000;
-            console.log(`Scanner: loaded global settings (min: ${state.threshold}%)`);
+            scannerState.threshold = parseFloat(gData.min_entry_spread) || 1;
+            scannerState.maxSpread = parseFloat(gData.max_entry_spread) || 10;
+            scannerState.refreshMs = Math.max(5, parseInt(gData.collector_interval_secs) || 5) * 1000;
+            console.log(`Scanner: loaded global settings (min: ${scannerState.threshold}%)`);
         } else {
             console.warn('Scanner: global settings failed, using defaults');
         }
@@ -1043,43 +1057,16 @@ async function loadScannerSettings(profileId = null) {
     }
 }
 
-(async function init() {
-    const params = new URLSearchParams(window.location.search);
-    const profileId = params.get('profile_id');
+window.initScanner = async function(profileId = null) {
+    if (window.scannerAutoRefreshTimer) return; // Only init once
+    window.scannerAutoRefreshTimer = true;
 
-    if (params.get('iframe') === '1') {
-        document.body.classList.add('iframe-mode');
-    }
-
-    // Load settings (from profile or globally)
+    console.log('Scanner: Initializing globally');
+    initRefs();
+    
+    // Load default settings
     await loadScannerSettings(profileId);
-
-    if (params.has('chart')) {
-        const pair = params.get('chart');
-        const exA = params.get('exA') || 'binance';
-        const exB = params.get('exB') || 'bybit';
-        window.targetEntryTime = parseInt(params.get('entry')) || null;
-        window.targetExitTime = parseInt(params.get('exit')) || null;
-
-        // Load snapshot even in chart mode so we have volume data
-        fetchSnapshot().then(() => {
-            // Ensure exchanges are considered "known" so klines can be fetched
-            state.activeExchanges.add(exA);
-            state.activeExchanges.add(exB);
-
-            const isHistory = params.has('exit');
-            state.timeframeSec = isHistory ? 60 : 15;
-            
-            document.querySelectorAll('.tf-btn').forEach(b => {
-                b.classList.remove('tf-btn--active');
-                if (b.dataset.tf === String(state.timeframeSec)) b.classList.add('tf-btn--active');
-            });
-
-            const fakeRow = { pair, exchangeA: exA, exchangeB: exB, priceA: 0, priceB: 0, spread: 0, volA: 0, volB: 0, direction: '' };
-            setTimeout(() => openModal(fakeRow), 300);
-        });
-    } else {
-        await fetchSnapshot();
-        scheduleRefresh();
-    }
-})();
+    
+    await fetchSnapshot();
+    scheduleRefresh();
+};

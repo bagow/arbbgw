@@ -1276,46 +1276,6 @@ input:checked+.slider:before {
   animation: fade-in 0.2s ease;
 }
 
-/* iframe mode for trading dashboard charts */
-body.iframe-mode {
-  background: var(--bg-panel);
-  overflow: hidden;
-  height: 100vh;
-  width: 100vw;
-  display: flex;
-  flex-direction: column;
-}
-
-body.iframe-mode .topbar {
-  display: none !important;
-}
-
-body.iframe-mode .layout {
-  display: flex !important;
-  flex-direction: column;
-  flex: 1;
-  margin: 0 !important;
-  padding: 0 !important;
-  width: 100% !important;
-  height: 100% !important;
-  min-height: 0;
-}
-
-body.iframe-mode .modal-backdrop {
-  background: var(--bg-panel);
-  padding: 0;
-  z-index: 1000;
-}
-
-body.iframe-mode .modal {
-  width: 100vw;
-  height: 100vh;
-  max-width: none;
-  border-radius: 0;
-  border: none;
-  box-shadow: none;
-}
-
 /* ── Exchange Monitoring ─────────────────────────────────────────────────────── */
 .exchange-cards-grid {
   display: grid;
