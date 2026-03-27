@@ -4,24 +4,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CEX Arb — Trading</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=2">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 </head>
 <body>
+    <div class="tab-bar" id="tab-bar" style="position:fixed;top:0;left:0;right:0;bottom:auto;z-index:10000;display:flex;">
+        <!-- tabs injected by JS -->
+        <button class="tab-add-btn" id="tab-add-btn" title="New trading profile">＋</button>
+    </div>
 
-    <header class="topbar">
-        <div class="topbar-left">
-            <span class="logo">CEX Arb</span>
-        </div>
-
-        <div class="topbar-right">
-            <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Toggle Menu">
-                <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
-            </button>
-        </div>
-    </header>
 
     <!-- ── Tab Panel Area ────────────────────────────────────────────────────── -->
     <div class="mt-layout">
@@ -32,10 +25,6 @@
     </div>
 
     <!-- ── Bottom Tab Bar ────────────────────────────────────────────────────── -->
-    <div class="tab-bar" id="tab-bar">
-        <!-- tabs injected by JS -->
-        <button class="tab-add-btn" id="tab-add-btn" title="New trading profile">＋</button>
-    </div>
 
     <!-- ── New Tab Modal ─────────────────────────────────────────────────────── -->
     <div id="new-tab-modal" class="modal-backdrop hidden">
@@ -85,10 +74,5 @@
     </div>
 
     <script src="trading.js"></script>
-    <script>
-        document.getElementById('mobile-menu-btn')?.addEventListener('click', () => {
-            document.getElementById('nav-menu').classList.toggle('open');
-        });
-    </script>
 </body>
 </html>

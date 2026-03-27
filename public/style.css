@@ -42,7 +42,6 @@
   --text-sub: #64748b;
   --text-dim: #334155;
 
-  --topbar-h: 56px;
   --radius: 8px;
   --radius-sm: 4px;
 }
@@ -80,69 +79,8 @@ body {
   background: var(--text-sub);
 }
 
-/* ── Top bar ────────────────────────────────────────────────────────────────── */
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  background: rgba(10, 12, 16, .92);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
 
-.topbar-left {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-}
-
-.logo {
-  font-size: 1.05rem;
-  font-weight: 700;
-  color: var(--text);
-  letter-spacing: -0.5px;
-  background: linear-gradient(to right, #fff, var(--accent));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.nav-menu {
-  display: none; /* Removed from topbar */
-}
-
-.nav-btn {
-  padding: 6px 14px;
-  border-radius: var(--radius-sm);
-  font-size: .85rem;
-  font-weight: 600;
-  text-decoration: none;
-  font-family: inherit;
-  transition: opacity .15s, background .15s, border-color .15s, color .15s;
-}
-
-.nav-btn.active {
-  background: var(--accent);
-  color: #fff;
-  border: 1px solid var(--accent);
-}
-
-.nav-btn:not(.active) {
-  background: transparent;
-  color: var(--text-sub);
-  border: 1px solid var(--border);
-}
-
-.nav-btn:not(.active):hover {
-  color: var(--text);
-  border-color: var(--text-sub);
-}
+/* Deleted topbar styles */
 
 .status-bar {
   display: flex;
@@ -227,7 +165,8 @@ body {
   display: flex;
   flex-direction: column;
   flex: 1;
-  padding: 16px;
+  padding: 8px; /* Compact padding */
+  width: 100%;
 }
 
 /* ── Panel ──────────────────────────────────────────────────────────────────── */
@@ -1325,59 +1264,7 @@ input:checked+.slider:before {
   }
 }
 
-/* ── Layout Compactness ── */
-.mt-layout {
-  padding: 4px 12px;
-  max-width: 1400px;
-  margin: 0 auto;
-}
-
-.mt-panel {
-  background: var(--bg-panel);
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  min-height: calc(100vh - 120px);
-  display: flex;
-  flex-direction: column;
-}
-
-.mt-subnav {
-  display: flex;
-  gap: 12px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border-dim);
-  background: rgba(0,0,0,0.1);
-  align-items: center;
-}
-
-.t-tab {
-  padding: 12px 24px;
-  background: transparent;
-  color: var(--text-sub);
-  border: none;
-  border-bottom: 2px solid transparent;
-  font-size: 0.95rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-  font-family: inherit;
-  border-top-left-radius: 6px;
-  border-top-right-radius: 6px;
-}
-
-.t-tab:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.t-tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-
-.tab-content {
-  display: none;
-}
+/* Removed old layout block */
 
 .tab-content.active {
   display: block;
@@ -1572,21 +1459,22 @@ body.iframe-mode .modal {
 
 /* ── Bottom tab bar ─────────────────────────────────────────────────────────── */
 .tab-bar {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 60;
-  height: 44px;
-  display: flex;
-  align-items: stretch;
-  background: rgba(10,12,16,.96);
-  border-top: 1px solid var(--border);
-  backdrop-filter: blur(12px);
-  padding: 0 0 0 4px;
-  gap: 2px;
-  overflow-x: auto;
-  scrollbar-width: none;
+  position: fixed !important;
+  top: 0 !important;
+  bottom: auto !important;
+  left: 0 !important;
+  right: 0 !important;
+  z-index: 1000 !important;
+  height: 44px !important;
+  display: flex !important;
+  align-items: stretch !important;
+  background: var(--bg-panel) !important;
+  border-bottom: 1px solid var(--border) !important;
+  backdrop-filter: blur(12px) !important;
+  padding: 0 !important;
+  gap: 0 !important;
+  overflow-x: auto !important;
+  scrollbar-width: none !important;
 }
 .tab-bar::-webkit-scrollbar { display: none; }
 
@@ -1646,12 +1534,16 @@ body.iframe-mode .modal {
 
 /* ── Main panel (above tab bar) ──────────────────────────────────────────────── */
 .mt-layout {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  padding: 0;
-  margin-bottom: 44px;   /* height of tab bar */
-  min-height: 0;
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 !important;
+  padding: 0 !important;
+  margin-top: 44px !important;      /* height of top tab bar */
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  width: 100% !important;
+  max-width: none !important;
+  min-height: 0 !important;
 }
 
 .mt-panel {
@@ -1675,8 +1567,8 @@ body.iframe-mode .modal {
 .mt-subnav {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 10px 16px 8px;
+  gap: 8px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   flex-wrap: wrap;

@@ -15,7 +15,7 @@ let profiles = [];       // all profiles from server
 let activeTabId = null;  // currently visible profile id
 let pollTimer = null;
 let lastUnified = null;  // cached /api/unified response
-let activeSubTabId = 'active'; // Fix navigation jumping by persisting sub-tab
+let activeSubTabId = 'scanner'; // Default to Scanner as requested
 
 // Expanded trade rows per profile
 const expandedRows = {};  // profileId -> Set of trade row ids
@@ -176,7 +176,21 @@ async function refreshActiveTab() {
 function renderPanel(profile, active, history, stats, exchanges) {
     const panel = document.getElementById('mt-panel');
 
-    // Destroy any existing Chart.js instances for this profile to avoid canvas conflicts
+    // ─── Polling Update: Only refresh dynamic data ──────────────────────────
+    if (panel.dataset.activeProfileId === profile.id) {
+        updateDynamicElements(profile, active, stats);
+        if (active !== null) {
+            renderActiveTable(profile.id, active);
+            renderHistoryTable(profile.id, history);
+            if (stats && stats.total_trades > 0) renderDashboardCharts(profile.id, stats);
+        }
+        return;
+    }
+
+    // ─── Profile Switch or Initial Load: Render full template ───────────────
+    panel.dataset.activeProfileId = profile.id;
+
+    // Destroy any existing Chart.js instances
     if (chartInstances[profile.id]) {
         Object.values(chartInstances[profile.id]).forEach(c => { try { c.destroy(); } catch {} });
         delete chartInstances[profile.id];
@@ -184,28 +198,20 @@ function renderPanel(profile, active, history, stats, exchanges) {
 
     panel.innerHTML = `
         <div class="mt-subnav">
-            <a href="chart.html" class="mt-nav-btn" style="text-decoration:none; display:inline-flex; align-items:center; gap:6px;">
-                <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"></path><path d="M22 12A10 10 0 0 0 12 2v10z"></path></svg>
-                Scanner
-            </a>
-            <div style="width:1px; height:18px; background:var(--border-dim); margin:0 4px;"></div>
+            <button class="mt-nav-btn ${activeSubTabId==='scanner'?'mt-nav-btn--active':''}" data-sub="scanner" onclick="showSubTab(this,'scanner')">Scanner</button>
             <button class="mt-nav-btn ${activeSubTabId==='dashboard'?'mt-nav-btn--active':''}" data-sub="dashboard" onclick="showSubTab(this,'dashboard')">Dashboard</button>
             <button class="mt-nav-btn ${activeSubTabId==='active'?'mt-nav-btn--active':''}" data-sub="active" onclick="showSubTab(this,'active')">Active Trades</button>
             <button class="mt-nav-btn ${activeSubTabId==='history'?'mt-nav-btn--active':''}" data-sub="history" onclick="showSubTab(this,'history')">History</button>
             <button class="mt-nav-btn ${activeSubTabId==='settings'?'mt-nav-btn--active':''}" data-sub="settings" onclick="showSubTab(this,'settings')">Settings</button>
-            <div style="margin-left:auto;display:flex;align-items:center;gap:10px;">
-                ${active !== null ? `
-                <span style="font-size:.8rem;color:var(--text-sub);">
-                    Active: <strong style="color:var(--text)">${active.length}</strong>
-                    &nbsp;|&nbsp; PnL:
-                    <strong style="color:${(stats?.total_pnl||0)>=0?'var(--green)':'var(--red)'}">
-                        ${fmtPnL(stats?.total_pnl||0)}
-                    </strong>
-                </span>` : ''}
-                <span class="mode-badge ${profile.mode === 'real' ? 'mode-badge--real' : 'mode-badge--paper'}">
-                    ${profile.mode === 'real' ? '💰 Real' : '🧪 Paper'}
-                </span>
+            
+            <div id="panel-stats-${profile.id}" style="margin-left:auto;display:flex;align-items:center;gap:10px;">
+                ${renderSubNavStats(active, stats, profile.mode)}
             </div>
+        </div>
+
+        <!-- Scanner sub-panel -->
+        <div class="mt-content" id="mt-sub-scanner" style="display:${activeSubTabId==='scanner'?'block':'none'}; flex:1;">
+            <iframe src="chart.html?profile_id=${profile.id}&iframe=1" style="width:100%; height:100%; border:none; background:var(--bg);"></iframe>
         </div>
 
         <!-- Dashboard sub-panel -->
@@ -275,6 +281,30 @@ function renderPanel(profile, active, history, stats, exchanges) {
         renderHistoryTable(profile.id, history);
         if (stats && stats.total_trades > 0) renderDashboardCharts(profile.id, stats);
     }
+}
+
+/** Helper to update stats in sub-nav during polling without full re-render */
+function updateDynamicElements(profile, active, stats) {
+    const statsEl = document.getElementById(`panel-stats-${profile.id}`);
+    if (statsEl) {
+        statsEl.innerHTML = renderSubNavStats(active, stats, profile.mode);
+    }
+}
+
+function renderSubNavStats(active, stats, mode) {
+    return `
+        ${active !== null ? `
+        <span style="font-size:.8rem;color:var(--text-sub);">
+            Active: <strong style="color:var(--text)">${active.length}</strong>
+            &nbsp;|&nbsp; PnL:
+            <strong style="color:${(stats?.total_pnl||0)>=0?'var(--green)':'var(--red)'}">
+                ${fmtPnL(stats?.total_pnl||0)}
+            </strong>
+        </span>` : ''}
+        <span class="mode-badge ${mode === 'real' ? 'mode-badge--real' : 'mode-badge--paper'}">
+            ${mode === 'real' ? '💰 Real' : '🧪 Paper'}
+        </span>
+    `;
 }
 
 function renderSettingsForm(profile) {

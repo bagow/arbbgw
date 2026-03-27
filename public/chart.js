@@ -1009,10 +1009,13 @@ function scheduleRefresh() {
     state.refreshTimer = setInterval(fetchSnapshot, state.refreshMs);
 }
 
-/** Load min/max spread and refresh interval from the shared Trading Settings. */
-async function loadScannerSettings() {
+/** Load min/max spread and refresh interval from the shared Trading Settings OR a specific profile. */
+async function loadScannerSettings(profileId = null) {
     try {
-        const res = await fetch(`${API_BASE}/api/trading/settings`);
+        const url = profileId
+            ? `${API_BASE}/api/profiles/${profileId}`
+            : `${API_BASE}/api/trading/settings`;
+        const res = await fetch(url);
         if (!res.ok) return;
         const data = await res.json();
         if (data && Object.keys(data).length > 0) {
@@ -1022,19 +1025,20 @@ async function loadScannerSettings() {
             state.refreshMs = Math.max(5, intervalSecs) * 1000;
         }
     } catch (e) {
-        console.warn('Could not load scanner settings from API, using defaults:', e);
+        console.warn('Could not load scanner settings, using defaults:', e);
     }
 }
 
 (async function init() {
     const params = new URLSearchParams(window.location.search);
+    const profileId = params.get('profile_id');
+
     if (params.get('iframe') === '1') {
         document.body.classList.add('iframe-mode');
-        // Auto-refresh snapshot disabled in iframe chart mode to save resources
-        state.refreshMs = 9999999;
-    } else {
-        await loadScannerSettings();
     }
+
+    // Load settings (from profile or globally)
+    await loadScannerSettings(profileId);
 
     if (params.has('chart')) {
         const pair = params.get('chart');
