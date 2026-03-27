@@ -183,9 +183,12 @@ function renderPanel(profile, active, history, stats, exchanges) {
     }
 
     panel.innerHTML = `
-        <!-- Sub-nav for this tab -->
         <div class="mt-subnav">
-            <a href="chart.html" class="mt-nav-btn" style="text-decoration:none">Scanner</a>
+            <a href="chart.html" class="mt-nav-btn" style="text-decoration:none; display:inline-flex; align-items:center; gap:6px;">
+                <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"></path><path d="M22 12A10 10 0 0 0 12 2v10z"></path></svg>
+                Scanner
+            </a>
+            <div style="width:1px; height:18px; background:var(--border-dim); margin:0 4px;"></div>
             <button class="mt-nav-btn ${activeSubTabId==='dashboard'?'mt-nav-btn--active':''}" data-sub="dashboard" onclick="showSubTab(this,'dashboard')">Dashboard</button>
             <button class="mt-nav-btn ${activeSubTabId==='active'?'mt-nav-btn--active':''}" data-sub="active" onclick="showSubTab(this,'active')">Active Trades</button>
             <button class="mt-nav-btn ${activeSubTabId==='history'?'mt-nav-btn--active':''}" data-sub="history" onclick="showSubTab(this,'history')">History</button>

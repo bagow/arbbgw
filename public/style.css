@@ -1325,13 +1325,29 @@ input:checked+.slider:before {
   }
 }
 
-/* ── Tabs ── */
-.trading-tabs {
+/* ── Layout Compactness ── */
+.mt-layout {
+  padding: 4px 12px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.mt-panel {
+  background: var(--bg-panel);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  min-height: calc(100vh - 120px);
   display: flex;
-  gap: 2px;
-  padding: 16px 24px 0 24px;
+  flex-direction: column;
+}
+
+.mt-subnav {
+  display: flex;
+  gap: 12px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--border-dim);
-  background: var(--bg-row-alt);
+  background: rgba(0,0,0,0.1);
+  align-items: center;
 }
 
 .t-tab {
