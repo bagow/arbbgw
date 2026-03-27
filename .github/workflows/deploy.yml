@@ -28,9 +28,9 @@ jobs:
       - name: Copy binaries to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.VPS_IP }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           source: "rust-collector/target/release/rust-collector,paper-trader/target/release/paper-trader,real-trader/target/release/real-trader"
           target: "/tmp/deploy"
           strip_components: 3 # Чтобы в /tmp/deploy оказались только файлы
@@ -38,9 +38,9 @@ jobs:
       - name: Install binaries and Restart services
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.VPS_IP }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
             sudo mv /tmp/deploy/rust-collector /usr/local/bin/
             sudo mv /tmp/deploy/paper-trader /usr/local/bin/
