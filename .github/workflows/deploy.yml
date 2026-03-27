@@ -45,8 +45,11 @@ jobs:
             sudo mv /tmp/deploy/rust-collector /usr/local/bin/
             sudo mv /tmp/deploy/paper-trader /usr/local/bin/
             sudo mv /tmp/deploy/real-trader /usr/local/bin/
+            sudo chown root:root /usr/local/bin/rust-collector /usr/local/bin/paper-trader /usr/local/bin/real-trader
             sudo chmod +x /usr/local/bin/rust-collector /usr/local/bin/paper-trader /usr/local/bin/real-trader
+            sudo restorecon -v /usr/local/bin/rust-collector /usr/local/bin/paper-trader /usr/local/bin/real-trader
             sudo systemctl restart rust-collector paper-trader real-trader
+            sudo systemctl status rust-collector paper-trader real-trader
 
       # --- 3. Деплой Cloudflare (Worker & Dashboard) ---
       - name: Deploy Cloudflare Worker & Assets
