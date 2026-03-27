@@ -1460,8 +1460,8 @@ body.iframe-mode .modal {
 /* ── Bottom tab bar ─────────────────────────────────────────────────────────── */
 .tab-bar {
   position: fixed !important;
-  top: 0 !important;
-  bottom: auto !important;
+  bottom: 0 !important;
+  top: auto !important;
   left: 0 !important;
   right: 0 !important;
   z-index: 1000 !important;
@@ -1469,7 +1469,7 @@ body.iframe-mode .modal {
   display: flex !important;
   align-items: stretch !important;
   background: var(--bg-panel) !important;
-  border-bottom: 1px solid var(--border) !important;
+  border-top: 1px solid var(--border) !important;
   backdrop-filter: blur(12px) !important;
   padding: 0 !important;
   gap: 0 !important;
@@ -1538,7 +1538,8 @@ body.iframe-mode .modal {
   flex-direction: column !important;
   flex: 1 !important;
   padding: 0 !important;
-  margin-top: 44px !important;      /* height of top tab bar */
+  margin-top: 0 !important;
+  margin-bottom: 44px !important;      /* height of bottom tab bar */
   margin-left: 0 !important;
   margin-right: 0 !important;
   width: 100% !important;
