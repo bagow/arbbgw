@@ -95,6 +95,8 @@ jobs:
             sudo restorecon -v /usr/local/bin/vps-api
             if [ -f /tmp/deploy/vps-api/vps-api.service ]; then
               sudo mv /tmp/deploy/vps-api/vps-api.service /etc/systemd/system/
+              sudo chmod 644 /etc/systemd/system/vps-api.service
+              sudo restorecon -v /etc/systemd/system/vps-api.service
               sudo systemctl daemon-reload
               sudo systemctl enable vps-api
             fi
