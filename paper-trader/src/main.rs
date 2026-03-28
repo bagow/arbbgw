@@ -80,6 +80,7 @@ pub struct SpreadPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingSettings {
+    pub id: String,
     pub is_active: bool,
     pub min_entry_spread: f64,
     pub max_entry_spread: f64,
@@ -95,9 +96,11 @@ pub struct TradingSettings {
     pub pending_commands: Option<String>,
 }
 
+
 impl Default for TradingSettings {
     fn default() -> Self {
         Self {
+            id: "paper-default".into(),
             is_active: false,
             min_entry_spread: 0.3,
             max_entry_spread: 5.0,
@@ -144,6 +147,7 @@ pub struct Trade {
     pub pnl_a: Option<f64>,
     pub pnl_b: Option<f64>,
     pub close_reason: Option<String>,
+    pub profile_id: Option<String>,
     // enriched fields (not stored in DB directly)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_price_a: Option<f64>,
@@ -167,8 +171,8 @@ struct AppState {
     collector_token: String,
     internal_token: String,
     engine_lock: Arc<Mutex<()>>,
-    /// Cached settings to reduce Worker load
-    settings_cache: Arc<Mutex<(Option<TradingSettings>, std::time::Instant)>>,
+    /// Cached settings to reduce Worker load (Array of profiles)
+    settings_cache: Arc<Mutex<(Option<Vec<TradingSettings>>, std::time::Instant)>>,
     /// Throttling for active trades push
     last_push_time: Arc<Mutex<std::time::Instant>>,
 }
@@ -212,6 +216,16 @@ async fn init_db(db: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
         ").map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
     }).await?;
+
+    let _ = db.call(|conn| {
+        conn.execute(
+            "ALTER TABLE trades ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'paper-default'",
+            [],
+        )
+        .map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+    })
+    .await;
+
     Ok(())
 }
 
@@ -245,6 +259,7 @@ fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
         pnl_a: row.get(23).ok(),
         pnl_b: row.get(24).ok(),
         close_reason: row.get(25).ok(),
+        profile_id: row.get::<_, Option<String>>(26).unwrap_or(Some("paper-default".into())),
         current_price_a: None,
         current_price_b: None,
         current_spread: None,
@@ -255,9 +270,9 @@ fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
 
 // ─── Trading Engine ───────────────────────────────────────────────────────────
 
-async fn ack_command(state: &AppState, command: &str) {
+async fn ack_command(state: &AppState, command: &str, profile_id: &str) {
     let url = format!("{}/api/trading/commands/ack", state.worker_url.trim_end_matches('/'));
-    let payload = json!({ "command": command });
+    let payload = json!({ "command": command, "profile_id": profile_id });
     let _ = state.http
         .post(&url)
         .bearer_auth(&state.internal_token)
@@ -267,7 +282,7 @@ async fn ack_command(state: &AppState, command: &str) {
         .await;
 }
 
-async fn fetch_settings(state: &AppState) -> TradingSettings {
+async fn fetch_settings(state: &AppState) -> Vec<TradingSettings> {
     {
         let cache = state.settings_cache.lock().await;
         if let Some(s) = &cache.0 {
@@ -277,36 +292,40 @@ async fn fetch_settings(state: &AppState) -> TradingSettings {
         }
     }
 
-    let url = format!("{}/api/trading/settings", state.worker_url.trim_end_matches('/'));
+    let url = format!("{}/api/trading/settings/all", state.worker_url.trim_end_matches('/'));
     let settings = match state.http.get(&url).timeout(Duration::from_secs(5)).send().await {
         Ok(resp) => {
             let status = resp.status();
-            match resp.json::<TradingSettings>().await {
+            match resp.json::<Vec<TradingSettings>>().await {
                 Ok(s) => s,
                 Err(e) => {
                     warn!("Failed to parse settings JSON (status {}): {} — using defaults", status, e);
-                    TradingSettings::default()
+                    vec![TradingSettings::default()]
                 }
             }
         },
         Err(e) => {
             warn!("Failed to fetch settings from Worker: {} — using defaults", e);
-            TradingSettings::default()
+            vec![TradingSettings::default()]
         }
     };
 
     // Process pending commands if any
-    if let Some(cmd) = &settings.pending_commands {
-        if cmd == "CLEAR_TRADES" {
-            info!("Received CLEAR_TRADES command from Worker, wiping local trades...");
-            let _ = state.db.call(|conn| {
-                conn.execute("DELETE FROM trades", []).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
-            }).await;
-            
-            let state_clone = state.clone();
-            tokio::spawn(async move {
-                ack_command(&state_clone, "CLEAR_TRADES").await;
-            });
+    for s in &settings {
+        if let Some(cmd) = &s.pending_commands {
+            if cmd == "CLEAR_TRADES" {
+                info!("Received CLEAR_TRADES command for profile {}, wiping local trades...", s.id);
+                let pid = s.id.clone();
+                let _ = state.db.call(move |conn| {
+                    conn.execute("DELETE FROM trades WHERE profile_id=?", rusqlite::params![pid]).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+                }).await;
+                
+                let state_clone = state.clone();
+                let pid_ack = s.id.clone();
+                tokio::spawn(async move {
+                    ack_command(&state_clone, "CLEAR_TRADES", &pid_ack).await;
+                });
+            }
         }
     }
 
@@ -331,27 +350,31 @@ async fn archive_trade_to_d1(http: &Client, worker_url: &str, token: &str, trade
     }
 }
 
-async fn push_active_trades_to_worker(http: &Client, worker_url: &str, token: &str, trades: &[Trade]) {
+async fn push_active_trades_to_worker(http: &Client, worker_url: &str, token: &str, trades_map: &std::collections::HashMap<String, Vec<Trade>>) {
     let url = format!("{}/api/trading/active", worker_url.trim_end_matches('/'));
     if let Err(e) = http
         .post(&url)
         .bearer_auth(token)
-        .json(trades)
+        .json(trades_map)
         .timeout(Duration::from_secs(5))
         .send()
         .await
     {
-        error!("Failed to push {} active trades to Worker: {}", trades.len(), e);
+        error!("Failed to push active trades map to Worker: {}", e);
     }
 }
 
 async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
     let _lock = state.engine_lock.lock().await;
 
-    let settings = fetch_settings(state).await;
-    if !settings.is_active {
+    let settings_list = fetch_settings(state).await;
+    let active_profiles: Vec<&TradingSettings> = settings_list.iter().filter(|s| s.is_active).collect();
+    if active_profiles.is_empty() {
         return;
     }
+    
+    let settings_map: std::collections::HashMap<String, &TradingSettings> = 
+        active_profiles.iter().map(|s| (s.id.clone(), *s)).collect();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -369,7 +392,7 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
                         exit_price_a,exit_price_b,exit_spread,exit_time,pnl,
                         commission_cost,funding_cost,
                         last_price_a,last_price_b,last_spread,curr_gross_pnl,
-                        pnl_a,pnl_b,close_reason
+                        pnl_a,pnl_b,close_reason,profile_id
                  FROM trades WHERE status='OPEN'",
             )?;
             let rows = stmt
@@ -387,13 +410,17 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         }
     };
 
-    let mut num_active = open_trades.len() as i64;
-    let mut open_pair_keys: std::collections::HashSet<String> = open_trades
-        .iter()
-        .map(|t| format!("{}_{}_{}", t.pair, t.exchange_a, t.exchange_b))
-        .collect();
-    let mut open_tickers: std::collections::HashSet<String> =
-        open_trades.iter().map(|t| t.pair.clone()).collect();
+    let mut num_active_by_profile: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut open_pair_keys_by_profile: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
+    let mut open_tickers_by_profile: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
+
+    for t in &open_trades {
+        let pid = t.profile_id.clone().unwrap_or_else(|| "paper-default".into());
+        *num_active_by_profile.entry(pid.clone()).or_insert(0) += 1;
+        let key = format!("{}_{}_{}", t.pair, t.exchange_a, t.exchange_b);
+        open_pair_keys_by_profile.entry(pid.clone()).or_default().insert(key);
+        open_tickers_by_profile.entry(pid.clone()).or_default().insert(t.pair.clone());
+    }
 
     let maps = &payload.maps;
 
@@ -404,6 +431,12 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
 
     // --- Process open trades ---
     for trade in &open_trades {
+        let profile_id = trade.profile_id.clone().unwrap_or_else(|| "paper-default".into());
+        let settings = match settings_map.get(&profile_id) {
+            Some(s) => s,
+            None => continue,
+        };
+
         let data_a = match get_ticker(&trade.exchange_a, &trade.pair) {
             Some(d) => d,
             None => continue,
@@ -578,10 +611,10 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             });
             */
 
-            num_active -= 1;
+            if let Some(c) = num_active_by_profile.get_mut(&profile_id) { *c -= 1; }
             let key = format!("{}_{}_{}", trade.pair, trade.exchange_a, trade.exchange_b);
-            open_pair_keys.remove(&key);
-            open_tickers.remove(&trade.pair);
+            if let Some(keys) = open_pair_keys_by_profile.get_mut(&profile_id) { keys.remove(&key); }
+            if let Some(tickers) = open_tickers_by_profile.get_mut(&profile_id) { tickers.remove(&trade.pair); }
         } else {
             // Update live prices
             let trade_id = trade.id;
@@ -601,77 +634,85 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
     }
 
     // --- Open new trades ---
-    for row in &payload.spreads {
-        if num_active >= settings.max_active_trades {
-            break;
-        }
-        if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread {
-            continue;
-        }
-        if open_tickers.contains(&row.pair) {
-            continue;
-        }
+    for settings in active_profiles {
+        let pid = &settings.id;
+        let max_trades = settings.max_active_trades;
 
-        let key = format!("{}_{}_{}", row.pair, row.exchange_a, row.exchange_b);
-        let key_rev = format!("{}_{}_{}", row.pair, row.exchange_b, row.exchange_a);
-        if open_pair_keys.contains(&key) || open_pair_keys.contains(&key_rev) {
-            continue;
-        }
-
-        let slippage = settings.slippage_percent / 100.0;
-        let is_a_higher = row.direction.starts_with(&row.exchange_a);
-
-        let entry_price_a = if is_a_higher {
-            row.price_a * (1.0 - slippage)
-        } else {
-            row.price_a * (1.0 + slippage)
-        };
-        let entry_price_b = if is_a_higher {
-            row.price_b * (1.0 + slippage)
-        } else {
-            row.price_b * (1.0 - slippage)
-        };
-
-        let pair = row.pair.clone();
-        let ex_a = row.exchange_a.clone();
-        let ex_b = row.exchange_b.clone();
-        let dir = row.direction.clone();
-        let vol = settings.trade_volume;
-        let spread = row.spread;
-
-        info!(
-            "Opening trade {} {} {} spread={:.4}%",
-            pair, ex_a, ex_b, spread
-        );
-
-        match state
-            .db
-            .call(move |conn| {
-                conn.execute(
-                    "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,
-                                         entry_price_a,entry_price_b,entry_spread,entry_time,
-                                         highest_spread_reached,status,pnl_a,pnl_b,close_reason)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    params![
-                        pair, ex_a, ex_b, dir, vol,
-                        entry_price_a, entry_price_b, spread, now,
-                        -9999.0, "OPEN", 0.0, 0.0, None::<String>
-                    ],
-                ).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
-            })
-            .await
-        {
-            Ok(_) => {
-                num_active += 1;
-                open_pair_keys.insert(key);
-                open_tickers.insert(row.pair.clone());
+        for row in &payload.spreads {
+            let num_active = *num_active_by_profile.get(pid).unwrap_or(&0);
+            if num_active >= max_trades {
+                break;
             }
-            Err(e) => error!("DB error opening trade: {}", e),
+            if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread {
+                continue;
+            }
+            let tickers = open_tickers_by_profile.entry(pid.clone()).or_default();
+            if tickers.contains(&row.pair) {
+                continue;
+            }
+
+            let key = format!("{}_{}_{}", row.pair, row.exchange_a, row.exchange_b);
+            let key_rev = format!("{}_{}_{}", row.pair, row.exchange_b, row.exchange_a);
+            let keys = open_pair_keys_by_profile.entry(pid.clone()).or_default();
+            if keys.contains(&key) || keys.contains(&key_rev) {
+                continue;
+            }
+
+            let slippage = settings.slippage_percent / 100.0;
+            let is_a_higher = row.direction.starts_with(&row.exchange_a);
+
+            let entry_price_a = if is_a_higher {
+                row.price_a * (1.0 - slippage)
+            } else {
+                row.price_a * (1.0 + slippage)
+            };
+            let entry_price_b = if is_a_higher {
+                row.price_b * (1.0 + slippage)
+            } else {
+                row.price_b * (1.0 - slippage)
+            };
+
+            let pair = row.pair.clone();
+            let ex_a = row.exchange_a.clone();
+            let ex_b = row.exchange_b.clone();
+            let dir = row.direction.clone();
+            let vol = settings.trade_volume;
+            let spread = row.spread;
+            let profile_id_db = pid.clone();
+
+            info!(
+                "Opening trade {} {} {} split spread={:.4}% profile={}",
+                pair, ex_a, ex_b, spread, profile_id_db
+            );
+
+            match state
+                .db
+                .call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,
+                                             entry_price_a,entry_price_b,entry_spread,entry_time,
+                                             highest_spread_reached,status,pnl_a,pnl_b,close_reason,profile_id)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        params![
+                            pair, ex_a, ex_b, dir, vol,
+                            entry_price_a, entry_price_b, spread, now,
+                            -9999.0, "OPEN", 0.0, 0.0, None::<String>, profile_id_db
+                        ],
+                    ).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+                })
+                .await
+            {
+                Ok(_) => {
+                    *num_active_by_profile.entry(pid.clone()).or_insert(0) += 1;
+                    open_pair_keys_by_profile.entry(pid.clone()).or_default().insert(key);
+                    open_tickers_by_profile.entry(pid.clone()).or_default().insert(row.pair.clone());
+                }
+                Err(e) => error!("DB error opening trade: {}", e),
+            }
         }
     }
 
     // --- Final Step: Push current active state to Cloudflare Worker ---
-    // Reload from DB to get the most accurate enriched state
     let final_trades: Vec<Trade> = match state
         .db
         .call(|conn| {
@@ -682,7 +723,7 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
                         exit_price_a,exit_price_b,exit_spread,exit_time,pnl,
                         commission_cost,funding_cost,
                         last_price_a,last_price_b,last_spread,curr_gross_pnl,
-                        pnl_a,pnl_b,close_reason
+                        pnl_a,pnl_b,close_reason,profile_id
                  FROM trades WHERE status='OPEN'",
             )?;
             let rows = stmt
@@ -694,7 +735,6 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         .await
     {
         Ok(mut t) => {
-            // Enrich with PnL before pushing
             for tr in t.iter_mut() {
                 if let (Some(c_price_a), Some(c_price_b), Some(c_spread)) = (tr.last_price_a, tr.last_price_b, tr.last_spread) {
                     let is_a_higher = tr.direction.starts_with(&tr.exchange_a);
@@ -721,15 +761,24 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         Err(_) => vec![],
     };
 
+    let mut mapped_trades: std::collections::HashMap<String, Vec<Trade>> = std::collections::HashMap::new();
+    for tr in final_trades {
+        let pid = tr.profile_id.clone().unwrap_or_else(|| "paper-default".into());
+        mapped_trades.entry(pid).or_default().push(tr);
+    }
+    // ensure active profiles with 0 trades send an empty array so they clear correctly
+    for s in &settings_list {
+        mapped_trades.entry(s.id.clone()).or_insert_with(Vec::new);
+    }
+
     let http = state.http.clone();
     let worker_url = state.worker_url.clone();
     let token = state.collector_token.clone();
     
-    // Only push if something changed (size changed) or if 30s passed
     let mut should_push = false;
     {
         let mut last_push = state.last_push_time.lock().await;
-        if last_push.elapsed() > Duration::from_secs(30) || final_trades.len() != open_trades.len() {
+        if last_push.elapsed() > Duration::from_secs(15) || true {
             should_push = true;
             *last_push = std::time::Instant::now();
         }
@@ -737,7 +786,7 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
 
     if should_push {
         tokio::spawn(async move {
-            push_active_trades_to_worker(&http, &worker_url, &token, &final_trades).await;
+            push_active_trades_to_worker(&http, &worker_url, &token, &mapped_trades).await;
         });
     }
 }
@@ -795,7 +844,7 @@ async fn handle_get_trades(State(state): State<AppState>) -> Response {
                         exit_price_a,exit_price_b,exit_spread,exit_time,pnl,
                         commission_cost,funding_cost,
                         last_price_a,last_price_b,last_spread,curr_gross_pnl,
-                        pnl_a,pnl_b,close_reason
+                        pnl_a,pnl_b,close_reason,profile_id
                  FROM trades WHERE status='OPEN' ORDER BY entry_time DESC",
             )?;
             let rows = stmt

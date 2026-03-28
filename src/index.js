@@ -464,6 +464,23 @@ async function handleFetch(request, env, ctx) {
         }
     }
 
+    // ── GET /api/trading/settings/all ─────────────────────────────────────────
+    if (path === '/api/trading/settings/all' && request.method === 'GET') {
+        const { results } = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE mode = 'paper' OR mode IS NULL`).all();
+        const defaults = {
+            is_active: false, min_entry_spread: 1.0, max_entry_spread: 10.0,
+            trade_volume: 1000.0, take_profit_percent: 0.1, trailing_stop_percent: 0.5,
+            max_active_trades: 5, commission_rate: 0.45, funding_rate_8h: 0.01,
+            slippage_percent: 0.1, min_volume_millions: 10, collector_interval_secs: 5,
+        };
+        const profiles = results.map(row => {
+            const out = { ...defaults, ...row };
+            out.is_active = Boolean(out.is_active);
+            return out;
+        });
+        return jsonResponse(profiles);
+    }
+
     // ── /api/trading/trades ───────────────────────────────────────────────────
     if (path === '/api/trading/trades' && request.method === 'GET') {
         const settings = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE id='paper-default'`).first() || {};
@@ -494,10 +511,10 @@ async function handleFetch(request, env, ctx) {
     if (path === '/api/trading/commands/ack' && request.method === 'POST') {
         const auth = request.headers.get('Authorization');
         if (auth !== `Bearer ${env.INTERNAL_TOKEN}`) return jsonResponse({ error: 'Unauthorized' }, 401);
-        const { command } = await request.json();
-        const settings = await env.DB.prepare(`SELECT pending_commands FROM trading_profiles WHERE id='paper-default'`).first();
+        const { command, profile_id = 'paper-default' } = await request.json();
+        const settings = await env.DB.prepare(`SELECT pending_commands FROM trading_profiles WHERE id=?`).bind(profile_id).first();
         if (settings?.pending_commands === command)
-            await env.DB.prepare(`UPDATE trading_profiles SET pending_commands=NULL WHERE id='paper-default'`).run();
+            await env.DB.prepare(`UPDATE trading_profiles SET pending_commands=NULL WHERE id=?`).bind(profile_id).run();
         return jsonResponse({ success: true });
     }
 
@@ -519,7 +536,7 @@ async function handleFetch(request, env, ctx) {
                 trade.entry_price_a, trade.entry_price_b, trade.entry_spread, trade.entry_time,
                 trade.highest_spread_reached, 'CLOSED', trade.exit_price_a, trade.exit_price_b,
                 trade.exit_spread, trade.exit_time, trade.pnl, trade.commission_cost, trade.funding_cost,
-                trade.pnl_a, trade.pnl_b, trade.close_reason, 'paper-default'
+                trade.pnl_a, trade.pnl_b, trade.close_reason, trade.profile_id || 'paper-default'
             ).run();
             return jsonResponse({ success: true });
         } catch (e) { return jsonResponse({ error: e.message }, 500); }
@@ -530,15 +547,32 @@ async function handleFetch(request, env, ctx) {
         const token = request.headers.get('Authorization') || '';
         if (!env.COLLECTOR_TOKEN || token !== `Bearer ${env.COLLECTOR_TOKEN}`)
             return jsonResponse({ error: 'Unauthorized' }, 401);
-        let trades;
-        try { trades = await request.json(); } catch { return jsonResponse({ error: 'Invalid JSON' }, 400); }
+            
+        let activeTradesMap;
+        try { activeTradesMap = await request.json(); } catch { return jsonResponse({ error: 'Invalid JSON' }, 400); }
+        
         const now = Date.now();
-        await env.DB.prepare(
-            `INSERT INTO server_cache (key,value,expires_at) VALUES (?,?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at`
-        ).bind('active_trades', JSON.stringify({ ts: now, data: trades }), now + 60_000).run();
-        return jsonResponse({ success: true, count: trades.length });
+        const stmts = [];
+        
+        // Ensure backwards compatibility by expecting arrays directly as well
+        if (Array.isArray(activeTradesMap)) {
+            activeTradesMap = { 'paper-default': activeTradesMap };
+        }
+        
+        for (const [profId, trades] of Object.entries(activeTradesMap)) {
+            const key = profId === 'paper-default' ? 'active_trades' : `active_trades_${profId}`;
+            stmts.push(env.DB.prepare(
+                `INSERT INTO server_cache (key,value,expires_at) VALUES (?,?,?)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at`
+            ).bind(key, JSON.stringify({ ts: now, data: trades }), now + 60_000));
+        }
+        
+        if (stmts.length > 0) {
+            await env.DB.batch(stmts);
+        }
+        return jsonResponse({ success: true });
     }
+
 
     // ── /api/real-trader/* ────────────────────────────────────────────────────
 
