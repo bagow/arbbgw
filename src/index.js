@@ -271,7 +271,7 @@ async function handleFetch(request, env, ctx) {
 
         let intervalSecs = 5;
         try {
-            const settings = await env.DB.prepare(`SELECT collector_interval_secs FROM trading_settings WHERE id = 'default'`).first();
+            const settings = await env.DB.prepare(`SELECT collector_interval_secs FROM trading_profiles WHERE id = 'paper-default'`).first();
             if (settings?.collector_interval_secs) intervalSecs = settings.collector_interval_secs;
         } catch {}
 
@@ -429,7 +429,7 @@ async function handleFetch(request, env, ctx) {
     // ── /api/trading/settings ─────────────────────────────────────────────────
     if (path === '/api/trading/settings') {
         if (request.method === 'GET') {
-            const settings = await env.DB.prepare(`SELECT * FROM trading_settings WHERE id = 'default'`).first();
+            const settings = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE id = 'paper-default'`).first();
             const defaults = {
                 is_active: false, min_entry_spread: 1.0, max_entry_spread: 10.0,
                 trade_volume: 1000.0, take_profit_percent: 0.1, trailing_stop_percent: 0.5,
@@ -448,12 +448,12 @@ async function handleFetch(request, env, ctx) {
                 min_volume_millions = 10, collector_interval_secs = 5,
             } = body;
             await env.DB.prepare(`
-                UPDATE trading_settings
+                UPDATE trading_profiles
                 SET is_active=?, min_entry_spread=?, max_entry_spread=?, trade_volume=?,
                     take_profit_percent=?, trailing_stop_percent=?, max_active_trades=?,
                     commission_rate=?, funding_rate_8h=?, slippage_percent=?,
                     min_volume_millions=?, collector_interval_secs=?, updated_at=?
-                WHERE id='default'
+                WHERE id='paper-default'
             `).bind(
                 is_active ? 1 : 0, parseFloat(min_entry_spread), parseFloat(max_entry_spread),
                 parseFloat(trade_volume), parseFloat(take_profit_percent), parseFloat(trailing_stop_percent),
@@ -466,7 +466,7 @@ async function handleFetch(request, env, ctx) {
 
     // ── /api/trading/trades ───────────────────────────────────────────────────
     if (path === '/api/trading/trades' && request.method === 'GET') {
-        const settings = await env.DB.prepare(`SELECT * FROM trading_settings WHERE id='default'`).first() || {};
+        const settings = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE id='paper-default'`).first() || {};
         let active = [];
         const activeRow = await env.DB.prepare(`SELECT value, expires_at FROM server_cache WHERE key='active_trades'`).first();
         if (activeRow?.expires_at > Date.now()) {
@@ -485,7 +485,7 @@ async function handleFetch(request, env, ctx) {
     }
 
     if (path === '/api/trading/trades' && request.method === 'DELETE') {
-        await env.DB.prepare(`UPDATE trading_settings SET pending_commands='CLEAR_TRADES' WHERE id='default'`).run();
+        await env.DB.prepare(`UPDATE trading_profiles SET pending_commands='CLEAR_TRADES' WHERE id='paper-default'`).run();
         await env.DB.prepare(`DELETE FROM trades WHERE profile_id='paper-default' OR profile_id IS NULL`).run();
         return jsonResponse({ success: true });
     }
@@ -495,9 +495,9 @@ async function handleFetch(request, env, ctx) {
         const auth = request.headers.get('Authorization');
         if (auth !== `Bearer ${env.INTERNAL_TOKEN}`) return jsonResponse({ error: 'Unauthorized' }, 401);
         const { command } = await request.json();
-        const settings = await env.DB.prepare(`SELECT pending_commands FROM trading_settings WHERE id='default'`).first();
+        const settings = await env.DB.prepare(`SELECT pending_commands FROM trading_profiles WHERE id='paper-default'`).first();
         if (settings?.pending_commands === command)
-            await env.DB.prepare(`UPDATE trading_settings SET pending_commands=NULL WHERE id='default'`).run();
+            await env.DB.prepare(`UPDATE trading_profiles SET pending_commands=NULL WHERE id='paper-default'`).run();
         return jsonResponse({ success: true });
     }
 

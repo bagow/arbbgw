@@ -1102,17 +1102,22 @@ async function loadScannerSettings(profileId = null) {
 }
 
 window.initScanner = async function(profileId = null) {
-    console.log('Scanner: Initializing references');
-    initRefs();
+    if (!refs.tableBody) {
+        console.log('Scanner: Initializing references');
+        initRefs();
+    }
     
-    if (window.scannerAutoRefreshTimer) return; // Only start timer and fetch first snapshot once
-    window.scannerAutoRefreshTimer = true;
-
-    console.log('Scanner: Starting auto-refresh cycle');
-    
-    // Load default settings
+    // Always load latest settings for the active profile when switching to Scanner
     await loadScannerSettings(profileId);
     
+    // Force immediate data fetch with new settings
     await fetchSnapshot();
+    
+    if (!window.scannerAutoRefreshTimer) {
+        window.scannerAutoRefreshTimer = true;
+        console.log('Scanner: Starting auto-refresh cycle');
+    }
+    
+    // Always reschedule timer in case refresh interval changed
     scheduleRefresh();
 };
