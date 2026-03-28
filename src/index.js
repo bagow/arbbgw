@@ -572,16 +572,22 @@ async function handleRequest(request, env, ctx) {
 
     // ── /api/trading/trades ───────────────────────────────────────────────────
     if (path === '/api/trading/trades' && request.method === 'GET') {
-        const settings = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE id='paper-default'`).first() || {};
+        const u = new URL(request.url);
+        const profileId = u.searchParams.get('profile') || 'paper-default';
+        const settings = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE id=?`).bind(profileId).first() || {};
+        
         let active = [];
-        const activeRow = await env.DB.prepare(`SELECT value, expires_at FROM server_cache WHERE key='active_trades'`).first();
+        const cacheKey = profileId === 'paper-default' ? 'active_trades' : `active_trades_${profileId}`;
+        const activeRow = await env.DB.prepare(`SELECT value, expires_at FROM server_cache WHERE key=?`).bind(cacheKey).first();
         if (activeRow?.expires_at > Date.now()) {
             try { active = JSON.parse(activeRow.value).data || []; } catch {}
         }
+        
         const { results: history } = await env.DB.prepare(
-            `SELECT * FROM trades WHERE status='CLOSED' AND (profile_id IS NULL OR profile_id='paper-default') ORDER BY exit_time DESC LIMIT 50`
-        ).all();
-        const stats = await getFullStats(env, 'paper-default');
+            `SELECT * FROM trades WHERE status='CLOSED' AND (profile_id = ? OR (profile_id IS NULL AND ? = 'paper-default')) ORDER BY exit_time DESC LIMIT 50`
+        ).bind(profileId, profileId).all();
+        
+        const stats = await getFullStats(env, profileId);
         const cr = settings.commission_rate ?? 0.45;
         for (const t of history) {
             if (t.commission_cost === null || t.commission_cost === undefined)
