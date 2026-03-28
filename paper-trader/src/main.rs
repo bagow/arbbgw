@@ -286,7 +286,7 @@ async fn fetch_settings(state: &AppState) -> Vec<TradingSettings> {
     {
         let cache = state.settings_cache.lock().await;
         if let Some(s) = &cache.0 {
-            if cache.1.elapsed() < Duration::from_secs(60) {
+            if cache.1.elapsed() < Duration::from_secs(5) {
                 return s.clone();
             }
         }
