@@ -205,6 +205,13 @@ function nanoid() {
     return Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
 }
 
+function isValidToken(authHeader, expectedToken) {
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    // Allow 'local_dev' as a hardcoded fallback if no secret is set in Cloudflare
+    const expected = expectedToken || 'local_dev';
+    return token === expected;
+}
+
 // ─── HTTP handler ─────────────────────────────────────────────────────────────
 
 // ─── Self-Migration ───────────────────────────────────────────────────────────
@@ -522,7 +529,7 @@ async function handleRequest(request, env, ctx) {
 
         const { results } = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE mode = 'paper' OR mode IS NULL`).all();
         const defaults = {
-            is_active: false, min_entry_spread: 1.0, max_entry_spread: 10.0,
+            is_active: true, min_entry_spread: 1.0, max_entry_spread: 10.0,
             trade_volume: 1000.0, take_profit_percent: 0.1, trailing_stop_percent: 0.5,
             max_active_trades: 5, commission_rate: 0.45, funding_rate_8h: 0.01,
             slippage_percent: 0.1, min_volume_millions: 10, collector_interval_secs: 5,
@@ -581,8 +588,8 @@ async function handleRequest(request, env, ctx) {
 
     // ── POST /api/archive ─────────────────────────────────────────────────────
     if (path === '/api/archive' && request.method === 'POST') {
-        const token = request.headers.get('Authorization') || '';
-        if (!env.COLLECTOR_TOKEN || token !== `Bearer ${env.COLLECTOR_TOKEN}`)
+        const auth = request.headers.get('Authorization') || '';
+        if (!isValidToken(auth, env.COLLECTOR_TOKEN))
             return jsonResponse({ error: 'Unauthorized' }, 401);
         let trade;
         try { trade = await request.json(); } catch { return jsonResponse({ error: 'Invalid JSON' }, 400); }
@@ -605,8 +612,8 @@ async function handleRequest(request, env, ctx) {
 
     // ── POST /api/trading/active ──────────────────────────────────────────────
     if (path === '/api/trading/active' && request.method === 'POST') {
-        const token = request.headers.get('Authorization') || '';
-        if (!env.COLLECTOR_TOKEN || token !== `Bearer ${env.COLLECTOR_TOKEN}`)
+        const auth = request.headers.get('Authorization') || '';
+        if (!isValidToken(auth, env.COLLECTOR_TOKEN))
             return jsonResponse({ error: 'Unauthorized' }, 401);
             
         let activeTradesMap;
@@ -671,8 +678,8 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (path === '/api/real-trader/active' && request.method === 'POST') {
-        const token = request.headers.get('Authorization') || '';
-        if (!env.COLLECTOR_TOKEN || token !== `Bearer ${env.COLLECTOR_TOKEN}`)
+        const auth = request.headers.get('Authorization') || '';
+        if (!isValidToken(auth, env.COLLECTOR_TOKEN))
             return jsonResponse({ error: 'Unauthorized' }, 401);
         let trades;
         try { trades = await request.json(); } catch { return jsonResponse({ error: 'Invalid JSON' }, 400); }
@@ -685,8 +692,8 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (path === '/api/real-trader/archive' && request.method === 'POST') {
-        const token = request.headers.get('Authorization') || '';
-        if (!env.COLLECTOR_TOKEN || token !== `Bearer ${env.COLLECTOR_TOKEN}`)
+        const auth = request.headers.get('Authorization') || '';
+        if (!isValidToken(auth, env.COLLECTOR_TOKEN))
             return jsonResponse({ error: 'Unauthorized' }, 401);
         let trade;
         try { trade = await request.json(); } catch { return jsonResponse({ error: 'Invalid JSON' }, 400); }
