@@ -8,7 +8,7 @@
  * buildSnapshot() generates every exchange combination automatically.
  */
 
-export const SPREAD_THRESHOLD = -1.0;
+export const SPREAD_THRESHOLD = 1.0;
 export const SPREAD_MAX = 50; // Keep up to 50% in the global cache so users can customize
 export const TOP_N = 1000;   // Store the top 1000 pairs so dynamic filtering has enough candidates
 

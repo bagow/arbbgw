@@ -253,6 +253,15 @@ async function ensureSchema(env) {
     } catch (e) {
         console.error("Migration error (profiles-mode):", e.message);
     }
+
+    // 4. Critical Recovery: Prune spread_history to free up space (Keep 1 hour)
+    try {
+        const oneHourAgo = Date.now() - 3600000;
+        await env.DB.prepare("DELETE FROM spread_history WHERE timestamp < ?").bind(oneHourAgo).run();
+        console.log("D1 Recovery: Pruned history older than 1 hour.");
+    } catch (e) {
+        console.warn("D1 Recovery Error (pruning failed, DB may still be full):", e.message);
+    }
 }
 
 async function handleFetch(request, env, ctx) {
@@ -341,6 +350,10 @@ async function handleRequest(request, env, ctx) {
                 );
             }
         }
+
+        // Also prune here to ensure space for the next bucket
+        const oneHourAgo = Date.now() - 3600000;
+        ctx.waitUntil(env.DB.prepare("DELETE FROM spread_history WHERE timestamp < ?").bind(oneHourAgo).run().catch(() => {}));
 
         let intervalSecs = 5;
         try {
