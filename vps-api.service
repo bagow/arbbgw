@@ -12,7 +12,7 @@ Environment="COLLECTOR_TOKEN=Drc8#mP2vLq!"
 Environment="INTERNAL_TOKEN=Drc8#mP2vLq!"
 Environment="PASS_DIMA=Xk9mP2#vLqRt7Yw"
 Environment="PASS_SERGEI=Bn4cZ8@jNhKs3Fd"
-ExecStart=/home/opc/.cargo/bin/cargo run --release
+ExecStart=/usr/local/bin/vps-api
 Restart=always
 RestartSec=3
 StandardOutput=syslog
