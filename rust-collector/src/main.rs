@@ -128,7 +128,7 @@ impl Config {
             .unwrap_or(10.0);
 
         let paper_trader_url = std::env::var("PAPER_TRADER_URL")
-            .unwrap_or_else(|_| "http://localhost:3001".into());
+            .unwrap_or_else(|_| "http://localhost:8080".into());
         let paper_trader_token = std::env::var("PAPER_TRADER_TOKEN").unwrap_or_default();
 
         let real_trader_url = std::env::var("REAL_TRADER_URL")

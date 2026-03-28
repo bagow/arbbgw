@@ -593,15 +593,13 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             closed.funding_cost = Some(funding_cost);
             closed.highest_spread_reached = best_pnl;
 
-            /* 
-            // Archive to D1 asynchronously (Now using shared DB directly, no need for archive)
+            // Archive to D1 asynchronously
             let http = state.http.clone();
             let worker_url = state.worker_url.clone();
             let token = state.collector_token.clone();
             tokio::spawn(async move {
                 archive_trade_to_d1(&http, &worker_url, &token, &closed).await;
             });
-            */
 
             /*
             // Remove from local DB (archived to D1)
