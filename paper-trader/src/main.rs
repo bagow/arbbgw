@@ -661,10 +661,14 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread {
                 continue;
             }
+            // Strictly allow everything in the scanner to match the bot settings
             let tickers = open_tickers_by_profile.entry(pid.clone()).or_default();
             if tickers.contains(&row.pair) {
                 continue;
             }
+            
+            // Log that we have found a potential match for this profile
+            info!("MATCH SEARCH: Pair={} Profile={} Spread={:.2}% Min={:.2}%", row.pair, pid, row.spread, settings.min_entry_spread);
 
             let key = format!("{}_{}_{}", row.pair, row.exchange_a, row.exchange_b);
             let key_rev = format!("{}_{}_{}", row.pair, row.exchange_b, row.exchange_a);
