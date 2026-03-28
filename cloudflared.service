@@ -14,3 +14,4 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
+# tunnel setup неділя, 29 березня 2026 01:06:23 +0200
