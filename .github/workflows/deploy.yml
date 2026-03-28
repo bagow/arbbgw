@@ -44,6 +44,7 @@ jobs:
           filters: |
             vps_api:
               - 'vps-api/**'
+              - 'vps-api.service'
               - '.github/workflows/deploy.yml'
             collector:
               - 'rust-collector/**'
