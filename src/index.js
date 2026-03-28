@@ -579,8 +579,12 @@ async function handleRequest(request, env, ctx) {
         let active = [];
         const cacheKey = profileId === 'paper-default' ? 'active_trades' : `active_trades_${profileId}`;
         const activeRow = await env.DB.prepare(`SELECT value, expires_at FROM server_cache WHERE key=?`).bind(cacheKey).first();
+        
         if (activeRow?.expires_at > Date.now()) {
-            try { active = JSON.parse(activeRow.value).data || []; } catch {}
+            try { 
+                const cached = JSON.parse(activeRow.value);
+                active = cached.data || []; 
+            } catch (e) { console.error(`Sync parse error for ${cacheKey}:`, e); }
         }
         
         const { results: history } = await env.DB.prepare(
@@ -656,10 +660,10 @@ async function handleRequest(request, env, ctx) {
         // Ensure payload is a Map of { profileId: trades[] }
         const tradesMap = Array.isArray(payload) ? { 'paper-default': payload } : payload;
         
-        // We get ALL active paper profiles first to ensure we clear empty ones explicitly
-        const { results: allProfiles } = await env.DB.prepare(`SELECT id FROM trading_profiles WHERE mode='paper' OR mode IS NULL`).all();
+        const allProfilesResult = await env.DB.prepare(`SELECT id FROM trading_profiles WHERE mode='paper' OR mode IS NULL`).all();
+        const allProfiles = allProfilesResult.results || [];
         
-        for (const prof of (allProfiles || [])) {
+        for (const prof of allProfiles) {
             const pid = prof.id;
             const trades = tradesMap[pid] || [];
             const key = pid === 'paper-default' ? 'active_trades' : `active_trades_${pid}`;
@@ -667,7 +671,7 @@ async function handleRequest(request, env, ctx) {
             stmts.push(env.DB.prepare(
                 `INSERT INTO server_cache (key,value,expires_at) VALUES (?,?,?)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at`
-            ).bind(key, JSON.stringify({ ts: now, data: trades }), now + 300_000));
+            ).bind(key, JSON.stringify({ ts: now, data: trades }), now + 600_000));
         }
         
         if (stmts.length > 0) await env.DB.batch(stmts);
