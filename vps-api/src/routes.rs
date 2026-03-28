@@ -324,7 +324,8 @@ pub async fn handle_patch_profile(
             match k.as_str() {
                 "is_active" => {
                     sets.push("is_active=?".to_string());
-                    params_vec.push(rusqlite::types::Value::Integer(if v.as_bool().unwrap_or(false) { 1 } else { 0 }));
+                    let active = v.as_bool().unwrap_or(v.as_i64().unwrap_or(0) > 0);
+                    params_vec.push(rusqlite::types::Value::Integer(if active { 1 } else { 0 }));
                 },
                 "min_entry_spread" | "max_entry_spread" | "trade_volume" | "take_profit_percent" | 
                 "trailing_stop_percent" | "commission_rate" | "slippage_percent" | "funding_rate_8h" | "min_volume_millions" => {
