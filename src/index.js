@@ -268,14 +268,15 @@ async function handleRequest(request, env, ctx) {
         }
     }
 
-    // ── PROXY EXTENSIONS /api/* -> vps-api (api.arb.bagow.com) ───────────────
+    // ── PROXY EXTENSIONS /api/* -> vps-api (direct VPS IP) ───────────────────
     
-    // We forward every other API request securely via Cloudflare Tunnel
-    // The tunnel map 'api.arb.bagow.com' directly accesses localhost:4000 on VPS.
+    // Forward API requests directly to VPS port 4000 over HTTP.
+    // Cloudflare Worker handles HTTPS termination; VPS does not need a tunnel.
     
     const targetUrl = new URL(request.url);
-    targetUrl.hostname = 'api.arb.bagow.com';
-    targetUrl.protocol = 'https:';
+    targetUrl.hostname = '92.5.127.87';
+    targetUrl.port = '4000';
+    targetUrl.protocol = 'http:';
 
     // Clone request to forward
     const proxyRequest = new Request(targetUrl.toString(), new Request(request));
@@ -293,7 +294,7 @@ async function handleRequest(request, env, ctx) {
     } catch (e) {
         return jsonResponse({ 
             error: 'VPS API Unavailable', 
-            details: 'Could not reach local VPS backend (vps-api) over Cloudflare Tunnel.',
+            details: 'Could not reach VPS backend at 92.5.127.87:4000. Ensure vps-api is running.',
             message: e.message 
         }, 502);
     }

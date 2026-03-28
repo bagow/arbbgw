@@ -165,6 +165,33 @@ pub async fn handle_get_unified(
         }
     }).await.unwrap_or_else(|_| vec![]);
 
+    // Enrich active trades with live PnL from last_price columns written by paper-trader
+    let active_enriched: Vec<serde_json::Value> = active_trades.iter().map(|t| {
+        let mut v = serde_json::to_value(t).unwrap_or_default();
+        if let (Some(c_price_a), Some(c_price_b), Some(c_spread)) = (t.last_price_a, t.last_price_b, t.last_spread) {
+            let is_a_higher = t.direction.starts_with(&t.exchange_a);
+            let slippage = 0.001;
+            let ep_a = if is_a_higher { c_price_a * (1.0 + slippage) } else { c_price_a * (1.0 - slippage) };
+            let ep_b = if is_a_higher { c_price_b * (1.0 - slippage) } else { c_price_b * (1.0 + slippage) };
+            let coins_a = t.volume / t.entry_price_a;
+            let coins_b = t.volume / t.entry_price_b;
+            let pnl_a = if is_a_higher { (t.entry_price_a - ep_a) * coins_a } else { (ep_a - t.entry_price_a) * coins_a };
+            let pnl_b = if is_a_higher { (ep_b - t.entry_price_b) * coins_b } else { (t.entry_price_b - ep_b) * coins_b };
+            let gross = t.curr_gross_pnl.unwrap_or(pnl_a + pnl_b);
+            let comm = t.volume * 0.0045 * 4.0;
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("current_price_a".into(), json!(c_price_a));
+                obj.insert("current_price_b".into(), json!(c_price_b));
+                obj.insert("current_spread".into(), json!(c_spread));
+                obj.insert("gross_pnl".into(), json!(gross));
+                obj.insert("current_pnl".into(), json!(gross - comm));
+                obj.insert("pnl_a".into(), json!(t.pnl_a.unwrap_or(pnl_a)));
+                obj.insert("pnl_b".into(), json!(t.pnl_b.unwrap_or(pnl_b)));
+            }
+        }
+        v
+    }).collect();
+
     let history_trades = state.db.call({
         let p = pid.clone();
         move |conn| {
@@ -174,17 +201,35 @@ pub async fn handle_get_unified(
         }
     }).await.unwrap_or_else(|_| vec![]);
 
-    // Return huge payload matching worker expected output
+    // Compute basic stats from history
+    let total_pnl: f64 = history_trades.iter().filter_map(|t| t.pnl).sum();
+    let total_trades = history_trades.len();
+    let wins = history_trades.iter().filter(|t| t.pnl.unwrap_or(0.0) > 0.0).count();
+    let avg_pnl = if total_trades > 0 { total_pnl / total_trades as f64 } else { 0.0 };
+    let equity_curve: Vec<serde_json::Value> = history_trades.iter().rev()
+        .map(|t| json!({ "pnl": t.pnl.unwrap_or(0.0) })).collect();
+    let stats = json!({
+        "total_pnl": total_pnl,
+        "total_trades": total_trades,
+        "wins": wins,
+        "losses": total_trades - wins,
+        "avg_pnl": avg_pnl,
+        "equity_curve": equity_curve,
+        "pnl_by_exchange": {}
+    });
+
+    // Return payload matching frontend expectations
     (StatusCode::OK, Json(json!({
         "snapshot": snapshot,
         "profiles": profiles,
         "trades": {
-            "active": active_trades,
+            "active": active_enriched,
             "history": history_trades,
-            "stats": {} // TODO: basic stats
+            "stats": stats
         },
-        "profile_active": active_trades,
+        "profile_active": active_enriched,
         "profile_history": history_trades,
+        "profile_stats": stats,
     }))).into_response()
 }
 
