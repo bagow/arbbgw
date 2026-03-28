@@ -548,6 +548,13 @@ async function handleRequest(request, env, ctx) {
         }
 
         const { results } = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE mode = 'paper' OR mode IS NULL`).all();
+        
+        const defaults = {
+            is_active: true, min_entry_spread: 1.0, max_entry_spread: 10.0,
+            trade_volume: 1000.0, take_profit_percent: 0.1, trailing_stop_percent: 0.5,
+            max_active_trades: 5, commission_rate: 0.45, funding_rate_8h: 0.01,
+            slippage_percent: 0.1, min_volume_millions: 10, collector_interval_secs: 5,
+        };
 
         const profiles = results.map(row => {
             const out = { ...defaults, ...row };
