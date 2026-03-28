@@ -240,6 +240,13 @@ async function ensureSchema(env) {
     } catch (e) {
         console.error("Migration error (server_cache):", e.message);
     }
+
+    // 3. Auto-activate paper trading
+    try {
+        await env.DB.prepare("UPDATE trading_profiles SET is_active = 1 WHERE id = 'paper-default' AND (is_active = 0 OR is_active IS NULL)").run();
+    } catch (e) {
+        console.error("Migration error (is_active):", e.message);
+    }
 }
 
 async function handleFetch(request, env, ctx) {
@@ -522,9 +529,8 @@ async function handleRequest(request, env, ctx) {
 
     // ── GET /api/trading/settings/all ─────────────────────────────────────────
     if (path === '/api/trading/settings/all' && request.method === 'GET') {
-        const token = request.headers.get('Authorization') || '';
-        const expected = env.INTERNAL_TOKEN || env.COLLECTOR_TOKEN || '';
-        if (expected && token !== `Bearer ${expected}`)
+        const auth = request.headers.get('Authorization') || '';
+        if (!isValidToken(auth, env.INTERNAL_TOKEN || env.COLLECTOR_TOKEN))
             return jsonResponse({ error: 'Unauthorized' }, 401);
 
         const { results } = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE mode = 'paper' OR mode IS NULL`).all();
@@ -577,8 +583,8 @@ async function handleRequest(request, env, ctx) {
 
     // ── POST /api/trading/commands/ack ────────────────────────────────────────
     if (path === '/api/trading/commands/ack' && request.method === 'POST') {
-        const auth = request.headers.get('Authorization');
-        if (auth !== `Bearer ${env.INTERNAL_TOKEN}`) return jsonResponse({ error: 'Unauthorized' }, 401);
+        const auth = request.headers.get('Authorization') || '';
+        if (!isValidToken(auth, env.INTERNAL_TOKEN)) return jsonResponse({ error: 'Unauthorized' }, 401);
         const { command, profile_id = 'paper-default' } = await request.json();
         const settings = await env.DB.prepare(`SELECT pending_commands FROM trading_profiles WHERE id=?`).bind(profile_id).first();
         if (settings?.pending_commands === command)
