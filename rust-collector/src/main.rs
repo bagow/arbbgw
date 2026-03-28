@@ -448,6 +448,8 @@ async fn push_loop(price_map: PriceMap, mut config: Config, http: Client) {
             }
 
             // ── 2. Push snapshot to Cloudflare Worker (for frontend display) ──
+            let maps_payload = build_maps_payload(&price_map);
+            let body = json!({ "spreads": spreads, "maps": maps_payload });
             let url = format!("{}/api/update", config.worker_url.trim_end_matches('/'));
 
             match http
@@ -1108,7 +1110,7 @@ async fn bingx_handler(price_map: &PriceMap) -> Result<()> {
                         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
                         let items = if let Some(arr) = v["data"].as_array() {
                             arr.clone()
-                        } else if let Some(obj) = v["data"].as_object() {
+                        } else if let Some(_obj) = v["data"].as_object() {
                             vec![v["data"].clone()]
                         } else {
                             vec![]
@@ -1148,7 +1150,7 @@ async fn bingx_handler(price_map: &PriceMap) -> Result<()> {
                         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
                         let items = if let Some(arr) = v["data"].as_array() {
                             arr.clone()
-                        } else if let Some(obj) = v["data"].as_object() {
+                        } else if let Some(_obj) = v["data"].as_object() {
                             vec![v["data"].clone()]
                         } else {
                             vec![]
