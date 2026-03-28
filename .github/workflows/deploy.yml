@@ -45,21 +45,16 @@ jobs:
             vps_api:
               - 'vps-api/**'
               - 'vps-api.service'
-              - '.github/workflows/deploy.yml'
             collector:
               - 'rust-collector/**'
-              - '.github/workflows/deploy.yml'
             paper:
               - 'paper-trader/**'
-              - '.github/workflows/deploy.yml'
             real:
               - 'real-trader/**'
-              - '.github/workflows/deploy.yml'
             cloudflare:
               - 'src/**'
               - 'public/**'
               - 'wrangler.toml'
-              - '.github/workflows/deploy.yml'
 
   # --- 2. Деплой vps-api ---
   deploy-vps-api:
