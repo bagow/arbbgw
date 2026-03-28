@@ -380,12 +380,11 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
     let settings_list = fetch_settings(state).await;
     let active_profiles: Vec<&TradingSettings> = settings_list.iter().filter(|s| s.is_active).collect();
     
+    // Detailed Heartbeat for ALL profiles
     for s in &settings_list {
-        info!("HEARTBEAT: Profile={} Active={} MinSpread={} Vol={}", s.id, s.is_active, s.min_entry_spread, s.trade_volume);
+        info!("PROFILE_STATUS: id={} active={} min_sp={:.2} vol={} max_avg={}", 
+            s.id, s.is_active, s.min_entry_spread, s.trade_volume, s.max_active_trades);
     }
-    
-    // Heartbeat: Log what the bot actually sees in its memory
-    info!("HEARTBEAT: Active Profiles: [{}]", active_profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(", "));
     
     if active_profiles.is_empty() {
         return;
@@ -657,6 +656,10 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         for row in &payload.spreads {
             let num_active = *num_active_by_profile.get(pid).unwrap_or(&0);
             if num_active >= max_trades {
+                // Log once per profile per cycle if full
+                if row == payload.spreads.first().unwrap() {
+                    info!("SKIP_MATCH: Profile {} is FULL ({} trades)", pid, num_active);
+                }
                 break;
             }
             // FORCE: For the dsfds tab, we accept matching ANY spread > 0.1% to prove the pipeline
@@ -672,12 +675,11 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             
             let tickers = open_tickers_by_profile.entry(pid.clone()).or_default();
             if tickers.contains(&row.pair) {
+                // Too many logs if we log every skip, but useful for debugging
+                // info!("SKIP_MATCH: Profile {} already has active trade for {}", pid, row.pair);
                 continue;
             }
             
-            // Log that we have found a potential match for this profile
-            info!("MATCH SEARCH: Pair={} Profile={} Spread={:.2}% Min={:.2}%", row.pair, pid, row.spread, settings.min_entry_spread);
-
             let key = format!("{}_{}_{}", row.pair, row.exchange_a, row.exchange_b);
             let key_rev = format!("{}_{}_{}", row.pair, row.exchange_b, row.exchange_a);
             let keys = open_pair_keys_by_profile.entry(pid.clone()).or_default();

@@ -660,12 +660,16 @@ async function handleRequest(request, env, ctx) {
         // Ensure payload is a Map of { profileId: trades[] }
         const tradesMap = Array.isArray(payload) ? { 'paper-default': payload } : payload;
         
+        console.log(`Syncing active trades. Payload profiles: ${Object.keys(tradesMap).join(', ')}`);
+
         // Get all known profiles to ensure we clear/update them all
         const profilesResult = await env.DB.prepare(`SELECT id FROM trading_profiles`).all();
         const activeProfiles = (profilesResult.results || []).map(p => p.id);
         
         // Ensure 'paper-default' is always in the list
         if (!activeProfiles.includes('paper-default')) activeProfiles.push('paper-default');
+
+        console.log(`D1 profiles to sync: ${activeProfiles.join(', ')}`);
 
         for (const pid of activeProfiles) {
             const trades = tradesMap[pid] || [];
@@ -678,6 +682,7 @@ async function handleRequest(request, env, ctx) {
         }
         
         if (stmts.length > 0) await env.DB.batch(stmts);
+        console.log(`Successfully synced ${stmts.length} profile cache keys.`);
         return jsonResponse({ success: true, count: stmts.length });
     }
 
