@@ -741,11 +741,6 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         })
         .await
     {
-        Ok(mut t) => {
-            for tr in t.iter_mut() {
-                if let (Some(c_price_a), Some(c_price_b), Some(c_spread)) = (tr.last_price_a, tr.last_price_b, tr.last_spread) {
-                    let is_a_higher = tr.direction.starts_with(&tr.exchange_a);
-                    let slippage = 0.001;
                     let ep_a = if is_a_higher { c_price_a * (1.0 + slippage) } else { c_price_a * (1.0 - slippage) };
                     let ep_b = if is_a_higher { c_price_b * (1.0 - slippage) } else { c_price_b * (1.0 + slippage) };
                     let coins_a = tr.volume / tr.entry_price_a;
