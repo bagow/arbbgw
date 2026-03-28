@@ -747,6 +747,7 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         if last_push.elapsed() > Duration::from_secs(15) || true {
             should_push = true;
             *last_push = std::time::Instant::now();
+        }
     }
 }
 

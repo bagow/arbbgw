@@ -1,5 +1,5 @@
 use crate::db::{row_to_profile, row_to_trade};
-use crate::models::{SpreadPayload, TickerData, TradingProfile};
+use crate::models::{SpreadPayload, TradingProfile};
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -64,11 +64,11 @@ pub async fn handle_update(
     // Save snapshot
     let snapshot_val = json!({ "ts": now, "data": payload.spreads }).to_string();
     let _ = state.db.call(move |conn| {
-        conn.execute(
+        Ok(conn.execute(
             "INSERT INTO server_cache (key, value, expires_at) VALUES ('snapshot', ?, ?)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
             params![snapshot_val, now + 180_000],
-        )
+        )?)
     }).await;
 
     // Save maps summary
@@ -78,11 +78,11 @@ pub async fn handle_update(
     }
     let map_val = json!({ "ts": now, "data": map_summaries }).to_string();
     let _ = state.db.call(move |conn| {
-        conn.execute(
+        Ok(conn.execute(
             "INSERT INTO server_cache (key, value, expires_at) VALUES ('exchange_maps', ?, ?)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
             params![map_val, now + 180_000],
-        )
+        )?)
     }).await;
 
     // Also notify paper-trader via an internal channel or just expect paper-trader to connect independently?
@@ -96,7 +96,7 @@ pub async fn handle_update(
 pub async fn handle_get_all_settings(State(state): State<AppState>) -> Response {
     let profiles = match state.db.call(|conn| {
         let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE mode = 'paper'")?;
-        let items = stmt.query_map([], row_to_profile)?.filter_map(|r| r.ok()).collect::<Vec<_>>();
+        let items: Vec<_> = stmt.query_map([], row_to_profile)?.filter_map(|r| r.ok()).collect();
         Ok(items)
     }).await {
         Ok(p) => p,
@@ -114,7 +114,7 @@ pub async fn handle_get_profiles(State(state): State<AppState>, headers: HeaderM
 
     let profiles = match state.db.call(move |conn| {
         let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE owner = ? OR id IN ('paper-default','real-default') ORDER BY created_at ASC")?;
-        let items = stmt.query_map([username], row_to_profile)?.filter_map(|r| r.ok()).collect::<Vec<_>>();
+        let items: Vec<_> = stmt.query_map([username], row_to_profile)?.filter_map(|r| r.ok()).collect();
         Ok(items)
     }).await {
         Ok(p) => p,
@@ -149,7 +149,8 @@ pub async fn handle_get_unified(
     // 2. Get Profiles
     let profiles = state.db.call(move |conn| {
         let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE owner = ? OR id IN ('paper-default','real-default') ORDER BY created_at ASC")?;
-        Ok(stmt.query_map([username], row_to_profile)?.filter_map(|r| r.ok()).collect::<Vec<_>>())
+        let items: Vec<_> = stmt.query_map([username], row_to_profile)?.filter_map(|r| r.ok()).collect();
+        Ok(items)
     }).await.unwrap_or_else(|_| vec![]);
 
     // 3. Get Active/History trades for given profile or paper-default
@@ -159,7 +160,8 @@ pub async fn handle_get_unified(
         let p = pid.clone();
         move |conn| {
             let mut stmt = conn.prepare("SELECT * FROM trades WHERE status='OPEN' AND profile_id=?")?;
-            Ok(stmt.query_map([p], row_to_trade)?.filter_map(|r| r.ok()).collect::<Vec<_>>())
+            let items: Vec<_> = stmt.query_map([p], row_to_trade)?.filter_map(|r| r.ok()).collect();
+            Ok(items)
         }
     }).await.unwrap_or_else(|_| vec![]);
 
@@ -167,7 +169,8 @@ pub async fn handle_get_unified(
         let p = pid.clone();
         move |conn| {
             let mut stmt = conn.prepare("SELECT * FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time DESC LIMIT 50")?;
-            Ok(stmt.query_map([p], row_to_trade)?.filter_map(|r| r.ok()).collect::<Vec<_>>())
+            let items: Vec<_> = stmt.query_map([p], row_to_trade)?.filter_map(|r| r.ok()).collect();
+            Ok(items)
         }
     }).await.unwrap_or_else(|_| vec![]);
 
@@ -201,7 +204,7 @@ pub async fn handle_post_profile(
     
     let p = payload.clone();
     let res = state.db.call(move |conn| {
-        conn.execute(
+        Ok(conn.execute(
             "INSERT INTO trading_profiles
                 (id,name,mode,is_active,min_entry_spread,max_entry_spread,trade_volume,
                  take_profit_percent,trailing_stop_percent,max_active_trades,commission_rate,
@@ -213,7 +216,7 @@ pub async fn handle_post_profile(
                 p.slippage_percent, p.funding_rate_8h, p.min_volume_millions, p.collector_interval_secs,
                 username, now, now
             ],
-        )
+        )?)
     }).await;
 
     match res {
@@ -239,13 +242,13 @@ pub async fn handle_patch_profile(
     
     // We update is_active, min_entry_spread, max_entry_spread etc
     if let Some(obj) = payload.as_object() {
-        let mut sets = vec![];
+        let mut sets: Vec<String> = vec![];
         let mut params_vec: Vec<rusqlite::types::Value> = vec![];
         
         for (k, v) in obj {
             match k.as_str() {
                 "is_active" => {
-                    sets.push("is_active=?");
+                    sets.push("is_active=?".to_string());
                     params_vec.push(rusqlite::types::Value::Integer(if v.as_bool().unwrap_or(false) { 1 } else { 0 }));
                 },
                 "min_entry_spread" | "max_entry_spread" | "trade_volume" | "take_profit_percent" | 
