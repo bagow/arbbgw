@@ -183,6 +183,7 @@ async fn init_db(db: &Connection) -> Result<()> {
     db.call(|conn| {
         conn.execute_batch("
             PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
 
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -703,6 +704,9 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             let vol = settings.trade_volume;
             let spread = row.spread;
             let profile_id_db = pid.clone();
+            
+            // Log that we are ACTUALLY opening the trade now
+            info!("OPENING: Profile={} Pair={} Spread={:.2}%", profile_id_db, pair, spread);
 
             info!(
                 "Opening trade {} {} {} split spread={:.4}% profile={}",
