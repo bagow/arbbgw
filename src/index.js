@@ -240,13 +240,6 @@ async function ensureSchema(env) {
     } catch (e) {
         console.error("Migration error (server_cache):", e.message);
     }
-
-    // 3. Auto-activate paper trading
-    try {
-        await env.DB.prepare("UPDATE trading_profiles SET is_active = 1 WHERE id = 'paper-default' AND (is_active = 0 OR is_active IS NULL)").run();
-    } catch (e) {
-        console.error("Migration error (is_active):", e.message);
-    }
 }
 
 async function handleFetch(request, env, ctx) {
@@ -288,9 +281,8 @@ async function handleRequest(request, env, ctx) {
 
     // ── POST /api/update ──────────────────────────────────────────────────────
     if (path === '/api/update' && request.method === 'POST') {
-        const token = request.headers.get('Authorization') || '';
-        const expectedToken = env.COLLECTOR_TOKEN || '';
-        if (!expectedToken || token !== `Bearer ${expectedToken}`)
+        const auth = request.headers.get('Authorization') || '';
+        if (!isValidToken(auth, env.COLLECTOR_TOKEN))
             return jsonResponse({ error: 'Unauthorized' }, 401);
 
         let body;
