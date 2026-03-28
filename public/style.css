@@ -353,6 +353,19 @@ td.dir-cell {
   box-shadow: none;
 }
 
+.modal-dialog {
+  background: var(--bg-panel);
+  width: 100%;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  box-shadow: 0 24px 48px rgba(0,0,0,0.6);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  animation: slide-up .3s cubic-bezier(0.16, 1, 0.3, 1);
+  box-sizing: border-box;
+}
+
 @keyframes slide-up {
   from {
     transform: translateY(20px);

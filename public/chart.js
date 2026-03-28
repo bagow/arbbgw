@@ -66,32 +66,54 @@ const scannerState = {
     isLoadingHistory: false,
 };
 
-// ─── DOM refs ─────────────────────────────────────────────────────────────────
-// ─── DOM refs (lazy-loaded on init) ───────────────────────────────────────────
-const scanner$ = id => document.getElementById(id);
+// ─── DOM refs (lazy-loaded on init) ─────────────────────────────────────────────────────
+// $ is an alias for scanner$ (getElementById shorthand)
+const $ = id => document.getElementById(id);
 let refs = {};
+
+// Proxied DOM ref vars – set by initRefs() so functions can use them directly
+let statusDot, statusText, lastUpdate, pairCount, modalTitle, modalSub, modalBackdrop;
+let wsLabelA, wsLabelB, wsStatus, legendDyn, svgP, svgH, priceLinesG, chartLegend;
 
 function initRefs() {
     refs = {
-        tableBody: scanner$('spread-tbody'),
-        pairCount: scanner$('pair-count'),
-        statusDot: scanner$('global-status'),
-        statusText: scanner$('status-text'),
-        lastUpdate: scanner$('last-update'),
-        modalBackdrop: scanner$('modal-backdrop'),
-        modalTitle: scanner$('modal-title'),
-        modalSub: scanner$('modal-sub'),
-        modalClose: scanner$('modal-close'),
-        legendDyn: scanner$('legend-dynamic'),
-        wsLabelA: scanner$('ws-label-a'),
-        wsLabelB: scanner$('ws-label-b'),
-        wsStatus: scanner$('ws-status'),
-        svgP: scanner$('chart-prices'),
-        svgH: scanner$('chart-hist'),
-        priceLinesG: scanner$('price-lines'),
-        exchangeFilters: scanner$('exchange-filters'),
+        tableBody: $('spread-tbody'),
+        pairCount: $('pair-count'),
+        statusDot: $('global-status'),
+        statusText: $('status-text'),
+        lastUpdate: $('last-update'),
+        modalBackdrop: $('modal-backdrop'),
+        modalTitle: $('modal-title'),
+        modalSub: $('modal-sub'),
+        modalClose: $('modal-close'),
+        legendDyn: $('legend-dynamic'),
+        wsLabelA: $('ws-label-a'),
+        wsLabelB: $('ws-label-b'),
+        wsStatus: $('ws-status'),
+        svgP: $('chart-prices'),
+        svgH: $('chart-hist'),
+        priceLinesG: $('price-lines'),
+        exchangeFilters: $('exchange-filters'),
+        chartLegend: $('chart-legend'),
     };
     
+    // Update proxied variables so that existing code using them directly still works
+    statusDot = refs.statusDot;
+    statusText = refs.statusText;
+    lastUpdate = refs.lastUpdate;
+    pairCount = refs.pairCount;
+    modalTitle = refs.modalTitle;
+    modalSub = refs.modalSub;
+    modalBackdrop = refs.modalBackdrop;
+    wsLabelA = refs.wsLabelA;
+    wsLabelB = refs.wsLabelB;
+    wsStatus = refs.wsStatus;
+    legendDyn = refs.legendDyn;
+    svgP = refs.svgP;
+    svgH = refs.svgH;
+    priceLinesG = refs.priceLinesG;
+    chartLegend = refs.chartLegend;
+
     // Wire up close button if it exists
     if (refs.modalClose) refs.modalClose.onclick = () => window.closeModal();
 }
@@ -327,7 +349,7 @@ function renderTable() {
         const av = a[scannerState.sortKey] ?? 0, bv = b[scannerState.sortKey] ?? 0;
         return typeof av === 'string' ? av.localeCompare(bv) * scannerState.sortDir : (av - bv) * scannerState.sortDir;
     });
-    pairCount.textContent = `${sorted.length} pairs`;
+    pairCount && (pairCount.textContent = `${sorted.length} pairs`);
     refs.tableBody.innerHTML = '';
     if (!sorted.length) {
         refs.tableBody.innerHTML = `<tr class="placeholder-row"><td colspan="7">No pairs above threshold</td></tr>`;
@@ -468,17 +490,23 @@ window.closeModal = function() {
 
     disconnectWS(); clearCharts(); renderTable();
 }
-modalClose.addEventListener('click', closeModal);
-modalBackdrop.addEventListener('click', e => { if (e.target === modalBackdrop) closeModal(); });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+document.addEventListener('DOMContentLoaded', () => {
+    const mc = $('modal-close');
+    if (mc) mc.addEventListener('click', closeModal);
 
-// ─── Timeframe buttons ────────────────────────────────────────────────────────
-document.querySelectorAll('.tf-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('tf-btn--active'));
-        btn.classList.add('tf-btn--active');
-        scannerState.timeframeSec = parseInt(btn.dataset.tf, 10);
-        if (scannerState.activeRow) loadChartData(scannerState.activeRow);
+    const mb = $('modal-backdrop');
+    if (mb) mb.addEventListener('click', e => { if (e.target === mb) closeModal(); });
+
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+    // ─── Timeframe buttons ────────────────────────────────────────────────────────
+    document.querySelectorAll('.tf-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('tf-btn--active'));
+            btn.classList.add('tf-btn--active');
+            scannerState.timeframeSec = parseInt(btn.dataset.tf, 10);
+            if (scannerState.activeRow) loadChartData(scannerState.activeRow);
+        });
     });
 });
 
@@ -487,7 +515,7 @@ function clearCharts() {
     priceLinesG.innerHTML = '';
     svgP.querySelectorAll('.inline-label').forEach(e => e.remove());
     ['grid-p', 'ylabel-p', 'bars-hist', 'bars-live', 'grid-h', 'ylabel-h', 'xlabel-h']
-        .forEach(id => { const el = scanner$(id); if (el) el.innerHTML = ''; });
+        .forEach(id => { const el = $(id); if (el) el.innerHTML = ''; });
     if (legendDyn) legendDyn.innerHTML = '';
 }
 
@@ -721,10 +749,10 @@ function drawHistPanel(klines, live, minT, maxT, row) {
     if (window.targetExitTime) drawMarker(window.targetExitTime, 'EXIT', '#f43f5e', 26);
 }
 
-// ─── Chart legend (clickable per-exchange toggles) ───────────────────────────
-const chartLegend = $('chart-legend');
-
+// ─── Chart legend (clickable per-exchange toggles) ────────────────────────────────────
+// chartLegend is assigned in initRefs()
 function updateLegend(klines, row) {
+    if (!chartLegend) return;
     chartLegend.innerHTML = '';
 
     // Exchange toggle buttons
@@ -908,24 +936,36 @@ function handleChartPanEnd() {
     svgH.style.cursor = 'crosshair';
 }
 
-svgP.addEventListener('wheel', handleChartZoom, { passive: false });
-svgH.addEventListener('wheel', handleChartZoom, { passive: false });
-
-svgP.addEventListener('mousedown', handleChartPanStart);
-svgH.addEventListener('mousedown', handleChartPanStart);
-
 let crosshairP = { x: null, y: null };
 let crosshairH = { x: null, y: null };
 
-function initCrosshairs() {
+document.addEventListener('DOMContentLoaded', () => {
+    const p = $('chart-prices');
+    const h = $('chart-hist');
+    if (p) {
+        p.addEventListener('wheel', handleChartZoom, { passive: false });
+        p.addEventListener('mousedown', handleChartPanStart);
+    }
+    if (h) {
+        h.addEventListener('wheel', handleChartZoom, { passive: false });
+        h.addEventListener('mousedown', handleChartPanStart);
+    }
+
     ['p', 'h'].forEach(id => {
-        const svg = id === 'p' ? svgP : svgH;
-        // Use insertBefore to put crosshairs right above the overlay rect
+        const svg = id === 'p' ? p : h;
+        if (!svg) return;
         const overlay = $(`overlay-${id}`);
+        // Use insertBefore to put crosshairs right above the overlay rect
         const xLine = svgEl('line', { class: 'crosshair', 'stroke-dasharray': '2 2', stroke: 'rgba(255,255,255,0.2)', 'stroke-width': 1, 'pointer-events': 'none', display: 'none' });
         const yLine = svgEl('line', { class: 'crosshair', 'stroke-dasharray': '2 2', stroke: 'rgba(255,255,255,0.2)', 'stroke-width': 1, 'pointer-events': 'none', display: 'none' });
-        svg.insertBefore(xLine, overlay);
-        svg.insertBefore(yLine, overlay);
+        
+        if (overlay) {
+            svg.insertBefore(xLine, overlay);
+            svg.insertBefore(yLine, overlay);
+        } else {
+            svg.appendChild(xLine);
+            svg.appendChild(yLine);
+        }
         
         if (id === 'p') {
             crosshairP.x = xLine; crosshairP.y = yLine;
@@ -936,6 +976,7 @@ function initCrosshairs() {
         svg.addEventListener('mousemove', e => {
             if (scannerState.isDragging) return;
             const ch = id === 'p' ? crosshairP : crosshairH;
+            if (!ch.x || !ch.y) return;
             const rect = svg.getBoundingClientRect();
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
@@ -950,15 +991,16 @@ function initCrosshairs() {
         
         svg.addEventListener('mouseleave', () => {
             const ch = id === 'p' ? crosshairP : crosshairH;
+            if (!ch.x || !ch.y) return;
             ch.x.style.display = 'none';
             ch.y.style.display = 'none';
         });
     });
-}
-initCrosshairs();
 
-window.addEventListener('mousemove', handleChartPanMove);
-window.addEventListener('mouseup', handleChartPanEnd);
+    window.addEventListener('mousemove', handleChartPanMove);
+    window.addEventListener('mouseup', handleChartPanEnd);
+});
+
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 function wsConfig(exchange, pair) {
