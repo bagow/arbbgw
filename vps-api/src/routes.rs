@@ -74,7 +74,14 @@ pub async fn handle_update(
     // Save maps summary
     let mut map_summaries: HashMap<String, Vec<String>> = HashMap::new();
     for (ex, data) in &payload.maps {
-        map_summaries.insert(ex.clone(), data.keys().cloned().collect());
+        let keys = if let Some(obj) = data.as_object() {
+            obj.keys().cloned().collect()
+        } else if let Some(arr) = data.as_array() {
+            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        } else {
+            vec![]
+        };
+        map_summaries.insert(ex.clone(), keys);
     }
     let map_val = json!({ "ts": now, "data": map_summaries }).to_string();
     let _ = state.db.call(move |conn| {
