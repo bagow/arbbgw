@@ -293,14 +293,23 @@ async fn fetch_settings(state: &AppState) -> Vec<TradingSettings> {
     }
 
     let url = format!("{}/api/trading/settings/all", state.worker_url.trim_end_matches('/'));
-    let settings = match state.http.get(&url).timeout(Duration::from_secs(5)).send().await {
+    let settings = match state.http.get(&url)
+        .bearer_auth(&state.internal_token)
+        .timeout(Duration::from_secs(5))
+        .send().await
+    {
         Ok(resp) => {
             let status = resp.status();
-            match resp.json::<Vec<TradingSettings>>().await {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("Failed to parse settings JSON (status {}): {} — using defaults", status, e);
-                    vec![TradingSettings::default()]
+            if !status.is_success() {
+                warn!("Failed to fetch settings (status {}): {:?} — using defaults", status, resp.text().await.ok());
+                vec![TradingSettings::default()]
+            } else {
+                match resp.json::<Vec<TradingSettings>>().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!("Failed to parse settings JSON: {} — using defaults", e);
+                        vec![TradingSettings::default()]
+                    }
                 }
             }
         },

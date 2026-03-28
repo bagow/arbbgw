@@ -206,32 +206,9 @@ function nanoid() {
 }
 
 // ─── HTTP handler ─────────────────────────────────────────────────────────────
-async function ensureSchema(env) {
-    // We run these and ignore "already exists" errors (SQLITE_ERROR: duplicate column name)
-    const queries = [
-        "ALTER TABLE trades ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'paper-default'",
-        "ALTER TABLE trading_profiles ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'",
-        "ALTER TABLE trading_profiles ADD COLUMN owner TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_trades_profile_status ON trades(profile_id, status)"
-    ];
-    for (const q of queries) {
-        try {
-            await env.DB.prepare(q).run();
-        } catch (e) {
-            // console.log("Migration info:", e.message);
-        }
-    }
-}
-
 async function handleFetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
-
-    // Run schema migrations on the first few hits or a specific path
-    // For simplicity, we run it and it usually fails quickly if columns already exist
-    if (path === '/api/unified') {
-        ctx.waitUntil(ensureSchema(env));
-    }
 
     if (request.method === 'OPTIONS')
         return new Response(null, { status: 204, headers: corsHeaders() });
@@ -489,6 +466,11 @@ async function handleFetch(request, env, ctx) {
 
     // ── GET /api/trading/settings/all ─────────────────────────────────────────
     if (path === '/api/trading/settings/all' && request.method === 'GET') {
+        const token = request.headers.get('Authorization') || '';
+        const expected = env.INTERNAL_TOKEN || env.COLLECTOR_TOKEN || '';
+        if (expected && token !== `Bearer ${expected}`)
+            return jsonResponse({ error: 'Unauthorized' }, 401);
+
         const { results } = await env.DB.prepare(`SELECT * FROM trading_profiles WHERE mode = 'paper' OR mode IS NULL`).all();
         const defaults = {
             is_active: false, min_entry_spread: 1.0, max_entry_spread: 10.0,
@@ -496,11 +478,18 @@ async function handleFetch(request, env, ctx) {
             max_active_trades: 5, commission_rate: 0.45, funding_rate_8h: 0.01,
             slippage_percent: 0.1, min_volume_millions: 10, collector_interval_secs: 5,
         };
+
         const profiles = results.map(row => {
             const out = { ...defaults, ...row };
             out.is_active = Boolean(out.is_active);
             return out;
         });
+
+        // Ensure paper-default always exists in the bot's view
+        if (!profiles.find(p => p.id === 'paper-default')) {
+            profiles.push({ id: 'paper-default', name: 'Paper Default', mode: 'paper', ...defaults });
+        }
+
         return jsonResponse(profiles);
     }
 
