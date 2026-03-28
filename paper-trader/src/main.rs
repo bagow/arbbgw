@@ -379,6 +379,10 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
     let settings_list = fetch_settings(state).await;
     let active_profiles: Vec<&TradingSettings> = settings_list.iter().filter(|s| s.is_active).collect();
     
+    for s in &settings_list {
+        info!("HEARTBEAT: Profile={} Active={} MinSpread={} Vol={}", s.id, s.is_active, s.min_entry_spread, s.trade_volume);
+    }
+    
     // Heartbeat: Log what the bot actually sees in its memory
     info!("HEARTBEAT: Active Profiles: [{}]", active_profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(", "));
     
