@@ -797,10 +797,14 @@ async function handleRequest(request, env, ctx) {
         const [authErr, username] = requireAuthUser(request, env);
         if (authErr) return authErr;
 
-        // Verify ownership (allow defaults for backward compat)
         if (profileId !== 'paper-default' && profileId !== 'real-default') {
-            const owner = await env.DB.prepare(`SELECT owner FROM trading_profiles WHERE id=?`).bind(profileId).first();
-            if (owner && owner.owner !== username) return jsonResponse({ error: 'Forbidden' }, 403);
+            const row = await env.DB.prepare(`SELECT owner FROM trading_profiles WHERE id=?`).bind(profileId).first();
+            // If the profile has an owner, only they can edit it.
+            // If it has NO owner, anyone logged in can claim/edit it.
+            if (row && row.owner && row.owner !== username) {
+                console.error(`Forbidden: Profile ${profileId} owned by ${row.owner}, attempt by ${username}`);
+                return jsonResponse({ error: 'Forbidden', debug: `Profile owned by ${row.owner}` }, 403);
+            }
         }
 
         if (request.method === 'GET') {
@@ -827,6 +831,13 @@ async function handleRequest(request, env, ctx) {
                 }
             }
             if (!fields.length) return jsonResponse({ error: 'No fields to update' }, 400);
+            
+            // Auto-claim the profile if it was orphan
+            if (profileId !== 'paper-default' && profileId !== 'real-default') {
+                fields.push('owner=?');
+                vals.push(username);
+            }
+            
             fields.push('updated_at=?');
             vals.push(Date.now(), profileId);
             await env.DB.prepare(`UPDATE trading_profiles SET ${fields.join(',')} WHERE id=?`).bind(...vals).run();

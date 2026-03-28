@@ -668,6 +668,31 @@ function renderHistoryTable(profileId, history) {
     }).join('');
 }
 
+// ─── UI Helpers ───────────────────────────────────────────────────────────────
+function showToast(message, type = 'info') {
+    let container = document.getElementById('toast-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'toast-container';
+        container.className = 'toast-container';
+        document.body.appendChild(container);
+    }
+    const toast = document.createElement('div');
+    toast.className = `toast toast--\${type}`;
+    const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : 'ℹ️';
+    toast.innerHTML = `<span class="toast-icon">\${icon}</span><span class="toast-msg">\${message}</span>`;
+    container.appendChild(toast);
+    
+    // Trigger animation
+    setTimeout(() => toast.classList.add('toast--visible'), 10);
+    
+    // Auto-remove
+    setTimeout(() => {
+        toast.classList.remove('toast--visible');
+        setTimeout(() => toast.remove(), 400);
+    }, 4000);
+}
+
 // ─── User actions ─────────────────────────────────────────────────────────────
 
 window.toggleRow = function (profileId, id) {
@@ -719,9 +744,11 @@ window.saveSettings = async function (profileId) {
         const p = profiles.find(pr => pr.id === profileId);
         if (p) Object.assign(p, settings);
         if (btn) { btn.textContent = 'Saved!'; btn.style.background = 'var(--green)'; }
+        showToast('Settings saved successfully', 'success');
     } catch (e) {
         if (btn) { btn.textContent = 'Error!'; btn.style.background = 'var(--red)'; }
         console.error('Save failed:', e);
+        showToast(`Save failed: \${e.message || 'Unknown error'}`, 'error');
     }
     setTimeout(() => {
         if (btn) { btn.textContent = 'Save Settings'; btn.style.background = 'var(--bg-ctrl)'; }
@@ -731,13 +758,22 @@ window.saveSettings = async function (profileId) {
 window.toggleBotPower = async function (profileId) {
     const profile = profiles.find(p => p.id === profileId);
     if (!profile) return;
+    const previousState = profile.is_active;
     profile.is_active = !profile.is_active;
     const settings = { ...profile, is_active: profile.is_active ? 1 : 0 };
-    await saveProfileSettings(profileId, settings);
-    const btn = document.getElementById(`sf-power-${profileId}`);
-    if (btn) {
-        btn.textContent = profile.is_active ? 'Stop Bot' : 'Start Bot';
-        btn.style.background = profile.is_active ? 'var(--red)' : 'var(--green)';
+    
+    try {
+        await saveProfileSettings(profileId, settings);
+        const btn = document.getElementById(`sf-power-${profileId}`);
+        if (btn) {
+            btn.textContent = profile.is_active ? 'Stop Bot' : 'Start Bot';
+            btn.style.background = profile.is_active ? 'var(--red)' : 'var(--green)';
+        }
+        showToast(`Bot \${profile.is_active ? 'Started' : 'Stopped'}`, 'success');
+    } catch (e) {
+        profile.is_active = previousState; // Revert locally
+        console.error('Bot toggle failed:', e);
+        showToast(`Action failed: \${e.message || 'Check ownership'}`, 'error');
     }
 };
 
