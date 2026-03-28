@@ -328,10 +328,29 @@ async function handleFetch(request, env, ctx) {
         ).bind(username).all();
         const profilesResult = results || [];
 
-        // If profile_id specified, also return per-profile stats
+        // If profile_id specified, also return per-profile stats and trades
         let profileStats = null;
+        let profileActive = [];
+        let profileHistory = [];
         if (profileIdParam) {
             profileStats = await getFullStats(env, profileIdParam);
+            // Get profile-specific active trades from cache
+            const profileActiveKey = `active_trades_${profileIdParam}`;
+            const profileActiveRow = await env.DB.prepare(
+                `SELECT value, expires_at FROM server_cache WHERE key = ?`
+            ).bind(profileActiveKey).first();
+            if (profileActiveRow?.expires_at > Date.now()) {
+                try { profileActive = JSON.parse(profileActiveRow.value).data || []; } catch {}
+            } else {
+                // Fall back to the global active_trades cache for paper-default
+                if (profileIdParam === 'paper-default') profileActive = paperActive;
+                else if (profileIdParam === 'real-default') profileActive = realActive;
+            }
+            // Get profile-specific history
+            const { results: pHistory } = await env.DB.prepare(
+                `SELECT * FROM trades WHERE status = 'CLOSED' AND profile_id = ? ORDER BY exit_time DESC LIMIT 50`
+            ).bind(profileIdParam).all();
+            profileHistory = pHistory || [];
         }
 
         return jsonResponse({
@@ -348,7 +367,11 @@ async function handleFetch(request, env, ctx) {
             },
             exchanges: maps,
             profiles: profilesResult,
-            ...(profileStats ? { profile_stats: profileStats } : {}),
+            ...(profileStats ? {
+                profile_stats: profileStats,
+                profile_active: profileActive,
+                profile_history: profileHistory,
+            } : {}),
         });
     }
 
@@ -687,6 +710,35 @@ async function handleFetch(request, env, ctx) {
             await env.DB.prepare(`DELETE FROM trades WHERE profile_id=?`).bind(profileId).run();
             return jsonResponse({ success: true });
         }
+    }
+
+    // ── DELETE /api/profiles/:id/trades — Clear all trades for a profile ───────
+    const profileTradesMatch = path.match(/^\/api\/profiles\/([^/]+)\/trades$/);
+    if (profileTradesMatch && request.method === 'DELETE') {
+        const [authErr, username] = requireAuthUser(request, env);
+        if (authErr) return authErr;
+        const profileId = profileTradesMatch[1];
+
+        // Set CLEAR_TRADES pending command so the bot knows to reset itself
+        await env.DB.prepare(
+            `UPDATE trading_profiles SET pending_commands='CLEAR_TRADES' WHERE id=?`
+        ).bind(profileId).run();
+
+        // Delete all trades for this profile
+        await env.DB.prepare(`DELETE FROM trades WHERE profile_id=?`).bind(profileId).run();
+
+        // For default paper profile, also delete legacy trades with no profile_id
+        if (profileId === 'paper-default') {
+            await env.DB.prepare(`DELETE FROM trades WHERE profile_id IS NULL`).run();
+        }
+
+        // Clear the active trades cache for this profile
+        const cacheKey = profileId === 'paper-default' ? 'active_trades'
+            : profileId === 'real-default' ? 'real_active_trades'
+            : `active_trades_${profileId}`;
+        await env.DB.prepare(`DELETE FROM server_cache WHERE key=?`).bind(cacheKey).run();
+
+        return jsonResponse({ success: true });
     }
 
     // ── FALLBACK ──────────────────────────────────────────────────────────────

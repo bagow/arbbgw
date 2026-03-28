@@ -89,6 +89,7 @@ function initRefs() {
         svgP: scanner$('chart-prices'),
         svgH: scanner$('chart-hist'),
         priceLinesG: scanner$('price-lines'),
+        exchangeFilters: scanner$('exchange-filters'),
     };
     
     // Wire up close button if it exists
@@ -269,12 +270,13 @@ async function fetchSnapshot() {
 }
 
 // ─── Exchange filter bar (scanner) ────────────────────────────────────────────
-const exchangeFiltersEl = scanner$('exchange-filters');
 
 function renderExchangeFilters() {
+    const exchangeFiltersEl = refs.exchangeFilters;
     // Collect unique exchanges present in snapshot
     const inSnapshot = [...new Set(scannerState.snapshot.flatMap(r => [r.exchangeA, r.exchangeB]))];
-    if (!inSnapshot.length) { exchangeFiltersEl.innerHTML = ''; return; }
+    if (!inSnapshot.length) { if (exchangeFiltersEl) exchangeFiltersEl.innerHTML = ''; return; }
+    if (!exchangeFiltersEl) return;
 
     exchangeFiltersEl.innerHTML = '';
 

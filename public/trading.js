@@ -78,18 +78,6 @@ async function saveProfileSettings(id, settings) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings),
     });
-
-    // Also update the canonical settings endpoint for the trader service
-    const profile = profiles.find(p => p.id === id);
-    if (!profile) return;
-    const settingsPath = profile.mode === 'real'
-        ? '/api/real-trader/settings'
-        : '/api/trading/settings';
-    await apiFetch(settingsPath, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
-    });
 }
 
 // ─── Tab bar rendering ────────────────────────────────────────────────────────
@@ -153,7 +141,7 @@ async function refreshActiveTab() {
     const profile = profiles.find(p => p.id === activeTabId);
     if (!profile) return;
 
-    const { trades, real, exchanges, profiles: serverProfiles, profile_stats } = lastUnified;
+    const { trades, real, exchanges, profiles: serverProfiles, profile_stats, profile_active, profile_history } = lastUnified;
 
     // Sync local profile settings from server profiles data
     if (serverProfiles) {
@@ -163,10 +151,19 @@ async function refreshActiveTab() {
         }
     }
 
-    const active  = profile.mode === 'real' ? (real?.active  || []) : (trades?.active  || []);
-    const history = profile.mode === 'real' ? (real?.history || []) : (trades?.history || []);
+    // Use profile-scoped data if available (from profile_id param in request)
+    // Otherwise fall back to the global paper/real data
+    let active, history;
+    if (profile_active !== undefined) {
+        active  = profile_active;
+        history = profile_history || [];
+    } else {
+        active  = profile.mode === 'real' ? (real?.active  || []) : (trades?.active  || []);
+        history = profile.mode === 'real' ? (real?.history || []) : (trades?.history || []);
+    }
+
     // Use per-profile stats if available, fall back to global
-    const stats   = profile_stats || (profile.mode === 'real' ? (real?.stats || {}) : (trades?.stats || {}));
+    const stats = profile_stats || (profile.mode === 'real' ? (real?.stats || {}) : (trades?.stats || {}));
 
     renderPanel(profile, active, history, stats, exchanges);
 }
@@ -746,9 +743,8 @@ window.toggleBotPower = async function (profileId) {
 
 window.clearTrades = async function (profileId, mode) {
     if (!confirm('Delete ALL active and historical trades for this profile?')) return;
-    const path = mode === 'real' ? '/api/real-trader/trades' : '/api/trading/trades';
     try {
-        await fetch(`${API_BASE}${path}`, { method: 'DELETE' });
+        await apiFetch(`/api/profiles/${profileId}/trades`, { method: 'DELETE' });
         await refreshActiveTab();
     } catch (e) { alert('Failed: ' + e.message); }
 };
