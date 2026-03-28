@@ -660,22 +660,25 @@ async function handleRequest(request, env, ctx) {
         // Ensure payload is a Map of { profileId: trades[] }
         const tradesMap = Array.isArray(payload) ? { 'paper-default': payload } : payload;
         
-        const allProfilesResult = await env.DB.prepare(`SELECT id FROM trading_profiles WHERE mode='paper' OR mode IS NULL`).all();
-        const allProfiles = allProfilesResult.results || [];
+        // Get all known profiles to ensure we clear/update them all
+        const profilesResult = await env.DB.prepare(`SELECT id FROM trading_profiles`).all();
+        const activeProfiles = (profilesResult.results || []).map(p => p.id);
         
-        for (const prof of allProfiles) {
-            const pid = prof.id;
+        // Ensure 'paper-default' is always in the list
+        if (!activeProfiles.includes('paper-default')) activeProfiles.push('paper-default');
+
+        for (const pid of activeProfiles) {
             const trades = tradesMap[pid] || [];
             const key = pid === 'paper-default' ? 'active_trades' : `active_trades_${pid}`;
             
             stmts.push(env.DB.prepare(
                 `INSERT INTO server_cache (key,value,expires_at) VALUES (?,?,?)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at`
-            ).bind(key, JSON.stringify({ ts: now, data: trades }), now + 600_000));
+            ).bind(key, JSON.stringify({ ts: now, data: trades }), now + 3600_000));
         }
         
         if (stmts.length > 0) await env.DB.batch(stmts);
-        return jsonResponse({ success: true });
+        return jsonResponse({ success: true, count: stmts.length });
     }
 
 
