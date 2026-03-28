@@ -208,22 +208,61 @@ pub async fn handle_get_unified(
         }
     }).await.unwrap_or_else(|_| vec![]);
 
-    // Compute basic stats from history
-    let total_pnl: f64 = history_trades.iter().filter_map(|t| t.pnl).sum();
-    let total_trades = history_trades.len();
-    let wins = history_trades.iter().filter(|t| t.pnl.unwrap_or(0.0) > 0.0).count();
-    let avg_pnl = if total_trades > 0 { total_pnl / total_trades as f64 } else { 0.0 };
-    let equity_curve: Vec<serde_json::Value> = history_trades.iter().rev()
-        .map(|t| json!({ "pnl": t.pnl.unwrap_or(0.0) })).collect();
-    let stats = json!({
-        "total_pnl": total_pnl,
-        "total_trades": total_trades,
-        "wins": wins,
-        "losses": total_trades - wins,
-        "avg_pnl": avg_pnl,
-        "equity_curve": equity_curve,
+    // 4. Compute aggregate stats from FULL history
+    let stats = state.db.call({
+        let p = pid.clone();
+        move |conn| {
+            // Aggregate totals
+            let mut stmt = conn.prepare("SELECT COUNT(*), SUM(pnl), SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) FROM trades WHERE status='CLOSED' AND profile_id=?")?;
+            struct Agg { count: i64, pnl: Option<f64>, wins: i64 }
+            let agg = stmt.query_row([p.clone()], |r| Ok(Agg {
+                count: r.get(0)?,
+                pnl: r.get(1)?,
+                wins: r.get(2)?
+            }))?;
+            
+            let total_trades = agg.count;
+            let total_pnl = agg.pnl.unwrap_or(0.0);
+            let wins = agg.wins;
+            let losses = total_trades - wins;
+            let avg_pnl = if total_trades > 0 { total_pnl / total_trades as f64 } else { 0.0 };
+
+            // Equity curve (last 1000)
+            let mut stmt = conn.prepare("SELECT pnl FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time ASC LIMIT 1000")?;
+            let equity_curve: Vec<serde_json::Value> = stmt.query_map([p.clone()], |r| {
+                let pnl: f64 = r.get(0)?;
+                Ok(json!({ "pnl": pnl }))
+            })?.filter_map(|r| r.ok()).collect();
+
+            // PnL by Exchange
+            let mut stmt = conn.prepare("SELECT exchange_a, exchange_b, SUM(pnl) FROM trades WHERE status='CLOSED' AND profile_id=? GROUP BY exchange_a, exchange_b")?;
+            let rows: Vec<(String, String, f64)> = stmt.query_map([p.clone()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.filter_map(|r| r.ok()).collect();
+            
+            let mut pnl_by_exchange: HashMap<String, f64> = HashMap::new();
+            for (ex_a, ex_b, pnl) in rows {
+                *pnl_by_exchange.entry(ex_a).or_insert(0.0) += pnl / 2.0;
+                *pnl_by_exchange.entry(ex_b).or_insert(0.0) += pnl / 2.0;
+            }
+
+            Ok(json!({
+                "total_pnl": total_pnl,
+                "total_trades": total_trades,
+                "wins": wins,
+                "losses": losses,
+                "avg_pnl": avg_pnl,
+                "equity_curve": equity_curve,
+                "pnl_by_exchange": pnl_by_exchange
+            }))
+        }
+    }).await.unwrap_or(json!({
+        "total_pnl": 0.0,
+        "total_trades": 0,
+        "wins": 0,
+        "losses": 0,
+        "avg_pnl": 0.0,
+        "equity_curve": Vec::<Value>::new(),
         "pnl_by_exchange": {}
-    });
+    }));
 
     // Return payload matching frontend expectations
     (StatusCode::OK, Json(json!({
