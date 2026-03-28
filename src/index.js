@@ -234,11 +234,24 @@ async function ensureSchema(env) {
             CREATE TABLE IF NOT EXISTS server_cache (
                 key TEXT PRIMARY KEY,
                 value TEXT,
+                expires_at INTEGER,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         `).run();
     } catch (e) {
         console.error("Migration error (server_cache):", e.message);
+    }
+
+    // 3. Ensure 'trading_profiles' has 'mode'
+    try {
+        const tableInfo = await env.DB.prepare("PRAGMA table_info(trading_profiles)").all();
+        const hasMode = tableInfo.results.some(col => col.name === 'mode');
+        if (!hasMode) {
+            console.log("Auto-migrating: Adding mode to trading_profiles table");
+            await env.DB.prepare("ALTER TABLE trading_profiles ADD COLUMN mode TEXT DEFAULT 'paper'").run();
+        }
+    } catch (e) {
+        console.error("Migration error (profiles-mode):", e.message);
     }
 }
 
