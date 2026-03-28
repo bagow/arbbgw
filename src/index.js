@@ -645,35 +645,32 @@ async function handleRequest(request, env, ctx) {
     // ── POST /api/trading/active ──────────────────────────────────────────────
     if (path === '/api/trading/active' && request.method === 'POST') {
         const auth = request.headers.get('Authorization') || '';
-        if (!isValidToken(auth, env.COLLECTOR_TOKEN)) {
-            return jsonResponse({ 
-                error: 'Unauthorized', 
-                debug: `Received: ${auth.slice(0, 15)}, Expected secret set: ${Boolean(env.COLLECTOR_TOKEN)}` 
-            }, 401);
-        }
+        if (!isValidToken(auth, env.COLLECTOR_TOKEN)) return jsonResponse({ error: 'Unauthorized' }, 401);
             
-        let activeTradesMap;
-        try { activeTradesMap = await request.json(); } catch { return jsonResponse({ error: 'Invalid JSON' }, 400); }
+        let payload;
+        try { payload = await request.json(); } catch { return jsonResponse({ error: 'Invalid JSON' }, 400); }
         
         const now = Date.now();
         const stmts = [];
         
-        // Ensure backwards compatibility by expecting arrays directly as well
-        if (Array.isArray(activeTradesMap)) {
-            activeTradesMap = { 'paper-default': activeTradesMap };
-        }
+        // Ensure payload is a Map of { profileId: trades[] }
+        const tradesMap = Array.isArray(payload) ? { 'paper-default': payload } : payload;
         
-        for (const [profId, trades] of Object.entries(activeTradesMap)) {
-            const key = profId === 'paper-default' ? 'active_trades' : `active_trades_${profId}`;
+        // We get ALL active paper profiles first to ensure we clear empty ones explicitly
+        const { results: allProfiles } = await env.DB.prepare(`SELECT id FROM trading_profiles WHERE mode='paper' OR mode IS NULL`).all();
+        
+        for (const prof of (allProfiles || [])) {
+            const pid = prof.id;
+            const trades = tradesMap[pid] || [];
+            const key = pid === 'paper-default' ? 'active_trades' : `active_trades_${pid}`;
+            
             stmts.push(env.DB.prepare(
                 `INSERT INTO server_cache (key,value,expires_at) VALUES (?,?,?)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at`
-            ).bind(key, JSON.stringify({ ts: now, data: trades }), now + 60_000));
+            ).bind(key, JSON.stringify({ ts: now, data: trades }), now + 300_000));
         }
         
-        if (stmts.length > 0) {
-            await env.DB.batch(stmts);
-        }
+        if (stmts.length > 0) await env.DB.batch(stmts);
         return jsonResponse({ success: true });
     }
 
