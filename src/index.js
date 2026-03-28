@@ -206,7 +206,56 @@ function nanoid() {
 }
 
 // ─── HTTP handler ─────────────────────────────────────────────────────────────
+
+// ─── Self-Migration ───────────────────────────────────────────────────────────
+async function ensureSchema(env) {
+    // 1. Ensure 'trades' has 'profile_id'
+    try {
+        const tableInfo = await env.DB.prepare("PRAGMA table_info(trades)").all();
+        const hasProfileId = tableInfo.results.some(col => col.name === 'profile_id');
+        if (!hasProfileId) {
+            console.log("Auto-migrating: Adding profile_id to trades table");
+            await env.DB.prepare("ALTER TABLE trades ADD COLUMN profile_id INTEGER DEFAULT 1").run();
+        }
+    } catch (e) {
+        console.error("Migration error (trades):", e.message);
+    }
+
+    // 2. Ensure 'server_cache' exists
+    try {
+        await env.DB.prepare(`
+            CREATE TABLE IF NOT EXISTS server_cache (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `).run();
+    } catch (e) {
+        console.error("Migration error (server_cache):", e.message);
+    }
+}
+
 async function handleFetch(request, env, ctx) {
+    // Run migration on every request (cheap PRAGMA check)
+    // In production, you might want to cache this or use a flag.
+    await ensureSchema(env);
+
+    try {
+        return await handleRequest(request, env, ctx);
+    } catch (err) {
+        console.error("Worker error:", err.stack);
+        return new Response(JSON.stringify({
+            error: "Internal Server Error",
+            message: err.message,
+            stack: err.stack
+        }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        });
+    }
+}
+
+async function handleRequest(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -847,5 +896,7 @@ async function getFullStats(env, profileId = 'paper-default') {
 
 // ─── Worker export ────────────────────────────────────────────────────────────
 export default {
-    async fetch(request, env, ctx) { return handleFetch(request, env, ctx); },
+    async fetch(request, env, ctx) {
+        return handleFetch(request, env, ctx);
+    },
 };
