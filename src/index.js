@@ -268,18 +268,19 @@ async function handleRequest(request, env, ctx) {
         }
     }
 
-    // ── PROXY EXTENSIONS /api/* -> vps-api (direct VPS IP) ───────────────────
+    // ── PROXY EXTENSIONS /api/* -> vps-api (via Cloudflare Tunnel) ───────────
     
-    // Forward API requests directly to VPS port 4000 over HTTP.
-    // Cloudflare Worker handles HTTPS termination; VPS does not need a tunnel.
+    // Forward every API request to api.arb.bagow.com which routes via
+    // Cloudflare Tunnel (tunnel ID: 89353ffb) to localhost:4000 on VPS.
     
     const targetUrl = new URL(request.url);
-    targetUrl.hostname = '92.5.127.87';
-    targetUrl.port = '4000';
-    targetUrl.protocol = 'http:';
+    targetUrl.hostname = 'api.arb.bagow.com';
+    targetUrl.port = '';
+    targetUrl.protocol = 'https:';
 
     // Clone request to forward
     const proxyRequest = new Request(targetUrl.toString(), new Request(request));
+    proxyRequest.headers.set('Host', targetUrl.hostname);
     
     // Maintain auth headers naturally
     try {
