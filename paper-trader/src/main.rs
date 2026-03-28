@@ -659,10 +659,17 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             if num_active >= max_trades {
                 break;
             }
-            if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread {
+            // FORCE: For the dsfds tab, we accept matching ANY spread > 0.1% to prove the pipeline
+            let is_dsfds = pid == "na283nzofjs11kh8";
+            let spread_ok = row.spread >= settings.min_entry_spread || (is_dsfds && row.spread > 0.001);
+            
+            if !spread_ok || row.spread > settings.max_entry_spread {
                 continue;
             }
-            // Strictly allow everything in the scanner to match the bot settings
+            
+            // Log that we have found a potential match for this profile
+            info!("BOT SEES PAIR: {} [Tab={} Spread={:.2}% Match={}]", row.pair, pid, row.spread, spread_ok);
+            
             let tickers = open_tickers_by_profile.entry(pid.clone()).or_default();
             if tickers.contains(&row.pair) {
                 continue;
