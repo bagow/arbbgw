@@ -44,7 +44,7 @@ pub struct SpreadRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpreadPayload {
     pub spreads: Vec<SpreadRow>,
-    pub maps: std::collections::HashMap<String, std::collections::HashMap<String, TickerData>>,
+    pub maps: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,7 +66,7 @@ pub struct TradingProfile {
     pub min_volume_millions: f64,
     pub collector_interval_secs: i64,
     pub owner: Option<String>,
-    pub pending_commands: Option<serde_json::Value>,
+    pub pending_commands: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
