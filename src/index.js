@@ -257,7 +257,7 @@ async function handleRequest(request, env, ctx) {
         const limit = Math.min(parseInt(limitStr) || 500, 1000);
         const endTimeMs = url.searchParams.get('endTime');
         const kUrl = klinesUrl(exchange, symbol, interval, limit, endTimeMs);
-        if (!kUrl) return jsonResponse({ error: `Unknown exchange: ${exchange}`, klines: [] }, 400);
+        if (!kUrl) return jsonResponse({ exchange, symbol, klines: [] }, 200);
         try {
             const res = await fetch(kUrl, { headers: { 'User-Agent': 'cex-spread-scanner/1.0' } });
             const raw = await res.json();

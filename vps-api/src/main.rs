@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/unified", get(routes::handle_get_unified))
         .route("/api/trading/settings/all", get(routes::handle_get_all_settings))
         .route("/api/profiles", get(routes::handle_get_profiles).post(routes::handle_post_profile))
-        .route("/api/profiles/:id", patch(routes::handle_patch_profile).delete(routes::handle_delete_profile))
+        .route("/api/profiles/:id", get(routes::handle_get_profile).patch(routes::handle_patch_profile).delete(routes::handle_delete_profile))
         .route("/api/profiles/:id/trades", delete(routes::handle_clear_trades))
         .with_state(state)
         .layer(CorsLayer::permissive()); // allow all origins since API Tunnel handles public exposure

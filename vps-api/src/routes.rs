@@ -233,6 +233,29 @@ pub async fn handle_get_unified(
     }))).into_response()
 }
 
+// ─── GET /api/profiles/:id ───
+pub async fn handle_get_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let _username = match check_basic_auth(&headers, &state) {
+        Some(u) => u,
+        None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
+    };
+
+    let profile = state.db.call(move |conn| {
+        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE id = ?")?;
+        let items: Vec<_> = stmt.query_map([id], row_to_profile)?.filter_map(|r| r.ok()).collect();
+        Ok(items.into_iter().next())
+    }).await.unwrap_or(None);
+
+    match profile {
+        Some(p) => (StatusCode::OK, Json(p)).into_response(),
+        None => json_err(StatusCode::NOT_FOUND, "Profile not found"),
+    }
+}
+
 // ─── POST /api/profiles ───
 pub async fn handle_post_profile(
     State(state): State<AppState>,

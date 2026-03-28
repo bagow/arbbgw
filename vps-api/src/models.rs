@@ -48,6 +48,7 @@ pub struct SpreadPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TradingProfile {
     pub id: String,
     pub name: String,
@@ -58,16 +59,42 @@ pub struct TradingProfile {
     pub trade_volume: f64,
     pub take_profit_percent: f64,
     pub trailing_stop_percent: f64,
-    pub max_active_trades: i64,
+    pub max_active_trades: i32,
     pub commission_rate: f64,
     pub slippage_percent: f64,
     pub funding_rate_8h: f64,
     pub min_volume_millions: f64,
     pub collector_interval_secs: i64,
-    pub pending_commands: Option<String>,
     pub owner: Option<String>,
-    pub created_at: Option<i64>,
-    pub updated_at: Option<i64>,
+    pub pending_commands: Option<serde_json::Value>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl Default for TradingProfile {
+    fn default() -> Self {
+        Self {
+            id: "".to_string(),
+            name: "New Profile".to_string(),
+            mode: "paper".to_string(),
+            is_active: false,
+            min_entry_spread: 1.0,
+            max_entry_spread: 10.0,
+            trade_volume: 1000.0,
+            take_profit_percent: 0.1,
+            trailing_stop_percent: 0.5,
+            max_active_trades: 5,
+            commission_rate: 0.45,
+            slippage_percent: 0.1,
+            funding_rate_8h: 0.01,
+            min_volume_millions: 10.0,
+            collector_interval_secs: 5,
+            owner: None,
+            pending_commands: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
