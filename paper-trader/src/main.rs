@@ -665,6 +665,11 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
                 continue;
             }
 
+            info!(
+                "MATCH: Profile={} Pair={} Spread={:.2}% (Min={:.2}%)",
+                pid, row.pair, row.spread, settings.min_entry_spread
+            );
+
             let slippage = settings.slippage_percent / 100.0;
             let is_a_higher = row.direction.starts_with(&row.exchange_a);
 
