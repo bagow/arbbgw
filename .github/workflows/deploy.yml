@@ -21,6 +21,10 @@ on:
         description: 'Deploy real-trader'
         type: boolean
         default: false
+      deploy_cloudflared:
+        description: 'Setup Cloudflare Tunnel on VPS'
+        type: boolean
+        default: false
       deploy_cloudflare:
         description: 'Deploy Cloudflare Worker & Assets'
         type: boolean
@@ -35,6 +39,7 @@ jobs:
       collector: ${{ steps.filter.outputs.collector }}
       paper: ${{ steps.filter.outputs.paper }}
       real: ${{ steps.filter.outputs.real }}
+      cloudflared: ${{ steps.filter.outputs.cloudflared }}
       cloudflare: ${{ steps.filter.outputs.cloudflare }}
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +56,8 @@ jobs:
               - 'paper-trader/**'
             real:
               - 'real-trader/**'
+            cloudflared:
+              - 'cloudflared.service'
             cloudflare:
               - 'src/**'
               - 'public/**'
@@ -207,7 +214,56 @@ jobs:
             sudo systemctl restart real-trader
             sudo systemctl status real-trader
 
-  # --- 5. Деплой в Cloudflare ---
+  # --- 5. Деплой Cloudflare Tunnel (cloudflared) на VPS ---
+  deploy-cloudflared:
+    needs: changes
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_cloudflared == 'true' ||
+      github.event_name == 'push' && needs.changes.outputs.cloudflared == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cloudflared & setup tunnel on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          script: |
+            # Download cloudflared if not present or outdated
+            if ! command -v cloudflared &>/dev/null; then
+              curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+              sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
+              sudo chmod +x /usr/local/bin/cloudflared
+            fi
+            # Write tunnel token to env file
+            echo "CLOUDFLARE_TUNNEL_TOKEN=${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}" | sudo tee /etc/cloudflared.env > /dev/null
+            sudo chmod 600 /etc/cloudflared.env
+      - name: Copy service file to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          source: "cloudflared.service"
+          target: "/tmp/deploy/"
+      - name: Enable and start cloudflared
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          script: |
+            sudo mv /tmp/deploy/cloudflared.service /etc/systemd/system/cloudflared.service
+            sudo chmod 644 /etc/systemd/system/cloudflared.service
+            sudo restorecon -v /etc/systemd/system/cloudflared.service 2>/dev/null || true
+            sudo systemctl daemon-reload
+            sudo systemctl enable cloudflared
+            sudo systemctl restart cloudflared
+            sleep 3
+            sudo systemctl status cloudflared
+
+  # --- 6. Деплой в Cloudflare ---
   deploy-cloudflare:
     needs: changes
     if: |

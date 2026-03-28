@@ -1,0 +1,16 @@
+[Unit]
+Description=Cloudflare Tunnel arb-api
+After=network.target
+
+[Service]
+Type=simple
+User=opc
+EnvironmentFile=/etc/cloudflared.env
+ExecStart=/usr/local/bin/cloudflared tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
