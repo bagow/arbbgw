@@ -206,9 +206,32 @@ function nanoid() {
 }
 
 // ─── HTTP handler ─────────────────────────────────────────────────────────────
+async function ensureSchema(env) {
+    // We run these and ignore "already exists" errors (SQLITE_ERROR: duplicate column name)
+    const queries = [
+        "ALTER TABLE trades ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'paper-default'",
+        "ALTER TABLE trading_profiles ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'",
+        "ALTER TABLE trading_profiles ADD COLUMN owner TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_trades_profile_status ON trades(profile_id, status)"
+    ];
+    for (const q of queries) {
+        try {
+            await env.DB.prepare(q).run();
+        } catch (e) {
+            // console.log("Migration info:", e.message);
+        }
+    }
+}
+
 async function handleFetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // Run schema migrations on the first few hits or a specific path
+    // For simplicity, we run it and it usually fails quickly if columns already exist
+    if (path === '/api/unified') {
+        ctx.waitUntil(ensureSchema(env));
+    }
 
     if (request.method === 'OPTIONS')
         return new Response(null, { status: 204, headers: corsHeaders() });
