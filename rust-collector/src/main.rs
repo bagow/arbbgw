@@ -381,39 +381,41 @@ async fn push_loop(price_map: PriceMap, mut config: Config, http: Client) {
                 continue;
             }
 
-            let maps_payload = build_maps_payload(&price_map);
-            let body = json!({ "spreads": spreads, "maps": maps_payload });
+            let full_maps = build_full_maps_payload(&price_map);
 
             // ── 1. Push to paper-trader directly (localhost, fire-and-forget) ──
-            // Send FULL ticker map to paper-trader so it always sees prices for open trades.
-            if !config.paper_trader_url.is_empty() && !config.paper_trader_token.is_empty() {
-                let pt_url = format!("{}/internal/spreads", config.paper_trader_url.trim_end_matches('/'));
-                let full_maps = build_full_maps_payload(&price_map);
-                let pt_body = json!({ "spreads": spreads, "maps": full_maps });
-                let http2 = http.clone();
-                let token2 = config.paper_trader_token.clone();
-                tokio::spawn(async move {
-                    match http2
-                        .post(&pt_url)
-                        .bearer_auth(&token2)
-                        .json(&pt_body)
-                        .timeout(Duration::from_secs(10))
-                        .send()
-                        .await
-                    {
-                        Ok(r) => {
-                            if r.status().is_success() {
-                                debug!("paper-trader ← {} spreads → {}", pt_body["spreads"].as_array().map(|a| a.len()).unwrap_or(0), r.status());
-                            } else {
-                                let status = r.status();
-                                let body = r.text().await.unwrap_or_default();
-                                warn!("paper-trader push failed {}: {}", status, body);
-                            }
-                        },
-                        Err(e) => warn!("paper-trader push error: {}", e),
-                    }
-                });
+            if !config.paper_trader_url.is_empty() {
+                if config.paper_trader_token.is_empty() {
+                    warn!("PAPER_TRADER_TOKEN is missing. Skipping direct push to {}", config.paper_trader_url);
+                } else {
+                    let pt_url = format!("{}/internal/spreads", config.paper_trader_url.trim_end_matches('/'));
+                    let token2 = config.paper_trader_token.clone();
+                    let pt_body = json!({ "spreads": spreads, "maps": full_maps });
+                    let http2 = http.clone();
+                    tokio::spawn(async move {
+                        match http2
+                            .post(&pt_url)
+                            .bearer_auth(&token2)
+                            .json(&pt_body)
+                            .timeout(Duration::from_secs(10))
+                            .send()
+                            .await
+                        {
+                            Ok(r) => {
+                                if r.status().is_success() {
+                                    debug!("paper-trader ← {} spreads → {}", pt_body["spreads"].as_array().map(|a| a.len()).unwrap_or(0), r.status());
+                                } else {
+                                    let status = r.status();
+                                    let body = r.text().await.unwrap_or_default();
+                                    warn!("paper-trader push failed {}: {}", status, body);
+                                }
+                            },
+                            Err(e) => warn!("paper-trader push error: {}", e),
+                        }
+                    });
+                }
             }
+
 
             // ── 1.b. Push to real-trader directly (localhost, fire-and-forget) ──
             if !config.real_trader_url.is_empty() && !config.real_trader_token.is_empty() {
