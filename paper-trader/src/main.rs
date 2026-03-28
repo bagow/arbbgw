@@ -41,7 +41,7 @@ pub struct TickerData {
     pub funding_rate: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SpreadRow {
     pub pair: String,
     #[serde(rename = "exchangeA")]
