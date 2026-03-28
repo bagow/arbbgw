@@ -5,6 +5,10 @@ on:
     branches: [ main ]
   workflow_dispatch: # Позволяет запускать вручную из вкладки Actions
     inputs:
+      deploy_vps_api:
+        description: 'Deploy vps-api'
+        type: boolean
+        default: false
       deploy_collector:
         description: 'Deploy rust-collector'
         type: boolean
@@ -27,6 +31,7 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
+      vps_api: ${{ steps.filter.outputs.vps_api }}
       collector: ${{ steps.filter.outputs.collector }}
       paper: ${{ steps.filter.outputs.paper }}
       real: ${{ steps.filter.outputs.real }}
@@ -37,6 +42,9 @@ jobs:
         id: filter
         with:
           filters: |
+            vps_api:
+              - 'vps-api/**'
+              - '.github/workflows/deploy.yml'
             collector:
               - 'rust-collector/**'
               - '.github/workflows/deploy.yml'
@@ -52,7 +60,48 @@ jobs:
               - 'wrangler.toml'
               - '.github/workflows/deploy.yml'
 
-  # --- 2. Деплой rust-collector ---
+  # --- 2. Деплой vps-api ---
+  deploy-vps-api:
+    needs: changes
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_vps_api == 'true' ||
+      github.event_name == 'push' && (needs.changes.outputs.vps_api == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build vps-api
+        run: cargo build --release --manifest-path vps-api/Cargo.toml
+      - name: Copy to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          source: "vps-api/target/release/vps-api,vps-api.service"
+          target: "/tmp/deploy/vps-api"
+          strip_components: 0
+      - name: Install and Restart
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          script: |
+            sudo mv /tmp/deploy/vps-api/vps-api/target/release/vps-api /usr/local/bin/
+            sudo chown root:root /usr/local/bin/vps-api
+            sudo chmod +x /usr/local/bin/vps-api
+            sudo restorecon -v /usr/local/bin/vps-api
+            if [ -f /tmp/deploy/vps-api/vps-api.service ]; then
+              sudo mv /tmp/deploy/vps-api/vps-api.service /etc/systemd/system/
+              sudo systemctl daemon-reload
+              sudo systemctl enable vps-api
+            fi
+            sudo systemctl restart vps-api
+            sudo systemctl status vps-api
+
+  # --- 3. Деплой rust-collector ---
   deploy-collector:
     needs: changes
     if: |

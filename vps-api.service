@@ -1,0 +1,23 @@
+[Unit]
+Description=VPS API Service for Crypto Arb
+After=network.target
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+WorkingDirectory=/home/opc/cex-arb/vps-api
+Environment="DATABASE_URL=/home/opc/cex-arb/paper-trader/trades.db"
+Environment="COLLECTOR_TOKEN=Drc8#mP2vLq!"
+Environment="INTERNAL_TOKEN=Drc8#mP2vLq!"
+Environment="PASS_DIMA=Xk9mP2#vLqRt7Yw"
+Environment="PASS_SERGEI=Bn4cZ8@jNhKs3Fd"
+ExecStart=/home/opc/.cargo/bin/cargo run --release
+Restart=always
+RestartSec=3
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=vps-api
+
+[Install]
+WantedBy=multi-user.target

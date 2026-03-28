@@ -271,51 +271,33 @@ fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
 
 // ─── Trading Engine ───────────────────────────────────────────────────────────
 
-async fn ack_command(state: &AppState, command: &str, profile_id: &str) {
-    let url = format!("{}/api/trading/commands/ack", state.worker_url.trim_end_matches('/'));
-    let payload = json!({ "command": command, "profile_id": profile_id });
-    let _ = state.http
-        .post(&url)
-        .bearer_auth(&state.internal_token)
-        .json(&payload)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await;
-}
-
 async fn fetch_settings(state: &AppState) -> Vec<TradingSettings> {
-    {
-        let cache = state.settings_cache.lock().await;
-        if let Some(s) = &cache.0 {
-            if cache.1.elapsed() < Duration::from_secs(5) {
-                return s.clone();
-            }
-        }
-    }
-
-    let url = format!("{}/api/trading/settings/all", state.worker_url.trim_end_matches('/'));
-    let settings = match state.http.get(&url)
-        .bearer_auth(&state.internal_token)
-        .timeout(Duration::from_secs(5))
-        .send().await
-    {
-        Ok(resp) => {
-            let status = resp.status();
-            if !status.is_success() {
-                warn!("Failed to fetch settings (status {}): {:?} — using defaults", status, resp.text().await.ok());
-                vec![TradingSettings::default()]
-            } else {
-                match resp.json::<Vec<TradingSettings>>().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!("Failed to parse settings JSON: {} — using defaults", e);
-                        vec![TradingSettings::default()]
-                    }
-                }
-            }
-        },
+    let settings = match state.db.call(|conn| {
+        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE mode='paper'")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(TradingSettings {
+                id: row.get(0)?,
+                is_active: row.get::<_, i64>(3)? != 0,
+                min_entry_spread: row.get(4)?,
+                max_entry_spread: row.get(5)?,
+                trade_volume: row.get(6)?,
+                take_profit_percent: row.get(7)?,
+                trailing_stop_percent: row.get(8)?,
+                max_active_trades: row.get(9)?,
+                commission_rate: row.get(10)?,
+                slippage_percent: row.get(11)?,
+                funding_rate_8h: row.get(12)?,
+                min_volume_millions: row.get(13)?,
+                collector_interval_secs: row.get(14)?,
+                pending_commands: row.get(15)?,
+            })
+        })?;
+        let items: Vec<TradingSettings> = rows.filter_map(|r| r.ok()).collect();
+        Ok(items)
+    }).await {
+        Ok(s) => s,
         Err(e) => {
-            warn!("Failed to fetch settings from Worker: {} — using defaults", e);
+            warn!("Failed to fetch settings from DB: {} — using defaults", e);
             vec![TradingSettings::default()]
         }
     };
@@ -327,52 +309,19 @@ async fn fetch_settings(state: &AppState) -> Vec<TradingSettings> {
                 info!("Received CLEAR_TRADES command for profile {}, wiping local trades...", s.id);
                 let pid = s.id.clone();
                 let _ = state.db.call(move |conn| {
-                    conn.execute("DELETE FROM trades WHERE profile_id=?", rusqlite::params![pid]).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+                    conn.execute("DELETE FROM trades WHERE profile_id=?", rusqlite::params![pid])?;
+                    // Ack command
+                    conn.execute("UPDATE trading_profiles SET pending_commands=NULL WHERE id=?", rusqlite::params![pid])?;
+                    Ok(())
                 }).await;
-                
-                let state_clone = state.clone();
-                let pid_ack = s.id.clone();
-                tokio::spawn(async move {
-                    ack_command(&state_clone, "CLEAR_TRADES", &pid_ack).await;
-                });
             }
         }
     }
 
-    let mut cache = state.settings_cache.lock().await;
-    *cache = (Some(settings.clone()), std::time::Instant::now());
     settings
 }
 
-async fn archive_trade_to_d1(http: &Client, worker_url: &str, token: &str, trade: &Trade) {
-    let url = format!("{}/api/archive", worker_url.trim_end_matches('/'));
-    if let Err(e) = http
-        .post(&url)
-        .bearer_auth(token)
-        .json(trade)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-    {
-        error!("Failed to archive trade {} to D1: {}", trade.id, e);
-    } else {
-        info!("Archived trade {} ({}) to D1", trade.id, trade.pair);
-    }
-}
-
-async fn push_active_trades_to_worker(http: &Client, worker_url: &str, token: &str, trades_map: &std::collections::HashMap<String, Vec<Trade>>) {
-    let url = format!("{}/api/trading/active", worker_url.trim_end_matches('/'));
-    if let Err(e) = http
-        .post(&url)
-        .bearer_auth(token)
-        .json(trades_map)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-    {
-        error!("Failed to push active trades map to Worker: {}", e);
-    }
-}
+// Network push functions deleted
 
 async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
     let _lock = state.engine_lock.lock().await;
@@ -601,30 +550,7 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             closed.funding_cost = Some(funding_cost);
             closed.highest_spread_reached = best_pnl;
 
-            // Archive to D1 asynchronously
-            let http = state.http.clone();
-            let worker_url = state.worker_url.clone();
-            let token = state.collector_token.clone();
-            tokio::spawn(async move {
-                archive_trade_to_d1(&http, &worker_url, &token, &closed).await;
-            });
-
-            /*
-            // Remove from local DB (archived to D1)
-            let trade_id = trade.id;
-            let db = state.db.clone();
-            tokio::spawn(async move {
-                if let Err(e) = db
-                    .call(move |conn| {
-                        conn.execute("DELETE FROM trades WHERE id=?", params![trade_id])
-                            .map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
-                    })
-                    .await
-                {
-                    error!("Failed to delete closed trade {} from SQLite: {}", trade_id, e);
-                }
-            });
-            */
+            // SQLite already persists the trade! No archiving to D1 needed.
 
             if let Some(c) = num_active_by_profile.get_mut(&profile_id) { *c -= 1; }
             let key = format!("{}_{}_{}", trade.pair, trade.exchange_a, trade.exchange_b);
@@ -821,13 +747,6 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         if last_push.elapsed() > Duration::from_secs(15) || true {
             should_push = true;
             *last_push = std::time::Instant::now();
-        }
-    }
-
-    if should_push {
-        tokio::spawn(async move {
-            push_active_trades_to_worker(&http, &worker_url, &token, &mapped_trades).await;
-        });
     }
 }
 
