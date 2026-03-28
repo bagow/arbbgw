@@ -370,15 +370,15 @@ function renderTable() {
     }
 }
 
-document.querySelectorAll('thead th[data-sort]').forEach(th => {
-    th.addEventListener('click', () => {
-        const key = th.dataset.sort;
-        document.querySelectorAll('thead th').forEach(h => h.classList.remove('sorted-asc', 'sorted-desc'));
-        scannerState.sortDir = (scannerState.sortKey === key) ? scannerState.sortDir * -1 : -1;
-        scannerState.sortKey = key;
-        th.classList.add(scannerState.sortDir === -1 ? 'sorted-desc' : 'sorted-asc');
-        renderTable();
-    });
+document.addEventListener('click', e => {
+    const th = e.target.closest('thead th[data-sort]');
+    if (!th) return;
+    const key = th.dataset.sort;
+    document.querySelectorAll('thead th').forEach(h => h.classList.remove('sorted-asc', 'sorted-desc'));
+    scannerState.sortDir = (scannerState.sortKey === key) ? scannerState.sortDir * -1 : -1;
+    scannerState.sortKey = key;
+    th.classList.add(scannerState.sortDir === -1 ? 'sorted-desc' : 'sorted-asc');
+    renderTable();
 });
 
 // ─── Modal ────────────────────────────────────────────────────────────────────
@@ -932,8 +932,8 @@ function handleChartPanMove(e) {
 
 function handleChartPanEnd() {
     scannerState.isDragging = false;
-    svgP.style.cursor = 'crosshair';
-    svgH.style.cursor = 'crosshair';
+    if (svgP) svgP.style.cursor = 'crosshair';
+    if (svgH) svgH.style.cursor = 'crosshair';
 }
 
 let crosshairP = { x: null, y: null };
@@ -1102,10 +1102,8 @@ async function loadScannerSettings(profileId = null) {
 }
 
 window.initScanner = async function(profileId = null) {
-    if (!refs.tableBody) {
-        console.log('Scanner: Initializing references');
-        initRefs();
-    }
+    console.log('Scanner: Initializing references');
+    initRefs();
     
     // Always load latest settings for the active profile when switching to Scanner
     await loadScannerSettings(profileId);
