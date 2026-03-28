@@ -773,9 +773,12 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         let pid = tr.profile_id.clone().unwrap_or_else(|| "paper-default".into());
         mapped_trades.entry(pid).or_default().push(tr);
     }
-    // ensure active profiles with 0 trades send an empty array so they clear correctly
+    
+    // Ensure ALL active profiles are explicitly mentioned (for clearing zero-trades)
     for s in &settings_list {
-        mapped_trades.entry(s.id.clone()).or_insert_with(Vec::new);
+        if s.is_active {
+            mapped_trades.entry(s.id.clone()).or_insert_with(Vec::new);
+        }
     }
 
     let http = state.http.clone();
