@@ -8,7 +8,7 @@
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -200,10 +200,11 @@ async fn push_to_traders(spreads: &[SpreadRow], price_map: &PriceMap, config: &C
         let body = json!({ "spreads": spreads, "maps": full_maps });
         let http2 = http.clone();
         let token2 = config.paper_trader_token.clone();
+        let n = spreads.len();
         tokio::spawn(async move {
             match http2.post(&pt_url).bearer_auth(&token2).json(&body)
                 .timeout(Duration::from_secs(5)).send().await {
-                Ok(r) if r.status().is_success() => debug!("paper-trader ← {} spreads OK", spreads.len()),
+                Ok(r) if r.status().is_success() => debug!("paper-trader <- {} spreads OK", n),
                 Ok(r) => { let s=r.status(); let b=r.text().await.unwrap_or_default(); warn!("paper-trader push failed {}: {}", s, b); }
                 Err(e) => warn!("paper-trader push error: {}", e),
             }
@@ -215,10 +216,11 @@ async fn push_to_traders(spreads: &[SpreadRow], price_map: &PriceMap, config: &C
         let body = json!({ "spreads": spreads, "maps": full_maps });
         let http3 = http.clone();
         let token3 = config.real_trader_token.clone();
+        let n = spreads.len();
         tokio::spawn(async move {
             match http3.post(&rt_url).bearer_auth(&token3).json(&body)
                 .timeout(Duration::from_secs(5)).send().await {
-                Ok(r) if r.status().is_success() => debug!("real-trader ← {} spreads OK", spreads.len()),
+                Ok(r) if r.status().is_success() => debug!("real-trader <- {} spreads OK", n),
                 Ok(r) => { let s=r.status(); let b=r.text().await.unwrap_or_default(); warn!("real-trader push failed {}: {}", s, b); }
                 Err(e) => warn!("real-trader push error: {}", e),
             }
