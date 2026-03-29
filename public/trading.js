@@ -405,15 +405,15 @@ function renderSettingsForm(profile) {
             <form id="settings-form-${p.id}" class="settings-grid" onsubmit="return false;">
                 <div class="form-group">
                     <label>Min Entry Spread (%)</label>
-                    <input type="number" id="sf-min-${p.id}" step="0.1" value="${p.min_entry_spread??1}" />
+                    <input type="number" id="sf-min-${p.id}" step="0.0001" value="${p.min_entry_spread??1}" />
                 </div>
                 <div class="form-group">
                     <label>Max Entry Spread (%)</label>
-                    <input type="number" id="sf-max-${p.id}" step="0.1" value="${p.max_entry_spread??10}" />
+                    <input type="number" id="sf-max-${p.id}" step="0.0001" value="${p.max_entry_spread??10}" />
                 </div>
                 <div class="form-group">
                     <label>Trade Volume (USD)</label>
-                    <input type="number" id="sf-vol-${p.id}" step="10" value="${p.trade_volume??1000}" />
+                    <input type="number" id="sf-vol-${p.id}" step="0.0001" value="${p.trade_volume??1000}" />
                 </div>
                 <div class="form-group">
                     <label>Max Active Trades</label>
@@ -421,15 +421,15 @@ function renderSettingsForm(profile) {
                 </div>
                 <div class="form-group">
                     <label>Take Profit (%)</label>
-                    <input type="number" id="sf-tp-${p.id}" step="any" value="${p.take_profit_percent??0.1}" />
+                    <input type="number" id="sf-tp-${p.id}" step="0.0001" value="${p.take_profit_percent??0.1}" />
                 </div>
                 <div class="form-group">
                     <label>Trailing Stop (%)</label>
-                    <input type="number" id="sf-trail-${p.id}" step="any" value="${p.trailing_stop_percent??0.5}" />
+                    <input type="number" id="sf-trail-${p.id}" step="0.0001" value="${p.trailing_stop_percent??0.5}" />
                 </div>
                 <div class="form-group">
                     <label>Slippage Rate (%)</label>
-                    <input type="number" id="sf-slip-${p.id}" step="any" value="${p.slippage_percent??0.1}" />
+                    <input type="number" id="sf-slip-${p.id}" step="0.0001" value="${p.slippage_percent??0.1}" />
                 </div>
                 <div class="form-group">
                     <label>Commission Rate (%)</label>
@@ -477,6 +477,15 @@ function renderDashboardHTML(profileId) {
         <div style="padding:16px 0;display:grid;gap:24px;">
             <!-- KPI row -->
             <div id="dash-kpi-${pid}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;"></div>
+            
+            <!-- Balance Analysis (Stacked) -->
+            <div class="chart-card">
+                <div class="chart-card-title">Balance Analysis</div>
+                <div style="position:relative;height:320px;width:100%;">
+                    <canvas id="dash-balance-${pid}"></canvas>
+                </div>
+            </div>
+
             <!-- Charts row 1: Equity + Win/Loss -->
             <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;">
                 <div class="chart-card">
@@ -540,6 +549,94 @@ function renderDashboardCharts(profileId, stats) {
 
     Chart.defaults.color = '#94a3b8';
     Chart.defaults.borderColor = '#334155';
+
+    // Balance Analysis Chart
+    const balCtx = document.getElementById(`dash-balance-${pid}`);
+    if (balCtx) {
+        const curve = stats.equity_curve || [];
+        const labels = [];
+        
+        const exBalances = {};
+        const exKeys = new Set();
+        curve.forEach(p => { if(p.ex_a) exKeys.add(p.ex_a); if(p.ex_b) exKeys.add(p.ex_b); });
+        if (exKeys.size === 0) exKeys.add('Capital');
+
+        const colors = ['#60a5fa', '#f43f5e', '#34d399', '#c084fc', '#fbbf24'];
+        let cIdx = 0;
+        const colorMap = {};
+        exKeys.forEach(ex => {
+            exBalances[ex] = 10000 / (exKeys.size || 1); // 10k virtual starting balance
+            colorMap[ex] = colors[cIdx % colors.length];
+            cIdx++;
+        });
+
+        const historyByEx = {};
+        exKeys.forEach(ex => historyByEx[ex] = []);
+        const historyTotal = [];
+
+        curve.forEach((p, i) => {
+            if (p.ex_a) exBalances[p.ex_a] += (p.pnl || 0) / 2;
+            else if (exKeys.has('Capital')) exBalances['Capital'] += (p.pnl || 0) / 2;
+            
+            if (p.ex_b) exBalances[p.ex_b] += (p.pnl || 0) / 2;
+            else if (exKeys.has('Capital')) exBalances['Capital'] += (p.pnl || 0) / 2;
+            
+            if (curve.length <= 150 || i % Math.ceil(curve.length / 100) === 0 || i === curve.length - 1) {
+                labels.push(`#${i + 1}`);
+                let total = 0;
+                exKeys.forEach(ex => {
+                    historyByEx[ex].push(parseFloat(exBalances[ex].toFixed(2)));
+                    total += exBalances[ex];
+                });
+                historyTotal.push(parseFloat(total.toFixed(2)));
+            }
+        });
+
+        const datasets = [];
+        exKeys.forEach(ex => {
+            datasets.push({
+                label: ex,
+                data: historyByEx[ex],
+                borderColor: colorMap[ex],
+                backgroundColor: colorMap[ex] + '33', // 20% opacity
+                fill: true,
+                tension: 0.1,
+                stack: 'exchanges',
+                pointRadius: curve.length > 50 ? 0 : 2
+            });
+        });
+
+        datasets.push({
+            label: 'Total Capitalization',
+            data: historyTotal,
+            borderColor: '#fbbf24',
+            borderDash: [5, 5],
+            borderWidth: 2,
+            backgroundColor: 'transparent',
+            fill: false,
+            tension: 0.1,
+            stack: 'total', // separate stack so it overlays and doesn't compound
+            pointRadius: curve.length > 50 ? 0 : 3
+        });
+
+        chartInstances[pid].balance = new Chart(balCtx, {
+            type: 'line',
+            data: { labels, datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: { position: 'top', align: 'end' },
+                    tooltip: { callbacks: { label: function(c) { return c.dataset.label + ': $' + c.raw.toLocaleString(); } } }
+                },
+                scales: {
+                    x: { grid: { color: '#1f2937' } },
+                    y: { stacked: true, grid: { color: '#1f2937' } }
+                }
+            }
+        });
+    }
 
     // Equity curve
     const equityCtx = document.getElementById(`dash-equity-${pid}`);
