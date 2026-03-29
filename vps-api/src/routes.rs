@@ -230,12 +230,20 @@ pub async fn handle_get_unified(
             tracing::debug!("Stats for [{}]: count={} pnl={:.2} wins={}", p, total_trades, total_pnl, wins);
 
             // Equity curve (last 1000)
-            let mut stmt = conn.prepare("SELECT pnl, exchange_a, exchange_b FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time ASC LIMIT 1000")?;
+            let mut stmt = conn.prepare("SELECT pnl, exchange_a, exchange_b, pnl_a, pnl_b FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time ASC LIMIT 1000")?;
             let equity_curve: Vec<serde_json::Value> = stmt.query_map([p.clone()], |r| {
                 let pnl: f64 = r.get(0)?;
                 let ex_a: String = r.get(1)?;
                 let ex_b: String = r.get(2)?;
-                Ok(json!({ "pnl": pnl, "ex_a": ex_a, "ex_b": ex_b }))
+                let pnl_a: Option<f64> = r.get(3).ok().unwrap_or(None);
+                let pnl_b: Option<f64> = r.get(4).ok().unwrap_or(None);
+                Ok(json!({ 
+                    "pnl": pnl, 
+                    "ex_a": ex_a, 
+                    "ex_b": ex_b,
+                    "pnl_a": pnl_a.unwrap_or(pnl / 2.0),
+                    "pnl_b": pnl_b.unwrap_or(pnl / 2.0)
+                }))
             })?.filter_map(|r| r.ok()).collect();
 
             // PnL by Exchange

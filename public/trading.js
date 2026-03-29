@@ -575,10 +575,10 @@ function renderDashboardCharts(profileId, stats) {
         const historyTotal = [];
 
         curve.forEach((p, i) => {
-            if (p.ex_a) exBalances[p.ex_a] += (p.pnl || 0) / 2;
+            if (p.ex_a) exBalances[p.ex_a] += (p.pnl_a !== undefined ? p.pnl_a : (p.pnl || 0) / 2);
             else if (exKeys.has('Capital')) exBalances['Capital'] += (p.pnl || 0) / 2;
             
-            if (p.ex_b) exBalances[p.ex_b] += (p.pnl || 0) / 2;
+            if (p.ex_b) exBalances[p.ex_b] += (p.pnl_b !== undefined ? p.pnl_b : (p.pnl || 0) / 2);
             else if (exKeys.has('Capital')) exBalances['Capital'] += (p.pnl || 0) / 2;
             
             if (curve.length <= 150 || i % Math.ceil(curve.length / 100) === 0 || i === curve.length - 1) {
