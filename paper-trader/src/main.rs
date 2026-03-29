@@ -506,20 +506,31 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
 
         // Exit conditions
         let target_pnl_usd = trade.volume * (settings.take_profit_percent / 100.0);
-        let stop_drop_usd = trade.volume * (settings.trailing_stop_percent / 100.0);
+        let stop_drop_usd  = trade.volume * (settings.trailing_stop_percent / 100.0);
 
-        let triggered_tp = net_pnl >= target_pnl_usd;
-        let triggered_stop = (best_pnl - net_pnl) >= stop_drop_usd;
-        let triggered_zero_spread = exit_spread <= 0.0;
+        let triggered_tp   = net_pnl >= target_pnl_usd;
+        let triggered_stop = best_pnl > 0.0 && (best_pnl - net_pnl) >= stop_drop_usd;
 
-        if triggered_tp || triggered_stop || triggered_zero_spread {
+        // ZERO_SPREAD: close only when the exit spread has converged AND net_pnl is non-negative.
+        // This prevents closing at a loss just because the raw spread crossed zero —
+        // the actual fill prices (bid/ask + slippage + commission) may still be underwater.
+        let triggered_zero_spread = exit_spread <= 0.0 && net_pnl >= 0.0;
+
+        // Hard stop: close at any spread if position has been open too long and is losing
+        // significantly (protects against stuck positions eating funding).
+        // Uses trailing_stop as the max loss threshold when position never went positive.
+        let triggered_hard_stop = best_pnl <= 0.0 && net_pnl <= -(stop_drop_usd);
+
+        if triggered_tp || triggered_stop || triggered_zero_spread || triggered_hard_stop {
             // Close the trade
             let reason = if triggered_tp {
                 "TP"
+            } else if triggered_zero_spread {
+                "ZERO_SPREAD"
             } else if triggered_stop {
                 "STOP"
             } else {
-                "ZERO_SPREAD"
+                "HARD_STOP"
             };
             info!(
                 "Closing trade {} {} — reason={} net_pnl={:.4}",
@@ -573,14 +584,16 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             if let Some(keys) = open_pair_keys_by_profile.get_mut(&profile_id) { keys.remove(&key); }
             if let Some(tickers) = open_tickers_by_profile.get_mut(&profile_id) { tickers.remove(&trade.pair); }
         } else {
-            // Update live prices
+            // Update live prices.
+            // Store NET pnl in curr_gross_pnl so vps-api routes.rs (which reads this field
+            // directly as current_pnl) shows the correct after-cost figure without double-counting.
             let trade_id = trade.id;
             if let Err(e) = state
                 .db
                 .call(move |conn| {
                     conn.execute(
                         "UPDATE trades SET highest_spread_reached=?, last_price_a=?, last_price_b=?, last_spread=?, curr_gross_pnl=?, pnl_a=?, pnl_b=? WHERE id=?",
-                        params![best_pnl, c_price_a, c_price_b, mid_spread, gross_pnl, pnl_a, pnl_b, trade_id],
+                        params![best_pnl, c_price_a, c_price_b, mid_spread, net_pnl, pnl_a, pnl_b, trade_id],
                     ).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
                 })
                 .await
@@ -595,70 +608,82 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         let pid = &settings.id;
         let max_trades = settings.max_active_trades;
 
+        // Break-even spread: the minimum spread needed to cover all round-trip costs.
+        // 4 legs × commission + 2 legs × slippage (entry only; exit slippage is baked into exit price)
+        let commission_pct = settings.commission_rate / 100.0;
+        let slippage_pct   = settings.slippage_percent / 100.0;
+        // Round-trip cost as a % of notional:
+        //   4 commission legs + 2 slippage legs at entry (exit slippage is marginal)
+        let break_even_pct = 4.0 * commission_pct + 2.0 * slippage_pct;
+
         for row in &payload.spreads {
             let num_active = *num_active_by_profile.get(pid).unwrap_or(&0);
             if num_active >= max_trades {
-                // Log once per profile per cycle if full
                 if row == payload.spreads.first().unwrap() {
                     info!("SKIP_MATCH: Profile {} is FULL ({} trades)", pid, num_active);
                 }
                 break;
             }
-            // FORCE: For the dsfds tab, we accept matching ANY spread > 0.1% to prove the pipeline
-            let is_dsfds = pid == "na283nzofjs11kh8";
-            let spread_ok = row.spread >= settings.min_entry_spread || (is_dsfds && row.spread > 0.001);
-            
+
+            let spread_pct = row.spread / 100.0; // spread is already in %
+            let spread_ok = row.spread >= settings.min_entry_spread;
             if !spread_ok || row.spread > settings.max_entry_spread {
                 continue;
             }
-            
-            // Log that we have found a potential match for this profile
-            info!("BOT SEES PAIR: {} [Tab={} Spread={:.2}% Match={}]", row.pair, pid, row.spread, spread_ok);
-            
-            let tickers = open_tickers_by_profile.entry(pid.clone()).or_default();
-            if tickers.contains(&row.pair) {
-                // Too many logs if we log every skip, but useful for debugging
-                // info!("SKIP_MATCH: Profile {} already has active trade for {}", pid, row.pair);
+
+            // ── Pre-trade profitability guard ──────────────────────────────
+            // Only enter if the spread covers break-even + a minimum net profit buffer.
+            // This prevents entering trades that are guaranteed losers even on perfect execution.
+            let min_net_profit_pct = break_even_pct * 0.5; // require at least 50% margin over costs
+            if spread_pct < break_even_pct + min_net_profit_pct {
+                // Spread exists but is too thin to be profitable after costs
                 continue;
             }
-            
+
+            info!("BOT SEES PAIR: {} [Tab={} Spread={:.3}% BreakEven={:.3}%]",
+                row.pair, pid, row.spread, break_even_pct * 100.0);
+
+            let tickers = open_tickers_by_profile.entry(pid.clone()).or_default();
+            if tickers.contains(&row.pair) { continue; }
+
             let key = format!("{}_{}_{}", row.pair, row.exchange_a, row.exchange_b);
             let key_rev = format!("{}_{}_{}", row.pair, row.exchange_b, row.exchange_a);
             let keys = open_pair_keys_by_profile.entry(pid.clone()).or_default();
-            if keys.contains(&key) || keys.contains(&key_rev) {
-                continue;
-            }
+            if keys.contains(&key) || keys.contains(&key_rev) { continue; }
 
             info!(
-                "MATCH: Profile={} Pair={} Spread={:.2}% (Min={:.2}%)",
-                pid, row.pair, row.spread, settings.min_entry_spread
+                "MATCH: Profile={} Pair={} Spread={:.3}% BreakEven={:.3}% NetEdge={:.3}%",
+                pid, row.pair, row.spread, break_even_pct * 100.0,
+                (spread_pct - break_even_pct) * 100.0
             );
 
-            let slippage = settings.slippage_percent / 100.0;
+            let slippage = slippage_pct;
             let is_a_higher = row.direction.starts_with(&row.exchange_a);
 
+            // Entry prices: use Bid/Ask directly (no additional slippage penalty on top —
+            // slippage is already modelled by the Bid/Ask spread itself vs. mid price).
+            // We only apply slippage as an extra haircut to model imperfect fills.
             let entry_price_a = if is_a_higher {
-                row.bid_a * (1.0 - slippage) // We short A -> sell at Bid
+                row.bid_a * (1.0 - slippage) // SHORT A: sell at Bid, slippage = worse fill
             } else {
-                row.ask_a * (1.0 + slippage) // We long A -> buy at Ask
+                row.ask_a * (1.0 + slippage) // LONG A: buy at Ask, slippage = worse fill
             };
             let entry_price_b = if is_a_higher {
-                row.ask_b * (1.0 + slippage) // We long B -> buy at Ask
+                row.ask_b * (1.0 + slippage) // LONG B: buy at Ask, slippage = worse fill
             } else {
-                row.bid_b * (1.0 - slippage) // We short B -> sell at Bid
+                row.bid_b * (1.0 - slippage) // SHORT B: sell at Bid, slippage = worse fill
             };
 
             let pair = row.pair.clone();
-            let ex_a = row.exchange_a.clone();
-            let ex_b = row.exchange_b.clone();
-            let dir = row.direction.clone();
-            let vol = settings.trade_volume;
+            let ex_a  = row.exchange_a.clone();
+            let ex_b  = row.exchange_b.clone();
+            let dir   = row.direction.clone();
+            let vol   = settings.trade_volume;
             let spread = row.spread;
             let profile_id_db = pid.clone();
-            // Commission paid at entry for all 4 legs (2 entry + 2 exit, estimated upfront)
-            let comm_at_open = vol * (settings.commission_rate / 100.0) * 4.0;
+            let comm_at_open = vol * commission_pct * 4.0;
 
-            info!("OPENING: Profile={} Pair={} Vol={} Spread={:.2}% Comm={:.4}",
+            info!("OPENING: Profile={} Pair={} Vol={} Spread={:.3}% Comm_est={:.4}",
                 profile_id_db, pair, vol, spread, comm_at_open);
 
             match state

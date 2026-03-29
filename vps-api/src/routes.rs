@@ -183,13 +183,11 @@ pub async fn handle_get_unified(
             let pnl_a_fallback = if is_a_higher { (t.entry_price_a - c_price_a) * coins_a } else { (c_price_a - t.entry_price_a) * coins_a };
             let pnl_b_fallback = if is_a_higher { (c_price_b - t.entry_price_b) * coins_b } else { (t.entry_price_b - c_price_b) * coins_b };
 
-            // curr_gross_pnl is written by paper-trader and already includes
-            // its own commission/slippage accounting. Use it directly — do NOT
-            // re-deduct commission here (that was the double-counting bug).
+            // curr_gross_pnl now stores NET pnl (paper-trader writes net after comm+funding).
+            // Use it directly as current_pnl — no further deductions.
             let current_net_pnl = t.curr_gross_pnl.unwrap_or(pnl_a_fallback + pnl_b_fallback);
 
-            // commission_cost: use what paper-trader stored in the DB (preferred),
-            // or fall back to a display estimate so the UI never shows $0.00 for open trades.
+            // commission_cost was stored in the DB at trade open for display purposes.
             let display_comm = t.commission_cost.unwrap_or_else(|| t.volume * 0.0045 * 4.0);
 
             if let Some(obj) = v.as_object_mut() {
