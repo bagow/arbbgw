@@ -79,8 +79,8 @@ pub async fn init_db(db: &Connection) -> Result<()> {
             "INSERT OR IGNORE INTO trading_profiles (id, name, mode, is_active, min_entry_spread, max_entry_spread,
                 trade_volume, take_profit_percent, trailing_stop_percent, max_active_trades,
                 commission_rate, slippage_percent, funding_rate_8h, min_volume_millions,
-                collector_interval_secs, created_at, updated_at)
-            VALUES ('paper-default', 'Paper Default', 'paper', 1, 1.0, 10.0, 1000.0, 0.1, 0.5, 5, 0.45, 0.1, 0.01, 10.0, 5, ?, ?)",
+                collector_interval_secs, created_at, updated_at, disabled_exchanges)
+            VALUES ('paper-default', 'Paper Default', 'paper', 1, 1.0, 10.0, 1000.0, 0.1, 0.5, 5, 0.45, 0.1, 0.01, 10.0, 5, ?, ?, '[]')",
             params![now, now],
         )?;
 
@@ -88,14 +88,23 @@ pub async fn init_db(db: &Connection) -> Result<()> {
             "INSERT OR IGNORE INTO trading_profiles (id, name, mode, is_active, min_entry_spread, max_entry_spread,
                 trade_volume, take_profit_percent, trailing_stop_percent, max_active_trades,
                 commission_rate, slippage_percent, funding_rate_8h, min_volume_millions,
-                collector_interval_secs, created_at, updated_at)
-            VALUES ('real-default', 'Real Trading', 'real', 0, 1.0, 10.0, 100.0, 0.2, 0.3, 3, 0.05, 0.05, 0.01, 10.0, 5, ?, ?)",
+                collector_interval_secs, created_at, updated_at, disabled_exchanges)
+            VALUES ('real-default', 'Real Trading', 'real', 0, 1.0, 10.0, 100.0, 0.2, 0.3, 3, 0.05, 0.05, 0.01, 10.0, 5, ?, ?, '[]')",
             params![now, now],
         )?;
 
         Ok(())
     })
     .await?;
+
+    let _ = db.call(|conn| {
+        conn.execute(
+            "ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'",
+            [],
+        )
+        .map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+    })
+    .await;
 
     Ok(())
 }
@@ -121,6 +130,7 @@ pub fn row_to_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradingProfil
         owner: row.get(16)?,
         created_at: row.get(17)?,
         updated_at: row.get(18)?,
+        disabled_exchanges: row.get::<_, Option<String>>(19).unwrap_or(Some("[]".into())),
     })
 }
 

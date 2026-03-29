@@ -147,9 +147,14 @@ pub async fn handle_get_unified(
         None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    // 1. Get Snapshot
+    // 1. Get Snapshot and Exchange Maps
     let snapshot = state.db.call(|conn| {
         let row: Result<String, _> = conn.query_row("SELECT value FROM server_cache WHERE key = 'snapshot'", [], |r| r.get(0));
+        Ok(if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) })
+    }).await.unwrap_or(json!({}));
+
+    let exchanges = state.db.call(|conn| {
+        let row: Result<String, _> = conn.query_row("SELECT value FROM server_cache WHERE key = 'exchange_maps'", [], |r| r.get(0));
         Ok(if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) })
     }).await.unwrap_or(json!({}));
 
@@ -315,6 +320,7 @@ pub async fn handle_get_unified(
     // Return payload matching frontend expectations
     (StatusCode::OK, Json(json!({
         "snapshot": snapshot,
+        "exchanges": exchanges,
         "profiles": profiles,
         "trades": {
             "active": active_enriched,
@@ -432,6 +438,11 @@ pub async fn handle_patch_profile(
                         sets.push(format!("{}=?", k));
                         params_vec.push(rusqlite::types::Value::Text(s.to_string()));
                     }
+                },
+                "disabled_exchanges" => {
+                    let s = if v.is_array() { serde_json::to_string(v).unwrap_or("[]".into()) } else { v.as_str().unwrap_or("[]").to_string() };
+                    sets.push(format!("{}=?", k));
+                    params_vec.push(rusqlite::types::Value::Text(s));
                 },
                 _ => {}
             }

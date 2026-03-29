@@ -250,6 +250,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
             <button class="mt-nav-btn ${activeSubTabId==='scanner'?'mt-nav-btn--active':''}" data-sub="scanner" onclick="showSubTab(this,'scanner')">Scanner</button>
             <button class="mt-nav-btn ${activeSubTabId==='active'?'mt-nav-btn--active':''}" data-sub="active" onclick="showSubTab(this,'active')">Active Trades</button>
             <button class="mt-nav-btn ${activeSubTabId==='history'?'mt-nav-btn--active':''}" data-sub="history" onclick="showSubTab(this,'history')">History</button>
+            <button class="mt-nav-btn ${activeSubTabId==='cex'?'mt-nav-btn--active':''}" data-sub="cex" onclick="showSubTab(this,'cex')">CEX</button>
             <button class="mt-nav-btn ${activeSubTabId==='settings'?'mt-nav-btn--active':''}" data-sub="settings" onclick="showSubTab(this,'settings')">Settings</button>
             
             <div id="panel-stats-${profile.id}" style="margin-left:auto;display:flex;align-items:center;gap:10px;">
@@ -342,6 +343,11 @@ function renderPanel(profile, active, history, stats, exchanges) {
             </div>
         </div>
 
+        <!-- CEX sub-panel -->
+        <div class="mt-content" id="mt-sub-cex" style="display:${activeSubTabId==='cex'?'block':'none'}; padding: 24px;">
+            ${renderCexTab(profile, exchanges)}
+        </div>
+
         <!-- Settings sub-panel -->
         <div class="mt-content" id="mt-sub-settings" style="display:${activeSubTabId==='settings'?'block':'none'}; padding: 24px;">
             ${renderSettingsForm(profile)}
@@ -396,6 +402,117 @@ function renderSubNavStats(active, stats, mode) {
             ${mode === 'real' ? '💰 Real' : '🧪 Paper'}
         </span>
     `;
+}
+
+// ─── CEX Tab Logic ────────────────────────────────────────────────────────────
+
+async function toggleExchange(profileId, exchangeName, checkboxEl) {
+    const profile = profiles.find(p => p.id === profileId);
+    if (!profile) return;
+    try {
+        checkboxEl.disabled = true;
+        let disabled = profile.disabled_exchanges || '[]';
+        if (typeof disabled === 'string') disabled = JSON.parse(disabled);
+
+        if (disabled.includes(exchangeName)) {
+            disabled = disabled.filter(ex => ex !== exchangeName);
+        } else {
+            disabled.push(exchangeName);
+        }
+
+        const updatedStr = JSON.stringify(disabled);
+        await apiFetch(`/api/profiles/${profileId}`, {
+            method: 'PATCH',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ disabled_exchanges: disabled })
+        });
+        profile.disabled_exchanges = updatedStr;
+        checkboxEl.checked = !disabled.includes(exchangeName);
+    } catch (e) {
+        alert('Failed to update: ' + e.message);
+        if (typeof profile.disabled_exchanges === 'string') {
+            const arr = JSON.parse(profile.disabled_exchanges || '[]');
+            checkboxEl.checked = !arr.includes(exchangeName);
+        }
+    } finally {
+        checkboxEl.disabled = false;
+    }
+}
+
+function renderCexTab(profile, exchangesData) {
+    if (!exchangesData || !exchangesData.data) {
+        return '<div class="text-sub" style="text-align:center;">No exchange data available yet. Please wait for collector to sync.</div>';
+    }
+
+    const exNames = Object.keys(exchangesData.data).sort();
+    
+    // Parse disabled_exchanges to a map for quick lookup
+    const disabledRaw = profile.disabled_exchanges || '[]';
+    let disabledMap = {};
+    if (typeof disabledRaw === 'string') {
+        try { JSON.parse(disabledRaw).forEach(ex => disabledMap[ex] = true); } catch(e) {}
+    } else if (Array.isArray(disabledRaw)) {
+        disabledRaw.forEach(ex => disabledMap[ex] = true);
+    }
+
+    let html = `<div class="cex-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px;">`;
+    
+    for (const exA of exNames) {
+        let pairsList = '';
+        const rawArr = exchangesData.data[exA];
+        // Ensure it's an array before using
+        const arr = Array.isArray(rawArr) ? rawArr : [];
+        const setA = new Set(arr);
+        
+        for (const exB of exNames) {
+            if (exA === exB) continue;
+            let matchCount = 0;
+            const bRaw = exchangesData.data[exB];
+            const bArr = Array.isArray(bRaw) ? bRaw : [];
+            for (let i=0; i<bArr.length; i++) {
+                if (setA.has(bArr[i])) matchCount++;
+            }
+            if (matchCount > 0) {
+                pairsList += `
+                    <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-dim);">
+                        <span style="color:var(--text-sub);">vs <strong style="color:var(--text);">${exB}</strong></span>
+                        <span style="font-family:var(--font-mono);font-size:0.9rem;">${matchCount} pairs</span>
+                    </div>
+                `;
+            }
+        }
+        
+        const isEnabled = !disabledMap[exA];
+        
+        html += `
+            <div class="stat-card" style="display:flex;flex-direction:column; background:var(--bg-panel); border:1px solid var(--border); border-radius:12px; padding:20px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <div style="width:10px;height:10px;border-radius:50%;background:${isEnabled?'var(--green)':'var(--text-sub)'}"></div>
+                        <h3 style="margin:0;font-size:1.2rem;font-weight:600;text-transform:uppercase;">${exA}</h3>
+                    </div>
+                    <div style="text-align:right;">
+                        <span style="font-size:0.75rem;color:var(--text-sub);display:block;text-transform:uppercase;letter-spacing:0.5px;">Tickers</span>
+                        <span style="font-family:var(--font-mono);font-weight:600;">${setA.size}</span>
+                    </div>
+                </div>
+                
+                <div style="flex:1;max-height:160px;overflow-y:auto;margin-bottom:20px;padding-right:8px;">
+                    ${pairsList || '<div class="text-sub" style="font-size:0.9rem;padding:12px 0;">No matching pairs found.</div>'}
+                </div>
+                
+                <label style="display:flex;align-items:center;gap:12px;cursor:pointer;padding-top:16px;border-top:1px solid var(--border-dim); user-select:none;">
+                    <input type="checkbox" 
+                           ${isEnabled ? 'checked' : ''} 
+                           onchange="toggleExchange('${profile.id}', '${exA}', this)"
+                           style="width: 18px; height: 18px; cursor:pointer;">
+                    <span style="font-weight:500; font-size:0.95rem;">${isEnabled ? 'Trading Enabled' : 'Trading Disabled'}</span>
+                </label>
+            </div>
+        `;
+    }
+    html += `</div>`;
+    return html;
 }
 
 function renderSettingsForm(profile) {

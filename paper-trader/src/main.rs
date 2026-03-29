@@ -94,6 +94,7 @@ pub struct TradingSettings {
     pub min_volume_millions: f64,
     pub collector_interval_secs: i64,
     pub pending_commands: Option<String>,
+    pub disabled_exchanges: Vec<String>,
 }
 
 
@@ -114,6 +115,7 @@ impl Default for TradingSettings {
             min_volume_millions: 10.0,
             collector_interval_secs: 5,
             pending_commands: None,
+            disabled_exchanges: vec![],
         }
     }
 }
@@ -290,6 +292,14 @@ async fn fetch_settings(state: &AppState) -> Vec<TradingSettings> {
                 min_volume_millions: row.get(13)?,
                 collector_interval_secs: row.get(14)?,
                 pending_commands: row.get(15)?,
+                disabled_exchanges: {
+                    let s: Option<String> = row.get(19).unwrap_or(None);
+                    if let Some(s) = s {
+                        serde_json::from_str(&s).unwrap_or_default()
+                    } else {
+                        vec![]
+                    }
+                },
             })
         })?;
         let items: Vec<TradingSettings> = rows.filter_map(|r| r.ok()).collect();
@@ -628,6 +638,11 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             let spread_pct = row.spread / 100.0; // spread is already in %
             let spread_ok = row.spread >= settings.min_entry_spread;
             if !spread_ok || row.spread > settings.max_entry_spread {
+                continue;
+            }
+
+            // Skip if either exchange is disabled
+            if settings.disabled_exchanges.contains(&row.exchange_a) || settings.disabled_exchanges.contains(&row.exchange_b) {
                 continue;
             }
 

@@ -69,6 +69,7 @@ pub struct TradingProfile {
     pub pending_commands: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub disabled_exchanges: Option<String>,
 }
 
 impl Default for TradingProfile {
@@ -93,6 +94,7 @@ impl Default for TradingProfile {
             pending_commands: None,
             created_at: 0,
             updated_at: 0,
+            disabled_exchanges: Some("[]".to_string()),
         }
     }
 }
