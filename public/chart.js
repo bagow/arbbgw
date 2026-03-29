@@ -342,9 +342,17 @@ function renderExchangeFilters() {
 // ─── Table ────────────────────────────────────────────────────────────────────
 function renderTable() {
     // Only rows where BOTH exchanges are active in the filter
-    const filtered = scannerState.snapshot.filter(r =>
+    let filtered = scannerState.snapshot.filter(r =>
         scannerState.activeExchanges.has(r.exchangeA) && scannerState.activeExchanges.has(r.exchangeB)
     );
+
+    // Apply active profile's settings (min/max entry spread)
+    if (window.currentProfile && window.currentProfile.settings) {
+        const s = window.currentProfile.settings;
+        const minS = (s.min_entry_spread !== undefined && s.min_entry_spread !== null) ? s.min_entry_spread : 0;
+        const maxS = (s.max_entry_spread !== undefined && s.max_entry_spread !== null) ? s.max_entry_spread : 999;
+        filtered = filtered.filter(r => r.spread >= minS && r.spread <= maxS);
+    }
     const sorted = [...filtered].sort((a, b) => {
         const av = a[scannerState.sortKey] ?? 0, bv = b[scannerState.sortKey] ?? 0;
         return typeof av === 'string' ? av.localeCompare(bv) * scannerState.sortDir : (av - bv) * scannerState.sortDir;
