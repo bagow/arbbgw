@@ -1541,9 +1541,9 @@ input:checked+.slider:before {
 .mt-layout {
   display: flex !important;
   flex-direction: column !important;
-  flex: 1 !important;
-  padding: 0 0 44px 0 !important;      /* Use padding-bottom for the height of bottom tab bar */
+  height: calc(100vh - 44px) !important;
   margin: 0 !important;
+  padding: 0 !important;
   width: 100% !important;
   max-width: none !important;
   min-height: 0 !important;
