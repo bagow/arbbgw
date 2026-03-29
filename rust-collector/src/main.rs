@@ -109,6 +109,21 @@ const TOP_N: usize = 1000;
 const STALE_SECS: u64 = 30;
 const INTRA_SPREAD_LIMIT: f64 = 1.02;
 
+/// Tokens that are structurally decoupled across exchanges (different underlying assets,
+/// political tokens, in-delisting, or commodities) and should never appear in arb scans.
+const BLACKLIST: &[&str] = &[
+    "USOILUSDT",  // commodity, not a crypto derivative
+    "XMRUSDT",    // Monero — delisted on most CEXes, extreme spread
+    "TRUMPUSDT",  // political meme, price decoupled per exchange
+    "LUNAUSDT",   // collapsed asset, legacy remnants
+    "BTTUSDT",    // BitTorrent rebrand — different contracts per exchange
+    "BTCSTUSDT",  // Binance liquid staking token, not available everywhere
+];
+
+/// Maximum allowed absolute difference between funding rates on two exchanges (per 8h).
+/// If > this value, the spread is likely a "kimchi premium" / one-sided squeeze, not arb.
+const MAX_FUNDING_DIFF: f64 = 0.005; // 0.5% per 8h
+
 fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
     let exchanges: Vec<String> = price_map.iter().map(|e| e.key().clone()).collect();
     let mut rows = Vec::new();
@@ -125,13 +140,29 @@ fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
             for (sym, data_a) in map_a.iter() {
                 let data_b = match map_b.get(sym.as_str()) { Some(d) => d, None => continue };
 
+                // ── Blacklist filter ─────────────────────────────────────────
+                if BLACKLIST.iter().any(|bl| sym.eq_ignore_ascii_case(bl)) { continue; }
+
+                // ── Stale data filter ────────────────────────────────────────
                 if data_a.last_updated > 0 && now_secs.saturating_sub(data_a.last_updated) > STALE_SECS { continue; }
                 if data_b.last_updated > 0 && now_secs.saturating_sub(data_b.last_updated) > STALE_SECS { continue; }
+
+                // ── Valid quotes ─────────────────────────────────────────────
                 if data_a.bid <= 0.0 || data_a.ask <= 0.0 || data_b.bid <= 0.0 || data_b.ask <= 0.0 { continue; }
                 if data_a.ask > data_a.bid * INTRA_SPREAD_LIMIT || data_b.ask > data_b.bid * INTRA_SPREAD_LIMIT { continue; }
 
+                // ── Volume filter (strict: 0 vol = no data = skip) ───────────
                 let min_v = min_vol_m * 1_000_000.0;
                 if data_a.vol <= 0.0 || data_a.vol < min_v || data_b.vol <= 0.0 || data_b.vol < min_v { continue; }
+
+                // ── Funding rate divergence filter ────────────────────────────
+                // If both exchanges report non-zero funding, check for extreme divergence.
+                // A large funding diff signals a structurally one-sided market (kimchi premium),
+                // not a real arbitrage opportunity.
+                if data_a.funding_rate != 0.0 && data_b.funding_rate != 0.0 {
+                    let funding_diff = (data_a.funding_rate - data_b.funding_rate).abs();
+                    if funding_diff > MAX_FUNDING_DIFF { continue; }
+                }
 
                 let a_over_b = (data_a.bid - data_b.ask) / data_b.ask * 100.0;
                 let b_over_a = (data_b.bid - data_a.ask) / data_a.ask * 100.0;

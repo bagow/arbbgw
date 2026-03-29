@@ -177,23 +177,33 @@ pub async fn handle_get_unified(
         let mut v = serde_json::to_value(t).unwrap_or_default();
         if let (Some(c_price_a), Some(c_price_b), Some(c_spread)) = (t.last_price_a, t.last_price_b, t.last_spread) {
             let is_a_higher = t.direction.starts_with(&t.exchange_a);
-            let slippage = 0.001;
-            let ep_a = if is_a_higher { c_price_a * (1.0 + slippage) } else { c_price_a * (1.0 - slippage) };
-            let ep_b = if is_a_higher { c_price_b * (1.0 - slippage) } else { c_price_b * (1.0 + slippage) };
+            // Compute per-leg PnL for display (used as fallback if paper-trader hasn't written pnl_a/pnl_b yet)
             let coins_a = t.volume / t.entry_price_a;
             let coins_b = t.volume / t.entry_price_b;
-            let pnl_a = if is_a_higher { (t.entry_price_a - ep_a) * coins_a } else { (ep_a - t.entry_price_a) * coins_a };
-            let pnl_b = if is_a_higher { (ep_b - t.entry_price_b) * coins_b } else { (t.entry_price_b - ep_b) * coins_b };
-            let gross = t.curr_gross_pnl.unwrap_or(pnl_a + pnl_b);
-            let comm = t.volume * 0.0045 * 4.0;
+            let pnl_a_fallback = if is_a_higher { (t.entry_price_a - c_price_a) * coins_a } else { (c_price_a - t.entry_price_a) * coins_a };
+            let pnl_b_fallback = if is_a_higher { (c_price_b - t.entry_price_b) * coins_b } else { (t.entry_price_b - c_price_b) * coins_b };
+
+            // curr_gross_pnl is written by paper-trader and already includes
+            // its own commission/slippage accounting. Use it directly — do NOT
+            // re-deduct commission here (that was the double-counting bug).
+            let current_net_pnl = t.curr_gross_pnl.unwrap_or(pnl_a_fallback + pnl_b_fallback);
+
+            // commission_cost: use what paper-trader stored in the DB (preferred),
+            // or fall back to a display estimate so the UI never shows $0.00 for open trades.
+            let display_comm = t.commission_cost.unwrap_or_else(|| t.volume * 0.0045 * 4.0);
+
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("current_price_a".into(), json!(c_price_a));
                 obj.insert("current_price_b".into(), json!(c_price_b));
                 obj.insert("current_spread".into(), json!(c_spread));
-                obj.insert("gross_pnl".into(), json!(gross));
-                obj.insert("current_pnl".into(), json!(gross - comm));
-                obj.insert("pnl_a".into(), json!(t.pnl_a.unwrap_or(pnl_a)));
-                obj.insert("pnl_b".into(), json!(t.pnl_b.unwrap_or(pnl_b)));
+                // gross_pnl = raw price movement before costs (for reference display)
+                obj.insert("gross_pnl".into(), json!(pnl_a_fallback + pnl_b_fallback));
+                // current_pnl = the authoritative net figure from paper-trader
+                obj.insert("current_pnl".into(), json!(current_net_pnl));
+                // commission_cost is shown truthfully in the detail card
+                obj.insert("commission_cost".into(), json!(display_comm));
+                obj.insert("pnl_a".into(), json!(t.pnl_a.unwrap_or(pnl_a_fallback)));
+                obj.insert("pnl_b".into(), json!(t.pnl_b.unwrap_or(pnl_b_fallback)));
             }
         }
         v
