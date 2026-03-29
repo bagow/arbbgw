@@ -231,6 +231,22 @@ function renderPanel(profile, active, history, stats, exchanges) {
                     dashWrap.innerHTML = '<div class="text-sub" style="padding:48px;text-align:center;flex:1;">📊 No closed trades found for this profile yet.<br/><span style="font-size:0.8rem;">Stats will appear here once the first trade is completed.</span></div>';
                 }
             }
+            
+            // Dynamically render CEX UI updates natively during polling
+            if (exchanges) {
+                const cexWrap = document.getElementById('mt-sub-cex');
+                // Only rewrite DOM if it's currently showing the fallback message (or if active tab is cex? Actually, rewriting DOM on every poll is fine since it's just buttons/checkboxes, but better to check if it's needed)
+                if (cexWrap && activeSubTabId === 'cex') {
+                   // We could do an innerHTML replacement, but we don't want to break checkboxes if user is clicking
+                   // Since the user reported it just stays blank, replacing innerHTML entirely is acceptable for the first render
+                   if (cexWrap.innerHTML.includes('No exchange data') || activeSubTabId === 'cex') {
+                       cexWrap.innerHTML = renderCexTab(profile, exchanges);
+                   }
+                } else if (cexWrap && cexWrap.innerHTML.includes('No exchange data')) {
+                   // If tab is hidden but stuck on loading text, update it in background
+                   cexWrap.innerHTML = renderCexTab(profile, exchanges);
+                }
+            }
         }
         return;
     }
