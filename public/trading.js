@@ -24,25 +24,55 @@ const chartInstances = {};  // profileId -> { equity, exchange, winloss }
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
 async function boot() {
-    await loadProfiles();
-    // Restore last active tab from localStorage
-    const saved = localStorage.getItem('activeTabId');
-    if (saved && profiles.find(p => p.id === saved)) {
-        activeTabId = saved;
-    } else if (profiles.length) {
-        activeTabId = profiles[0].id;
+    try {
+        await loadProfiles();
+        const loader = document.querySelector('.mt-loading');
+        if (loader) loader.style.display = 'none';
+
+        // Restore last active tab from localStorage
+        const saved = localStorage.getItem('activeTabId');
+        if (saved && profiles.find(p => p.id === saved)) {
+            activeTabId = saved;
+        } else if (profiles.length) {
+            activeTabId = profiles[0].id;
+        }
+        
+        if (profiles.length === 0) {
+            const panel = document.getElementById('mt-panel');
+            if (panel) panel.innerHTML = '<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--text-sub);"><h3>No Profiles Found</h3><p>Click the ＋ button below to create one.</p></div>';
+        } else {
+            renderTabBar();
+            if (activeTabId) {
+                await switchTab(activeTabId);
+            }
+            startPoll();
+        }
+    } catch (e) {
+        console.warn('Boot halted due to error:', e.message);
+        const loader = document.querySelector('.mt-loading');
+        if (loader) loader.style.display = 'none';
     }
-    renderTabBar();
-    if (activeTabId) {
-        await switchTab(activeTabId);
-    }
-    startPoll();
 }
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
 async function apiFetch(path, opts = {}) {
+    const creds = localStorage.getItem('cex_auth');
+    if (creds) {
+        opts.headers = opts.headers || {};
+        opts.headers['Authorization'] = 'Basic ' + creds;
+    }
+
     const res = await fetch(`${API_BASE}${path}`, opts);
+    if (res.status === 401) {
+        const modal = document.getElementById('login-modal');
+        if (modal) {
+            modal.classList.remove('hidden');
+            const unEl = document.getElementById('login-username');
+            if (unEl) unEl.focus();
+        }
+        throw new Error(`HTTP 401 Unauthorized`);
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
 }
@@ -284,9 +314,9 @@ function renderPanel(profile, active, history, stats, exchanges) {
                     <tfoot style="background:var(--bg-row-alt);font-weight:600;">
                         <tr>
                             <td colspan="3" style="text-align:right;border-top:1px solid var(--border-dim)">
-                                Total (<span>${stats?.total_trades??0}</span> trades)
+                                Total (<span id="h-count-${profile.id}">${stats?.total_trades??0}</span> trades)
                             </td>
-                            <td style="color:${(stats?.total_pnl||0)>=0?'var(--green)':'var(--red)'};border-top:1px solid var(--border-dim)">
+                            <td id="h-pnl-${profile.id}" style="color:${(stats?.total_pnl||0)>=0?'var(--green)':'var(--red)'};border-top:1px solid var(--border-dim)">
                                 ${fmtPnL(stats?.total_pnl||0)}
                             </td>
                             <td colspan="3" style="border-top:1px solid var(--border-dim)"></td>
@@ -319,6 +349,20 @@ function updateDynamicElements(profile, active, stats) {
     const statsEl = document.getElementById(`panel-stats-${profile.id}`);
     if (statsEl) {
         statsEl.innerHTML = renderSubNavStats(active, stats, profile.mode);
+    }
+    
+    // Update active PnL list counts
+    const tCountEl = document.getElementById(`t-count-${profile.id}`);
+    if (tCountEl) tCountEl.textContent = active?.length ?? 0;
+
+    // Update history totals
+    const hCountEl = document.getElementById(`h-count-${profile.id}`);
+    if (hCountEl && stats) hCountEl.textContent = stats.total_trades ?? 0;
+    
+    const hPnlEl = document.getElementById(`h-pnl-${profile.id}`);
+    if (hPnlEl && stats) {
+        hPnlEl.innerHTML = fmtPnL(stats.total_pnl || 0);
+        hPnlEl.style.color = (stats.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
     }
 }
 
@@ -810,6 +854,48 @@ document.getElementById('nt-create').addEventListener('click', async () => {
     }
     document.getElementById('nt-create').textContent = 'Create Profile';
 });
+
+// ─── Login Form ───────────────────────────────────────────────────────────────
+const loginForm = document.getElementById('login-form');
+if (loginForm) {
+    loginForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = e.target.querySelector('button');
+        const errEl = document.getElementById('login-error');
+        const u = document.getElementById('login-username').value.trim();
+        const p = document.getElementById('login-password').value.trim();
+        
+        btn.textContent = 'Connecting...';
+        errEl.textContent = '';
+        
+        const creds = btoa(u + ':' + p);
+        const originalCreds = localStorage.getItem('cex_auth');
+        localStorage.setItem('cex_auth', creds);
+        
+        try {
+            // Test auth before proceeding
+            const opts = { headers: { 'Authorization': 'Basic ' + creds } };
+            const res = await fetch(`${API_BASE}/api/profiles`, opts);
+            if (res.status === 401) throw new Error('Unauthorized');
+            
+            document.getElementById('login-modal').classList.add('hidden');
+            
+            // Re-boot application layout fully
+            const loader = document.querySelector('.mt-loading');
+            if (loader) loader.style.display = 'flex';
+            const panel = document.getElementById('mt-panel');
+            if (panel) panel.innerHTML = '';
+            
+            await boot();
+        } catch (err) {
+            errEl.textContent = 'Invalid username or password.';
+            if (originalCreds) localStorage.setItem('cex_auth', originalCreds);
+            else localStorage.removeItem('cex_auth');
+        } finally {
+            btn.textContent = 'Connect';
+        }
+    });
+}
 
 // Tab close delegation
 document.getElementById('tab-bar').addEventListener('click', async (e) => {

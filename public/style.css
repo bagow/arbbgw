@@ -47,9 +47,10 @@
 }
 
 html, body {
-  height: 100%;
+  height: 100vh; /* Use 100vh to ensure it never exceeds viewport */
   margin: 0;
   padding: 0;
+  overflow: hidden; /* Prevent body scrolling so internal flex containers can scroll */
 }
 
 html {
@@ -420,6 +421,18 @@ td.dir-cell {
 .modal-close:hover {
   color: var(--text);
   border-color: var(--text-sub);
+}
+
+/* ── Login Check ─────────────────────────────────────────────────────────────── */
+#login-modal {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  background: rgba(10, 12, 16, 0.85);
+}
+
+#login-modal .modal-dialog {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 30px 60px rgba(0,0,0,0.8), 0 0 40px rgba(59, 130, 246, 0.1);
 }
 
 /* ── Timeframe buttons ───────────────────────────────────────────────────────── */
