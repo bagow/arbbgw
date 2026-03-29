@@ -258,18 +258,18 @@ function renderPanel(profile, active, history, stats, exchanges) {
         </div>
 
         <!-- Dashboard sub-panel -->
-        <div class="mt-content" id="mt-sub-dashboard" style="display:${activeSubTabId==='dashboard'?'flex':'none'}; flex:1; flex-direction:column; overflow-y:auto; padding-bottom: 30px;">
-            ${stats && stats.total_trades > 0 ? renderDashboardHTML(profile.id) : '<div class="text-sub" style="padding:48px;text-align:center;flex:1;">📊 No closed trades found for this profile yet.<br/><span style="font-size:0.8rem;">Stats will appear here once the first trade is completed.</span></div>'}
+        <div class="mt-content" id="mt-sub-dashboard" style="display:${activeSubTabId==='dashboard'?'block':'none'}; padding: 0 24px 30px 24px;">
+            ${stats && stats.total_trades > 0 ? renderDashboardHTML(profile.id) : '<div class="text-sub" style="padding:48px;text-align:center;">📊 No closed trades found for this profile yet.<br/><span style="font-size:0.8rem;">Stats will appear here once the first trade is completed.</span></div>'}
         </div>
 
         <!-- Scanner sub-panel (Integrated) -->
-        <div class="mt-content" id="mt-sub-scanner" style="display:${activeSubTabId==='scanner'?'flex':'none'}; flex:1; flex-direction:column; min-height:0;">
+        <div class="mt-content" id="mt-sub-scanner" style="display:${activeSubTabId==='scanner'?'block':'none'};">
             <div class="panel-header" style="padding:10px 15px; border-bottom:1px solid var(--border-dim); background:var(--bg-panel);">
                 <h1 class="panel-title" style="font-size:1rem;">Live Spreads</h1>
                 <span class="panel-sub" id="pair-count" style="margin-left:auto; font-size:0.8rem;">–</span>
             </div>
             <div id="exchange-filters" class="exchange-filters" style="padding:8px 15px; background:var(--bg-panel); border-bottom:1px solid var(--border-dim);"></div>
-            <div class="trading-table-wrap" style="flex:1; overflow-y:auto;">
+            <div class="trading-table-wrap">
                 <table id="spread-table">
                     <thead>
                         <tr>
@@ -292,7 +292,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
         </div>
 
         <!-- Active trades sub-panel -->
-        <div class="mt-content" id="mt-sub-active" style="display:${activeSubTabId==='active'?'flex':'none'}; flex:1; flex-direction:column;">
+        <div class="mt-content" id="mt-sub-active" style="display:${activeSubTabId==='active'?'block':'none'};">
             <div class="trading-table-wrap">
                 <table>
                     <thead><tr>
@@ -317,7 +317,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
         </div>
 
         <!-- History sub-panel -->
-        <div class="mt-content" id="mt-sub-history" style="display:${activeSubTabId==='history'?'flex':'none'}; flex:1; flex-direction:column;">
+        <div class="mt-content" id="mt-sub-history" style="display:${activeSubTabId==='history'?'block':'none'};">
             <div class="trading-table-wrap">
                 <table>
                     <thead><tr>
@@ -343,7 +343,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
         </div>
 
         <!-- Settings sub-panel -->
-        <div class="mt-content" id="mt-sub-settings" style="display:${activeSubTabId==='settings'?'block':'none'}">
+        <div class="mt-content" id="mt-sub-settings" style="display:${activeSubTabId==='settings'?'block':'none'}; padding: 24px;">
             ${renderSettingsForm(profile)}
         </div>
     `;
@@ -478,20 +478,26 @@ function renderDashboardHTML(profileId) {
             <!-- KPI row -->
             <div id="dash-kpi-${pid}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;"></div>
             <!-- Charts row 1: Equity + Win/Loss -->
-            <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;min-height:220px;">
+            <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;">
                 <div class="chart-card">
                     <div class="chart-card-title">Equity Curve</div>
-                    <canvas id="dash-equity-${pid}" height="180"></canvas>
+                    <div style="position:relative;height:240px;width:100%;">
+                        <canvas id="dash-equity-${pid}"></canvas>
+                    </div>
                 </div>
                 <div class="chart-card">
                     <div class="chart-card-title">Win / Loss</div>
-                    <canvas id="dash-winloss-${pid}" height="180"></canvas>
+                    <div style="position:relative;height:240px;width:100%;">
+                        <canvas id="dash-winloss-${pid}"></canvas>
+                    </div>
                 </div>
             </div>
             <!-- Charts row 2: Exchange PnL -->
-            <div class="chart-card" style="min-height:200px;">
+            <div class="chart-card">
                 <div class="chart-card-title">PnL by Exchange</div>
-                <canvas id="dash-exchange-${pid}" height="180"></canvas>
+                <div style="position:relative;height:260px;width:100%;">
+                    <canvas id="dash-exchange-${pid}"></canvas>
+                </div>
             </div>
         </div>
     `;
