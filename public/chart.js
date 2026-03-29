@@ -347,8 +347,9 @@ function renderTable() {
     );
 
     // Apply active profile's settings (min/max entry spread)
-    if (window.currentProfile && window.currentProfile.settings) {
-        const s = window.currentProfile.settings;
+    const currentProfile = window.profiles ? window.profiles.find(p => p.id === window.activeTabId) : null;
+    if (currentProfile && currentProfile.settings) {
+        const s = currentProfile.settings;
         const minS = (s.min_entry_spread !== undefined && s.min_entry_spread !== null) ? s.min_entry_spread : 0;
         const maxS = (s.max_entry_spread !== undefined && s.max_entry_spread !== null) ? s.max_entry_spread : 999;
         filtered = filtered.filter(r => r.spread >= minS && r.spread <= maxS);
@@ -1083,11 +1084,11 @@ async function loadScannerSettings(profileId = null) {
             const res = await fetch(`${API_BASE}/api/profiles/${profileId}`);
             if (res.ok) {
                 const data = await res.json();
-                if (data && data.min_entry_spread != null) {
-                    scannerState.threshold = parseFloat(data.min_entry_spread);
-                    scannerState.maxSpread = parseFloat(data.max_entry_spread) || 10;
-                    scannerState.refreshMs = Math.max(5, parseInt(data.collector_interval_secs) || 5) * 1000;
-                    console.log(`Scanner: loaded profile ${profileId} settings (min: ${scannerState.threshold}%)`);
+                if (data && data.settings && data.settings.min_entry_spread != null) {
+                    scannerState.threshold = parseFloat(data.settings.min_entry_spread);
+                    scannerState.maxSpread = parseFloat(data.settings.max_entry_spread) || 10;
+                    scannerState.refreshMs = Math.max(5, parseInt(data.settings.collector_interval_secs) || 5) * 1000;
+                    console.log(`Scanner: loaded profile ${profileId} settings (min: ${scannerState.threshold}%, max: ${scannerState.maxSpread}%)`);
                     return;
                 }
             }
