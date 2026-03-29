@@ -586,7 +586,6 @@ function renderDashboardCharts(profileId, stats) {
     } else if (tpEl) {
         tpEl.innerHTML = '<tr><td colspan="2" style="text-align:center;color:var(--text-sub)">No data</td></tr>';
     }
-    }
 
     Chart.defaults.color = '#94a3b8';
     Chart.defaults.borderColor = '#334155';
