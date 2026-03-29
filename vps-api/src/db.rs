@@ -69,10 +69,14 @@ pub async fn init_db(db: &Connection) -> Result<()> {
                 pending_commands TEXT,
                 owner TEXT,
                 created_at INTEGER,
-                updated_at INTEGER
+                updated_at INTEGER,
+                disabled_exchanges TEXT DEFAULT '[]'
             );
             ",
         )?;
+
+        // Try to add the column in case the table already existed from an older version
+        let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'", []);
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
         conn.execute(
@@ -96,15 +100,6 @@ pub async fn init_db(db: &Connection) -> Result<()> {
         Ok(())
     })
     .await?;
-
-    let _ = db.call(|conn| {
-        conn.execute(
-            "ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'",
-            [],
-        )
-        .map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
-    })
-    .await;
 
     Ok(())
 }
