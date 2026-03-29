@@ -428,6 +428,23 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             }
         };
 
+        // Exit spread defines the spread based on closing operations
+        // If we shorted A, we buy back at Ask A. We longed B, we sell at Bid B.
+        // The spread between Ask A and Bid B is what we care about for closing.
+        let exit_spread = if is_a_higher {
+            if data_b.bid > 0.0 {
+                (data_a.ask - data_b.bid) / data_b.bid * 100.0
+            } else {
+                0.0
+            }
+        } else {
+            if data_a.bid > 0.0 {
+                (data_b.ask - data_a.bid) / data_a.bid * 100.0
+            } else {
+                0.0
+            }
+        };
+
         let mid_spread = if is_a_higher {
             (data_a.price - data_b.price) / data_b.price * 100.0
         } else {
@@ -439,14 +456,14 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         let c_price_b = data_b.price;
 
         let exit_price_a = if is_a_higher {
-            c_price_a * (1.0 + slippage)
+            data_a.ask * (1.0 + slippage) // Buy back short at ask + slippage
         } else {
-            c_price_a * (1.0 - slippage)
+            data_a.bid * (1.0 - slippage) // Sell long at bid - slippage
         };
         let exit_price_b = if is_a_higher {
-            c_price_b * (1.0 - slippage)
+            data_b.bid * (1.0 - slippage) // Sell long at bid - slippage
         } else {
-            c_price_b * (1.0 + slippage)
+            data_b.ask * (1.0 + slippage) // Buy back short at ask + slippage
         };
 
         let coins_a = trade.volume / trade.entry_price_a;
@@ -479,14 +496,13 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
 
         let net_pnl = gross_pnl - comm_cost - funding_cost;
 
-        // Update best PnL
-        let prev_best = if trade.highest_spread_reached.abs() > 50.0 {
-            net_pnl
-        } else {
-            trade.highest_spread_reached
-        };
-        let best_pnl = if net_pnl > prev_best { net_pnl } else { prev_best };
-        let update_best = net_pnl > prev_best;
+        // Initialize best_pnl cleanly if it's the first check.
+        let mut best_pnl = trade.highest_spread_reached;
+        if best_pnl < -5000.0 {
+            best_pnl = net_pnl;
+        } else if net_pnl > best_pnl {
+            best_pnl = net_pnl;
+        }
 
         // Exit conditions
         let target_pnl_usd = trade.volume * (settings.take_profit_percent / 100.0);
@@ -494,7 +510,7 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
 
         let triggered_tp = net_pnl >= target_pnl_usd;
         let triggered_stop = (best_pnl - net_pnl) >= stop_drop_usd;
-        let triggered_zero_spread = mid_spread <= 0.0;
+        let triggered_zero_spread = exit_spread <= 0.0;
 
         if triggered_tp || triggered_stop || triggered_zero_spread {
             // Close the trade
@@ -622,14 +638,14 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             let is_a_higher = row.direction.starts_with(&row.exchange_a);
 
             let entry_price_a = if is_a_higher {
-                row.price_a * (1.0 - slippage)
+                row.bid_a * (1.0 - slippage) // We short A -> sell at Bid
             } else {
-                row.price_a * (1.0 + slippage)
+                row.ask_a * (1.0 + slippage) // We long A -> buy at Ask
             };
             let entry_price_b = if is_a_higher {
-                row.price_b * (1.0 + slippage)
+                row.ask_b * (1.0 + slippage) // We long B -> buy at Ask
             } else {
-                row.price_b * (1.0 - slippage)
+                row.bid_b * (1.0 - slippage) // We short B -> sell at Bid
             };
 
             let pair = row.pair.clone();
