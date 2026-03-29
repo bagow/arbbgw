@@ -127,10 +127,15 @@ function renderTabBar() {
             ? '<span class="tab-badge tab-badge--real">💰</span>'
             : '<span class="tab-badge tab-badge--paper">🧪</span>';
 
+        const isDefault = p.id === 'paper-default' || p.id === 'real-default';
+        let dispName = escHtml(p.name);
+        if (p.id === 'paper-default') dispName = 'Public Paper';
+        if (p.id === 'real-default') dispName = 'Public Real';
+
         tab.innerHTML = `
             ${badge}
-            <span class="tab-name">${escHtml(p.name)}</span>
-            <button class="tab-close" data-id="${p.id}" title="Close tab">×</button>
+            <span class="tab-name">${dispName}</span>
+            ${isDefault ? '' : `<button class="tab-close" data-id="${p.id}" title="Close tab">&times;</button>`}
         `;
         tab.addEventListener('click', (e) => {
             if (e.target.classList.contains('tab-close')) return;
@@ -214,7 +219,18 @@ function renderPanel(profile, active, history, stats, exchanges) {
         if (active !== null) {
             renderActiveTable(profile.id, active);
             renderHistoryTable(profile.id, history);
-            if (stats && stats.total_trades > 0) renderDashboardCharts(profile.id, stats);
+            const dashWrap = document.getElementById('mt-sub-dashboard');
+            const hasStats = stats && stats.total_trades > 0;
+            if (dashWrap && hasStats) {
+                if (!document.getElementById(`dash-equity-${profile.id}`)) {
+                    dashWrap.innerHTML = renderDashboardHTML(profile.id);
+                }
+                renderDashboardCharts(profile.id, stats);
+            } else if (dashWrap && !hasStats) {
+                if (document.getElementById(`dash-equity-${profile.id}`)) {
+                    dashWrap.innerHTML = '<div class="text-sub" style="padding:48px;text-align:center;flex:1;">📊 No closed trades found for this profile yet.<br/><span style="font-size:0.8rem;">Stats will appear here once the first trade is completed.</span></div>';
+                }
+            }
         }
         return;
     }
@@ -242,7 +258,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
         </div>
 
         <!-- Dashboard sub-panel -->
-        <div class="mt-content" id="mt-sub-dashboard" style="display:${activeSubTabId==='dashboard'?'flex':'none'}; flex:1; flex-direction:column;">
+        <div class="mt-content" id="mt-sub-dashboard" style="display:${activeSubTabId==='dashboard'?'flex':'none'}; flex:1; flex-direction:column; overflow-y:auto; padding-bottom: 30px;">
             ${stats && stats.total_trades > 0 ? renderDashboardHTML(profile.id) : '<div class="text-sub" style="padding:48px;text-align:center;flex:1;">📊 No closed trades found for this profile yet.<br/><span style="font-size:0.8rem;">Stats will appear here once the first trade is completed.</span></div>'}
         </div>
 
