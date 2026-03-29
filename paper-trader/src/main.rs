@@ -747,14 +747,14 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
                     let pnl_a = if is_a_higher { (tr.entry_price_a - ep_a) * coins_a } else { (ep_a - tr.entry_price_a) * coins_a };
                     let pnl_b = if is_a_higher { (ep_b - tr.entry_price_b) * coins_b } else { (tr.entry_price_b - ep_b) * coins_b };
                     let gross = pnl_a + pnl_b;
-                    // Use commission_cost saved at open time (correct rate × volume × 4 legs).
-                    // Falls back to gross if somehow missing (old trades before this fix).
-                    let comm = tr.commission_cost;
+                    // curr_gross_pnl now stores NET pnl (after comm+funding) written by engine loop.
+                    // For the worker-push branch, fall back to gross - commission_cost.
+                    let comm = tr.commission_cost.unwrap_or(0.0);
                     tr.current_price_a = Some(c_price_a);
                     tr.current_price_b = Some(c_price_b);
                     tr.current_spread = Some(c_spread);
-                    tr.gross_pnl = Some(tr.curr_gross_pnl.unwrap_or(gross));
-                    tr.current_pnl = Some(tr.curr_gross_pnl.unwrap_or(gross) - comm);
+                    tr.gross_pnl = Some(gross);
+                    tr.current_pnl = Some(tr.curr_gross_pnl.unwrap_or(gross - comm));
                     tr.pnl_a = Some(pnl_a);
                     tr.pnl_b = Some(pnl_b);
                 }
@@ -877,12 +877,12 @@ async fn handle_get_trades(State(state): State<AppState>) -> Response {
             let pnl_a = if is_a_higher { (t.entry_price_a - ep_a) * coins_a } else { (ep_a - t.entry_price_a) * coins_a };
             let pnl_b = if is_a_higher { (ep_b - t.entry_price_b) * coins_b } else { (t.entry_price_b - ep_b) * coins_b };
             let gross = pnl_a + pnl_b;
-            let comm = t.commission_cost; // saved at open time with correct rate
+            let comm = t.commission_cost.unwrap_or(0.0); // saved at open time with correct rate
             t.current_price_a = Some(c_price_a);
             t.current_price_b = Some(c_price_b);
             t.current_spread = Some(c_spread);
-            t.gross_pnl = Some(t.curr_gross_pnl.unwrap_or(gross));
-            t.current_pnl = Some(t.curr_gross_pnl.unwrap_or(gross) - comm);
+            t.gross_pnl = Some(gross);
+            t.current_pnl = Some(t.curr_gross_pnl.unwrap_or(gross - comm));
         }
     }
 
