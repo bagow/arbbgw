@@ -727,7 +727,7 @@ async fn kucoin_handler(price_map: &PriceMap) -> Result<()> {
             if let Ok(data) = resp.json::<Value>().await {
                 let vol_usd = data["data"]["turnoverOf24h"].as_f64().unwrap_or(0.0);
                 if vol_usd > 0.0 {
-                    let entry = price_map.entry("kucoin".to_string()).or_default();
+                    let mut entry = price_map.entry("kucoin".to_string()).or_default();
                     entry.entry(normalized).or_insert_with(|| TickerData { vol: vol_usd, ..Default::default() }).vol = vol_usd;
                 }
             }
