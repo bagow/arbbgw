@@ -347,7 +347,10 @@ function renderTable() {
     );
 
     // Apply active profile's settings (min/max entry spread)
-    const currentProfile = window.profiles ? window.profiles.find(p => p.id === window.activeTabId) : null;
+    const currentProfile = (typeof profiles !== 'undefined' && typeof activeTabId !== 'undefined') 
+        ? profiles.find(p => p.id === activeTabId) 
+        : null;
+    
     if (currentProfile) {
         const s = currentProfile;
         const minS = (s.min_entry_spread !== undefined && s.min_entry_spread !== null) ? s.min_entry_spread : 0;
