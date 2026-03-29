@@ -486,6 +486,28 @@ function renderDashboardHTML(profileId) {
                 </div>
             </div>
 
+            <!-- Top Tokens and Pairs -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+                <div class="chart-card">
+                    <div class="chart-card-title">Top Tokens by PnL</div>
+                    <div class="table-wrap" style="max-height: 240px; overflow-y: auto;">
+                        <table style="width:100%;text-align:left;">
+                            <thead><tr><th>Token</th><th style="text-align:right">PnL</th></tr></thead>
+                            <tbody id="dash-toptokens-${pid}"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-card-title">Top Exchange Pairs by PnL</div>
+                    <div class="table-wrap" style="max-height: 240px; overflow-y: auto;">
+                        <table style="width:100%;text-align:left;">
+                            <thead><tr><th>Exchange Pair</th><th style="text-align:right">PnL</th></tr></thead>
+                            <tbody id="dash-toppairs-${pid}"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
             <!-- Charts row 1: Equity + Win/Loss -->
             <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;">
                 <div class="chart-card">
@@ -534,17 +556,36 @@ function renderDashboardCharts(profileId, stats) {
         const wins = stats.wins || 0;
         const winRate = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(1) : '0.0';
         const avgPnl = stats.avg_pnl || 0;
+        const avgDuration = stats.avg_duration || 0;
         kpiEl.innerHTML = [
             ['Total PnL', fmtPnL(totalPnl), totalPnl >= 0 ? 'var(--green)' : 'var(--red)'],
             ['Trades', totalTrades, 'var(--text)'],
             ['Win Rate', `${winRate}%`, wins / (totalTrades || 1) >= 0.5 ? 'var(--green)' : 'var(--red)'],
             ['Avg PnL', fmtPnL(avgPnl), avgPnl >= 0 ? 'var(--green)' : 'var(--red)'],
+            ['Avg Duration', typeof fmtDuration === 'function' ? fmtDuration(avgDuration) : avgDuration + 'ms', 'var(--text)'],
         ].map(([label, value, color]) => `
             <div style="background:var(--bg-row-alt);border:1px solid var(--border-dim);border-radius:10px;padding:14px 16px;">
                 <div style="font-size:.75rem;color:var(--text-sub);margin-bottom:4px;">${label}</div>
                 <div style="font-size:1.2rem;font-weight:700;color:${color};">${value}</div>
             </div>
         `).join('');
+    }
+
+    // Top Tokens array
+    const ttEl = document.getElementById(`dash-toptokens-${pid}`);
+    if (ttEl && stats.top_tokens && stats.top_tokens.length > 0) {
+        ttEl.innerHTML = stats.top_tokens.map(t => `<tr><td><strong>${t.token}</strong></td><td style="text-align:right;color:${(t.pnl||0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl||0)}</td></tr>`).join('');
+    } else if (ttEl) {
+        ttEl.innerHTML = '<tr><td colspan="2" style="text-align:center;color:var(--text-sub)">No data</td></tr>';
+    }
+
+    // Top Exchange Pairs array
+    const tpEl = document.getElementById(`dash-toppairs-${pid}`);
+    if (tpEl && stats.top_exchange_pairs && stats.top_exchange_pairs.length > 0) {
+        tpEl.innerHTML = stats.top_exchange_pairs.map(p => `<tr><td><strong>${p.pair}</strong></td><td style="text-align:right;color:${(p.pnl||0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(p.pnl||0)}</td></tr>`).join('');
+    } else if (tpEl) {
+        tpEl.innerHTML = '<tr><td colspan="2" style="text-align:center;color:var(--text-sub)">No data</td></tr>';
+    }
     }
 
     Chart.defaults.color = '#94a3b8';
@@ -575,10 +616,10 @@ function renderDashboardCharts(profileId, stats) {
         const historyTotal = [];
 
         curve.forEach((p, i) => {
-            if (p.ex_a) exBalances[p.ex_a] += (p.pnl_a !== undefined ? p.pnl_a : (p.pnl || 0) / 2);
+            if (p.ex_a) exBalances[p.ex_a] += (p.pnl || 0) / 2;
             else if (exKeys.has('Capital')) exBalances['Capital'] += (p.pnl || 0) / 2;
             
-            if (p.ex_b) exBalances[p.ex_b] += (p.pnl_b !== undefined ? p.pnl_b : (p.pnl || 0) / 2);
+            if (p.ex_b) exBalances[p.ex_b] += (p.pnl || 0) / 2;
             else if (exKeys.has('Capital')) exBalances['Capital'] += (p.pnl || 0) / 2;
             
             if (curve.length <= 150 || i % Math.ceil(curve.length / 100) === 0 || i === curve.length - 1) {

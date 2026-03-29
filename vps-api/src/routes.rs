@@ -213,12 +213,14 @@ pub async fn handle_get_unified(
         let p = pid.clone();
         move |conn| {
             // Aggregate totals
-            let mut stmt = conn.prepare("SELECT COUNT(*), SUM(pnl), SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) FROM trades WHERE status='CLOSED' AND profile_id=?")?;
-            struct Agg { count: i64, pnl: Option<f64>, wins: Option<i64> }
+            let mut stmt = conn.prepare("SELECT COUNT(*), SUM(pnl), SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), SUM(exit_time - entry_time), COUNT(exit_time) FROM trades WHERE status='CLOSED' AND profile_id=?")?;
+            struct Agg { count: i64, pnl: Option<f64>, wins: Option<i64>, total_duration: Option<i64>, closed_count: Option<i64> }
             let agg = stmt.query_row([p.clone()], |r| Ok(Agg {
                 count: r.get(0)?,
                 pnl: r.get(1)?,
-                wins: r.get(2)?
+                wins: r.get(2)?,
+                total_duration: r.get(3)?,
+                closed_count: r.get(4)?
             }))?;
             
             let total_trades = agg.count;
@@ -226,35 +228,52 @@ pub async fn handle_get_unified(
             let wins = agg.wins.unwrap_or(0);
             let losses = total_trades - wins;
             let avg_pnl = if total_trades > 0 { total_pnl / total_trades as f64 } else { 0.0 };
+            
+            let avg_duration = if let (Some(td), Some(cc)) = (agg.total_duration, agg.closed_count) {
+                if cc > 0 { td / cc } else { 0 }
+            } else { 0 };
 
             tracing::debug!("Stats for [{}]: count={} pnl={:.2} wins={}", p, total_trades, total_pnl, wins);
 
             // Equity curve (last 1000)
-            let mut stmt = conn.prepare("SELECT pnl, exchange_a, exchange_b, pnl_a, pnl_b FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time ASC LIMIT 1000")?;
+            let mut stmt = conn.prepare("SELECT pnl, exchange_a, exchange_b FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time ASC LIMIT 1000")?;
             let equity_curve: Vec<serde_json::Value> = stmt.query_map([p.clone()], |r| {
                 let pnl: f64 = r.get(0)?;
                 let ex_a: String = r.get(1)?;
                 let ex_b: String = r.get(2)?;
-                let pnl_a: Option<f64> = r.get(3).ok().unwrap_or(None);
-                let pnl_b: Option<f64> = r.get(4).ok().unwrap_or(None);
-                Ok(json!({ 
-                    "pnl": pnl, 
-                    "ex_a": ex_a, 
-                    "ex_b": ex_b,
-                    "pnl_a": pnl_a.unwrap_or(pnl / 2.0),
-                    "pnl_b": pnl_b.unwrap_or(pnl / 2.0)
-                }))
+                Ok(json!({ "pnl": pnl, "ex_a": ex_a, "ex_b": ex_b }))
             })?.filter_map(|r| r.ok()).collect();
 
-            // PnL by Exchange
+            // Top tokens by PnL
+            let mut stmt = conn.prepare("SELECT pair, SUM(pnl) as tpnl FROM trades WHERE status='CLOSED' AND profile_id=? GROUP BY pair ORDER BY tpnl DESC LIMIT 10")?;
+            let top_tokens: Vec<serde_json::Value> = stmt.query_map([p.clone()], |r| {
+                Ok(json!({ "token": r.get::<_, String>(0)?, "pnl": r.get::<_, f64>(1)? }))
+            })?.filter_map(|r| r.ok()).collect();
+
+            // PnL by Exchange and Best Exchange Pairs
             let mut stmt = conn.prepare("SELECT exchange_a, exchange_b, SUM(pnl) FROM trades WHERE status='CLOSED' AND profile_id=? GROUP BY exchange_a, exchange_b")?;
             let rows: Vec<(String, String, f64)> = stmt.query_map([p.clone()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.filter_map(|r| r.ok()).collect();
             
             let mut pnl_by_exchange: HashMap<String, f64> = HashMap::new();
+            let mut exchange_pairs: HashMap<String, f64> = HashMap::new();
+            
             for (ex_a, ex_b, pnl) in rows {
-                *pnl_by_exchange.entry(ex_a).or_insert(0.0) += pnl / 2.0;
-                *pnl_by_exchange.entry(ex_b).or_insert(0.0) += pnl / 2.0;
+                *pnl_by_exchange.entry(ex_a.clone()).or_insert(0.0) += pnl / 2.0;
+                *pnl_by_exchange.entry(ex_b.clone()).or_insert(0.0) += pnl / 2.0;
+
+                let mut pair_arr = [ex_a, ex_b];
+                pair_arr.sort();
+                let pair_key = format!("{}-{}", pair_arr[0], pair_arr[1]);
+                *exchange_pairs.entry(pair_key).or_insert(0.0) += pnl;
             }
+
+            let mut top_exchange_pairs: Vec<serde_json::Value> = exchange_pairs.into_iter()
+                .map(|(pair, pnl)| json!({ "pair": pair, "pnl": pnl }))
+                .collect();
+            top_exchange_pairs.sort_by(|a, b| {
+                b.get("pnl").unwrap().as_f64().unwrap().total_cmp(&a.get("pnl").unwrap().as_f64().unwrap())
+            });
+            top_exchange_pairs.truncate(10);
 
             Ok(json!({
                 "total_pnl": total_pnl,
@@ -262,8 +281,11 @@ pub async fn handle_get_unified(
                 "wins": wins,
                 "losses": losses,
                 "avg_pnl": avg_pnl,
+                "avg_duration": avg_duration,
                 "equity_curve": equity_curve,
-                "pnl_by_exchange": pnl_by_exchange
+                "pnl_by_exchange": pnl_by_exchange,
+                "top_tokens": top_tokens,
+                "top_exchange_pairs": top_exchange_pairs
             }))
         }
     }).await.unwrap_or_else(|e| {
@@ -274,8 +296,11 @@ pub async fn handle_get_unified(
             "wins": 0,
             "losses": 0,
             "avg_pnl": 0.0,
+            "avg_duration": 0,
             "equity_curve": Vec::<serde_json::Value>::new(),
-            "pnl_by_exchange": {}
+            "pnl_by_exchange": {},
+            "top_tokens": Vec::<serde_json::Value>::new(),
+            "top_exchange_pairs": Vec::<serde_json::Value>::new()
         })
     });
 
