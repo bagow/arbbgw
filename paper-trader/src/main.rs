@@ -655,14 +655,11 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             let vol = settings.trade_volume;
             let spread = row.spread;
             let profile_id_db = pid.clone();
-            
-            // Log that we are ACTUALLY opening the trade now
-            info!("OPENING: Profile={} Pair={} Spread={:.2}%", profile_id_db, pair, spread);
+            // Commission paid at entry for all 4 legs (2 entry + 2 exit, estimated upfront)
+            let comm_at_open = vol * (settings.commission_rate / 100.0) * 4.0;
 
-            info!(
-                "Opening trade {} {} {} split spread={:.4}% profile={}",
-                pair, ex_a, ex_b, spread, profile_id_db
-            );
+            info!("OPENING: Profile={} Pair={} Vol={} Spread={:.2}% Comm={:.4}",
+                profile_id_db, pair, vol, spread, comm_at_open);
 
             match state
                 .db
@@ -670,12 +667,12 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
                     conn.execute(
                         "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,
                                              entry_price_a,entry_price_b,entry_spread,entry_time,
-                                             highest_spread_reached,status,pnl_a,pnl_b,close_reason,profile_id)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                             highest_spread_reached,status,pnl_a,pnl_b,close_reason,profile_id,commission_cost)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         params![
                             pair, ex_a, ex_b, dir, vol,
                             entry_price_a, entry_price_b, spread, now,
-                            -9999.0, "OPEN", 0.0, 0.0, None::<String>, profile_id_db
+                            -9999.0, "OPEN", 0.0, 0.0, None::<String>, profile_id_db, comm_at_open
                         ],
                     ).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
                 })
@@ -725,7 +722,9 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
                     let pnl_a = if is_a_higher { (tr.entry_price_a - ep_a) * coins_a } else { (ep_a - tr.entry_price_a) * coins_a };
                     let pnl_b = if is_a_higher { (ep_b - tr.entry_price_b) * coins_b } else { (tr.entry_price_b - ep_b) * coins_b };
                     let gross = pnl_a + pnl_b;
-                    let comm = tr.volume * 0.0045 * 4.0;
+                    // Use commission_cost saved at open time (correct rate × volume × 4 legs).
+                    // Falls back to gross if somehow missing (old trades before this fix).
+                    let comm = tr.commission_cost;
                     tr.current_price_a = Some(c_price_a);
                     tr.current_price_b = Some(c_price_b);
                     tr.current_spread = Some(c_spread);
@@ -853,7 +852,7 @@ async fn handle_get_trades(State(state): State<AppState>) -> Response {
             let pnl_a = if is_a_higher { (t.entry_price_a - ep_a) * coins_a } else { (ep_a - t.entry_price_a) * coins_a };
             let pnl_b = if is_a_higher { (ep_b - t.entry_price_b) * coins_b } else { (t.entry_price_b - ep_b) * coins_b };
             let gross = pnl_a + pnl_b;
-            let comm = t.volume * 0.0045 * 4.0;
+            let comm = t.commission_cost; // saved at open time with correct rate
             t.current_price_a = Some(c_price_a);
             t.current_price_b = Some(c_price_b);
             t.current_spread = Some(c_spread);
