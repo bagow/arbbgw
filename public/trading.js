@@ -565,7 +565,7 @@ function renderDashboardCharts(profileId, stats) {
         let cIdx = 0;
         const colorMap = {};
         exKeys.forEach(ex => {
-            exBalances[ex] = 100 / (exKeys.size || 1); // 100 virtual starting balance
+            exBalances[ex] = 100; // $100 base for each exchange
             colorMap[ex] = colors[cIdx % colors.length];
             cIdx++;
         });
