@@ -214,7 +214,7 @@ pub async fn handle_get_unified(
         move |conn| {
             // Aggregate totals
             let mut stmt = conn.prepare("SELECT COUNT(*), SUM(pnl), SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) FROM trades WHERE status='CLOSED' AND profile_id=?")?;
-            struct Agg { count: i64, pnl: Option<f64>, wins: i64 }
+            struct Agg { count: i64, pnl: Option<f64>, wins: Option<i64> }
             let agg = stmt.query_row([p.clone()], |r| Ok(Agg {
                 count: r.get(0)?,
                 pnl: r.get(1)?,
@@ -223,9 +223,11 @@ pub async fn handle_get_unified(
             
             let total_trades = agg.count;
             let total_pnl = agg.pnl.unwrap_or(0.0);
-            let wins = agg.wins;
+            let wins = agg.wins.unwrap_or(0);
             let losses = total_trades - wins;
             let avg_pnl = if total_trades > 0 { total_pnl / total_trades as f64 } else { 0.0 };
+
+            tracing::debug!("Stats for [{}]: count={} pnl={:.2} wins={}", p, total_trades, total_pnl, wins);
 
             // Equity curve (last 1000)
             let mut stmt = conn.prepare("SELECT pnl FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time ASC LIMIT 1000")?;
@@ -254,15 +256,18 @@ pub async fn handle_get_unified(
                 "pnl_by_exchange": pnl_by_exchange
             }))
         }
-    }).await.unwrap_or(json!({
-        "total_pnl": 0.0,
-        "total_trades": 0,
-        "wins": 0,
-        "losses": 0,
-        "avg_pnl": 0.0,
-        "equity_curve": Vec::<Value>::new(),
-        "pnl_by_exchange": {}
-    }));
+    }).await.unwrap_or_else(|e| {
+        tracing::error!("Stats failed for [{}]: {}", pid, e);
+        json!({
+            "total_pnl": 0.0,
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "avg_pnl": 0.0,
+            "equity_curve": Vec::<serde_json::Value>::new(),
+            "pnl_by_exchange": {}
+        })
+    });
 
     // Return payload matching frontend expectations
     (StatusCode::OK, Json(json!({

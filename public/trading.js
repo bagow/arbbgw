@@ -142,6 +142,7 @@ async function refreshActiveTab() {
     if (!profile) return;
 
     const { trades, real, exchanges, profiles: serverProfiles, profile_stats, profile_active, profile_history } = lastUnified;
+    console.log(`[DEBUG] Received Unified for ${activeTabId}:`, { profile_stats, trades_stats: trades?.stats });
 
     // Sync local profile settings from server profiles data
     if (serverProfiles) {
