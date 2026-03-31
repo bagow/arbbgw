@@ -3,7 +3,7 @@ name: Deploy Crypto Arbitrage Stack
 on:
   push:
     branches: [ main ]
-  workflow_dispatch: # Позволяет запускать вручную из вкладки Actions
+  workflow_dispatch:
     inputs:
       deploy_vps_api:
         description: 'Deploy vps-api'
@@ -21,6 +21,10 @@ on:
         description: 'Deploy real-trader'
         type: boolean
         default: false
+      deploy_core:
+        description: 'Deploy core-node (single-process engine)'
+        type: boolean
+        default: false
       deploy_cloudflared:
         description: 'Setup Cloudflare Tunnel on VPS'
         type: boolean
@@ -31,14 +35,29 @@ on:
         default: false
 
 jobs:
-  # --- 1. Проверка изменений (чтобы не деплоить лишнее) ---
+  # --- 0. Cargo check для всего workspace (блокирует деплой при ошибке) ---
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      - name: Workspace check
+        run: cargo check --workspace --locked
+
+  # --- 1. Проверка изменений ---
   changes:
     runs-on: ubuntu-latest
     outputs:
-      vps_api: ${{ steps.filter.outputs.vps_api }}
-      collector: ${{ steps.filter.outputs.collector }}
-      paper: ${{ steps.filter.outputs.paper }}
-      real: ${{ steps.filter.outputs.real }}
+      vps_api:    ${{ steps.filter.outputs.vps_api }}
+      collector:  ${{ steps.filter.outputs.collector }}
+      paper:      ${{ steps.filter.outputs.paper }}
+      real:       ${{ steps.filter.outputs.real }}
+      core:       ${{ steps.filter.outputs.core }}
       cloudflared: ${{ steps.filter.outputs.cloudflared }}
       cloudflare: ${{ steps.filter.outputs.cloudflare }}
     steps:
@@ -50,12 +69,26 @@ jobs:
             vps_api:
               - 'vps-api/**'
               - 'vps-api.service'
+              - 'shared/**'
+              - 'Cargo.toml'
             collector:
               - 'rust-collector/**'
+              - 'shared/**'
+              - 'Cargo.toml'
             paper:
               - 'paper-trader/**'
+              - 'shared/**'
+              - 'Cargo.toml'
             real:
               - 'real-trader/**'
+              - 'real-trader.service'
+              - 'shared/**'
+              - 'Cargo.toml'
+            core:
+              - 'core-node/**'
+              - 'core-node.service'
+              - 'shared/**'
+              - 'Cargo.toml'
             cloudflared:
               - 'cloudflared.service'
             cloudflare:
@@ -65,25 +98,30 @@ jobs:
 
   # --- 2. Деплой vps-api ---
   deploy-vps-api:
-    needs: changes
+    needs: [check, changes]
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_vps_api == 'true' ||
-      github.event_name == 'push' && (needs.changes.outputs.vps_api == 'true')
+      github.event_name == 'push' && needs.changes.outputs.vps_api == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      # Workspace build — binary lands in target/release/ (not vps-api/target/)
       - name: Build vps-api
-        run: cargo build --release --manifest-path vps-api/Cargo.toml
+        run: cargo build --release -p vps-api --locked
       - name: Copy to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "vps-api/target/release/vps-api,vps-api.service"
-          target: "/tmp/deploy/vps-api"
+          source: "target/release/vps-api,vps-api.service"
+          target: "/tmp/deploy/"
           strip_components: 0
       - name: Install and Restart
         uses: appleboy/ssh-action@v1.0.3
@@ -92,14 +130,12 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
-            sudo mv /tmp/deploy/vps-api/vps-api/target/release/vps-api /usr/local/bin/
+            sudo mv /tmp/deploy/target/release/vps-api /usr/local/bin/
             sudo chown root:root /usr/local/bin/vps-api
             sudo chmod +x /usr/local/bin/vps-api
-            sudo restorecon -v /usr/local/bin/vps-api
-            if [ -f /tmp/deploy/vps-api/vps-api.service ]; then
-              sudo mv /tmp/deploy/vps-api/vps-api.service /etc/systemd/system/
-              sudo chmod 644 /etc/systemd/system/vps-api.service
-              sudo restorecon -v /etc/systemd/system/vps-api.service
+            sudo restorecon -v /usr/local/bin/vps-api 2>/dev/null || true
+            if [ -f /tmp/deploy/vps-api.service ]; then
+              sudo mv /tmp/deploy/vps-api.service /etc/systemd/system/
               sudo systemctl daemon-reload
               sudo systemctl enable vps-api
             fi
@@ -108,26 +144,30 @@ jobs:
 
   # --- 3. Деплой rust-collector ---
   deploy-collector:
-    needs: changes
+    needs: [check, changes]
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_collector == 'true' ||
-      github.event_name == 'push' && (needs.changes.outputs.collector == 'true')
+      github.event_name == 'push' && needs.changes.outputs.collector == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
       - name: Build rust-collector
-        run: cargo build --release --manifest-path rust-collector/Cargo.toml
+        run: cargo build --release -p rust-collector --locked
       - name: Copy to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "rust-collector/target/release/rust-collector"
-          target: "/tmp/deploy/collector"
-          strip_components: 3
+          source: "target/release/rust-collector"
+          target: "/tmp/deploy/"
+          strip_components: 2
       - name: Install and Restart
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -135,35 +175,39 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
-            sudo mv /tmp/deploy/collector/rust-collector /usr/local/bin/
+            sudo mv /tmp/deploy/rust-collector /usr/local/bin/
             sudo chown root:root /usr/local/bin/rust-collector
             sudo chmod +x /usr/local/bin/rust-collector
-            sudo restorecon -v /usr/local/bin/rust-collector
+            sudo restorecon -v /usr/local/bin/rust-collector 2>/dev/null || true
             sudo systemctl restart rust-collector
             sudo systemctl status rust-collector
 
-  # --- 3. Деплой paper-trader ---
+  # --- 4. Деплой paper-trader ---
   deploy-paper:
-    needs: changes
+    needs: [check, changes]
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_paper == 'true' ||
-      github.event_name == 'push' && (needs.changes.outputs.paper == 'true')
+      github.event_name == 'push' && needs.changes.outputs.paper == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
       - name: Build paper-trader
-        run: cargo build --release --manifest-path paper-trader/Cargo.toml
+        run: cargo build --release -p paper-trader --locked
       - name: Copy to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "paper-trader/target/release/paper-trader"
-          target: "/tmp/deploy/paper"
-          strip_components: 3
+          source: "target/release/paper-trader"
+          target: "/tmp/deploy/"
+          strip_components: 2
       - name: Install and Restart
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -171,35 +215,39 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
-            sudo mv /tmp/deploy/paper/paper-trader /usr/local/bin/
+            sudo mv /tmp/deploy/paper-trader /usr/local/bin/
             sudo chown root:root /usr/local/bin/paper-trader
             sudo chmod +x /usr/local/bin/paper-trader
-            sudo restorecon -v /usr/local/bin/paper-trader
+            sudo restorecon -v /usr/local/bin/paper-trader 2>/dev/null || true
             sudo systemctl restart paper-trader
             sudo systemctl status paper-trader
 
-  # --- 4. Деплой real-trader ---
+  # --- 5. Деплой real-trader ---
   deploy-real:
-    needs: changes
+    needs: [check, changes]
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_real == 'true' ||
-      github.event_name == 'push' && (needs.changes.outputs.real == 'true')
+      github.event_name == 'push' && needs.changes.outputs.real == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
       - name: Build real-trader
-        run: cargo build --release --manifest-path real-trader/Cargo.toml
+        run: cargo build --release -p real-trader --locked
       - name: Copy to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "real-trader/target/release/real-trader"
-          target: "/tmp/deploy/real"
-          strip_components: 3
+          source: "target/release/real-trader,real-trader.service"
+          target: "/tmp/deploy/"
+          strip_components: 0
       - name: Install and Restart
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -207,16 +255,68 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
-            sudo mv /tmp/deploy/real/real-trader /usr/local/bin/
+            sudo mv /tmp/deploy/target/release/real-trader /usr/local/bin/
             sudo chown root:root /usr/local/bin/real-trader
             sudo chmod +x /usr/local/bin/real-trader
-            sudo restorecon -v /usr/local/bin/real-trader
+            sudo restorecon -v /usr/local/bin/real-trader 2>/dev/null || true
+            if [ -f /tmp/deploy/real-trader.service ]; then
+              sudo mv /tmp/deploy/real-trader.service /etc/systemd/system/
+              sudo systemctl daemon-reload
+              sudo systemctl enable real-trader
+            fi
             sudo systemctl restart real-trader
             sudo systemctl status real-trader
 
-  # --- 5. Деплой Cloudflare Tunnel (cloudflared) на VPS ---
+  # --- 6. Деплой core-node (single-process: collector + trader) ---
+  deploy-core:
+    needs: [check, changes]
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_core == 'true' ||
+      github.event_name == 'push' && needs.changes.outputs.core == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      - name: Build core-node
+        run: cargo build --release -p core-node --locked
+      - name: Copy to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          source: "target/release/core-node,core-node.service"
+          target: "/tmp/deploy/"
+          strip_components: 0
+      - name: Install and Restart
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          script: |
+            sudo mv /tmp/deploy/target/release/core-node /usr/local/bin/
+            sudo chown root:root /usr/local/bin/core-node
+            sudo chmod +x /usr/local/bin/core-node
+            sudo restorecon -v /usr/local/bin/core-node 2>/dev/null || true
+            # Create working dir and ensure env file exists
+            mkdir -p /home/opc/core-node
+            if [ -f /tmp/deploy/core-node.service ]; then
+              sudo mv /tmp/deploy/core-node.service /etc/systemd/system/
+              sudo systemctl daemon-reload
+              sudo systemctl enable core-node
+            fi
+            sudo systemctl restart core-node
+            sudo systemctl status core-node
+
+  # --- 7. Деплой Cloudflare Tunnel (cloudflared) на VPS ---
   deploy-cloudflared:
-    needs: changes
+    needs: [check, changes]
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_cloudflared == 'true' ||
       github.event_name == 'push' && needs.changes.outputs.cloudflared == 'true'
@@ -230,13 +330,11 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
-            # Download cloudflared if not present or outdated
             if ! command -v cloudflared &>/dev/null; then
               curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
               sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
               sudo chmod +x /usr/local/bin/cloudflared
             fi
-            # Write tunnel token to env file
             echo "CLOUDFLARE_TUNNEL_TOKEN=${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}" | sudo tee /etc/cloudflared.env > /dev/null
             sudo chmod 600 /etc/cloudflared.env
       - name: Copy service file to VPS
@@ -263,9 +361,9 @@ jobs:
             sleep 3
             sudo systemctl status cloudflared
 
-  # --- 6. Деплой в Cloudflare ---
+  # --- 7. Деплой в Cloudflare ---
   deploy-cloudflare:
-    needs: changes
+    needs: [check, changes]
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_cloudflare == 'true' ||
       github.event_name == 'push' && needs.changes.outputs.cloudflare == 'true'

@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "rust-collector",
+    "paper-trader",
+    "real-trader",
+    "vps-api",
+    "shared",
+    "core-node",
+]
+resolver = "2"
+
+# Shared release profile applied to all workspace members
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

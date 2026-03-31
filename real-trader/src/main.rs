@@ -28,13 +28,17 @@ use axum::{
     Router,
 };
 use base64::Engine;
+use governor::{Quota, RateLimiter};
+use governor::state::{NotKeyed, InMemoryState};
+use governor::clock::DefaultClock;
 use hmac::{Hmac, Mac};
 use reqwest::{Client, header as rh};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Sha256;
-use tokio::sync::Mutex;
+use std::num::NonZeroU32;
+use tokio::sync::{Mutex, RwLock};
 use tokio_rusqlite::Connection;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, warn};
@@ -91,6 +95,7 @@ pub struct SpreadPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingSettings {
+    pub id: String,
     pub is_active: bool,
     pub min_entry_spread: f64,
     pub max_entry_spread: f64,
@@ -104,15 +109,17 @@ pub struct TradingSettings {
     pub min_volume_millions: f64,
     pub collector_interval_secs: i64,
     pub pending_commands: Option<String>,
+    pub disabled_exchanges: Vec<String>,
 }
 
 impl Default for TradingSettings {
     fn default() -> Self {
         Self {
+            id: "real-default".to_string(),
             is_active: false,
             min_entry_spread: 1.0,
             max_entry_spread: 10.0,
-            trade_volume: 100.0, // Real trading with smaller default size
+            trade_volume: 100.0,
             take_profit_percent: 0.2,
             trailing_stop_percent: 0.3,
             max_active_trades: 3,
@@ -122,6 +129,7 @@ impl Default for TradingSettings {
             min_volume_millions: 10.0,
             collector_interval_secs: 5,
             pending_commands: None,
+            disabled_exchanges: vec![],
         }
     }
 }
@@ -208,6 +216,37 @@ impl ExchangeKeys {
 
 // ─── App state ────────────────────────────────────────────────────────────────
 
+/// Per-exchange token-bucket rate limiters.
+/// Limits: Gate=8/s (conservative vs 100/10s), HTX=8/s (vs 10/s), KuCoin=8/s (vs 30/3s).
+/// Shared via Arc so all concurrent engine calls draw from the same bucket.
+#[derive(Clone)]
+struct ExchangeRateLimiters {
+    gate:   Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    htx:    Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    kucoin: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+}
+
+impl ExchangeRateLimiters {
+    fn new() -> Self {
+        let q = |n: u32| Quota::per_second(NonZeroU32::new(n).unwrap());
+        Self {
+            gate:   Arc::new(RateLimiter::direct(q(8))),
+            htx:    Arc::new(RateLimiter::direct(q(8))),
+            kucoin: Arc::new(RateLimiter::direct(q(8))),
+        }
+    }
+
+    /// Wait until the given exchange's bucket allows another request.
+    async fn wait(&self, exchange: &str) {
+        match exchange {
+            "gate"   => self.gate.until_ready().await,
+            "htx"    => self.htx.until_ready().await,
+            "kucoin" => self.kucoin.until_ready().await,
+            _        => {},
+        }
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     db: Connection,
@@ -218,7 +257,10 @@ struct AppState {
     dry_run: bool,
     keys: ExchangeKeys,
     engine_lock: Arc<Mutex<()>>,
-    settings_cache: Arc<Mutex<(Option<TradingSettings>, std::time::Instant)>>,
+    /// In-memory settings — refreshed from profiles DB every 5s by background task.
+    /// Hot path reads this with zero network latency.
+    settings: Arc<RwLock<TradingSettings>>,
+    limiters: ExchangeRateLimiters,
     last_push_time: Arc<Mutex<std::time::Instant>>,
 }
 
@@ -430,26 +472,8 @@ fn htx_sign(key: &str, secret: &str, method: &str, host: &str, path: &str) -> St
 }
 
 fn chrono_like_ts() -> String {
-    // Returns UTC time in ISO 8601 format without Z
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    // Simple manual formatting
-    let s = now;
-    let sec = s % 60;
-    let min = (s / 60) % 60;
-    let hr = (s / 3600) % 24;
-    let days = s / 86400;
-    // Days since epoch -> date (simplified, good enough for the sign string)
-    let year = 1970 + days / 365;
-    let day_of_year = days % 365;
-    let month = (day_of_year / 30) + 1;
-    let day = (day_of_year % 30) + 1;
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-        year, month, day, hr, min, sec
-    )
+    // HTX HMAC signing requires ISO 8601 UTC without the Z suffix.
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
 fn urlencoding_ts(s: &str) -> String {
@@ -633,49 +657,116 @@ async fn close_position(
     open_position(http, keys, exchange, pair, !was_short, volume_usd, price, dry_run).await
 }
 
+// ─── Partial Fill Guard ───────────────────────────────────────────────────────
+
+/// Query how many contracts were actually filled for a given order.
+/// Called in parallel for both legs right after tokio::join! opens them.
+/// On any error returns `requested_contracts` (optimistic: assume full fill).
+async fn get_order_fill(
+    http: &Client, keys: &ExchangeKeys,
+    exchange: &str, pair: &str, order_id: &str, requested_contracts: f64,
+) -> f64 {
+    if order_id.starts_with("dry_") { return requested_contracts; }
+    let result = match exchange {
+        "gate"   => fill_gate(http, keys, order_id).await,
+        "htx"    => fill_htx(http, keys, pair, order_id).await,
+        "kucoin" => fill_kucoin(http, keys, order_id).await,
+        _        => return requested_contracts,
+    };
+    match result {
+        Ok(f)  => f,
+        Err(e) => { warn!("[fill] {} {}: {} — assuming full fill", exchange, order_id, e); requested_contracts }
+    }
+}
+
+/// Gate.io: GET /api/v4/futures/usdt/orders/{id} → abs(size) - abs(left) = filled
+async fn fill_gate(http: &Client, keys: &ExchangeKeys, order_id: &str) -> Result<f64> {
+    let path = format!("/api/v4/futures/usdt/orders/{}", order_id);
+    let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, "");
+    let v: Value = http
+        .get(format!("https://api.gateio.ws{}", path))
+        .headers(headers)
+        .timeout(Duration::from_secs(5))
+        .send().await?.json().await?;
+    let size = v["size"].as_i64().unwrap_or(0).abs();
+    let left = v["left"].as_i64().unwrap_or(0).abs();
+    Ok((size - left).max(0) as f64)
+}
+
+/// HTX: POST /linear-swap-api/v1/swap_order_info → data[0].trade_volume
+async fn fill_htx(http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str) -> Result<f64> {
+    let host = "api.hbdm.com";
+    let path = "/linear-swap-api/v1/swap_order_info";
+    let signed_url = htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path);
+    let contract_code = format!("{}-{}", &pair[..pair.len()-4], &pair[pair.len()-4..]);
+    let body = json!({ "order_id": order_id.parse::<i64>().unwrap_or(0), "contract_code": contract_code });
+    let v: Value = http
+        .post(format!("https://{}{}", host, signed_url))
+        .json(&body)
+        .timeout(Duration::from_secs(5))
+        .send().await?.json().await?;
+    Ok(v["data"][0]["trade_volume"].as_f64().unwrap_or(0.0))
+}
+
+/// KuCoin: GET /api/v1/orders/{id} → data.dealSize (string field)
+async fn fill_kucoin(http: &Client, keys: &ExchangeKeys, order_id: &str) -> Result<f64> {
+    let ts = now_ms().to_string();
+    let path = format!("/api/v1/orders/{}", order_id);
+    let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &keys.kucoin_key, &ts, "GET", &path, "");
+    let v: Value = http
+        .get(format!("https://api-futures.kucoin.com{}", path))
+        .header("KC-API-KEY", &keys.kucoin_key)
+        .header("KC-API-SIGN", sig)
+        .header("KC-API-TIMESTAMP", &ts)
+        .header("KC-API-PASSPHRASE", pass_sig)
+        .header("KC-API-KEY-VERSION", "2")
+        .timeout(Duration::from_secs(5))
+        .send().await?.json().await?;
+    Ok(v["data"]["dealSize"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0))
+}
+
 // ─── Worker communication ─────────────────────────────────────────────────────
 
+/// Load active real-trader profile from local profiles DB.
+/// Column order mirrors vps-api trading_profiles table:
+/// 0=id 1=name 2=mode 3=is_active 4=min_entry_spread 5=max_entry_spread
+/// 6=trade_volume 7=take_profit 8=trailing_stop 9=max_trades 10=commission
+/// 11=slippage 12=funding_rate_8h 13=min_vol_millions 14=collector_secs 15=pending_commands
+/// 19=disabled_exchanges
+async fn load_settings_from_db(profiles_db: &Connection) -> TradingSettings {
+    profiles_db.call(|conn| {
+        let result = conn.query_row(
+            "SELECT * FROM trading_profiles WHERE mode='real' ORDER BY is_active DESC, created_at ASC LIMIT 1",
+            [],
+            |row| Ok(TradingSettings {
+                id: row.get(0).unwrap_or_else(|_| "real-default".to_string()),
+                is_active: row.get::<_, i64>(3).unwrap_or(0) != 0,
+                min_entry_spread: row.get(4).unwrap_or(1.0),
+                max_entry_spread: row.get(5).unwrap_or(10.0),
+                trade_volume: row.get(6).unwrap_or(100.0),
+                take_profit_percent: row.get(7).unwrap_or(0.2),
+                trailing_stop_percent: row.get(8).unwrap_or(0.3),
+                max_active_trades: row.get(9).unwrap_or(3),
+                commission_rate: row.get(10).unwrap_or(0.05),
+                slippage_percent: row.get(11).unwrap_or(0.05),
+                funding_rate_8h: row.get(12).unwrap_or(0.01),
+                min_volume_millions: row.get(13).unwrap_or(10.0),
+                collector_interval_secs: row.get(14).unwrap_or(5),
+                pending_commands: row.get(15).ok().flatten(),
+                disabled_exchanges: {
+                    let s: Option<String> = row.get(19).unwrap_or(None);
+                    s.and_then(|js| serde_json::from_str(&js).ok()).unwrap_or_default()
+                },
+            }),
+        );
+        Ok(result.unwrap_or_default())
+    }).await.unwrap_or_default()
+}
+
+/// Fetch active settings from in-memory RwLock (nanosecond latency).
+/// Settings are refreshed from profiles DB every 5s by a background task.
 async fn fetch_settings(state: &AppState) -> TradingSettings {
-    {
-        let cache = state.settings_cache.lock().await;
-        if let Some(s) = &cache.0 {
-            if cache.1.elapsed() < Duration::from_secs(60) {
-                return s.clone();
-            }
-        }
-    }
-
-    let url = format!("{}/api/real-trader/settings", state.worker_url.trim_end_matches('/'));
-    let settings = match state.http.get(&url).timeout(Duration::from_secs(5)).send().await {
-        Ok(resp) => {
-            match resp.json::<TradingSettings>().await {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("Failed to parse real-trader settings: {} — using defaults", e);
-                    TradingSettings::default()
-                }
-            }
-        }
-        Err(e) => {
-            warn!("Failed to fetch real-trader settings: {} — using defaults", e);
-            TradingSettings::default()
-        }
-    };
-
-    // Handle pending commands
-    if let Some(cmd) = &settings.pending_commands {
-        if cmd == "CLEAR_TRADES" {
-            info!("Received CLEAR_TRADES command, wiping local trades...");
-            let _ = state.db.call(|conn| {
-                conn.execute("DELETE FROM trades", []).map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
-            }).await;
-            ack_command(state, "CLEAR_TRADES").await;
-        }
-    }
-
-    let mut cache = state.settings_cache.lock().await;
-    *cache = (Some(settings.clone()), std::time::Instant::now());
-    settings
+    state.settings.read().await.clone()
 }
 
 async fn ack_command(state: &AppState, command: &str) {
@@ -816,22 +907,29 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             let reason = if triggered_tp { "TP" } else if triggered_stop { "STOP" } else { "ZERO_SPREAD" };
             info!("Closing real trade {} {} — reason={} net_pnl={:.4}", trade.id, trade.pair, reason, net_pnl);
 
-            // Place closing orders on exchanges
-            let close_a = close_position(
-                &state.http, &state.keys,
-                &trade.exchange_a, &trade.pair,
-                is_a_higher, // was short on A if A was higher
-                trade.volume, c_price_a, state.dry_run
-            ).await;
-            let close_b = close_position(
-                &state.http, &state.keys,
-                &trade.exchange_b, &trade.pair,
-                !is_a_higher,
-                trade.volume, c_price_b, state.dry_run
-            ).await;
+            // Close BOTH legs concurrently — sequential closing loses time while spread moves.
+            // Pre-acquire rate limit tokens before firing to avoid 429 on either leg.
+            tokio::join!(
+                state.limiters.wait(&trade.exchange_a),
+                state.limiters.wait(&trade.exchange_b)
+            );
+            let (close_a, close_b) = tokio::join!(
+                close_position(
+                    &state.http, &state.keys,
+                    &trade.exchange_a, &trade.pair,
+                    is_a_higher,
+                    trade.volume, c_price_a, state.dry_run
+                ),
+                close_position(
+                    &state.http, &state.keys,
+                    &trade.exchange_b, &trade.pair,
+                    !is_a_higher,
+                    trade.volume, c_price_b, state.dry_run
+                )
+            );
 
-            if let Err(e) = &close_a { error!("Failed to close position on {}: {}", trade.exchange_a, e); }
-            if let Err(e) = &close_b { error!("Failed to close position on {}: {}", trade.exchange_b, e); }
+            if let Err(e) = &close_a { error!("[CLOSE] Failed on {}: {}", trade.exchange_a, e); }
+            if let Err(e) = &close_b { error!("[CLOSE] Failed on {}: {}", trade.exchange_b, e); }
 
             let trade_id = trade.id;
             let ep_a = exit_price_a;
@@ -898,6 +996,10 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         if !state.keys.supports(&row.exchange_a) { continue; }
         if !state.keys.supports(&row.exchange_b) { continue; }
 
+        // Skip disabled exchanges (configured via UI)
+        if settings.disabled_exchanges.contains(&row.exchange_a) ||
+           settings.disabled_exchanges.contains(&row.exchange_b) { continue; }
+
         let key = format!("{}_{}_{}", row.pair, row.exchange_a, row.exchange_b);
         let key_rev = format!("{}_{}_{}", row.pair, row.exchange_b, row.exchange_a);
         if open_pair_keys.contains(&key) || open_pair_keys.contains(&key_rev) { continue; }
@@ -911,41 +1013,118 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         info!("Opening REAL trade {} {} {} spread={:.4}% [DRY_RUN={}]",
             row.pair, row.exchange_a, row.exchange_b, row.spread, state.dry_run);
 
-        // Place opening orders
-        let order_a = open_position(
-            &state.http, &state.keys,
-            &row.exchange_a, &row.pair,
-            is_a_higher, // short on A if A is higher-priced
-            settings.trade_volume, row.price_a, state.dry_run
-        ).await;
-
-        let order_b = open_position(
-            &state.http, &state.keys,
-            &row.exchange_b, &row.pair,
-            !is_a_higher, // long on B if A is higher-priced
-            settings.trade_volume, row.price_b, state.dry_run
-        ).await;
+        // ── Concurrent Firing: both legs sent simultaneously ─────────────────
+        // Pre-acquire rate limit tokens for BOTH exchanges first, then fire
+        // simultaneously. This prevents 429 from collapsing one leg mid-join.
+        tokio::join!(
+            state.limiters.wait(&row.exchange_a),
+            state.limiters.wait(&row.exchange_b)
+        );
+        let (order_a, order_b) = tokio::join!(
+            open_position(
+                &state.http, &state.keys,
+                &row.exchange_a, &row.pair,
+                is_a_higher,
+                settings.trade_volume, row.price_a, state.dry_run
+            ),
+            open_position(
+                &state.http, &state.keys,
+                &row.exchange_b, &row.pair,
+                !is_a_higher,
+                settings.trade_volume, row.price_b, state.dry_run
+            )
+        );
 
         let order_id_a = match &order_a {
             Ok(id) => Some(id.clone()),
-            Err(e) => { error!("Failed to open position on {}: {}", row.exchange_a, e); None }
+            Err(e) => { error!("[LEG_A] Failed to open on {}: {}", row.exchange_a, e); None }
         };
         let order_id_b = match &order_b {
             Ok(id) => Some(id.clone()),
-            Err(e) => { error!("Failed to open position on {}: {}", row.exchange_b, e); None }
+            Err(e) => { error!("[LEG_B] Failed to open on {}: {}", row.exchange_b, e); None }
         };
 
-        // If either leg failed (non-dry-run), don't record as open trade
-        if !state.dry_run && (order_id_a.is_none() || order_id_b.is_none()) {
-            error!("Skipping trade entry due to order failure");
-            continue;
+        // ── Leg Risk Fallback ────────────────────────────────────────────────
+        // If only one leg filled, we have a naked directional position.
+        // Emergency close the open leg with exponential backoff retry.
+        if !state.dry_run {
+            match (order_id_a.is_some(), order_id_b.is_some()) {
+                (true, false) => {
+                    error!("🚨 LEG ASYMMETRY: {} OPEN, {} FAILED — emergency close A!",
+                        row.exchange_a, row.exchange_b);
+                    let (http, keys) = (state.http.clone(), state.keys.clone());
+                    let (exchange, pair) = (row.exchange_a.clone(), row.pair.clone());
+                    let (volume, price, dry_run) = (settings.trade_volume, row.price_a, state.dry_run);
+                    tokio::spawn(async move {
+                        for attempt in 1u32..=5 {
+                            match close_position(&http, &keys, &exchange, &pair, is_a_higher, volume, price, dry_run).await {
+                                Ok(id) => { error!("🛡️  FALLBACK: A closed OK order_id={}", id); break; }
+                                Err(e) => {
+                                    let wait_ms = 300 * 2u64.pow(attempt - 1);
+                                    error!("FALLBACK attempt {}/5 failed: {} — retry in {}ms", attempt, e, wait_ms);
+                                    tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                                }
+                            }
+                        }
+                    });
+                    continue;
+                }
+                (false, true) => {
+                    error!("🚨 LEG ASYMMETRY: {} FAILED, {} OPEN — emergency close B!",
+                        row.exchange_a, row.exchange_b);
+                    let (http, keys) = (state.http.clone(), state.keys.clone());
+                    let (exchange, pair) = (row.exchange_b.clone(), row.pair.clone());
+                    let (volume, price, dry_run) = (settings.trade_volume, row.price_b, state.dry_run);
+                    tokio::spawn(async move {
+                        for attempt in 1u32..=5 {
+                            match close_position(&http, &keys, &exchange, &pair, !is_a_higher, volume, price, dry_run).await {
+                                Ok(id) => { error!("🛡️  FALLBACK: B closed OK order_id={}", id); break; }
+                                Err(e) => {
+                                    let wait_ms = 300 * 2u64.pow(attempt - 1);
+                                    error!("FALLBACK attempt {}/5 failed: {} — retry in {}ms", attempt, e, wait_ms);
+                                    tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                                }
+                            }
+                        }
+                    });
+                    continue;
+                }
+                (false, false) => { error!("Both legs failed, skipping."); continue; }
+                (true, true) => { /* Both filled — proceed to record trade */ }
+            }
+        } else if order_id_a.is_none() || order_id_b.is_none() {
+            continue; // dry_run: simulate skip
         }
+
+        // ── Partial Fill Guard ────────────────────────────────────────────────
+        // Market orders on thin pairs may fill partially. Verify actual volume
+        // before recording, so PnL and trailing-stop math is accurate.
+        let requested_contracts = (settings.trade_volume / row.price_a.max(0.001)).ceil();
+        let actual_vol = if !state.dry_run {
+            let oid_a = order_id_a.as_deref().unwrap_or("");
+            let oid_b = order_id_b.as_deref().unwrap_or("");
+            let (fill_a, fill_b) = tokio::join!(
+                get_order_fill(&state.http, &state.keys, &row.exchange_a, &row.pair, oid_a, requested_contracts),
+                get_order_fill(&state.http, &state.keys, &row.exchange_b, &row.pair, oid_b, requested_contracts)
+            );
+            let max_fill = fill_a.max(fill_b);
+            let min_fill = fill_a.min(fill_b);
+            if max_fill > 0.0 && (max_fill - min_fill) / max_fill > 0.01 {
+                warn!("⚠️  PARTIAL FILL: {} fill_a={:.1} fill_b={:.1} — recording min={:.1} contracts",
+                    row.pair, fill_a, fill_b, min_fill);
+            }
+            // Record min fill converted back to USD
+            let effective_contracts = if min_fill > 0.0 { min_fill } else { requested_contracts };
+            effective_contracts * row.price_a
+        } else {
+            settings.trade_volume
+        };
 
         let pair = row.pair.clone();
         let ex_a = row.exchange_a.clone();
         let ex_b = row.exchange_b.clone();
         let dir = row.direction.clone();
-        let vol = settings.trade_volume;
+        let vol = actual_vol;
         let spread = row.spread;
 
         match state.db.call(move |conn| {
@@ -966,6 +1145,7 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
             Err(e) => error!("DB error opening trade: {}", e),
         }
     }
+
 
     // Push active trades to Cloudflare Worker
     let final_trades: Vec<Trade> = match state.db.call(|conn| {
@@ -1130,6 +1310,50 @@ async fn main() -> Result<()> {
         .user_agent("real-trader/1.0")
         .build()?;
 
+    // ── Local settings from profiles DB (replaces Cloudflare HTTP fetch) ──────
+    // real-trader reads trading_profiles directly from vps-api.db instead of
+    // calling the Cloudflare Worker. Hot path gets settings in nanoseconds.
+    let profiles_db_path = std::env::var("PROFILES_DB_PATH")
+        .unwrap_or_else(|_| "vps-api.db".to_string());
+    let profiles_db_opt = match tokio_rusqlite::Connection::open(&profiles_db_path).await {
+        Ok(c) => { info!("Profiles DB: {}", profiles_db_path); Some(c) }
+        Err(e) => { warn!("Cannot open profiles DB '{}': {} — using defaults", profiles_db_path, e); None }
+    };
+    let initial_settings = match &profiles_db_opt {
+        Some(pdb) => load_settings_from_db(pdb).await,
+        None => TradingSettings::default(),
+    };
+    info!("Settings: active={} min_spread={:.3} vol={} max_trades={}",
+        initial_settings.is_active, initial_settings.min_entry_spread,
+        initial_settings.trade_volume, initial_settings.max_active_trades);
+    let settings: Arc<RwLock<TradingSettings>> = Arc::new(RwLock::new(initial_settings));
+
+    // Background refresh — polls profiles DB every 5s, handles CLEAR_TRADES locally.
+    if let Some(pdb) = profiles_db_opt {
+        let settings_bg = Arc::clone(&settings);
+        let trades_db_bg = db.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let fresh = load_settings_from_db(&pdb).await;
+                if fresh.pending_commands.as_deref() == Some("CLEAR_TRADES") {
+                    let pid = fresh.id.clone();
+                    info!("Executing CLEAR_TRADES for profile {}", pid);
+                    let _ = trades_db_bg.call(|conn| {
+                        conn.execute("DELETE FROM trades", []).map_err(tokio_rusqlite::Error::Rusqlite)
+                    }).await;
+                    let _ = pdb.call(move |conn| {
+                        conn.execute(
+                            "UPDATE trading_profiles SET pending_commands=NULL WHERE id=?",
+                            rusqlite::params![pid],
+                        ).map_err(tokio_rusqlite::Error::Rusqlite)
+                    }).await;
+                }
+                *settings_bg.write().await = fresh;
+            }
+        });
+    }
+
     let state = AppState {
         db,
         http,
@@ -1139,7 +1363,8 @@ async fn main() -> Result<()> {
         dry_run,
         keys,
         engine_lock: Arc::new(Mutex::new(())),
-        settings_cache: Arc::new(Mutex::new((None, std::time::Instant::now()))),
+        settings,
+        limiters: ExchangeRateLimiters::new(),
         last_push_time: Arc::new(Mutex::new(std::time::Instant::now())),
     };
 

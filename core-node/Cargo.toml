@@ -1,0 +1,50 @@
+[package]
+name = "core-node"
+version = "0.1.0"
+edition = "2021"
+description = "Single-process CEX arbitrage engine: collector + trader in one binary"
+
+[[bin]]
+name = "core-node"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+# HTTP server (dashboard API)
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+# HTTP client (REST orders + Cloudflare push)
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+# WebSocket (exchange market data)
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+# In-memory concurrent price map
+dashmap = "5"
+# JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# SQLite
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio-rusqlite = "0.5"
+# HMAC signing (Gate/HTX/KuCoin orders)
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+# Rate limiting
+governor = "0.6"
+# Datetime (HTX signing, timestamps)
+chrono = { version = "0.4", features = ["clock"] }
+# Gzip decompression (HTX WS binary frames)
+flate2 = "1"
+# Utils
+anyhow = "1"
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+std-semaphore = "0.1"
+
+[dependencies.shared]
+path = "../shared"

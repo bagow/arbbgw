@@ -1,0 +1,29 @@
+[Unit]
+Description=CEX Arbitrage Core Node (collector + trader, single process)
+Documentation=https://github.com/bagow/cex-arb
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opc
+WorkingDirectory=/home/opc/core-node
+ExecStart=/usr/local/bin/core-node
+
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=5
+
+EnvironmentFile=/etc/core-node.env
+
+# Protect from OOM: core-node holds all WS connections + price map
+OOMScoreAdjust=-600
+LimitNOFILE=65536
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=core-node
+
+[Install]
+WantedBy=multi-user.target
