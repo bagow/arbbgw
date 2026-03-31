@@ -310,31 +310,7 @@ jobs:
             sudo chmod +x /usr/local/bin/core-node
             sudo restorecon -v /usr/local/bin/core-node 2>/dev/null || true
             mkdir -p /home/opc/core-node
-            sudo tee /etc/systemd/system/core-node.service > /dev/null << 'EOF'
-            [Unit]
-            Description=CEX Arbitrage Core Node (collector + trader, single process)
-            After=network-online.target time-sync.target
-            Wants=network-online.target
-
-            [Service]
-            Type=simple
-            User=opc
-            WorkingDirectory=/home/opc/core-node
-            ExecStart=/usr/local/bin/core-node
-            Restart=on-failure
-            RestartSec=5
-            StartLimitInterval=60
-            StartLimitBurst=5
-            EnvironmentFile=-/etc/core-node.env
-            OOMScoreAdjust=-600
-            LimitNOFILE=65536
-            StandardOutput=journal
-            StandardError=journal
-            SyslogIdentifier=core-node
-
-            [Install]
-            WantedBy=multi-user.target
-            EOF
+            printf '[Unit]\nDescription=CEX Arbitrage Core Node\nAfter=network-online.target time-sync.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=opc\nWorkingDirectory=/home/opc/core-node\nExecStart=/usr/local/bin/core-node\nRestart=on-failure\nRestartSec=5\nStartLimitInterval=60\nStartLimitBurst=5\nEnvironmentFile=-/etc/core-node.env\nOOMScoreAdjust=-600\nLimitNOFILE=65536\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=core-node\n\n[Install]\nWantedBy=multi-user.target\n' | sudo tee /etc/systemd/system/core-node.service
             sudo systemctl daemon-reload
             sudo systemctl enable core-node
             sudo systemctl restart core-node || true
