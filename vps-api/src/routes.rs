@@ -165,10 +165,15 @@ pub async fn handle_get_unified(
         Ok(items)
     }).await.unwrap_or_else(|_| vec![]);
 
-    // 3. Get Active/History trades for given profile or paper-default
+    // 3. Pick trade DB based on profile mode (paper vs real)
     let pid = query.profile_id.unwrap_or_else(|| "paper-default".to_string());
-    
-    let active_trades = state.db.call({
+    let profile_mode = profiles.iter()
+        .find(|p| p.id == pid)
+        .map(|p| p.mode.clone())
+        .unwrap_or_else(|| "paper".into());
+    let trade_db = if profile_mode == "real" { state.real_db.clone() } else { state.paper_db.clone() };
+
+    let active_trades = trade_db.call({
         let p = pid.clone();
         move |conn| {
             let mut stmt = conn.prepare("SELECT * FROM trades WHERE status='OPEN' AND profile_id=?")?;
@@ -212,7 +217,7 @@ pub async fn handle_get_unified(
         v
     }).collect();
 
-    let history_trades = state.db.call({
+    let history_trades = trade_db.call({
         let p = pid.clone();
         move |conn| {
             let mut stmt = conn.prepare("SELECT * FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time DESC LIMIT 50")?;
@@ -222,7 +227,7 @@ pub async fn handle_get_unified(
     }).await.unwrap_or_else(|_| vec![]);
 
     // 4. Compute aggregate stats from FULL history
-    let stats = state.db.call({
+    let stats = trade_db.call({
         let p = pid.clone();
         move |conn| {
             // Aggregate totals
@@ -496,9 +501,18 @@ pub async fn handle_delete_profile(
         return json_err(StatusCode::BAD_REQUEST, "Cannot delete default profiles");
     }
 
+    let id2 = id.clone(); let id3 = id.clone();
     let _ = state.db.call(move |conn| {
         conn.execute("DELETE FROM trading_profiles WHERE id=? AND owner=?", params![id.clone(), username])?;
-        conn.execute("DELETE FROM trades WHERE profile_id=?", params![id])?;
+        Ok(())
+    }).await;
+    // Clear trades from both DBs (profile might have trades in either)
+    let _ = state.paper_db.call(move |conn| {
+        conn.execute("DELETE FROM trades WHERE profile_id=?", params![id2])?;
+        Ok(())
+    }).await;
+    let _ = state.real_db.call(move |conn| {
+        conn.execute("DELETE FROM trades WHERE profile_id=?", params![id3])?;
         Ok(())
     }).await;
 
@@ -515,9 +529,17 @@ pub async fn handle_clear_trades(
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
     }
 
+    let id2 = id.clone(); let id3 = id.clone();
     let _ = state.db.call(move |conn| {
-        conn.execute("UPDATE trading_profiles SET pending_commands='CLEAR_TRADES' WHERE id=?", params![id.clone()])?;
-        conn.execute("DELETE FROM trades WHERE profile_id=?", params![id])?;
+        conn.execute("UPDATE trading_profiles SET pending_commands='CLEAR_TRADES' WHERE id=?", params![id])?;
+        Ok(())
+    }).await;
+    let _ = state.paper_db.call(move |conn| {
+        conn.execute("DELETE FROM trades WHERE profile_id=?", params![id2])?;
+        Ok(())
+    }).await;
+    let _ = state.real_db.call(move |conn| {
+        conn.execute("DELETE FROM trades WHERE profile_id=?", params![id3])?;
         Ok(())
     }).await;
 

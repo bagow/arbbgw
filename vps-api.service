@@ -7,7 +7,9 @@ Type=simple
 User=opc
 Group=opc
 WorkingDirectory=/home/opc/cex-arb/vps-api
-Environment="DATABASE_URL=/home/opc/cex-arb/paper-trader/trades.db"
+Environment="DATABASE_URL=/home/opc/cex-arb/vps-api.db"
+Environment="PAPER_DB_PATH=/home/opc/core-node/paper-trader.db"
+Environment="REAL_DB_PATH=/home/opc/core-node/real-trader.db"
 Environment="COLLECTOR_TOKEN=Drc8#mP2vLq!"
 Environment="INTERNAL_TOKEN=Drc8#mP2vLq!"
 Environment="PASS_DIMA=Xk9mP2#vLqRt7Yw"
@@ -15,8 +17,8 @@ Environment="PASS_SERGEI=Bn4cZ8@jNhKs3Fd"
 ExecStart=/usr/local/bin/vps-api
 Restart=always
 RestartSec=3
-StandardOutput=syslog
-StandardError=syslog
+StandardOutput=journal
+StandardError=journal
 SyslogIdentifier=vps-api
 
 [Install]

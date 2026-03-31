@@ -5,43 +5,13 @@ use tokio_rusqlite::Connection;
 
 use crate::models::{Trade, TradingProfile};
 
+/// Init profiles DB (vps-api.db): trading_profiles + server_cache
 pub async fn init_db(db: &Connection) -> Result<()> {
     db.call(|conn| {
         conn.execute_batch(
             "
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
-
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pair TEXT NOT NULL,
-                exchange_a TEXT NOT NULL,
-                exchange_b TEXT NOT NULL,
-                direction TEXT NOT NULL,
-                volume REAL NOT NULL,
-                entry_price_a REAL NOT NULL,
-                entry_price_b REAL NOT NULL,
-                entry_spread REAL NOT NULL,
-                entry_time INTEGER NOT NULL,
-                highest_spread_reached REAL NOT NULL,
-                status TEXT NOT NULL DEFAULT 'OPEN',
-                exit_price_a REAL,
-                exit_price_b REAL,
-                exit_spread REAL,
-                exit_time INTEGER,
-                pnl REAL,
-                commission_cost REAL,
-                funding_cost REAL,
-                last_price_a REAL,
-                last_price_b REAL,
-                last_spread REAL,
-                curr_gross_pnl REAL,
-                pnl_a REAL,
-                pnl_b REAL,
-                close_reason TEXT,
-                profile_id TEXT DEFAULT 'paper-default'
-            );
-            CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 
             CREATE TABLE IF NOT EXISTS server_cache (
                 key TEXT PRIMARY KEY,
@@ -75,32 +45,77 @@ pub async fn init_db(db: &Connection) -> Result<()> {
             ",
         )?;
 
-        // Try to add the column in case the table already existed from an older version
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'", []);
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
         conn.execute(
-            "INSERT OR IGNORE INTO trading_profiles (id, name, mode, is_active, min_entry_spread, max_entry_spread,
-                trade_volume, take_profit_percent, trailing_stop_percent, max_active_trades,
-                commission_rate, slippage_percent, funding_rate_8h, min_volume_millions,
-                collector_interval_secs, created_at, updated_at, disabled_exchanges)
-            VALUES ('paper-default', 'Paper Default', 'paper', 1, 1.0, 10.0, 1000.0, 0.1, 0.5, 5, 0.45, 0.1, 0.01, 10.0, 5, ?, ?, '[]')",
+            "INSERT OR IGNORE INTO trading_profiles
+                (id,name,mode,is_active,min_entry_spread,max_entry_spread,
+                 trade_volume,take_profit_percent,trailing_stop_percent,max_active_trades,
+                 commission_rate,slippage_percent,funding_rate_8h,min_volume_millions,
+                 collector_interval_secs,created_at,updated_at,disabled_exchanges)
+            VALUES ('paper-default','Paper Default','paper',1,1.0,10.0,1000.0,0.1,0.5,5,0.45,0.1,0.01,10.0,5,?,?,'[]')",
             params![now, now],
         )?;
-
         conn.execute(
-            "INSERT OR IGNORE INTO trading_profiles (id, name, mode, is_active, min_entry_spread, max_entry_spread,
-                trade_volume, take_profit_percent, trailing_stop_percent, max_active_trades,
-                commission_rate, slippage_percent, funding_rate_8h, min_volume_millions,
-                collector_interval_secs, created_at, updated_at, disabled_exchanges)
-            VALUES ('real-default', 'Real Trading', 'real', 0, 1.0, 10.0, 100.0, 0.2, 0.3, 3, 0.05, 0.05, 0.01, 10.0, 5, ?, ?, '[]')",
+            "INSERT OR IGNORE INTO trading_profiles
+                (id,name,mode,is_active,min_entry_spread,max_entry_spread,
+                 trade_volume,take_profit_percent,trailing_stop_percent,max_active_trades,
+                 commission_rate,slippage_percent,funding_rate_8h,min_volume_millions,
+                 collector_interval_secs,created_at,updated_at,disabled_exchanges)
+            VALUES ('real-default','Real Trading','real',0,1.0,10.0,100.0,0.2,0.3,3,0.05,0.05,0.01,10.0,5,?,?,'[]')",
             params![now, now],
         )?;
-
         Ok(())
-    })
-    .await?;
+    }).await?;
+    Ok(())
+}
 
+/// Init trades-only DB (paper-trader.db or real-trader.db)
+pub async fn init_trades_db(db: &Connection) -> Result<()> {
+    db.call(|conn| {
+        conn.execute_batch(
+            "
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pair TEXT NOT NULL,
+                exchange_a TEXT NOT NULL,
+                exchange_b TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                volume REAL NOT NULL,
+                entry_price_a REAL NOT NULL,
+                entry_price_b REAL NOT NULL,
+                entry_spread REAL NOT NULL,
+                entry_time INTEGER NOT NULL,
+                highest_spread_reached REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'OPEN',
+                exit_price_a REAL,
+                exit_price_b REAL,
+                exit_spread REAL,
+                exit_time INTEGER,
+                pnl REAL,
+                gross_pnl REAL,
+                commission_cost REAL,
+                funding_cost REAL,
+                last_price_a REAL,
+                last_price_b REAL,
+                last_spread REAL,
+                curr_gross_pnl REAL,
+                pnl_a REAL,
+                pnl_b REAL,
+                close_reason TEXT,
+                profile_id TEXT DEFAULT 'paper-default'
+            );
+            CREATE INDEX IF NOT EXISTS idx_trades_status   ON trades(status);
+            CREATE INDEX IF NOT EXISTS idx_trades_profile  ON trades(profile_id);
+            CREATE INDEX IF NOT EXISTS idx_trades_exit     ON trades(exit_time);
+            ",
+        )?;
+        Ok(())
+    }).await?;
     Ok(())
 }
 

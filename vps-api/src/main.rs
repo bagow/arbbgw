@@ -15,7 +15,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Connection,
+    pub db: Connection,           // vps-api.db — profiles + server_cache
+    pub paper_db: Connection,     // paper-trader.db — paper trades only
+    pub real_db: Connection,      // real-trader.db  — real trades only
     pub collector_token: String,
     pub pass_dima: String,
     pub pass_sergei: String,
@@ -23,7 +25,6 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // initialize tracing
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -32,38 +33,48 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Load .env ignores if not found
     let _ = dotenvy::dotenv();
 
     let collector_token = env::var("COLLECTOR_TOKEN").unwrap_or_else(|_| "secret_token_123".into());
-    let pass_dima = env::var("PASS_DIMA").unwrap_or_else(|_| "pass_dima".into());
-    let pass_sergei = env::var("PASS_SERGEI").unwrap_or_else(|_| "pass_sergei".into());
+    let pass_dima       = env::var("PASS_DIMA").unwrap_or_else(|_| "pass_dima".into());
+    let pass_sergei     = env::var("PASS_SERGEI").unwrap_or_else(|_| "pass_sergei".into());
 
-    // Connect to SQLite DB
-    let db_path = env::var("DATABASE_URL").unwrap_or_else(|_| "../paper-trader/trades.db".into());
-    tracing::info!("Connecting to SQLite at {}", db_path);
-    let db = Connection::open(db_path).await?;
-    
-    // Initialize DB schema
+    // ── Profiles DB (vps-api.db) ──────────────────────────────────────────────
+    let db_path = env::var("DATABASE_URL").unwrap_or_else(|_| "vps-api.db".into());
+    tracing::info!("Profiles DB: {}", db_path);
+    let db = Connection::open(&db_path).await?;
     db::init_db(&db).await?;
+
+    // ── Paper trades DB ───────────────────────────────────────────────────────
+    let paper_path = env::var("PAPER_DB_PATH").unwrap_or_else(|_| "../paper-trader/trades.db".into());
+    tracing::info!("Paper DB:    {}", paper_path);
+    let paper_db = Connection::open(&paper_path).await?;
+    db::init_trades_db(&paper_db).await?;
+
+    // ── Real trades DB ────────────────────────────────────────────────────────
+    let real_path = env::var("REAL_DB_PATH").unwrap_or_else(|_| "../real-trader/trades.db".into());
+    tracing::info!("Real DB:     {}", real_path);
+    let real_db = Connection::open(&real_path).await?;
+    db::init_trades_db(&real_db).await?;
 
     let state = AppState {
         db,
+        paper_db,
+        real_db,
         collector_token,
         pass_dima,
         pass_sergei,
     };
 
-    // Build the router
     let app = Router::new()
-        .route("/api/update", post(routes::handle_update))
-        .route("/api/unified", get(routes::handle_get_unified))
-        .route("/api/trading/settings/all", get(routes::handle_get_all_settings))
-        .route("/api/profiles", get(routes::handle_get_profiles).post(routes::handle_post_profile))
-        .route("/api/profiles/:id", get(routes::handle_get_profile).patch(routes::handle_patch_profile).delete(routes::handle_delete_profile))
-        .route("/api/profiles/:id/trades", delete(routes::handle_clear_trades))
+        .route("/api/update",                  post(routes::handle_update))
+        .route("/api/unified",                 get(routes::handle_get_unified))
+        .route("/api/trading/settings/all",    get(routes::handle_get_all_settings))
+        .route("/api/profiles",                get(routes::handle_get_profiles).post(routes::handle_post_profile))
+        .route("/api/profiles/:id",            get(routes::handle_get_profile).patch(routes::handle_patch_profile).delete(routes::handle_delete_profile))
+        .route("/api/profiles/:id/trades",     delete(routes::handle_clear_trades))
         .with_state(state)
-        .layer(CorsLayer::permissive()); // allow all origins since API Tunnel handles public exposure
+        .layer(CorsLayer::permissive());
 
     let addr = "0.0.0.0:4000";
     tracing::info!("Server listening on {}", addr);
@@ -72,4 +83,3 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-
