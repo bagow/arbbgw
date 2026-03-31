@@ -47,7 +47,7 @@ jobs:
         with:
           workspaces: "."
       - name: Workspace check
-        run: cargo check --workspace --locked
+        run: cargo check --workspace
 
   # --- 1. Проверка изменений ---
   changes:
@@ -113,7 +113,7 @@ jobs:
           workspaces: "."
       # Workspace build — binary lands in target/release/ (not vps-api/target/)
       - name: Build vps-api
-        run: cargo build --release -p vps-api --locked
+        run: cargo build --release -p vps-api
       - name: Copy to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -158,7 +158,7 @@ jobs:
         with:
           workspaces: "."
       - name: Build rust-collector
-        run: cargo build --release -p rust-collector --locked
+        run: cargo build --release -p rust-collector
       - name: Copy to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -198,7 +198,7 @@ jobs:
         with:
           workspaces: "."
       - name: Build paper-trader
-        run: cargo build --release -p paper-trader --locked
+        run: cargo build --release -p paper-trader
       - name: Copy to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -238,7 +238,7 @@ jobs:
         with:
           workspaces: "."
       - name: Build real-trader
-        run: cargo build --release -p real-trader --locked
+        run: cargo build --release -p real-trader
       - name: Copy to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -283,7 +283,7 @@ jobs:
         with:
           workspaces: "."
       - name: Build core-node
-        run: cargo build --release -p core-node --locked
+        run: cargo build --release -p core-node
       - name: Copy to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
