@@ -16,7 +16,7 @@ use tracing::info;
 
 use settings::{load_settings, spawn_settings_refresher};
 use spreads::compute_spreads;
-use state::{PriceMap, UpdateSignal};
+use state::{AppState, PriceMap, UpdateSignal};
 
 mod collector {
     pub mod gate;
@@ -150,7 +150,11 @@ async fn main() -> Result<()> {
 
                 let exchanges_list: Vec<String> = prices_snap.iter().map(|e| e.key().clone()).collect();
                 let sym_map: HashMap<String, HashSet<String>> = prices_snap.iter()
-                    .map(|e| (e.key().clone(), e.value().keys().cloned().collect()))
+                    .map(|e| {
+                        let ex: String = e.key().clone();
+                        let syms: HashSet<String> = e.value().keys().cloned().collect();
+                        (ex, syms)
+                    })
                     .collect();
 
                 let mut pairs_map: HashMap<String, serde_json::Value> = HashMap::new();

@@ -1,7 +1,7 @@
 //! Binance USDT Futures WebSocket collector — !bookTicker stream (all pairs)
 use std::time::Duration;
 use anyhow::{Context, Result};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};

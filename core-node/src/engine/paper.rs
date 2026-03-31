@@ -53,20 +53,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
     let tp_pct     = settings.take_profit_percent / 100.0;
     let stop_pct   = settings.trailing_stop_percent / 100.0;
 
-    // Minimum time before any close check (prevents flip-flopping on noisy ticks)
-    let min_hold_ms = 5_000_i64; // 5 seconds minimum hold
+    // Minimum hold time enforced via load_open_trades WHERE entry_time filter (future improvement)
 
-    // ── Close qualifying trades ──────────────────────────────────────────────
+    // Close qualifying trades
     for trade in &trades {
-        // Enforce minimum hold time
-        let entry_time_ms = {
-            // We don't store entry_time in the in-memory Trade struct, so guard by checking
-            // entry_spread > 0 (always true) but enforce via open-trades query time filter (see load_open_trades)
-            // TODO: add entry_time to Trade struct for proper hold check
-            0_i64 // placeholder — hold check is done in load_open_trades via WHERE clause
-        };
-        let _ = entry_time_ms; // suppress unused warning
-
         let is_a_higher = trade.direction == format!("{}>{}",trade.exchange_a, trade.exchange_b);
 
         // Look up the spread row for the EXACT same exchange pair as this trade
