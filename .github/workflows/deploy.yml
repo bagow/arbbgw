@@ -115,6 +115,7 @@ jobs:
       - name: Build vps-api
         run: cargo build --release -p vps-api
       - name: Copy to VPS
+        timeout-minutes: 3
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
@@ -160,6 +161,7 @@ jobs:
       - name: Build rust-collector
         run: cargo build --release -p rust-collector
       - name: Copy to VPS
+        timeout-minutes: 3
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
@@ -200,6 +202,7 @@ jobs:
       - name: Build paper-trader
         run: cargo build --release -p paper-trader
       - name: Copy to VPS
+        timeout-minutes: 3
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
@@ -240,6 +243,7 @@ jobs:
       - name: Build real-trader
         run: cargo build --release -p real-trader
       - name: Copy to VPS
+        timeout-minutes: 3
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
@@ -285,6 +289,7 @@ jobs:
       - name: Build core-node
         run: cargo build --release -p core-node
       - name: Copy to VPS
+        timeout-minutes: 3
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
@@ -338,6 +343,7 @@ jobs:
             echo "CLOUDFLARE_TUNNEL_TOKEN=${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}" | sudo tee /etc/cloudflared.env > /dev/null
             sudo chmod 600 /etc/cloudflared.env
       - name: Copy service file to VPS
+        timeout-minutes: 3
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
