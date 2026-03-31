@@ -25,8 +25,8 @@ source "$HOME/.cargo/env"
 cargo --version
 
 echo "=== 5. GitHub SSH ключ ==="
-# Проверяем что репо доступно
-ssh -T git@github.com 2>&1 | grep -E "Hi|denied" || true
+ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+echo "github.com добавлен в known_hosts"
 
 echo "=== 6. Clone/Pull репо ==="
 if [ -d /home/opc/cex-arb ]; then
