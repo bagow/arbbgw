@@ -119,10 +119,12 @@ async fn main() -> Result<()> {
     // ── Real trade DB ────────────────────────────────────────────────────────
     let real_db = Connection::open(&real_db_path).await
         .context(format!("Cannot open real-trader DB: {}", real_db_path))?;
+    init_trades_db(&real_db).await?;
 
     // ── Paper trade DB ───────────────────────────────────────────────────────
     let paper_db = Connection::open(&paper_db_path).await
         .context(format!("Cannot open paper-trader DB: {}", paper_db_path))?;
+    init_trades_db(&paper_db).await?;
 
     // ── Engine loop — wakes on every WS tick ────────────────────────────────
     {
@@ -186,4 +188,49 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-// v2-1774988982
+// ─── DB schema init ───────────────────────────────────────────────────────────
+
+async fn init_trades_db(db: &tokio_rusqlite::Connection) -> anyhow::Result<()> {
+    db.call(|conn| {
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS trades (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                pair                  TEXT    NOT NULL,
+                exchange_a            TEXT    NOT NULL,
+                exchange_b            TEXT    NOT NULL,
+                direction             TEXT    NOT NULL,
+                volume                REAL    NOT NULL,
+                entry_price_a         REAL    NOT NULL,
+                entry_price_b         REAL    NOT NULL,
+                entry_spread          REAL    NOT NULL,
+                entry_time            INTEGER NOT NULL,
+                highest_spread_reached REAL   NOT NULL DEFAULT -9999,
+                status                TEXT    NOT NULL DEFAULT 'OPEN',
+                exit_price_a          REAL,
+                exit_price_b          REAL,
+                exit_spread           REAL,
+                exit_time             INTEGER,
+                pnl                   REAL,
+                gross_pnl             REAL,
+                pnl_a                 REAL    DEFAULT 0,
+                pnl_b                 REAL    DEFAULT 0,
+                curr_gross_pnl        REAL,
+                close_reason          TEXT,
+                order_id_a            TEXT,
+                order_id_b            TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+        ")?;
+        // Migrate old schemas — ignore errors if column already exists
+        for col in &[
+            "ALTER TABLE trades ADD COLUMN gross_pnl REAL",
+            "ALTER TABLE trades ADD COLUMN order_id_a TEXT",
+            "ALTER TABLE trades ADD COLUMN order_id_b TEXT",
+            "ALTER TABLE trades ADD COLUMN curr_gross_pnl REAL",
+        ] {
+            let _ = conn.execute_batch(col);
+        }
+        Ok(())
+    }).await.map_err(|e| anyhow::anyhow!("DB init failed: {}", e))
+}
