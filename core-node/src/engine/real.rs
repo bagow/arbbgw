@@ -195,7 +195,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, http:
             let cpa = c_price_a; let cpb = c_price_b; let pa = pnl_a; let pb = pnl_b; let r = reason.to_string();
             let _ = db.call(move |conn| {
                 conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=? WHERE id=?",
-                    params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, r, id]).map_err(tokio_rusqlite::Error::Rusqlite)
+                    params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, r, id])?;
+                Ok::<_, rusqlite::Error>(())
             }).await;
         }
     }
@@ -257,7 +258,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, http:
             conn.execute(
                 "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason,order_id_a,order_id_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![pair, exa, exb, dir, vol, entry_a, entry_b, sp, now_ms(), -9999.0, "OPEN", 0.0, 0.0, None::<String>, oid_a, oid_b]
-            ).map_err(tokio_rusqlite::Error::Rusqlite)
+            )?;
+            Ok::<_, rusqlite::Error>(())
         }).await;
         break; // one trade per cycle
     }

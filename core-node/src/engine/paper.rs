@@ -81,13 +81,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
             let _ = db.call(move |conn| {
                 conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=? WHERE id=?",
                     params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, reason_s, id]
-                ).map_err(tokio_rusqlite::Error::Rusqlite)
+                )?;
+                Ok::<_, rusqlite::Error>(())
             }).await;
         } else if top_spread > trade.highest_spread {
             let id = trade.id;
             let _ = db.call(move |conn| {
-                conn.execute("UPDATE trades SET highest_spread_reached=? WHERE id=?", params![top_spread, id])
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                conn.execute("UPDATE trades SET highest_spread_reached=? WHERE id=?", params![top_spread, id])?;
+                Ok::<_, rusqlite::Error>(())
             }).await;
         }
     }
@@ -118,7 +119,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
             conn.execute(
                 "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![pair, exa, exb, dir, vol, entry_a, entry_b, sp, now_ms(), -9999.0, "OPEN", 0.0, 0.0, None::<String>]
-            ).map_err(tokio_rusqlite::Error::Rusqlite)
+            )?;
+            Ok::<_, rusqlite::Error>(())
         }).await;
         break; // one trade per cycle to avoid opening multiple on same tick
     }
