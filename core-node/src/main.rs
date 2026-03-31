@@ -17,7 +17,7 @@ mod settings;
 mod spreads;
 mod state;
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, collections::HashSet, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{routing::get, Router};
@@ -31,10 +31,7 @@ use settings::{load_settings, spawn_settings_refresher, TradingSettings};
 use spreads::compute_spreads;
 use state::{PriceMap, UpdateSignal};
 
-// ─── Collector modules (WS handlers) ─────────────────────────────────────────
-// Each handler runs in its own tokio task, writes to the shared PriceMap,
-// then calls signal.notify_one() so the engine wakes up immediately.
-
+// Collector modules (WS handlers)
 mod collector {
     pub mod gate;
     pub mod htx;
@@ -46,17 +43,14 @@ mod collector {
     pub mod bitget;
 }
 
-// ─── Engine module (trade decisions) ─────────────────────────────────────────
+// Engine module (trade decisions)
 mod engine {
     pub mod real;
     pub mod paper;
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load .env if present (dev convenience)
     let _ = dotenvy::dotenv();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -64,7 +58,6 @@ async fn main() -> Result<()> {
 
     info!("core-node starting");
 
-    // ── Config from environment ──────────────────────────────────────────────
     let profiles_db_path = std::env::var("PROFILES_DB_PATH")
         .unwrap_or_else(|_| "vps-api.db".to_string());
     let real_db_path = std::env::var("REAL_DB_PATH")
@@ -77,37 +70,25 @@ async fn main() -> Result<()> {
     let _worker_url = std::env::var("WORKER_URL")
         .unwrap_or_else(|_| "https://api.arb.bagow.com".to_string());
 
-    // ── HTTP client shared across REST order calls ───────────────────────────
     let http = Client::builder()
         .user_agent("core-node/1.0")
         .timeout(Duration::from_secs(15))
         .build()?;
 
-    // ── Profiles DB (read settings) ──────────────────────────────────────────
     let profiles_db = Connection::open(&profiles_db_path).await
         .context(format!("Cannot open profiles DB: {}", profiles_db_path))?;
     info!("Profiles DB: {}", profiles_db_path);
 
-    // ── Load initial settings ────────────────────────────────────────────────
-    let real_settings_init  = load_settings(&profiles_db, "real").await;
-    let paper_settings_init = load_settings(&profiles_db, "paper").await;
-    info!("Real  settings: active={} min_spread={:.3} vol={}",
-        real_settings_init.is_active, real_settings_init.min_entry_spread, real_settings_init.trade_volume);
-    info!("Paper settings: active={} min_spread={:.3} vol={}",
-        paper_settings_init.is_active, paper_settings_init.min_entry_spread, paper_settings_init.trade_volume);
+    let (real_settings, paper_settings) = load_settings(&profiles_db).await?;
+    let real_settings  = Arc::new(RwLock::new(real_settings));
+    let paper_settings = Arc::new(RwLock::new(paper_settings));
 
-    let real_settings:  Arc<RwLock<TradingSettings>> = Arc::new(RwLock::new(real_settings_init));
-    let paper_settings: Arc<RwLock<TradingSettings>> = Arc::new(RwLock::new(paper_settings_init));
+    spawn_settings_refresher(profiles_db.clone(), Arc::clone(&real_settings), Arc::clone(&paper_settings));
 
-    // Background settings refresh every 5 seconds
-    spawn_settings_refresher(profiles_db.clone(), "real",  Arc::clone(&real_settings),  5);
-    spawn_settings_refresher(profiles_db.clone(), "paper", Arc::clone(&paper_settings), 5);
+    let prices: Arc<PriceMap> = Arc::new(PriceMap::new());
+    let signal: Arc<UpdateSignal> = Arc::new(tokio::sync::Notify::new());
 
-    // ── Shared price map + event signal ─────────────────────────────────────
-    let prices: PriceMap  = Arc::new(dashmap::DashMap::new());
-    let signal: UpdateSignal = Arc::new(tokio::sync::Notify::new());
-
-    // ── Start WS collectors (Gate, HTX, KuCoin + Binance, Bybit, MEXC, OKX, Bitget) ──
+    // Spawn collectors
     {
         let p = Arc::clone(&prices); let s = Arc::clone(&signal);
         tokio::spawn(async move { collector::gate::run(p, s).await });
@@ -141,17 +122,15 @@ async fn main() -> Result<()> {
         tokio::spawn(async move { collector::bitget::run(p, s).await });
     }
 
-    // ── Real trade DB ────────────────────────────────────────────────────────
     let real_db = Connection::open(&real_db_path).await
         .context(format!("Cannot open real-trader DB: {}", real_db_path))?;
     init_trades_db(&real_db).await?;
 
-    // ── Paper trade DB ───────────────────────────────────────────────────────
     let paper_db = Connection::open(&paper_db_path).await
         .context(format!("Cannot open paper-trader DB: {}", paper_db_path))?;
     init_trades_db(&paper_db).await?;
 
-    // ── Engine loop — wakes on every WS tick ────────────────────────────────
+    // Engine loop — wakes on every WS tick
     {
         let prices   = Arc::clone(&prices);
         let signal   = Arc::clone(&signal);
@@ -164,40 +143,83 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let mut last_run = std::time::Instant::now();
             loop {
-                // Wait for next price update
                 signal.notified().await;
 
-                // Debounce: don't run faster than 50ms
                 let elapsed = last_run.elapsed();
                 if elapsed < Duration::from_millis(50) {
                     tokio::time::sleep(Duration::from_millis(50) - elapsed).await;
                 }
                 last_run = std::time::Instant::now();
 
-                // Read settings (nanosecond lock)
                 let real_s  = rs.read().await.clone();
                 let paper_s = ps.read().await.clone();
 
-                // Compute spreads directly from PriceMap — zero HTTP, zero copy
                 let min_vol = real_s.min_volume_millions.min(paper_s.min_volume_millions);
                 let spreads = compute_spreads(&prices, min_vol);
 
                 if spreads.is_empty() { continue; }
 
-                // Run real and paper engines concurrently
-                let real_fut = engine::real::run_cycle(
-                    spreads.clone(), real_s, http.clone(), real_db.clone(),
-                );
-                let paper_fut = engine::paper::run_cycle(
-                    spreads, paper_s, http.clone(), paper_db.clone(),
-                );
+                let real_fut  = engine::real::run_cycle(spreads.clone(), real_s,  http.clone(), real_db.clone());
+                let paper_fut = engine::paper::run_cycle(spreads,        paper_s, http.clone(), paper_db.clone());
 
                 tokio::join!(real_fut, paper_fut);
             }
         });
     }
 
-    // ── HTTP API (health + dashboard passthrough) ────────────────────────────
+    // Publish exchange_maps to server_cache every 30s (feeds the CEX tab)
+    {
+        let prices_snap = Arc::clone(&prices);
+        let cache_db    = profiles_db.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+
+                let exchanges_list: Vec<String> = prices_snap.iter()
+                    .map(|e| e.key().clone()).collect();
+
+                let sym_map: HashMap<String, HashSet<String>> = prices_snap.iter()
+                    .map(|e| (e.key().clone(), e.value().keys().cloned().collect()))
+                    .collect();
+
+                let mut pairs_map: HashMap<String, serde_json::Value> = HashMap::new();
+                for ex_a in &exchanges_list {
+                    let syms_a = sym_map.get(ex_a).cloned().unwrap_or_default();
+                    let mut vs = serde_json::Map::new();
+                    for ex_b in &exchanges_list {
+                        if ex_a == ex_b { continue; }
+                        let syms_b = sym_map.get(ex_b).cloned().unwrap_or_default();
+                        let n = syms_a.intersection(&syms_b).count();
+                        if n > 0 {
+                            vs.insert(format!("vs {}", ex_b), serde_json::json!(n));
+                        }
+                    }
+                    pairs_map.insert(ex_a.clone(), serde_json::Value::Object(vs));
+                }
+
+                let val = serde_json::json!({ "ts": now_ms, "data": pairs_map }).to_string();
+                let n = exchanges_list.len();
+                let _ = cache_db.call(move |conn| {
+                    let _ = conn.execute_batch(
+                        "CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);"
+                    );
+                    conn.execute(
+                        "INSERT INTO server_cache(key,value,expires_at) VALUES('exchange_maps',?,?) \
+                         ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
+                        rusqlite::params![val, now_ms + 300_000],
+                    )?;
+                    Ok(())
+                }).await;
+                info!("exchange_maps: {} exchanges published to server_cache", n);
+            }
+        });
+    }
+
+    // HTTP API
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -213,7 +235,6 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-// ─── DB schema init ───────────────────────────────────────────────────────────
 
 async fn init_trades_db(db: &tokio_rusqlite::Connection) -> anyhow::Result<()> {
     db.call(|conn| {
@@ -230,7 +251,7 @@ async fn init_trades_db(db: &tokio_rusqlite::Connection) -> anyhow::Result<()> {
                 entry_price_b         REAL    NOT NULL,
                 entry_spread          REAL    NOT NULL,
                 entry_time            INTEGER NOT NULL,
-                highest_spread_reached REAL   NOT NULL DEFAULT -9999,
+                highest_spread_reached REAL   NOT NULL,
                 status                TEXT    NOT NULL DEFAULT 'OPEN',
                 exit_price_a          REAL,
                 exit_price_b          REAL,
@@ -238,24 +259,26 @@ async fn init_trades_db(db: &tokio_rusqlite::Connection) -> anyhow::Result<()> {
                 exit_time             INTEGER,
                 pnl                   REAL,
                 gross_pnl             REAL,
-                pnl_a                 REAL    DEFAULT 0,
-                pnl_b                 REAL    DEFAULT 0,
+                commission_cost       REAL,
+                funding_cost          REAL,
+                last_price_a          REAL,
+                last_price_b          REAL,
+                last_spread           REAL,
                 curr_gross_pnl        REAL,
+                pnl_a                 REAL,
+                pnl_b                 REAL,
                 close_reason          TEXT,
-                order_id_a            TEXT,
-                order_id_b            TEXT
+                profile_id            TEXT DEFAULT 'paper-default'
             );
-            CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+            CREATE INDEX IF NOT EXISTS idx_trades_status  ON trades(status);
+            CREATE INDEX IF NOT EXISTS idx_trades_profile ON trades(profile_id);
         ")?;
-        // Migrate old schemas — ignore errors if column already exists
-        for col in &[
-            "ALTER TABLE trades ADD COLUMN gross_pnl REAL",
-            "ALTER TABLE trades ADD COLUMN order_id_a TEXT",
-            "ALTER TABLE trades ADD COLUMN order_id_b TEXT",
-            "ALTER TABLE trades ADD COLUMN curr_gross_pnl REAL",
-        ] {
-            let _ = conn.execute_batch(col);
-        }
+
+        // Migrate: add gross_pnl column if missing (older DBs)
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN gross_pnl REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN profile_id TEXT DEFAULT 'paper-default'", []);
+
         Ok(())
-    }).await.map_err(|e| anyhow::anyhow!("DB init failed: {}", e))
+    }).await?;
+    Ok(())
 }
