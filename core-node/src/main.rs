@@ -1,37 +1,23 @@
 //! core-node — single-process CEX arbitrage engine
-//!
-//! Architecture (Arc<DashMap> + Notify):
-//!
-//!   WS handlers ──writes──▶ PriceMap ──▶ Notify.notify_one()
-//!                                              │
-//!   Engine loop ◀──notified()────────────────┘
-//!        │
-//!        ├─▶ compute_spreads(PriceMap)   [zero HTTP, zero copy]
-//!        ├─▶ real engine (place orders)
-//!        └─▶ paper engine (simulate)
-//!
-//! Replacing rust-collector → HTTP → real/paper-trader eliminates 200-400ms
-//! of inter-process latency on every spread event.
 
 mod settings;
 mod spreads;
 mod state;
 
-use std::{collections::HashMap, collections::HashSet, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{routing::get, Router};
 use reqwest::Client;
-use tokio::{net::TcpListener, sync::RwLock};
+use tokio::net::TcpListener;
 use tokio_rusqlite::Connection;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
-use settings::{load_settings, spawn_settings_refresher, TradingSettings};
+use settings::{load_settings, spawn_settings_refresher};
 use spreads::compute_spreads;
 use state::{PriceMap, UpdateSignal};
 
-// Collector modules (WS handlers)
 mod collector {
     pub mod gate;
     pub mod htx;
@@ -43,7 +29,6 @@ mod collector {
     pub mod bitget;
 }
 
-// Engine module (trade decisions)
 mod engine {
     pub mod real;
     pub mod paper;
@@ -67,61 +52,49 @@ async fn main() -> Result<()> {
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "3003".to_string())
         .parse().unwrap_or(3003);
-    let _worker_url = std::env::var("WORKER_URL")
-        .unwrap_or_else(|_| "https://api.arb.bagow.com".to_string());
 
+    // ── HTTP client ──────────────────────────────────────────────────────────
     let http = Client::builder()
         .user_agent("core-node/1.0")
         .timeout(Duration::from_secs(15))
         .build()?;
 
+    // ── Profiles DB (settings) ───────────────────────────────────────────────
     let profiles_db = Connection::open(&profiles_db_path).await
         .context(format!("Cannot open profiles DB: {}", profiles_db_path))?;
     info!("Profiles DB: {}", profiles_db_path);
 
-    let (real_settings, paper_settings) = load_settings(&profiles_db).await?;
-    let real_settings  = Arc::new(RwLock::new(real_settings));
-    let paper_settings = Arc::new(RwLock::new(paper_settings));
+    // ── Load initial settings ────────────────────────────────────────────────
+    let real_s  = load_settings(&profiles_db, "real").await;
+    let paper_s = load_settings(&profiles_db, "paper").await;
 
-    spawn_settings_refresher(profiles_db.clone(), Arc::clone(&real_settings), Arc::clone(&paper_settings));
+    let state = AppState {
+        prices:         Arc::new(dashmap::DashMap::new()),
+        signal:         Arc::new(tokio::sync::Notify::new()),
+        real_settings:  Arc::new(tokio::sync::RwLock::new(real_s)),
+        paper_settings: Arc::new(tokio::sync::RwLock::new(paper_s)),
+        http: http.clone(),
+    };
 
-    let prices: Arc<PriceMap> = Arc::new(PriceMap::new());
-    let signal: Arc<UpdateSignal> = Arc::new(tokio::sync::Notify::new());
+    // Refresh settings every 10s from DB
+    spawn_settings_refresher(profiles_db.clone(), "real",  Arc::clone(&state.real_settings),  10);
+    spawn_settings_refresher(profiles_db.clone(), "paper", Arc::clone(&state.paper_settings), 10);
 
-    // Spawn collectors
-    {
-        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
-        tokio::spawn(async move { collector::gate::run(p, s).await });
-    }
-    {
-        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
-        tokio::spawn(async move { collector::htx::run(p, s).await });
-    }
-    {
-        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
-        tokio::spawn(async move { collector::kucoin::run(p, s).await });
-    }
-    {
-        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
-        tokio::spawn(async move { collector::binance::run(p, s).await });
-    }
-    {
-        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
-        tokio::spawn(async move { collector::bybit::run(p, s).await });
-    }
-    {
-        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
-        tokio::spawn(async move { collector::mexc::run(p, s).await });
-    }
-    {
-        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
-        tokio::spawn(async move { collector::okx::run(p, s).await });
-    }
-    {
-        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
-        tokio::spawn(async move { collector::bitget::run(p, s).await });
-    }
+    // Shortcuts for spawning collectors and engine
+    let prices: PriceMap   = state.prices.clone();
+    let signal: UpdateSignal = state.signal.clone();
 
+    // ── Spawn collectors ─────────────────────────────────────────────────────
+    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::gate::run(p, s).await }); }
+    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::htx::run(p, s).await }); }
+    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::kucoin::run(p, s).await }); }
+    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::binance::run(p, s).await }); }
+    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::bybit::run(p, s).await }); }
+    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::mexc::run(p, s).await }); }
+    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::okx::run(p, s).await }); }
+    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::bitget::run(p, s).await }); }
+
+    // ── Trade DBs ────────────────────────────────────────────────────────────
     let real_db = Connection::open(&real_db_path).await
         .context(format!("Cannot open real-trader DB: {}", real_db_path))?;
     init_trades_db(&real_db).await?;
@@ -130,12 +103,12 @@ async fn main() -> Result<()> {
         .context(format!("Cannot open paper-trader DB: {}", paper_db_path))?;
     init_trades_db(&paper_db).await?;
 
-    // Engine loop — wakes on every WS tick
+    // ── Engine loop (wakes on every WS tick) ─────────────────────────────────
     {
-        let prices   = Arc::clone(&prices);
-        let signal   = Arc::clone(&signal);
-        let rs       = Arc::clone(&real_settings);
-        let ps       = Arc::clone(&paper_settings);
+        let prices   = prices.clone();
+        let signal   = signal.clone();
+        let rs       = Arc::clone(&state.real_settings);
+        let ps       = Arc::clone(&state.paper_settings);
         let http     = http.clone();
         let real_db  = real_db.clone();
         let paper_db = paper_db.clone();
@@ -144,7 +117,6 @@ async fn main() -> Result<()> {
             let mut last_run = std::time::Instant::now();
             loop {
                 signal.notified().await;
-
                 let elapsed = last_run.elapsed();
                 if elapsed < Duration::from_millis(50) {
                     tokio::time::sleep(Duration::from_millis(50) - elapsed).await;
@@ -153,23 +125,20 @@ async fn main() -> Result<()> {
 
                 let real_s  = rs.read().await.clone();
                 let paper_s = ps.read().await.clone();
-
                 let min_vol = real_s.min_volume_millions.min(paper_s.min_volume_millions);
                 let spreads = compute_spreads(&prices, min_vol);
-
                 if spreads.is_empty() { continue; }
 
                 let real_fut  = engine::real::run_cycle(spreads.clone(), real_s,  http.clone(), real_db.clone());
                 let paper_fut = engine::paper::run_cycle(spreads,        paper_s, http.clone(), paper_db.clone());
-
                 tokio::join!(real_fut, paper_fut);
             }
         });
     }
 
-    // Publish exchange_maps to server_cache every 30s (feeds the CEX tab)
+    // ── Publish exchange_maps to server_cache every 30s (feeds CEX tab) ──────
     {
-        let prices_snap = Arc::clone(&prices);
+        let prices_snap = prices.clone();
         let cache_db    = profiles_db.clone();
         tokio::spawn(async move {
             loop {
@@ -179,9 +148,7 @@ async fn main() -> Result<()> {
                     .unwrap_or_default()
                     .as_millis() as i64;
 
-                let exchanges_list: Vec<String> = prices_snap.iter()
-                    .map(|e| e.key().clone()).collect();
-
+                let exchanges_list: Vec<String> = prices_snap.iter().map(|e| e.key().clone()).collect();
                 let sym_map: HashMap<String, HashSet<String>> = prices_snap.iter()
                     .map(|e| (e.key().clone(), e.value().keys().cloned().collect()))
                     .collect();
@@ -194,9 +161,7 @@ async fn main() -> Result<()> {
                         if ex_a == ex_b { continue; }
                         let syms_b = sym_map.get(ex_b).cloned().unwrap_or_default();
                         let n = syms_a.intersection(&syms_b).count();
-                        if n > 0 {
-                            vs.insert(format!("vs {}", ex_b), serde_json::json!(n));
-                        }
+                        if n > 0 { vs.insert(format!("vs {}", ex_b), serde_json::json!(n)); }
                     }
                     pairs_map.insert(ex_a.clone(), serde_json::Value::Object(vs));
                 }
@@ -204,9 +169,7 @@ async fn main() -> Result<()> {
                 let val = serde_json::json!({ "ts": now_ms, "data": pairs_map }).to_string();
                 let n = exchanges_list.len();
                 let _ = cache_db.call(move |conn| {
-                    let _ = conn.execute_batch(
-                        "CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);"
-                    );
+                    let _ = conn.execute_batch("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);");
                     conn.execute(
                         "INSERT INTO server_cache(key,value,expires_at) VALUES('exchange_maps',?,?) \
                          ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
@@ -214,29 +177,26 @@ async fn main() -> Result<()> {
                     )?;
                     Ok(())
                 }).await;
-                info!("exchange_maps: {} exchanges published to server_cache", n);
+                info!("exchange_maps: {} exchanges published", n);
             }
         });
     }
 
-    // HTTP API
+    // ── HTTP API ─────────────────────────────────────────────────────────────
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .layer(cors);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = TcpListener::bind(addr).await
-        .context("HTTP server failed to bind")?;
+    let listener = TcpListener::bind(addr).await.context("HTTP bind failed")?;
     info!("core-node listening on {}", addr);
-
-    axum::serve(listener, app).await
-        .context("HTTP server failed")?;
+    axum::serve(listener, app).await.context("HTTP server failed")?;
 
     Ok(())
 }
 
-async fn init_trades_db(db: &tokio_rusqlite::Connection) -> anyhow::Result<()> {
+async fn init_trades_db(db: &Connection) -> Result<()> {
     db.call(|conn| {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         conn.execute_batch("
@@ -273,11 +233,8 @@ async fn init_trades_db(db: &tokio_rusqlite::Connection) -> anyhow::Result<()> {
             CREATE INDEX IF NOT EXISTS idx_trades_status  ON trades(status);
             CREATE INDEX IF NOT EXISTS idx_trades_profile ON trades(profile_id);
         ")?;
-
-        // Migrate: add gross_pnl column if missing (older DBs)
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN gross_pnl REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN profile_id TEXT DEFAULT 'paper-default'", []);
-
         Ok(())
     }).await?;
     Ok(())
