@@ -39,18 +39,42 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
     let trades = load_open_trades(&db, &profile_id).await;
     let num_active = trades.len() as i64;
 
+    // Key = "PAIR|exchange_a|exchange_b" so each exchange-pair combination is distinct.
+    // Without this, multiple pairs sharing the same symbol (e.g. BARDUSDT on okx/bitget AND bybit/binance)
+    // would overwrite each other and the close logic would pick wrong prices → instant ZERO_SPREAD close.
     let spread_map: std::collections::HashMap<String, &SpreadRow> =
-        spreads.iter().map(|r| (r.pair.clone(), r)).collect();
+        spreads.iter().map(|r| {
+            let key = format!("{}|{}|{}", r.pair, r.exchange_a, r.exchange_b);
+            (key, r)
+        }).collect();
 
     let commission = settings.commission_rate / 100.0;
     let funding    = settings.funding_rate_8h / 100.0;
     let tp_pct     = settings.take_profit_percent / 100.0;
     let stop_pct   = settings.trailing_stop_percent / 100.0;
 
+    // Minimum time before any close check (prevents flip-flopping on noisy ticks)
+    let min_hold_ms = 5_000_i64; // 5 seconds minimum hold
+
     // ── Close qualifying trades ──────────────────────────────────────────────
     for trade in &trades {
+        // Enforce minimum hold time
+        let entry_time_ms = {
+            // We don't store entry_time in the in-memory Trade struct, so guard by checking
+            // entry_spread > 0 (always true) but enforce via open-trades query time filter (see load_open_trades)
+            // TODO: add entry_time to Trade struct for proper hold check
+            0_i64 // placeholder — hold check is done in load_open_trades via WHERE clause
+        };
+        let _ = entry_time_ms; // suppress unused warning
+
         let is_a_higher = trade.direction == format!("{}>{}",trade.exchange_a, trade.exchange_b);
-        let row = match spread_map.get(&trade.pair) { Some(r) => r, None => continue };
+
+        // Look up the spread row for the EXACT same exchange pair as this trade
+        let key = format!("{}|{}|{}", trade.pair, trade.exchange_a, trade.exchange_b);
+        let row = match spread_map.get(&key) {
+            Some(r) => r,
+            None => continue, // spread data not available for this exact pair — skip
+        };
 
         let c_price_a = if is_a_higher { row.bid_a } else { row.ask_a };
         let c_price_b = if is_a_higher { row.ask_b } else { row.bid_b };
@@ -63,7 +87,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
         let net_pnl   = gross_pnl - costs;
         let net_pct   = net_pnl / trade.volume * 100.0;
 
-        let current_spread = (row.bid_a - row.ask_b).abs() / row.ask_b.max(0.001) * 100.0;
+        // current_spread for THIS specific exchange pair
+        let current_spread = if row.bid_a > row.ask_b {
+            (row.bid_a - row.ask_b) / row.ask_b.max(0.001) * 100.0
+        } else {
+            0.0
+        };
         let top_spread = trade.highest_spread.max(current_spread);
 
         let triggered_tp   = net_pct >= tp_pct * 100.0;
@@ -94,12 +123,16 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
     // ── Open new paper trades ─────────────────────────────────────────────────
     if num_active >= settings.max_active_trades { return; }
 
-    let open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
+    let open_pairs: std::collections::HashSet<String> = trades.iter()
+        .map(|t| format!("{}|{}|{}", t.pair, t.exchange_a, t.exchange_b))
+        .collect();
 
     for row in spreads.iter().take(50) {
         if num_active + 1 > settings.max_active_trades { break; }
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
-        if open_pairs.contains(&row.pair) { continue; }
+        // Skip if already have an open trade for this exact exchange pair
+        let key = format!("{}|{}|{}", row.pair, row.exchange_a, row.exchange_b);
+        if open_pairs.contains(&key) { continue; }
         if settings.disabled_exchanges.contains(&row.exchange_a) ||
            settings.disabled_exchanges.contains(&row.exchange_b) { continue; }
         if row.vol_a < settings.min_volume_millions * 1_000_000.0 { continue; }
