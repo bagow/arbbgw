@@ -460,7 +460,12 @@ function renderCexTab(profile, exchangesData) {
         return '<div class="text-sub" style="text-align:center;">No exchange data available yet. Please wait for collector to sync.</div>';
     }
 
-    const exNames = Object.keys(exchangesData.data).sort();
+    // Real trading: only Gate/HTX/KuCoin have API keys
+    const REAL_EXCHANGES = new Set(['gate', 'htx', 'kucoin']);
+    const isReal = profile.mode === 'real';
+    const exNames = Object.keys(exchangesData.data)
+        .filter(ex => !isReal || REAL_EXCHANGES.has(ex))
+        .sort();
     
     // Parse disabled_exchanges to a map for quick lookup
     const disabledRaw = profile.disabled_exchanges || '[]';
