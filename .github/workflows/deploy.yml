@@ -329,7 +329,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install cloudflared & setup tunnel on VPS
+      - name: Install cloudflared, setup tunnel & service on VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
@@ -341,32 +341,18 @@ jobs:
               sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
               sudo chmod +x /usr/local/bin/cloudflared
             fi
-            echo "CLOUDFLARE_TUNNEL_TOKEN=${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}" | sudo tee /etc/cloudflared.env > /dev/null
+            printf 'CLOUDFLARE_TUNNEL_TOKEN=${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}\n' > /tmp/cloudflared.env
+            sudo mv /tmp/cloudflared.env /etc/cloudflared.env
             sudo chmod 600 /etc/cloudflared.env
-      - name: Copy service file to VPS
-        timeout-minutes: 3
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_SSH_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "cloudflared.service"
-          target: "/tmp/deploy/"
-      - name: Enable and start cloudflared
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_SSH_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          script: |
-            sudo mv /tmp/deploy/cloudflared.service /etc/systemd/system/cloudflared.service
+            printf '[Unit]\nDescription=Cloudflare Tunnel\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=root\nExecStart=/usr/local/bin/cloudflared tunnel run\nEnvironmentFile=/etc/cloudflared.env\nRestart=on-failure\nRestartSec=5\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=cloudflared\n\n[Install]\nWantedBy=multi-user.target\n' > /tmp/cloudflared.service
+            sudo mv /tmp/cloudflared.service /etc/systemd/system/cloudflared.service
             sudo chmod 644 /etc/systemd/system/cloudflared.service
-            sudo restorecon -v /etc/systemd/system/cloudflared.service 2>/dev/null || true
+            sudo restorecon /etc/systemd/system/cloudflared.service 2>/dev/null || true
             sudo systemctl daemon-reload
             sudo systemctl enable cloudflared
             sudo systemctl restart cloudflared
             sleep 3
-            sudo systemctl status cloudflared
+            sudo systemctl status cloudflared --no-pager
 
   # --- 7. Деплой в Cloudflare ---
   deploy-cloudflare:
