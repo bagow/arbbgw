@@ -29,10 +29,10 @@ ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
 echo "github.com добавлен в known_hosts"
 
 echo "=== 6. Clone/Pull репо ==="
-if [ -d /home/opc/cex-arb ]; then
+if [ -d /home/opc/cex-arb/.git ]; then
     cd /home/opc/cex-arb && git pull origin main
 else
-    git clone git@github.com:bagow/arbbgw.git /home/opc/cex-arb
+    git clone https://github.com/bagow/arbbgw.git /home/opc/cex-arb
 fi
 cd /home/opc/cex-arb
 git log --oneline -3

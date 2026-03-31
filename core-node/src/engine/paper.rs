@@ -2,12 +2,9 @@
 //! No real orders placed; simulates execution against market mid-prices.
 
 use std::time::Duration;
-use anyhow::Result;
 use rusqlite::params;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tokio_rusqlite::Connection;
-use tracing::{error, info, warn};
+use tracing::info;
 
 use crate::settings::TradingSettings;
 use shared::SpreadRow;

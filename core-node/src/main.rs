@@ -22,10 +22,10 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use anyhow::{Context, Result};
 use axum::{routing::get, Router};
 use reqwest::Client;
-use tokio::sync::RwLock;
+use tokio::{net::TcpListener, sync::RwLock};
 use tokio_rusqlite::Connection;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{error, info, warn};
+use tracing::info;
 
 use settings::{load_settings, spawn_settings_refresher, TradingSettings};
 use spreads::compute_spreads;
@@ -177,11 +177,11 @@ async fn main() -> Result<()> {
         .layer(cors);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = TcpListener::bind(addr).await
+        .context("HTTP server failed to bind")?;
     info!("core-node listening on {}", addr);
 
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
+    axum::serve(listener, app).await
         .context("HTTP server failed")?;
 
     Ok(())
