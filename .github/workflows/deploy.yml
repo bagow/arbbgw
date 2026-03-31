@@ -295,9 +295,9 @@ jobs:
           host: ${{ secrets.VPS_SSH_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "target/release/core-node,core-node.service"
+          source: "target/release/core-node"
           target: "/tmp/deploy/"
-          strip_components: 0
+          strip_components: 2
       - name: Install and Restart
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -305,19 +305,40 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
-            sudo mv /tmp/deploy/target/release/core-node /usr/local/bin/
+            sudo mv /tmp/deploy/core-node /usr/local/bin/
             sudo chown root:root /usr/local/bin/core-node
             sudo chmod +x /usr/local/bin/core-node
             sudo restorecon -v /usr/local/bin/core-node 2>/dev/null || true
-            # Create working dir and ensure env file exists
             mkdir -p /home/opc/core-node
-            if [ -f /tmp/deploy/core-node.service ]; then
-              sudo mv /tmp/deploy/core-node.service /etc/systemd/system/
-              sudo systemctl daemon-reload
-              sudo systemctl enable core-node
-            fi
-            sudo systemctl restart core-node
-            sudo systemctl status core-node
+            sudo tee /etc/systemd/system/core-node.service > /dev/null << 'EOF'
+            [Unit]
+            Description=CEX Arbitrage Core Node (collector + trader, single process)
+            After=network-online.target time-sync.target
+            Wants=network-online.target
+
+            [Service]
+            Type=simple
+            User=opc
+            WorkingDirectory=/home/opc/core-node
+            ExecStart=/usr/local/bin/core-node
+            Restart=on-failure
+            RestartSec=5
+            StartLimitInterval=60
+            StartLimitBurst=5
+            EnvironmentFile=-/etc/core-node.env
+            OOMScoreAdjust=-600
+            LimitNOFILE=65536
+            StandardOutput=journal
+            StandardError=journal
+            SyslogIdentifier=core-node
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            sudo systemctl daemon-reload
+            sudo systemctl enable core-node
+            sudo systemctl restart core-node || true
+            sudo systemctl status core-node --no-pager
 
   # --- 7. Деплой Cloudflare Tunnel (cloudflared) на VPS ---
   deploy-cloudflared:
