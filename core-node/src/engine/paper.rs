@@ -34,8 +34,9 @@ fn now_ms() -> i64 {
 /// Reads DB, closes qualifying trades, opens new ones.
 pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http: reqwest::Client, db: Connection) {
     if !settings.is_active { return; }
+    let profile_id = settings.id.clone();
 
-    let trades = load_open_trades(&db).await;
+    let trades = load_open_trades(&db, &profile_id).await;
     let num_active = trades.len() as i64;
 
     let spread_map: std::collections::HashMap<String, &SpreadRow> =
@@ -112,10 +113,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
 
         let pair = row.pair.clone(); let exa = row.exchange_a.clone(); let exb = row.exchange_b.clone();
         let dir  = row.direction.clone(); let vol = settings.trade_volume; let sp = row.spread;
+        let profile_id = settings.id.clone();
         let _ = db.call(move |conn| {
             conn.execute(
-                "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![pair, exa, exb, dir, vol, entry_a, entry_b, sp, now_ms(), -9999.0, "OPEN", 0.0, 0.0, None::<String>]
+                "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason,profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![pair, exa, exb, dir, vol, entry_a, entry_b, sp, now_ms(), -9999.0, "OPEN", 0.0, 0.0, None::<String>, profile_id]
             )?;
             Ok(())
         }).await;
@@ -123,12 +125,13 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
     }
 }
 
-async fn load_open_trades(db: &Connection) -> Vec<Trade> {
-    db.call(|conn| {
+async fn load_open_trades(db: &Connection, profile_id: &str) -> Vec<Trade> {
+    let pid = profile_id.to_string();
+    db.call(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT id,pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,highest_spread_reached,pnl_a,pnl_b FROM trades WHERE status='OPEN'"
+            "SELECT id,pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,highest_spread_reached,pnl_a,pnl_b FROM trades WHERE status='OPEN' AND profile_id=?"
         )?;
-        let rows = stmt.query_map([], |row| Ok(Trade {
+        let rows = stmt.query_map([&pid], |row| Ok(Trade {
             id: row.get(0)?, pair: row.get(1)?,
             exchange_a: row.get(2)?, exchange_b: row.get(3)?,
             direction: row.get(4)?, volume: row.get(5)?,
