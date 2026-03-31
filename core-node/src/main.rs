@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
     let prices: PriceMap  = Arc::new(dashmap::DashMap::new());
     let signal: UpdateSignal = Arc::new(tokio::sync::Notify::new());
 
-    // ── Start WS collectors (Gate, HTX, KuCoin) ──────────────────────────────
+    // ── Start WS collectors (Gate, HTX, KuCoin + Binance, Bybit, MEXC, OKX, Bitget) ──
     {
         let p = Arc::clone(&prices); let s = Arc::clone(&signal);
         tokio::spawn(async move { collector::gate::run(p, s).await });
@@ -114,6 +114,26 @@ async fn main() -> Result<()> {
     {
         let p = Arc::clone(&prices); let s = Arc::clone(&signal);
         tokio::spawn(async move { collector::kucoin::run(p, s).await });
+    }
+    {
+        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
+        tokio::spawn(async move { collector::binance::run(p, s).await });
+    }
+    {
+        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
+        tokio::spawn(async move { collector::bybit::run(p, s).await });
+    }
+    {
+        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
+        tokio::spawn(async move { collector::mexc::run(p, s).await });
+    }
+    {
+        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
+        tokio::spawn(async move { collector::okx::run(p, s).await });
+    }
+    {
+        let p = Arc::clone(&prices); let s = Arc::clone(&signal);
+        tokio::spawn(async move { collector::bitget::run(p, s).await });
     }
 
     // ── Real trade DB ────────────────────────────────────────────────────────
