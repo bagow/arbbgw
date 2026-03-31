@@ -1,8 +1,7 @@
 //! Spread computation — ported from rust-collector, runs in-process.
 //! No HTTP serialization overhead; reads PriceMap directly from memory.
 
-use std::collections::HashMap;
-use crate::state::{PriceMap, TickerData};
+use crate::state::PriceMap;
 use shared::SpreadRow;
 
 const SPREAD_THRESHOLD: f64 = -1.0;

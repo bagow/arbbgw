@@ -19,7 +19,7 @@ pub type PriceMap = Arc<DashMap<String, HashMap<String, TickerData>>>;
 pub type UpdateSignal = Arc<Notify>;
 
 // Re-export from shared (will migrate fully later)
-pub use shared::{SpreadRow, OrderResult};
+pub use shared::SpreadRow;
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TickerData {

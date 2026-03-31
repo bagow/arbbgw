@@ -1,7 +1,6 @@
 //! Paper trading engine — runs in-process on each WS tick.
 //! No real orders placed; simulates execution against market mid-prices.
 
-use std::time::Duration;
 use rusqlite::params;
 use tokio_rusqlite::Connection;
 use tracing::info;
@@ -36,11 +35,9 @@ fn now_ms() -> i64 {
 pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http: reqwest::Client, db: Connection) {
     if !settings.is_active { return; }
 
-    // Load open trades for this profile
     let trades = load_open_trades(&db).await;
     let num_active = trades.len() as i64;
 
-    // Build lookup for current prices
     let spread_map: std::collections::HashMap<String, &SpreadRow> =
         spreads.iter().map(|r| (r.pair.clone(), r)).collect();
 
@@ -49,7 +46,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
     let tp_pct     = settings.take_profit_percent / 100.0;
     let stop_pct   = settings.trailing_stop_percent / 100.0;
 
-    // ── Close qualifying trade ───────────────────────────────────────────────
+    // ── Close qualifying trades ──────────────────────────────────────────────
     for trade in &trades {
         let is_a_higher = trade.direction == format!("{}>{}",trade.exchange_a, trade.exchange_b);
         let row = match spread_map.get(&trade.pair) { Some(r) => r, None => continue };
@@ -68,7 +65,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
         let current_spread = (row.bid_a - row.ask_b).abs() / row.ask_b.max(0.001) * 100.0;
         let top_spread = trade.highest_spread.max(current_spread);
 
-        let triggered_tp   = net_pct >= settings.take_profit_percent;
+        let triggered_tp   = net_pct >= tp_pct * 100.0;
         let triggered_stop = top_spread > settings.trailing_stop_percent && current_spread < top_spread * (1.0 - stop_pct);
         let zero_spread    = current_spread <= 0.0;
 
@@ -82,13 +79,13 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
                 conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=? WHERE id=?",
                     params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, reason_s, id]
                 )?;
-                Ok::<_, rusqlite::Error>(())
+                Ok(())
             }).await;
         } else if top_spread > trade.highest_spread {
             let id = trade.id;
             let _ = db.call(move |conn| {
                 conn.execute("UPDATE trades SET highest_spread_reached=? WHERE id=?", params![top_spread, id])?;
-                Ok::<_, rusqlite::Error>(())
+                Ok(())
             }).await;
         }
     }
@@ -120,9 +117,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
                 "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![pair, exa, exb, dir, vol, entry_a, entry_b, sp, now_ms(), -9999.0, "OPEN", 0.0, 0.0, None::<String>]
             )?;
-            Ok::<_, rusqlite::Error>(())
+            Ok(())
         }).await;
-        break; // one trade per cycle to avoid opening multiple on same tick
+        break;
     }
 }
 

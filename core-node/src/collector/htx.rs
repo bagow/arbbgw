@@ -1,5 +1,5 @@
 //! HTX (Huobi) Linear Swap WebSocket collector
-use std::{io::Read, sync::Arc, time::Duration};
+use std::{io::Read, time::Duration};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;

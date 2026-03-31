@@ -1,5 +1,5 @@
 //! Gate.io Futures WebSocket collector
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};

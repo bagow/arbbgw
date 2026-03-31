@@ -29,7 +29,7 @@ use tracing::info;
 
 use settings::{load_settings, spawn_settings_refresher, TradingSettings};
 use spreads::compute_spreads;
-use state::{AppState, PriceMap, UpdateSignal};
+use state::{PriceMap, UpdateSignal};
 
 // ─── Collector modules (WS handlers) ─────────────────────────────────────────
 // Each handler runs in its own tokio task, writes to the shared PriceMap,
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "3003".to_string())
         .parse().unwrap_or(3003);
-    let worker_url = std::env::var("WORKER_URL")
+    let _worker_url = std::env::var("WORKER_URL")
         .unwrap_or_else(|_| "https://api.arb.bagow.com".to_string());
 
     // ── HTTP client shared across REST order calls ───────────────────────────
