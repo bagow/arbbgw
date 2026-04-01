@@ -77,21 +77,19 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
         let net_pct   = net_pnl / trade.volume * 100.0;
 
         // current_spread for THIS specific exchange pair
-        let current_spread = if row.bid_a > row.ask_b {
-            (row.bid_a - row.ask_b) / row.ask_b.max(0.001) * 100.0
-        } else {
-            0.0
-        };
+        let current_spread = (row.bid_a - row.ask_b) / row.ask_b.max(0.001) * 100.0;
         let top_spread = trade.highest_spread.max(current_spread);
 
         let triggered_tp   = net_pct >= tp_pct * 100.0;
-        let triggered_stop = top_spread > settings.trailing_stop_percent && current_spread < top_spread * (1.0 - stop_pct);
-        let zero_spread    = current_spread <= 0.0;
+        let stop_limit     = top_spread - settings.trailing_stop_percent;
+        let triggered_stop = current_spread < stop_limit;
+        let zero_spread    = false; // Disable ZERO_SPREAD logic since current_spread can now go negative gracefully
+
 
         if triggered_tp || triggered_stop || zero_spread {
             let reason = if triggered_tp { "TP" } else if triggered_stop { "STOP" } else { "ZERO_SPREAD" };
             info!("[paper] Closing {} {} reason={} net={:.4} curr_sp={:.4} top_sp={:.4} stop_limit={:.4} gross={:.4}", 
-                trade.id, trade.pair, reason, net_pnl, current_spread, top_spread, top_spread * (1.0 - stop_pct), gross_pnl);
+                trade.id, trade.pair, reason, net_pnl, current_spread, top_spread, stop_limit, gross_pnl);
 
             let id = trade.id; let np = net_pnl; let gp = gross_pnl; let cs = current_spread;
             let cpa = c_price_a; let cpb = c_price_b; let pa = pnl_a; let pb = pnl_b;

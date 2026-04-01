@@ -483,17 +483,12 @@ function renderCexTab(profile, exchangesData) {
     for (const exA of exNames) {
         let pairsList = '';
         const rawArr = exchangesData.data[exA];
-        // Ensure it's an array before using
-        const arr = Array.isArray(rawArr) ? rawArr : [];
-        const setA = new Set(arr);
-        
         for (const exB of exNames) {
             if (exA === exB) continue;
             let matchCount = 0;
-            const bRaw = exchangesData.data[exB];
-            const bArr = Array.isArray(bRaw) ? bRaw : [];
-            for (let i=0; i<bArr.length; i++) {
-                if (setA.has(bArr[i])) matchCount++;
+            // The Rust backend sends pre-computed matches like: { "vs bybit": 150 }
+            if (rawArr && typeof rawArr === 'object' && rawArr[`vs ${exB}`]) {
+                matchCount = rawArr[`vs ${exB}`];
             }
             if (matchCount > 0) {
                 pairsList += `
