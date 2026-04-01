@@ -54,13 +54,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
     let tp_pct     = settings.take_profit_percent / 100.0;
     let stop_pct   = settings.trailing_stop_percent / 100.0;
 
-    // Minimum hold time enforced via load_open_trades WHERE entry_time filter (future improvement)
-
-    // Close qualifying trades (min 10s hold avoids flip-flopping on noisy ticks)
-    let min_hold_ms = 10_000_i64;
+    // Close qualifying trades
     for trade in &trades {
-        if now_ms() - trade.entry_time < min_hold_ms { continue; }
-
         let is_a_higher = trade.direction == format!("{}>{}",trade.exchange_a, trade.exchange_b);
 
         // Look up the spread row for the EXACT same exchange pair as this trade
