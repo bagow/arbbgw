@@ -145,6 +145,13 @@ pub fn row_to_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradingProfil
 }
 
 pub fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
+    // Column layout (SELECT * FROM trades):
+    // 0:id 1:pair 2:exchange_a 3:exchange_b 4:direction 5:volume
+    // 6:entry_price_a 7:entry_price_b 8:entry_spread 9:entry_time
+    // 10:highest_spread_reached 11:status 12:exit_price_a 13:exit_price_b
+    // 14:exit_spread 15:exit_time 16:pnl 17:gross_pnl 18:commission_cost
+    // 19:funding_cost 20:last_price_a 21:last_price_b 22:last_spread
+    // 23:curr_gross_pnl 24:pnl_a 25:pnl_b 26:close_reason 27:profile_id
     Ok(Trade {
         id: row.get(0)?,
         pair: row.get(1)?,
@@ -163,20 +170,21 @@ pub fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
         exit_spread: row.get(14)?,
         exit_time: row.get(15)?,
         pnl: row.get(16)?,
-        commission_cost: row.get(17)?,
-        funding_cost: row.get(18)?,
-        last_price_a: row.get(19)?,
-        last_price_b: row.get(20)?,
-        last_spread: row.get(21)?,
-        curr_gross_pnl: row.get(22)?,
-        pnl_a: row.get(23)?,
-        pnl_b: row.get(24)?,
-        close_reason: row.get(25)?,
-        profile_id: row.get(26)?,
+        // col 17 = gross_pnl (stored only in closed trades; mapped into Trade via enrichment)
+        commission_cost: row.get(18)?,
+        funding_cost: row.get(19)?,
+        last_price_a: row.get(20)?,
+        last_price_b: row.get(21)?,
+        last_spread: row.get(22)?,
+        curr_gross_pnl: row.get(23)?,
+        pnl_a: row.get(24)?,
+        pnl_b: row.get(25)?,
+        close_reason: row.get(26)?,
+        profile_id: row.get(27)?,
         current_price_a: None,
         current_price_b: None,
         current_spread: None,
         current_pnl: None,
-        gross_pnl: None,
+        gross_pnl: row.get(17).ok(), // gross_pnl col (closed trades only)
     })
 }

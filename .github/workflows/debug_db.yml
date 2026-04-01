@@ -1,7 +1,6 @@
-name: Debug DB
+name: Debug DB (Manual Only)
 on:
-  push:
-    branches: [ main ]
+  workflow_dispatch:
 jobs:
   debug:
     runs-on: ubuntu-latest
@@ -13,11 +12,19 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
-            echo "--- core-node trading_profiles ---"
-            sqlite3 /home/opc/core-node/vps-api.db "SELECT * FROM trading_profiles" || echo "FAIL"
-            echo "--- core-node table_info ---"
-            sqlite3 /home/opc/core-node/vps-api.db "PRAGMA table_info(trading_profiles)" || echo "FAIL"
-            echo "--- vps-api trading_profiles ---"
-            sqlite3 /home/opc/cex-arb/vps-api/vps-api.db "SELECT * FROM trading_profiles" || echo "FAIL"
-            echo "--- curl unified ---"
-            curl -s http://localhost:4000/api/unified?profile_id=acc5ee84-9424-4246-b6c0-43610ad6fa7c || echo "FAIL"
+            echo "=== trading_profiles (id | name | mode | is_active | trade_volume | min_entry_spread | take_profit_percent) ==="
+            sqlite3 /home/opc/core-node/vps-api.db \
+              "SELECT id, name, mode, is_active, trade_volume, min_entry_spread, take_profit_percent FROM trading_profiles ORDER BY created_at ASC" \
+              2>/dev/null || echo "FAIL: sqlite3 not available — use /api/debug_ps instead"
+
+            echo ""
+            echo "=== vps-api service status ==="
+            sudo systemctl status vps-api --no-pager | tail -5
+
+            echo ""
+            echo "=== core-node last 20 log lines (settings) ==="
+            sudo journalctl -u core-node -n 20 --no-pager | grep -E "settings|vol=|Profiles DB" || echo "(no matching lines)"
+
+            echo ""
+            echo "=== /api/debug_ps endpoint ==="
+            curl -s http://localhost:4000/api/debug_ps || echo "FAIL"

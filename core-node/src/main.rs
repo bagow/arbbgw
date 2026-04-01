@@ -87,7 +87,9 @@ async fn main() -> Result<()> {
         .context(format!("Cannot open paper-trader DB: {}", paper_db_path))?;
     init_trades_db(&paper_db).await?;
 
-    // ── Pre-load & Spawn    // Bypassing cache to ensure real-time settings update
+    info!("Profiles DB path: {}", profiles_db_path);
+    info!("Paper DB path:    {}", paper_db_path);
+    info!("Real DB path:     {}", real_db_path);
 
     // ── Engine loop (wakes on every WS tick) ─────────────────────────────────
     {
@@ -111,6 +113,20 @@ async fn main() -> Result<()> {
                 // Load ALL profiles DIRECTLY from database (bypasses any caching bugs)
                 let paper_profiles = settings::load_all_settings(&profiles_db, "paper").await;
                 let real_profiles  = settings::load_all_settings(&profiles_db, "real").await;
+
+                // Log settings being used (every ~5s = ~100 ticks at 50ms)
+                static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if tick % 100 == 0 {
+                    for p in paper_profiles.iter() {
+                        info!("[settings] paper id={} active={} vol={} tp={}% min_spread={}",
+                            p.id, p.is_active, p.trade_volume, p.take_profit_percent, p.min_entry_spread);
+                    }
+                    for p in real_profiles.iter() {
+                        info!("[settings] real  id={} active={} vol={} tp={}% min_spread={}",
+                            p.id, p.is_active, p.trade_volume, p.take_profit_percent, p.min_entry_spread);
+                    }
+                }
 
                 let min_vol = paper_profiles.iter().chain(real_profiles.iter())
                     .map(|p| p.min_volume_millions)

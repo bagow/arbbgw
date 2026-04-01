@@ -12,7 +12,6 @@ use tokio::net::TcpListener;
 use tokio_rusqlite::Connection;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use std::process::Command;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -75,17 +74,26 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/profiles",                get(routes::handle_get_profiles).post(routes::handle_post_profile))
         .route("/api/profiles/:id",            get(routes::handle_get_profile).patch(routes::handle_patch_profile).delete(routes::handle_delete_profile))
         .route("/api/profiles/:id/trades",     delete(routes::handle_clear_trades))
-        .route("/api/debug_ps", get(|| async {
-            let out1 = std::process::Command::new("sh").arg("-c").arg("pwd && ls -l *.db").output().unwrap();
-            let out2 = std::process::Command::new("sh").arg("-c").arg("sqlite3 /home/opc/core-node/vps-api.db 'SELECT id, trade_volume FROM trading_profiles'").output().unwrap();
-            let mut res = String::from_utf8_lossy(&out1.stdout).to_string();
-            res.push_str("\nSTDERR1: ");
-            res.push_str(&String::from_utf8_lossy(&out1.stderr));
-            res.push_str("\n\nSTDOUT2: ");
-            res.push_str(&String::from_utf8_lossy(&out2.stdout));
-            res.push_str("\nSTDERR2: ");
-            res.push_str(&String::from_utf8_lossy(&out2.stderr));
-            res
+        .route("/api/debug_ps", get({
+            let db_clone = state.db.clone();
+            || async move {
+                let result = db_clone.call(|conn| {
+                    let mut stmt = conn.prepare("SELECT id, name, mode, is_active, trade_volume, min_entry_spread, take_profit_percent FROM trading_profiles ORDER BY created_at ASC")?;
+                    let rows: Vec<String> = stmt.query_map([], |r| {
+                        Ok(format!("id={} name={} mode={} active={} vol={} min_sp={} tp={}",
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, i64>(3)?,
+                            r.get::<_, f64>(4)?,
+                            r.get::<_, f64>(5)?,
+                            r.get::<_, f64>(6)?
+                        ))
+                    })?.filter_map(|r| r.ok()).collect();
+                    Ok(rows.join("\n"))
+                }).await.unwrap_or_else(|e| format!("DB error: {e}"));
+                result
+            }
         }))
         .with_state(state)
         .layer(CorsLayer::permissive());
@@ -97,4 +105,3 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-// trigger deploy
