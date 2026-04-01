@@ -75,8 +75,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/profiles/:id",            get(routes::handle_get_profile).patch(routes::handle_patch_profile).delete(routes::handle_delete_profile))
         .route("/api/profiles/:id/trades",     delete(routes::handle_clear_trades))
         .route("/api/debug_ps", get(|| async {
-            let out = std::process::Command::new("sh").arg("-c").arg("ps aux | grep -i 'paper-trader\\|real-trader\\|rust-collector\\|core-node'").output().unwrap();
-            String::from_utf8_lossy(&out.stdout).to_string()
+            let out1 = std::process::Command::new("sh").arg("-c").arg("pwd && ls -l *.db").output().unwrap();
+            let out2 = std::process::Command::new("sh").arg("-c").arg("sqlite3 vps-api.db 'SELECT id, trade_volume FROM trading_profiles'").output().unwrap();
+            let mut res = String::from_utf8_lossy(&out1.stdout).to_string();
+            res.push_str("\n\n");
+            res.push_str(&String::from_utf8_lossy(&out2.stdout));
+            res
         }))
         .with_state(state)
         .layer(CorsLayer::permissive());
