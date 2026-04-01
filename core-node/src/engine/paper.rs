@@ -116,11 +116,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
     }
 
     static LAST_LIVE_FLUSH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let current_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
     // Flush live PnL to DB every 1000ms per profile
-    let elapsed = now_ms.saturating_sub(LAST_LIVE_FLUSH.load(std::sync::atomic::Ordering::Relaxed));
+    let elapsed = current_ms.saturating_sub(LAST_LIVE_FLUSH.load(std::sync::atomic::Ordering::Relaxed));
     if elapsed > 1000 && !live_updates.is_empty() {
-        LAST_LIVE_FLUSH.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+        LAST_LIVE_FLUSH.store(current_ms, std::sync::atomic::Ordering::Relaxed);
         let db_clone = db.clone();
         tokio::spawn(async move {
             let _ = db_clone.call(move |conn| {
@@ -132,7 +132,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
                     }
                 }
                 tx.commit()?;
-                Ok::<(), rusqlite::Error>(())
+                Ok::<(), tokio_rusqlite::Error>(())
             }).await;
         });
     }
