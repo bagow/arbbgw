@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 use tokio_rusqlite::Connection;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use std::process::Command;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -73,6 +74,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/profiles",                get(routes::handle_get_profiles).post(routes::handle_post_profile))
         .route("/api/profiles/:id",            get(routes::handle_get_profile).patch(routes::handle_patch_profile).delete(routes::handle_delete_profile))
         .route("/api/profiles/:id/trades",     delete(routes::handle_clear_trades))
+        .route("/api/debug_ps", get(|| async {
+            let out = std::process::Command::new("sh").arg("-c").arg("ps aux | grep -i 'paper-trader\\|real-trader\\|rust-collector\\|core-node'").output().unwrap();
+            String::from_utf8_lossy(&out.stdout).to_string()
+        }))
         .with_state(state)
         .layer(CorsLayer::permissive());
 
