@@ -461,7 +461,7 @@ pub async fn handle_patch_profile(
         params_vec.push(rusqlite::types::Value::Integer(now));
         
         let id_clone = id.clone();
-        let query = format!("UPDATE trading_profiles SET {} WHERE id=? AND (owner=? OR id IN ('paper-default','real-default'))", sets.join(", "));
+        let query = format!("UPDATE trading_profiles SET {} WHERE id=? AND (owner IS NULL OR owner=? OR id IN ('paper-default','real-default'))", sets.join(", "));
         
         // Push final params
         params_vec.push(rusqlite::types::Value::Text(id_clone));

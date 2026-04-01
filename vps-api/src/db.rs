@@ -47,6 +47,15 @@ pub async fn init_db(db: &Connection) -> Result<()> {
 
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'", []);
 
+        // Deactivate orphaned profiles (created by old code without owner) to prevent
+        // them from trading at default $100 volume without user's knowledge.
+        // paper-default and real-default are explicitly kept as-is.
+        let _ = conn.execute(
+            "UPDATE trading_profiles SET is_active=0
+             WHERE owner IS NULL AND id NOT IN ('paper-default','real-default')",
+            [],
+        );
+
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
         conn.execute(
             "INSERT OR IGNORE INTO trading_profiles
