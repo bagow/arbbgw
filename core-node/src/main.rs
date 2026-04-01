@@ -59,9 +59,17 @@ async fn main() -> Result<()> {
         .timeout(Duration::from_secs(15))
         .build()?;
 
-    // ── Profiles DB (settings) ───────────────────────────────────────────────
+    // ── Profiles DB (settings) — open and ensure schema is current ───────────
     let profiles_db = Connection::open(&profiles_db_path).await
         .context(format!("Cannot open profiles DB: {}", profiles_db_path))?;
+    // Migrate older DBs: add columns that may be missing (errors ignored)
+    let _ = profiles_db.call(|conn| {
+        let _ = conn.execute(
+            "ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'",
+            [],
+        );
+        Ok(())
+    }).await;
     info!("Profiles DB: {}", profiles_db_path);
 
     // ── Price map and signal ─────────────────────────────────────────────────
