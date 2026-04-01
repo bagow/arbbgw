@@ -171,11 +171,11 @@ async fn main() -> Result<()> {
                     tokio::spawn(async move {
                         let _ = cache_db.call(move |conn| {
                             let _ = conn.execute("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);", []);
-                            conn.execute(
+                            Ok(conn.execute(
                                 "INSERT INTO server_cache(key,value,expires_at) VALUES('snapshot',?,?) \
                                  ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
                                 rusqlite::params![snapshot_val, now_ms as i64 + 10_000],
-                            )
+                            )?)
                         }).await;
                     });
                 }
