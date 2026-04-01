@@ -1069,17 +1069,17 @@ window.showSubTab = function (btn, tab) {
 
 window.saveSettings = async function (profileId) {
     const g = id => document.getElementById(id)?.value;
+    // NOTE: is_active is intentionally excluded here — use Start/Stop Bot for that.
     const settings = {
-        is_active: (profiles.find(p => p.id === profileId)?.is_active ? 1 : 0),
-        min_entry_spread: parseFloat(g(`sf-min-${profileId}`)),
-        max_entry_spread: parseFloat(g(`sf-max-${profileId}`)),
-        trade_volume: parseFloat(g(`sf-vol-${profileId}`)),
-        max_active_trades: parseInt(g(`sf-max-trades-${profileId}`)),
-        take_profit_percent: parseFloat(g(`sf-tp-${profileId}`)),
+        min_entry_spread:      parseFloat(g(`sf-min-${profileId}`)),
+        max_entry_spread:      parseFloat(g(`sf-max-${profileId}`)),
+        trade_volume:          parseFloat(g(`sf-vol-${profileId}`)),
+        max_active_trades:     parseInt(g(`sf-max-trades-${profileId}`)),
+        take_profit_percent:   parseFloat(g(`sf-tp-${profileId}`)),
         trailing_stop_percent: parseFloat(g(`sf-trail-${profileId}`)),
-        slippage_percent: parseFloat(g(`sf-slip-${profileId}`)),
-        commission_rate: parseFloat(g(`sf-comm-${profileId}`)),
-        min_volume_millions: parseInt(g(`sf-minvol-${profileId}`)),
+        slippage_percent:      parseFloat(g(`sf-slip-${profileId}`)),
+        commission_rate:       parseFloat(g(`sf-comm-${profileId}`)),
+        min_volume_millions:   parseInt(g(`sf-minvol-${profileId}`)),
         collector_interval_secs: parseInt(g(`sf-interval-${profileId}`)),
     };
     const btn = document.getElementById(`sf-save-${profileId}`);
@@ -1092,7 +1092,7 @@ window.saveSettings = async function (profileId) {
     } catch (e) {
         if (btn) { btn.textContent = 'Error!'; btn.style.background = 'var(--red)'; }
         console.error('Save failed:', e);
-        showToast(`Save failed: \${e.message || 'Unknown error'}`, 'error');
+        showToast(`Save failed: ${e.message || 'Unknown error'}`, 'error');
     }
     setTimeout(() => {
         if (btn) { btn.textContent = 'Save Settings'; btn.style.background = 'var(--bg-ctrl)'; }

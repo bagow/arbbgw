@@ -49,6 +49,15 @@ pub async fn init_db(db: &Connection) -> Result<()> {
         // Never touches existing row data.
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'", []);
 
+        // Restore activity for the shared default profiles.
+        // After a DB path migration (e.g. env var change), the new DB file may have
+        // is_active=0 for paper-default because saveSettings previously sent is_active=0.
+        // The shared default profiles should always be active unless explicitly stopped by the user.
+        let _ = conn.execute(
+            "UPDATE trading_profiles SET is_active=1 WHERE id='paper-default' AND is_active=0",
+            [],
+        );
+
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
         // INSERT OR IGNORE — only runs once when the row does not yet exist.
         // Existing rows are NEVER modified here — user settings are preserved.
