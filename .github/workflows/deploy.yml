@@ -160,6 +160,9 @@ jobs:
             sudo restorecon /etc/systemd/system/core-node.service 2>/dev/null || true
             ls -la /etc/systemd/system/core-node.service
             sudo systemctl stop rust-collector paper-trader real-trader || true
+            sudo killall -9 paper-trader real-trader rust-collector || true
+            sudo pkill -f paper-trader || true
+            sudo rm -f /usr/local/bin/paper-trader /usr/local/bin/real-trader /usr/local/bin/rust-collector
             sudo systemctl disable rust-collector paper-trader real-trader || true
             sudo rm -f /etc/systemd/system/rust-collector.service /etc/systemd/system/paper-trader.service /etc/systemd/system/real-trader.service
             sudo systemctl daemon-reload
