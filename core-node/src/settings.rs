@@ -71,21 +71,35 @@ pub async fn load_all_settings(db: &Connection, mode: &str) -> Vec<TradingSettin
     }).await.unwrap_or_default()
 }
 
+fn get_f64(row: &rusqlite::Row, idx: usize) -> Option<f64> {
+    match row.get::<_, f64>(idx) {
+        Ok(v) => Some(v),
+        Err(_) => row.get::<_, i64>(idx).ok().map(|v| v as f64),
+    }
+}
+
+fn get_i64(row: &rusqlite::Row, idx: usize) -> Option<i64> {
+    match row.get::<_, i64>(idx) {
+        Ok(v) => Some(v),
+        Err(_) => row.get::<_, f64>(idx).ok().map(|v| v as i64),
+    }
+}
+
 fn parse_row(row: &rusqlite::Row) -> TradingSettings {
     TradingSettings {
         id:                     row.get(0).unwrap_or_else(|_| "default".to_string()),
-        is_active:              row.get::<_, i64>(3).unwrap_or(0) != 0,
-        min_entry_spread:       row.get(4).unwrap_or(0.5),
-        max_entry_spread:       row.get(5).unwrap_or(10.0),
-        trade_volume:           row.get(6).unwrap_or(100.0),
-        take_profit_percent:    row.get(7).unwrap_or(0.2),
-        trailing_stop_percent:  row.get(8).unwrap_or(0.3),
-        max_active_trades:      row.get(9).unwrap_or(3),
-        commission_rate:        row.get(10).unwrap_or(0.05),
-        slippage_percent:       row.get(11).unwrap_or(0.05),
-        funding_rate_8h:        row.get(12).unwrap_or(0.01),
-        min_volume_millions:    row.get(13).unwrap_or(10.0),
-        collector_interval_secs: row.get(14).unwrap_or(5),
+        is_active:              get_i64(row, 3).unwrap_or(0) != 0,
+        min_entry_spread:       get_f64(row, 4).unwrap_or(0.5),
+        max_entry_spread:       get_f64(row, 5).unwrap_or(10.0),
+        trade_volume:           get_f64(row, 6).unwrap_or(100.0),
+        take_profit_percent:    get_f64(row, 7).unwrap_or(0.2),
+        trailing_stop_percent:  get_f64(row, 8).unwrap_or(0.3),
+        max_active_trades:      get_i64(row, 9).unwrap_or(3),
+        commission_rate:        get_f64(row, 10).unwrap_or(0.05),
+        slippage_percent:       get_f64(row, 11).unwrap_or(0.05),
+        funding_rate_8h:        get_f64(row, 12).unwrap_or(0.01),
+        min_volume_millions:    get_f64(row, 13).unwrap_or(10.0),
+        collector_interval_secs: get_i64(row, 14).unwrap_or(5),
         pending_commands:       row.get(15).ok().flatten(),
         disabled_exchanges: {
             let s: Option<String> = row.get(19).unwrap_or(None);
