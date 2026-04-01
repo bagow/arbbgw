@@ -87,26 +87,7 @@ async fn main() -> Result<()> {
         .context(format!("Cannot open paper-trader DB: {}", paper_db_path))?;
     init_trades_db(&paper_db).await?;
 
-    // ── Pre-load & Spawn Settings Refreshers ─────────────────────────────────
-    let paper_settings_cache = std::sync::Arc::new(tokio::sync::RwLock::new(
-        settings::load_all_settings(&profiles_db, "paper").await
-    ));
-    let real_settings_cache = std::sync::Arc::new(tokio::sync::RwLock::new(
-        settings::load_all_settings(&profiles_db, "real").await
-    ));
-
-    settings::spawn_all_settings_refresher(
-        profiles_db.clone(),
-        "paper",
-        paper_settings_cache.clone(),
-        3, // Refresh every 3 seconds
-    );
-    settings::spawn_all_settings_refresher(
-        profiles_db.clone(),
-        "real",
-        real_settings_cache.clone(),
-        3,
-    );
+    // ── Pre-load & Spawn    // Bypassing cache to ensure real-time settings update
 
     // ── Engine loop (wakes on every WS tick) ─────────────────────────────────
     {
@@ -126,9 +107,9 @@ async fn main() -> Result<()> {
                 }
                 last_run = std::time::Instant::now();
 
-                // Load ALL profiles from memory cache (zero DB latency)
-                let paper_profiles = paper_settings_cache.read().await.clone();
-                let real_profiles  = real_settings_cache.read().await.clone();
+                // Load ALL profiles DIRECTLY from database (bypasses any caching bugs)
+                let paper_profiles = settings::load_all_settings(&profiles_db, "paper").await;
+                let real_profiles  = settings::load_all_settings(&profiles_db, "real").await;
 
                 let min_vol = paper_profiles.iter().chain(real_profiles.iter())
                     .map(|p| p.min_volume_millions)
