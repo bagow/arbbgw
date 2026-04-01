@@ -47,25 +47,27 @@ impl Default for TradingSettings {
 // Explicit SELECT column list — NEVER use SELECT * because column indices
 // depend on the physical schema order on VPS (may differ from code expectations
 // if columns were added via ALTER TABLE historically).
+//
+// NOTE: disabled_exchanges is intentionally excluded — it may not exist on older DBs.
+// It is fetched separately in parse_row with a safe fallback.
 const PROFILE_SELECT: &str = "
     SELECT
-        id,                     -- 0
-        name,                   -- 1
-        mode,                   -- 2
-        is_active,              -- 3
-        min_entry_spread,       -- 4
-        max_entry_spread,       -- 5
-        trade_volume,           -- 6
-        take_profit_percent,    -- 7
-        trailing_stop_percent,  -- 8
-        max_active_trades,      -- 9
-        commission_rate,        -- 10
-        slippage_percent,       -- 11
-        funding_rate_8h,        -- 12
-        min_volume_millions,    -- 13
-        collector_interval_secs,-- 14
-        pending_commands,       -- 15
-        COALESCE(disabled_exchanges, '[]') -- 16
+        id,
+        name,
+        mode,
+        is_active,
+        min_entry_spread,
+        max_entry_spread,
+        trade_volume,
+        take_profit_percent,
+        trailing_stop_percent,
+        max_active_trades,
+        commission_rate,
+        slippage_percent,
+        funding_rate_8h,
+        min_volume_millions,
+        collector_interval_secs,
+        pending_commands
     FROM trading_profiles
 ";
 
@@ -125,10 +127,9 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
         min_volume_millions:     get_f64(row, 13).unwrap_or(10.0),
         collector_interval_secs: get_i64(row, 14).unwrap_or(5),
         pending_commands:        row.get(15).ok().flatten(),
-        disabled_exchanges: {
-            let s: Option<String> = row.get(16).unwrap_or(None);
-            s.and_then(|js| serde_json::from_str(&js).ok()).unwrap_or_default()
-        },
+        // disabled_exchanges is NOT in PROFILE_SELECT (may not exist in old DBs).
+        // Always default to empty — the DB migration runs on startup.
+        disabled_exchanges: vec![],
     }
 }
 
