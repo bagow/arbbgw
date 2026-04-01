@@ -577,3 +577,4 @@ pub async fn handle_clear_trades(
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
+ 
