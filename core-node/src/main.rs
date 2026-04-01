@@ -315,3 +315,4 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
     }).await?;
     Ok(())
 }
+// Trigger redeploy
