@@ -57,7 +57,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
     // Close qualifying trades
     let mut live_updates = Vec::new();
     for trade in &trades {
-        let is_a_higher = trade.direction == format!("{}>{}",trade.exchange_a, trade.exchange_b);
+        let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
 
         // Look up the spread row for the EXACT same exchange pair as this trade
         let key = format!("{}|{}|{}", trade.pair, trade.exchange_a, trade.exchange_b);
@@ -66,8 +66,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
             None => continue, // spread data not available for this exact pair — skip
         };
 
-        let c_price_a = if is_a_higher { row.bid_a } else { row.ask_a };
-        let c_price_b = if is_a_higher { row.ask_b } else { row.bid_b };
+        let slippage = settings.slippage_percent / 100.0;
+        let c_price_a = if is_a_higher { row.ask_a * (1.0 + slippage) } else { row.bid_a * (1.0 - slippage) };
+        let c_price_b = if is_a_higher { row.bid_b * (1.0 - slippage) } else { row.ask_b * (1.0 + slippage) };
         let contracts = trade.volume / trade.entry_price_a.max(0.001);
 
         let pnl_a = if is_a_higher { (trade.entry_price_a - c_price_a) * contracts } else { (c_price_a - trade.entry_price_a) * contracts };
@@ -155,9 +156,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
         if row.vol_a < settings.min_volume_millions * 1_000_000.0 { continue; }
         if row.vol_b < settings.min_volume_millions * 1_000_000.0 { continue; }
 
+        let slippage = settings.slippage_percent / 100.0;
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
-        let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
-        let entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
+        let entry_a = if is_a_higher { row.bid_a * (1.0 - slippage) } else { row.ask_a * (1.0 + slippage) };
+        let entry_b = if is_a_higher { row.ask_b * (1.0 + slippage) } else { row.bid_b * (1.0 - slippage) };
 
         info!("[paper] Opening {} {} {} spread={:.4}%", row.pair, row.exchange_a, row.exchange_b, row.spread);
 
