@@ -154,22 +154,14 @@ jobs:
             sudo chmod +x /usr/local/bin/core-node
             sudo restorecon -v /usr/local/bin/core-node 2>/dev/null || true
             mkdir -p /home/opc/core-node
-            printf '[Unit]\nDescription=CEX Arbitrage Core Node\nAfter=network-online.target time-sync.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=opc\nWorkingDirectory=/home/opc/core-node\nExecStart=/usr/local/bin/core-node\nRestart=on-failure\nRestartSec=5\nStartLimitInterval=60\nStartLimitBurst=5\nEnvironmentFile=-/etc/core-node.env\nOOMScoreAdjust=-600\nLimitNOFILE=65536\nTimeoutStopSec=3\nKillMode=process\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=core-node\n\n[Install]\nWantedBy=multi-user.target\n' > /tmp/core-node.service
+            printf '[Unit]\nDescription=CEX Arbitrage Core Node\nAfter=network-online.target time-sync.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=opc\nWorkingDirectory=/home/opc/core-node\nExecStart=/usr/local/bin/core-node\nRestart=on-failure\nRestartSec=5\nStartLimitInterval=60\nStartLimitBurst=5\nEnvironmentFile=-/etc/core-node.env\nOOMScoreAdjust=-600\nLimitNOFILE=65536\nTimeoutStopSec=5\nKillMode=process\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=core-node\n\n[Install]\nWantedBy=multi-user.target\n' > /tmp/core-node.service
             sudo mv /tmp/core-node.service /etc/systemd/system/core-node.service
             sudo chmod 644 /etc/systemd/system/core-node.service
             sudo restorecon /etc/systemd/system/core-node.service 2>/dev/null || true
-            ls -la /etc/systemd/system/core-node.service
-            sudo systemctl stop rust-collector paper-trader real-trader || true
-            sudo killall -9 paper-trader real-trader rust-collector || true
-            sudo pkill -f paper-trader || true
-            sudo rm -f /usr/local/bin/paper-trader /usr/local/bin/real-trader /usr/local/bin/rust-collector
-            sudo systemctl disable rust-collector paper-trader real-trader || true
-            sudo rm -f /etc/systemd/system/rust-collector.service /etc/systemd/system/paper-trader.service /etc/systemd/system/real-trader.service
             sudo systemctl daemon-reload
-            sudo killall -9 core-node || true
             sudo systemctl enable core-node
-            sudo systemctl restart core-node || true
-            sleep 3
+            sudo systemctl restart core-node
+            sleep 5
             sudo systemctl status core-node --no-pager || true
 
   # --- 7. Деплой Cloudflare Tunnel (cloudflared) на VPS ---
