@@ -160,6 +160,27 @@ async fn main() -> Result<()> {
                 let min_vol = if min_vol == f64::MAX { 1.0 } else { min_vol };
 
                 let spreads = compute_spreads(&prices, min_vol);
+                
+                // Publish snapshot to UI frontend (throttle to 1000ms to avoid db lock overhead)
+                static LAST_SNAP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                if now_ms.saturating_sub(LAST_SNAP.load(std::sync::atomic::Ordering::Relaxed)) > 1000 {
+                    LAST_SNAP.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                    let snapshot_val = serde_json::json!({ "ts": now_ms as i64, "data": spreads }).to_string();
+                    let cache_db = profiles_db.clone();
+                    tokio::spawn(async move {
+                        let _ = cache_db.call(move |conn| {
+                            let _ = conn.execute("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);", []);
+                            let _ = conn.execute(
+                                "INSERT INTO server_cache(key,value,expires_at) VALUES('snapshot',?,?) \
+                                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
+                                rusqlite::params![snapshot_val, now_ms as i64 + 10_000],
+                            );
+                            Ok(())
+                        }).await;
+                    });
+                }
+
                 if spreads.is_empty() { continue; }
 
                 // Run paper engine for each paper profile
