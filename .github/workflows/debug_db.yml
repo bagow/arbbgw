@@ -25,8 +25,12 @@ jobs:
             ls -la /usr/local/bin/core-node
 
             echo ""
+            echo "=== /tmp/core-node-profiles.txt (written by core-node at startup) ==="
+            cat /tmp/core-node-profiles.txt 2>/dev/null || echo "(file not found — core-node not yet redeployed)"
+
+            echo ""
             echo "=== core-node last 30 log lines ==="
-            sudo journalctl -u core-node -n 30 --no-pager
+            sudo journalctl -u core-node -n 30 --no-pager | grep -E "STARTUP|settings|vol="
 
             echo ""
             echo "=== vps-api API: live profiles from DB ==="

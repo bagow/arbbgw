@@ -99,6 +99,22 @@ async fn main() -> Result<()> {
     info!("Paper DB path:    {}", paper_db_path);
     info!("Real DB path:     {}", real_db_path);
 
+    // ── STARTUP DIAGNOSTIC: log and persist profile settings ─────────────────
+    {
+        let startup_profiles = load_all_settings(&profiles_db, "paper").await;
+        info!("STARTUP: {} active paper profiles found in DB='{}'",
+            startup_profiles.len(), profiles_db_path);
+        let mut lines = format!("db_path={}\nactive_paper_count={}\n",
+            profiles_db_path, startup_profiles.len());
+        for p in &startup_profiles {
+            let line = format!("id={} vol={} active={} min_spread={} max_spread={}\n",
+                p.id, p.trade_volume, p.is_active, p.min_entry_spread, p.max_entry_spread);
+            info!("STARTUP-PROFILE: {}", line.trim());
+            lines.push_str(&line);
+        }
+        let _ = std::fs::write("/tmp/core-node-profiles.txt", &lines);
+    }
+
     // ── Engine loop (wakes on every WS tick) ─────────────────────────────────
     {
         let prices      = prices.clone();
@@ -125,7 +141,7 @@ async fn main() -> Result<()> {
                 // Log settings being used (every ~5s = ~100 ticks at 50ms)
                 static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if tick % 100 == 0 {
+                if tick % 20 == 0 {
                     for p in paper_profiles.iter() {
                         info!("[settings] paper id={} active={} vol={} tp={}% min_spread={}",
                             p.id, p.is_active, p.trade_volume, p.take_profit_percent, p.min_entry_spread);
