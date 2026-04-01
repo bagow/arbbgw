@@ -14,9 +14,9 @@ use tokio_rusqlite::Connection;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
-use settings::{load_settings, spawn_settings_refresher};
+use settings::load_all_settings;
 use spreads::compute_spreads;
-use state::{AppState, PriceMap, UpdateSignal};
+use state::{PriceMap, UpdateSignal};
 
 mod collector {
     pub mod gate;
@@ -64,25 +64,9 @@ async fn main() -> Result<()> {
         .context(format!("Cannot open profiles DB: {}", profiles_db_path))?;
     info!("Profiles DB: {}", profiles_db_path);
 
-    // ── Load initial settings ────────────────────────────────────────────────
-    let real_s  = load_settings(&profiles_db, "real").await;
-    let paper_s = load_settings(&profiles_db, "paper").await;
-
-    let state = AppState {
-        prices:         Arc::new(dashmap::DashMap::new()),
-        signal:         Arc::new(tokio::sync::Notify::new()),
-        real_settings:  Arc::new(tokio::sync::RwLock::new(real_s)),
-        paper_settings: Arc::new(tokio::sync::RwLock::new(paper_s)),
-        http: http.clone(),
-    };
-
-    // Refresh settings every 10s from DB
-    spawn_settings_refresher(profiles_db.clone(), "real",  Arc::clone(&state.real_settings),  10);
-    spawn_settings_refresher(profiles_db.clone(), "paper", Arc::clone(&state.paper_settings), 10);
-
-    // Shortcuts for spawning collectors and engine
-    let prices: PriceMap   = state.prices.clone();
-    let signal: UpdateSignal = state.signal.clone();
+    // ── Price map and signal ─────────────────────────────────────────────────
+    let prices: PriceMap    = Arc::new(dashmap::DashMap::new());
+    let signal: UpdateSignal = Arc::new(tokio::sync::Notify::new());
 
     // ── Spawn collectors ─────────────────────────────────────────────────────
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::gate::run(p, s).await }); }
@@ -105,13 +89,12 @@ async fn main() -> Result<()> {
 
     // ── Engine loop (wakes on every WS tick) ─────────────────────────────────
     {
-        let prices   = prices.clone();
-        let signal   = signal.clone();
-        let rs       = Arc::clone(&state.real_settings);
-        let ps       = Arc::clone(&state.paper_settings);
-        let http     = http.clone();
-        let real_db  = real_db.clone();
-        let paper_db = paper_db.clone();
+        let prices      = prices.clone();
+        let signal      = signal.clone();
+        let http        = http.clone();
+        let real_db     = real_db.clone();
+        let paper_db    = paper_db.clone();
+        let prof_db     = profiles_db.clone();
 
         tokio::spawn(async move {
             let mut last_run = std::time::Instant::now();
@@ -123,15 +106,26 @@ async fn main() -> Result<()> {
                 }
                 last_run = std::time::Instant::now();
 
-                let real_s  = rs.read().await.clone();
-                let paper_s = ps.read().await.clone();
-                let min_vol = real_s.min_volume_millions.min(paper_s.min_volume_millions);
+                // Load ALL profiles each cycle — every tab gets its own engine run
+                let paper_profiles = settings::load_all_settings(&prof_db, "paper").await;
+                let real_profiles  = settings::load_all_settings(&prof_db, "real").await;
+
+                let min_vol = paper_profiles.iter().chain(real_profiles.iter())
+                    .map(|p| p.min_volume_millions)
+                    .fold(f64::MAX, f64::min);
+                let min_vol = if min_vol == f64::MAX { 1.0 } else { min_vol };
+
                 let spreads = compute_spreads(&prices, min_vol);
                 if spreads.is_empty() { continue; }
 
-                let real_fut  = engine::real::run_cycle(spreads.clone(), real_s,  http.clone(), real_db.clone());
-                let paper_fut = engine::paper::run_cycle(spreads,        paper_s, http.clone(), paper_db.clone());
-                tokio::join!(real_fut, paper_fut);
+                // Run paper engine for each paper profile
+                for paper_s in paper_profiles {
+                    engine::paper::run_cycle(spreads.clone(), paper_s, http.clone(), paper_db.clone()).await;
+                }
+                // Run real engine for each real profile
+                for real_s in real_profiles {
+                    engine::real::run_cycle(spreads.clone(), real_s, http.clone(), real_db.clone()).await;
+                }
             }
         });
     }

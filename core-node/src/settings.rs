@@ -51,29 +51,47 @@ pub async fn load_settings(db: &Connection, mode: &str) -> TradingSettings {
         let result = conn.query_row(
             "SELECT * FROM trading_profiles WHERE mode=? ORDER BY is_active DESC LIMIT 1",
             rusqlite::params![mode],
-            |row| Ok(TradingSettings {
-                id:                     row.get(0).unwrap_or_else(|_| "default".to_string()),
-                is_active:              row.get::<_, i64>(3).unwrap_or(0) != 0,
-                min_entry_spread:       row.get(4).unwrap_or(0.5),
-                max_entry_spread:       row.get(5).unwrap_or(10.0),
-                trade_volume:           row.get(6).unwrap_or(100.0),
-                take_profit_percent:    row.get(7).unwrap_or(0.2),
-                trailing_stop_percent:  row.get(8).unwrap_or(0.3),
-                max_active_trades:      row.get(9).unwrap_or(3),
-                commission_rate:        row.get(10).unwrap_or(0.05),
-                slippage_percent:       row.get(11).unwrap_or(0.05),
-                funding_rate_8h:        row.get(12).unwrap_or(0.01),
-                min_volume_millions:    row.get(13).unwrap_or(10.0),
-                collector_interval_secs: row.get(14).unwrap_or(5),
-                pending_commands:       row.get(15).ok().flatten(),
-                disabled_exchanges: {
-                    let s: Option<String> = row.get(19).unwrap_or(None);
-                    s.and_then(|js| serde_json::from_str(&js).ok()).unwrap_or_default()
-                },
-            }),
+            |row| Ok(parse_row(row)),
         );
         Ok(result.unwrap_or_default())
     }).await.unwrap_or_default()
+}
+
+/// Load ALL profiles for a given mode — used to run a trade engine cycle per profile.
+pub async fn load_all_settings(db: &Connection, mode: &str) -> Vec<TradingSettings> {
+    let mode = mode.to_string();
+    db.call(move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT * FROM trading_profiles WHERE mode=?"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![mode], |row| Ok(parse_row(row)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }).await.unwrap_or_default()
+}
+
+fn parse_row(row: &rusqlite::Row) -> TradingSettings {
+    TradingSettings {
+        id:                     row.get(0).unwrap_or_else(|_| "default".to_string()),
+        is_active:              row.get::<_, i64>(3).unwrap_or(0) != 0,
+        min_entry_spread:       row.get(4).unwrap_or(0.5),
+        max_entry_spread:       row.get(5).unwrap_or(10.0),
+        trade_volume:           row.get(6).unwrap_or(100.0),
+        take_profit_percent:    row.get(7).unwrap_or(0.2),
+        trailing_stop_percent:  row.get(8).unwrap_or(0.3),
+        max_active_trades:      row.get(9).unwrap_or(3),
+        commission_rate:        row.get(10).unwrap_or(0.05),
+        slippage_percent:       row.get(11).unwrap_or(0.05),
+        funding_rate_8h:        row.get(12).unwrap_or(0.01),
+        min_volume_millions:    row.get(13).unwrap_or(10.0),
+        collector_interval_secs: row.get(14).unwrap_or(5),
+        pending_commands:       row.get(15).ok().flatten(),
+        disabled_exchanges: {
+            let s: Option<String> = row.get(19).unwrap_or(None);
+            s.and_then(|js| serde_json::from_str(&js).ok()).unwrap_or_default()
+        },
+    }
 }
 
 /// Spawn background task refreshing settings from profiles DB every `interval_secs`.
