@@ -297,7 +297,12 @@ function renderExchangeFilters() {
     const exchangeFiltersEl = refs.exchangeFilters;
     // Collect unique exchanges present in snapshot
     const inSnapshot = [...new Set(scannerState.snapshot.flatMap(r => [r.exchangeA, r.exchangeB]))];
-    if (!inSnapshot.length) { if (exchangeFiltersEl) exchangeFiltersEl.innerHTML = ''; return; }
+    if (!inSnapshot.length) { 
+        if (exchangeFiltersEl) exchangeFiltersEl.innerHTML = ''; 
+        if (refs.tableBody) refs.tableBody.innerHTML = '<tr class="placeholder-row"><td colspan="7">No pairs match your active bot volume thresholds</td></tr>';
+        if (pairCount) pairCount.textContent = '0 pairs';
+        return; 
+    }
     if (!exchangeFiltersEl) return;
 
     exchangeFiltersEl.innerHTML = '';
