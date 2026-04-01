@@ -321,6 +321,14 @@ pub async fn handle_get_unified(
             "top_exchange_pairs": Vec::<serde_json::Value>::new()
         })
     });
+    let history_enriched: Vec<serde_json::Value> = history_trades.into_iter().map(|t| {
+        let mut v = serde_json::to_value(&t).unwrap_or_default();
+        if let Some(obj) = v.as_object_mut() {
+            let display_comm = t.commission_cost.unwrap_or_else(|| t.volume * 0.0045 * 4.0);
+            obj.insert("commission_cost".into(), json!(display_comm));
+        }
+        v
+    }).collect();
 
     // Return payload matching frontend expectations
     (StatusCode::OK, Json(json!({
@@ -329,11 +337,11 @@ pub async fn handle_get_unified(
         "profiles": profiles,
         "trades": {
             "active": active_enriched,
-            "history": history_trades,
+            "history": history_enriched,
             "stats": stats
         },
         "profile_active": active_enriched,
-        "profile_history": history_trades,
+        "profile_history": history_enriched,
         "profile_stats": stats,
     }))).into_response()
 }
