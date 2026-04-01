@@ -482,6 +482,7 @@ function renderCexTab(profile, exchangesData) {
     
     for (const exA of exNames) {
         let pairsList = '';
+        let maxTickers = 0;
         const rawArr = exchangesData.data[exA];
         for (const exB of exNames) {
             if (exA === exB) continue;
@@ -489,6 +490,7 @@ function renderCexTab(profile, exchangesData) {
             // The Rust backend sends pre-computed matches like: { "vs bybit": 150 }
             if (rawArr && typeof rawArr === 'object' && rawArr[`vs ${exB}`]) {
                 matchCount = rawArr[`vs ${exB}`];
+                if (matchCount > maxTickers) maxTickers = matchCount;
             }
             if (matchCount > 0) {
                 pairsList += `
@@ -511,7 +513,7 @@ function renderCexTab(profile, exchangesData) {
                     </div>
                     <div style="text-align:right;">
                         <span style="font-size:0.75rem;color:var(--text-sub);display:block;text-transform:uppercase;letter-spacing:0.5px;">Tickers</span>
-                        <span style="font-family:var(--font-mono);font-weight:600;">${setA.size}</span>
+                        <span style="font-family:var(--font-mono);font-weight:600;">${maxTickers}+</span>
                     </div>
                 </div>
                 
