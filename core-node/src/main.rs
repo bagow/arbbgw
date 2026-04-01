@@ -147,6 +147,7 @@ async fn main() -> Result<()> {
                 } else {
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
+                let paper_debug = settings::load_all_settings(&cache_db, "paper").await;
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -174,7 +175,7 @@ async fn main() -> Result<()> {
                     pairs_map.insert(ex_a.clone(), serde_json::Value::Object(vs));
                 }
 
-                let val = serde_json::json!({ "ts": now_ms, "data": pairs_map }).to_string();
+                let val = serde_json::json!({ "ts": now_ms, "data": pairs_map, "DEBUG_PROFILES": paper_debug }).to_string();
                 let n = exchanges_list.len();
                 let _ = cache_db.call(move |conn| {
                     let _ = conn.execute_batch("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);");
