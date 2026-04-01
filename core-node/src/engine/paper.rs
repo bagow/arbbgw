@@ -55,6 +55,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
     let stop_pct   = settings.trailing_stop_percent / 100.0;
 
     // Close qualifying trades
+    let mut live_updates = Vec::new();
     for trade in &trades {
         let is_a_higher = trade.direction == format!("{}>{}",trade.exchange_a, trade.exchange_b);
 
@@ -100,13 +101,40 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
                 )?;
                 Ok(())
             }).await;
-        } else if top_spread > trade.highest_spread {
-            let id = trade.id;
-            let _ = db.call(move |conn| {
-                conn.execute("UPDATE trades SET highest_spread_reached=? WHERE id=?", params![top_spread, id])?;
-                Ok(())
-            }).await;
+        } else {
+            // Did not close, track live PnL for UI
+            live_updates.push((trade.id, c_price_a, c_price_b, current_spread, net_pnl));
+
+            if top_spread > trade.highest_spread {
+                let id = trade.id;
+                let _ = db.call(move |conn| {
+                    conn.execute("UPDATE trades SET highest_spread_reached=? WHERE id=?", params![top_spread, id])?;
+                    Ok(())
+                }).await;
+            }
         }
+    }
+
+    static LAST_LIVE_FLUSH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    // Flush live PnL to DB every 1000ms per profile
+    let elapsed = now_ms.saturating_sub(LAST_LIVE_FLUSH.load(std::sync::atomic::Ordering::Relaxed));
+    if elapsed > 1000 && !live_updates.is_empty() {
+        LAST_LIVE_FLUSH.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+        let db_clone = db.clone();
+        tokio::spawn(async move {
+            let _ = db_clone.call(move |conn| {
+                let tx = conn.transaction()?;
+                {
+                    let mut stmt = tx.prepare_cached("UPDATE trades SET last_price_a=?, last_price_b=?, last_spread=?, curr_gross_pnl=? WHERE id=?")?;
+                    for (id, pa, pb, cs, pnl) in live_updates {
+                        stmt.execute(params![pa, pb, cs, pnl, id])?;
+                    }
+                }
+                tx.commit()?;
+                Ok::<(), rusqlite::Error>(())
+            }).await;
+        });
     }
 
     // ── Open new paper trades ─────────────────────────────────────────────────

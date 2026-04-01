@@ -166,6 +166,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, http:
     let stop_pct   = settings.trailing_stop_percent / 100.0;
 
     // ── Close qualifying trades ───────────────────────────────────────────────
+    let mut live_updates = Vec::new();
     for trade in &trades {
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
         let row = match spread_map.get(&trade.pair) { Some(r) => r, None => continue };
@@ -197,8 +198,39 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, http:
                 conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=? WHERE id=?",
                     params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, r, id])?;
                 Ok(())
-            }).await;
+        } else {
+            // Did not close, track live PnL for UI
+            live_updates.push((trade.id, c_price_a, c_price_b, current_spread, net_pnl));
+
+            if top_spread > trade.highest_spread {
+                let id = trade.id;
+                let _ = db.call(move |conn| {
+                    conn.execute("UPDATE trades SET highest_spread_reached=? WHERE id=?", params![top_spread, id])?;
+                    Ok(())
+                }).await;
+            }
         }
+    }
+
+    static LAST_LIVE_FLUSH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now_ms = now_ms() as u64;
+    let elapsed = now_ms.saturating_sub(LAST_LIVE_FLUSH.load(std::sync::atomic::Ordering::Relaxed));
+    if elapsed > 1000 && !live_updates.is_empty() {
+        LAST_LIVE_FLUSH.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+        let db_clone = db.clone();
+        tokio::spawn(async move {
+            let _ = db_clone.call(move |conn| {
+                let tx = conn.transaction()?;
+                {
+                    let mut stmt = tx.prepare_cached("UPDATE trades SET last_price_a=?, last_price_b=?, last_spread=?, curr_gross_pnl=? WHERE id=?")?;
+                    for (id, pa, pb, cs, pnl) in live_updates {
+                        stmt.execute(params![pa, pb, cs, pnl, id])?;
+                    }
+                }
+                tx.commit()?;
+                Ok::<(), rusqlite::Error>(())
+            }).await;
+        });
     }
 
     // ── Open new real trades ──────────────────────────────────────────────────
