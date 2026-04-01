@@ -154,6 +154,14 @@ jobs:
             sudo chmod +x /usr/local/bin/core-node
             sudo restorecon -v /usr/local/bin/core-node 2>/dev/null || true
             mkdir -p /home/opc/core-node
+
+            # Write correct env file — overwrite any stale values from old .env.example
+            # Both vps-api and core-node MUST point to the same DB files.
+            printf 'PROFILES_DB_PATH=/home/opc/core-node/vps-api.db\nPAPER_DB_PATH=/home/opc/core-node/paper-trader.db\nREAL_DB_PATH=/home/opc/core-node/real-trader.db\nRUST_LOG=info\n' > /tmp/core-node.env
+            sudo mv /tmp/core-node.env /etc/core-node.env
+            sudo chmod 640 /etc/core-node.env
+            sudo chown root:opc /etc/core-node.env
+
             printf '[Unit]\nDescription=CEX Arbitrage Core Node\nAfter=network-online.target time-sync.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=opc\nWorkingDirectory=/home/opc/core-node\nExecStart=/usr/local/bin/core-node\nRestart=on-failure\nRestartSec=5\nStartLimitInterval=60\nStartLimitBurst=5\nEnvironmentFile=-/etc/core-node.env\nOOMScoreAdjust=-600\nLimitNOFILE=65536\nTimeoutStopSec=5\nKillMode=process\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=core-node\n\n[Install]\nWantedBy=multi-user.target\n' > /tmp/core-node.service
             sudo mv /tmp/core-node.service /etc/systemd/system/core-node.service
             sudo chmod 644 /etc/systemd/system/core-node.service
@@ -163,6 +171,8 @@ jobs:
             sudo systemctl restart core-node
             sleep 5
             sudo systemctl status core-node --no-pager || true
+            echo "=== DB paths in use ==="
+            sudo journalctl -u core-node --no-pager -n 20 | grep -E "DB|profile|vol" || true
 
   # --- 7. Деплой Cloudflare Tunnel (cloudflared) на VPS ---
   deploy-cloudflared:

@@ -39,21 +39,24 @@ async fn main() -> anyhow::Result<()> {
     let pass_dima       = env::var("PASS_DIMA").unwrap_or_else(|_| "pass_dima".into());
     let pass_sergei     = env::var("PASS_SERGEI").unwrap_or_else(|_| "pass_sergei".into());
 
-    let db_path = "/home/opc/core-node/vps-api.db".to_string();
-    
+    let db_path    = env::var("PROFILES_DB_PATH")
+        .unwrap_or_else(|_| "/home/opc/core-node/vps-api.db".to_string());
+    let paper_path = env::var("PAPER_DB_PATH")
+        .unwrap_or_else(|_| "/home/opc/core-node/paper-trader.db".to_string());
+    let real_path  = env::var("REAL_DB_PATH")
+        .unwrap_or_else(|_| "/home/opc/core-node/real-trader.db".to_string());
+
     // ── Profiles DB (vps-api.db) ──────────────────────────────────────────────
     tracing::info!("Profiles DB: {}", db_path);
     let db = Connection::open(&db_path).await?;
     db::init_db(&db).await?;
 
     // ── Paper trades DB ───────────────────────────────────────────────────────
-    let paper_path = "/home/opc/core-node/paper-trader.db".to_string();
     tracing::info!("Paper DB:    {}", paper_path);
     let paper_db = Connection::open(&paper_path).await?;
     db::init_trades_db(&paper_db).await?;
 
     // ── Real trades DB ────────────────────────────────────────────────────────
-    let real_path = "/home/opc/core-node/real-trader.db".to_string();
     tracing::info!("Real DB:     {}", real_path);
     let real_db = Connection::open(&real_path).await?;
     db::init_trades_db(&real_db).await?;

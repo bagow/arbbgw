@@ -62,8 +62,10 @@ async fn main() -> Result<()> {
     // ── Profiles DB (settings) — open and ensure schema is current ───────────
     let profiles_db = Connection::open(&profiles_db_path).await
         .context(format!("Cannot open profiles DB: {}", profiles_db_path))?;
-    // Migrate older DBs: add columns that may be missing (errors ignored)
+    // Enable WAL so vps-api (writer) and core-node (reader) don't block each other.
+    // Migrate older DBs: add columns that may be missing (errors ignored).
     let _ = profiles_db.call(|conn| {
+        let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
         let _ = conn.execute(
             "ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'",
             [],
