@@ -90,7 +90,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
 
         if triggered_tp || triggered_stop || zero_spread {
             let reason = if triggered_tp { "TP" } else if triggered_stop { "STOP" } else { "ZERO_SPREAD" };
-            info!("[paper] Closing {} {} reason={} net={:.4}", trade.id, trade.pair, reason, net_pnl);
+            info!("[paper] Closing {} {} reason={} net={:.4} curr_sp={:.4} top_sp={:.4} stop_limit={:.4} gross={:.4}", 
+                trade.id, trade.pair, reason, net_pnl, current_spread, top_spread, top_spread * (1.0 - stop_pct), gross_pnl);
+
             let id = trade.id; let np = net_pnl; let gp = gross_pnl; let cs = current_spread;
             let cpa = c_price_a; let cpb = c_price_b; let pa = pnl_a; let pb = pnl_b;
             let reason_s = reason.to_string();
