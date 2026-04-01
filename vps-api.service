@@ -7,7 +7,7 @@ Type=simple
 User=opc
 Group=opc
 WorkingDirectory=/home/opc/cex-arb/vps-api
-Environment="DATABASE_URL=/home/opc/cex-arb/vps-api.db"
+Environment="DATABASE_URL=/home/opc/core-node/vps-api.db"
 Environment="PAPER_DB_PATH=/home/opc/core-node/paper-trader.db"
 Environment="REAL_DB_PATH=/home/opc/core-node/real-trader.db"
 Environment="COLLECTOR_TOKEN=Drc8#mP2vLq!"

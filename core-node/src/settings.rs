@@ -94,17 +94,18 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
     }
 }
 
-/// Spawn background task refreshing settings from profiles DB every `interval_secs`.
-pub fn spawn_settings_refresher(
+/// Spawn background task refreshing ALL profiles from DB every `interval_secs`.
+pub fn spawn_all_settings_refresher(
     db: Connection,
     mode: &'static str,
-    settings: std::sync::Arc<tokio::sync::RwLock<TradingSettings>>,
+    settings: std::sync::Arc<tokio::sync::RwLock<Vec<TradingSettings>>>,
     interval_secs: u64,
 ) {
     tokio::spawn(async move {
+        let m = mode.to_string();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
-            let fresh = load_settings(&db, mode).await;
+            let fresh = load_all_settings(&db, &m).await;
             *settings.write().await = fresh;
         }
     });

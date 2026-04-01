@@ -87,6 +87,27 @@ async fn main() -> Result<()> {
         .context(format!("Cannot open paper-trader DB: {}", paper_db_path))?;
     init_trades_db(&paper_db).await?;
 
+    // ── Pre-load & Spawn Settings Refreshers ─────────────────────────────────
+    let paper_settings_cache = std::sync::Arc::new(tokio::sync::RwLock::new(
+        settings::load_all_settings(&profiles_db, "paper").await
+    ));
+    let real_settings_cache = std::sync::Arc::new(tokio::sync::RwLock::new(
+        settings::load_all_settings(&profiles_db, "real").await
+    ));
+
+    settings::spawn_all_settings_refresher(
+        profiles_db.clone(),
+        "paper",
+        paper_settings_cache.clone(),
+        3, // Refresh every 3 seconds
+    );
+    settings::spawn_all_settings_refresher(
+        profiles_db.clone(),
+        "real",
+        real_settings_cache.clone(),
+        3,
+    );
+
     // ── Engine loop (wakes on every WS tick) ─────────────────────────────────
     {
         let prices      = prices.clone();
@@ -94,7 +115,6 @@ async fn main() -> Result<()> {
         let http        = http.clone();
         let real_db     = real_db.clone();
         let paper_db    = paper_db.clone();
-        let prof_db     = profiles_db.clone();
 
         tokio::spawn(async move {
             let mut last_run = std::time::Instant::now();
@@ -106,9 +126,9 @@ async fn main() -> Result<()> {
                 }
                 last_run = std::time::Instant::now();
 
-                // Load ALL profiles each cycle — every tab gets its own engine run
-                let paper_profiles = settings::load_all_settings(&prof_db, "paper").await;
-                let real_profiles  = settings::load_all_settings(&prof_db, "real").await;
+                // Load ALL profiles from memory cache (zero DB latency)
+                let paper_profiles = paper_settings_cache.read().await.clone();
+                let real_profiles  = real_settings_cache.read().await.clone();
 
                 let min_vol = paper_profiles.iter().chain(real_profiles.iter())
                     .map(|p| p.min_volume_millions)
@@ -135,8 +155,16 @@ async fn main() -> Result<()> {
         let prices_snap = prices.clone();
         let cache_db    = profiles_db.clone();
         tokio::spawn(async move {
+            // Wait just 5s for collectors to connect, then publish immediately
+            // Subsequent updates every 30s
+            let mut first = true;
             loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                if first {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    first = false;
+                } else {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()

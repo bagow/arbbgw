@@ -467,11 +467,14 @@ pub async fn handle_patch_profile(
         params_vec.push(rusqlite::types::Value::Text(id_clone));
         params_vec.push(rusqlite::types::Value::Text(username));
 
-        let _ = state.db.call(move |conn| {
+        if let Err(e) = state.db.call(move |conn| {
             let mut stmt = conn.prepare(&query)?;
             stmt.execute(rusqlite::params_from_iter(params_vec))?;
             Ok(())
-        }).await;
+        }).await {
+            tracing::error!("Failed to update profile {}: {:?}", id, e);
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, "Failed to update profile in database");
+        }
     }
 
     // Return updated profile
