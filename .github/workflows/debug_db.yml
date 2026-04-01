@@ -5,26 +5,36 @@ jobs:
   debug:
     runs-on: ubuntu-latest
     steps:
-      - name: SSH and dump DB
+      - name: SSH diagnostic dump
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
-            echo "=== trading_profiles (id | name | mode | is_active | trade_volume | min_entry_spread | take_profit_percent) ==="
+            echo "=== core-node binary timestamp ==="
+            ls -la /usr/local/bin/core-node
+
+            echo ""
+            echo "=== core-node service status ==="
+            sudo systemctl status core-node --no-pager | tail -8
+
+            echo ""
+            echo "=== core-node last 60 log lines ==="
+            sudo journalctl -u core-node -n 60 --no-pager
+
+            echo ""
+            echo "=== /etc/core-node.env (may override PROFILES_DB_PATH) ==="
+            cat /etc/core-node.env 2>/dev/null || echo "(file does not exist — using defaults)"
+
+            echo ""
+            echo "=== trading_profiles raw from SQLite ==="
             sqlite3 /home/opc/core-node/vps-api.db \
-              "SELECT id, name, mode, is_active, trade_volume, min_entry_spread, take_profit_percent FROM trading_profiles ORDER BY created_at ASC" \
-              2>/dev/null || echo "FAIL: sqlite3 not available — use /api/debug_ps instead"
+              "SELECT id, name, mode, is_active, trade_volume FROM trading_profiles" \
+              2>/dev/null || echo "sqlite3 not available"
 
             echo ""
-            echo "=== vps-api service status ==="
-            sudo systemctl status vps-api --no-pager | tail -5
-
-            echo ""
-            echo "=== core-node last 20 log lines (settings) ==="
-            sudo journalctl -u core-node -n 20 --no-pager | grep -E "settings|vol=|Profiles DB" || echo "(no matching lines)"
-
-            echo ""
-            echo "=== /api/debug_ps endpoint ==="
-            curl -s http://localhost:4000/api/debug_ps || echo "FAIL"
+            echo "=== last 10 trades inserted (volume column) ==="
+            sqlite3 /home/opc/core-node/paper-trader.db \
+              "SELECT id, pair, volume, profile_id, entry_time FROM trades ORDER BY entry_time DESC LIMIT 10" \
+              2>/dev/null || echo "sqlite3 not available"
