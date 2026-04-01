@@ -1,4 +1,4 @@
-//! core-node — single-process CEX arbitrage engine
+//! core-node — single-process CEX arbitrage engine (v2026.04.01)
 
 mod settings;
 mod spreads;
