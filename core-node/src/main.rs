@@ -96,6 +96,7 @@ async fn main() -> Result<()> {
         let http        = http.clone();
         let real_db     = real_db.clone();
         let paper_db    = paper_db.clone();
+        let profiles_db = profiles_db.clone();
 
         tokio::spawn(async move {
             let mut last_run = std::time::Instant::now();
