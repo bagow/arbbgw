@@ -6,10 +6,7 @@ After=network.target
 Type=simple
 User=opc
 Group=opc
-WorkingDirectory=/home/opc/cex-arb/vps-api
-Environment="DATABASE_URL=/home/opc/core-node/vps-api.db"
-Environment="PAPER_DB_PATH=/home/opc/core-node/paper-trader.db"
-Environment="REAL_DB_PATH=/home/opc/core-node/real-trader.db"
+WorkingDirectory=/home/opc/core-node
 Environment="COLLECTOR_TOKEN=Drc8#mP2vLq!"
 Environment="INTERNAL_TOKEN=Drc8#mP2vLq!"
 Environment="PASS_DIMA=Xk9mP2#vLqRt7Yw"
