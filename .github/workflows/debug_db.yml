@@ -12,29 +12,30 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
+            echo "=== DB files in /home/opc/core-node ==="
+            ls -la /home/opc/core-node/*.db 2>/dev/null || echo "no .db files there"
+            ls -la ~/core-node/*.db 2>/dev/null
+
+            echo ""
+            echo "=== vps-api last 30 log lines (includes migration output) ==="
+            sudo journalctl -u vps-api -n 30 --no-pager
+
+            echo ""
             echo "=== core-node binary timestamp ==="
             ls -la /usr/local/bin/core-node
 
             echo ""
-            echo "=== core-node service status ==="
-            sudo systemctl status core-node --no-pager | tail -8
+            echo "=== core-node last 30 log lines ==="
+            sudo journalctl -u core-node -n 30 --no-pager
 
             echo ""
-            echo "=== core-node last 60 log lines ==="
-            sudo journalctl -u core-node -n 60 --no-pager
+            echo "=== vps-api API: live profiles from DB ==="
+            curl -s -u "dima:${PASS_DIMA}" http://localhost:4000/api/profiles 2>/dev/null \
+              | python3 -c "import sys,json; [print(f\"id={p['id'][:8]} name={p['name']} mode={p['mode']} active={p['is_active']} vol={p['trade_volume']}\") for p in json.load(sys.stdin)]" \
+              || curl -s http://localhost:4000/api/profiles | head -500
 
             echo ""
-            echo "=== /etc/core-node.env (may override PROFILES_DB_PATH) ==="
-            cat /etc/core-node.env 2>/dev/null || echo "(file does not exist — using defaults)"
-
-            echo ""
-            echo "=== trading_profiles raw from SQLite ==="
-            sqlite3 /home/opc/core-node/vps-api.db \
-              "SELECT id, name, mode, is_active, trade_volume FROM trading_profiles" \
-              2>/dev/null || echo "sqlite3 not available"
-
-            echo ""
-            echo "=== last 10 trades inserted (volume column) ==="
-            sqlite3 /home/opc/core-node/paper-trader.db \
-              "SELECT id, pair, volume, profile_id, entry_time FROM trades ORDER BY entry_time DESC LIMIT 10" \
+            echo "=== last 5 trades from paper-trader.db ==="
+            sqlite3 ~/core-node/paper-trader.db \
+              "SELECT id, pair, volume, profile_id, entry_time FROM trades ORDER BY entry_time DESC LIMIT 5" \
               2>/dev/null || echo "sqlite3 not available"
