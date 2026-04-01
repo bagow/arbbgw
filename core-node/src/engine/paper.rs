@@ -19,6 +19,7 @@ struct Trade {
     entry_price_a: f64,
     entry_price_b: f64,
     entry_spread: f64,
+    entry_time: i64,
     highest_spread: f64,
     pnl_a: f64,
     pnl_b: f64,
@@ -55,8 +56,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
 
     // Minimum hold time enforced via load_open_trades WHERE entry_time filter (future improvement)
 
-    // Close qualifying trades
+    // Close qualifying trades (min 10s hold avoids flip-flopping on noisy ticks)
+    let min_hold_ms = 10_000_i64;
     for trade in &trades {
+        if now_ms() - trade.entry_time < min_hold_ms { continue; }
+
         let is_a_higher = trade.direction == format!("{}>{}",trade.exchange_a, trade.exchange_b);
 
         // Look up the spread row for the EXACT same exchange pair as this trade
@@ -152,15 +156,17 @@ async fn load_open_trades(db: &Connection, profile_id: &str) -> Vec<Trade> {
     let pid = profile_id.to_string();
     db.call(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT id,pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,highest_spread_reached,pnl_a,pnl_b FROM trades WHERE status='OPEN' AND profile_id=?"
+            "SELECT id,pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,pnl_a,pnl_b FROM trades WHERE status='OPEN' AND profile_id=?"
         )?;
         let rows = stmt.query_map([&pid], |row| Ok(Trade {
             id: row.get(0)?, pair: row.get(1)?,
             exchange_a: row.get(2)?, exchange_b: row.get(3)?,
             direction: row.get(4)?, volume: row.get(5)?,
             entry_price_a: row.get(6)?, entry_price_b: row.get(7)?,
-            entry_spread: row.get(8)?, highest_spread: row.get(9)?,
-            pnl_a: row.get(10)?, pnl_b: row.get(11)?,
+            entry_spread: row.get(8)?,
+            entry_time: row.get(9)?,
+            highest_spread: row.get(10)?,
+            pnl_a: row.get(11)?, pnl_b: row.get(12)?,
         }))?.filter_map(|r| r.ok()).collect();
         Ok(rows)
     }).await.unwrap_or_default()

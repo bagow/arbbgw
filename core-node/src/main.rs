@@ -203,6 +203,7 @@ async fn main() -> Result<()> {
 async fn init_trades_db(db: &Connection) -> Result<()> {
     db.call(|conn| {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        // 1. Create table if not exists
         conn.execute_batch("
             CREATE TABLE IF NOT EXISTS trades (
                 id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -234,11 +235,15 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
                 close_reason          TEXT,
                 profile_id            TEXT DEFAULT 'paper-default'
             );
-            CREATE INDEX IF NOT EXISTS idx_trades_status  ON trades(status);
-            CREATE INDEX IF NOT EXISTS idx_trades_profile ON trades(profile_id);
         ")?;
+        // 2. Migrate older DBs (errors ignored — columns might already exist)
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN gross_pnl REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN profile_id TEXT DEFAULT 'paper-default'", []);
+        // 3. Create indexes AFTER ensuring columns exist
+        let _ = conn.execute_batch("
+            CREATE INDEX IF NOT EXISTS idx_trades_status  ON trades(status);
+            CREATE INDEX IF NOT EXISTS idx_trades_profile ON trades(profile_id);
+        ");
         Ok(())
     }).await?;
     Ok(())
