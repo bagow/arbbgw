@@ -76,10 +76,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/profiles/:id/trades",     delete(routes::handle_clear_trades))
         .route("/api/debug_ps", get(|| async {
             let out1 = std::process::Command::new("sh").arg("-c").arg("pwd && ls -l *.db").output().unwrap();
-            let out2 = std::process::Command::new("sh").arg("-c").arg("sqlite3 vps-api.db 'SELECT id, trade_volume FROM trading_profiles'").output().unwrap();
+            let out2 = std::process::Command::new("sh").arg("-c").arg("sqlite3 /home/opc/core-node/vps-api.db 'SELECT id, trade_volume FROM trading_profiles'").output().unwrap();
             let mut res = String::from_utf8_lossy(&out1.stdout).to_string();
-            res.push_str("\n\n");
+            res.push_str("\nSTDERR1: ");
+            res.push_str(&String::from_utf8_lossy(&out1.stderr));
+            res.push_str("\n\nSTDOUT2: ");
             res.push_str(&String::from_utf8_lossy(&out2.stdout));
+            res.push_str("\nSTDERR2: ");
+            res.push_str(&String::from_utf8_lossy(&out2.stderr));
             res
         }))
         .with_state(state)
