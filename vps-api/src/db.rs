@@ -47,12 +47,16 @@ pub async fn init_db(db: &Connection) -> Result<()> {
 
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'", []);
 
-        // Deactivate orphaned profiles (created by old code without owner) to prevent
-        // them from trading at default $100 volume without user's knowledge.
-        // paper-default and real-default are explicitly kept as-is.
+        // Fix trade_volume for all paper profiles still using old high defaults.
+        // This covers profiles created before the user configured the volume via UI.
+        // Reactivate profiles deactivated by the previous aggressive migration.
         let _ = conn.execute(
-            "UPDATE trading_profiles SET is_active=0
-             WHERE owner IS NULL AND id NOT IN ('paper-default','real-default')",
+            "UPDATE trading_profiles SET trade_volume=10.0 WHERE mode='paper' AND trade_volume >= 100.0",
+            [],
+        );
+        // Restore profiles that may have been deactivated by a previous version of this migration.
+        let _ = conn.execute(
+            "UPDATE trading_profiles SET is_active=1 WHERE owner IS NULL AND id NOT IN ('paper-default','real-default') AND mode='paper'",
             [],
         );
 
