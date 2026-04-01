@@ -1,0 +1,23 @@
+name: Debug DB
+on:
+  push:
+    branches: [ main ]
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and dump DB
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          script: |
+            echo "--- core-node trading_profiles ---"
+            sqlite3 /home/opc/core-node/vps-api.db "SELECT * FROM trading_profiles" || echo "FAIL"
+            echo "--- core-node table_info ---"
+            sqlite3 /home/opc/core-node/vps-api.db "PRAGMA table_info(trading_profiles)" || echo "FAIL"
+            echo "--- vps-api trading_profiles ---"
+            sqlite3 /home/opc/cex-arb/vps-api/vps-api.db "SELECT * FROM trading_profiles" || echo "FAIL"
+            echo "--- curl unified ---"
+            curl -s http://localhost:4000/api/unified?profile_id=acc5ee84-9424-4246-b6c0-43610ad6fa7c || echo "FAIL"
