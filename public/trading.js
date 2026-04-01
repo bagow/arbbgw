@@ -93,8 +93,10 @@ async function createProfile(name, mode) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, mode }),
     });
-    profiles.push(p);
-    return p;
+    // Reload all profiles from server to ensure local state is accurate.
+    await loadProfiles();
+    // Return the profile that matches the newly created one.
+    return profiles.find(pr => pr.id === p.id) || p;
 }
 
 async function deleteProfile(id) {
@@ -1101,21 +1103,23 @@ window.toggleBotPower = async function (profileId) {
     const profile = profiles.find(p => p.id === profileId);
     if (!profile) return;
     const previousState = profile.is_active;
-    profile.is_active = !profile.is_active;
-    const settings = { ...profile, is_active: profile.is_active ? 1 : 0 };
-    
+    const newActive = !previousState;
+    profile.is_active = newActive;
+
+    // Send ONLY is_active — do not spread the whole profile object
+    // to avoid sending stale or unintended field values.
     try {
-        await saveProfileSettings(profileId, settings);
+        await saveProfileSettings(profileId, { is_active: newActive ? 1 : 0 });
         const btn = document.getElementById(`sf-power-${profileId}`);
         if (btn) {
-            btn.textContent = profile.is_active ? 'Stop Bot' : 'Start Bot';
-            btn.style.background = profile.is_active ? 'var(--red)' : 'var(--green)';
+            btn.textContent = newActive ? 'Stop Bot' : 'Start Bot';
+            btn.style.background = newActive ? 'var(--red)' : 'var(--green)';
         }
-        showToast(`Bot \${profile.is_active ? 'Started' : 'Stopped'}`, 'success');
+        showToast(`Bot ${newActive ? 'Started' : 'Stopped'}`, 'success');
     } catch (e) {
         profile.is_active = previousState; // Revert locally
         console.error('Bot toggle failed:', e);
-        showToast(`Action failed: \${e.message || 'Check ownership'}`, 'error');
+        showToast(`Action failed: ${e.message || 'Check ownership'}`, 'error');
     }
 };
 

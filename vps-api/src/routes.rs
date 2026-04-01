@@ -1,5 +1,5 @@
 use crate::db::{row_to_profile, row_to_trade};
-use crate::models::{SpreadPayload, TradingProfile};
+use crate::models::SpreadPayload;
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -365,7 +365,7 @@ pub async fn handle_get_profile(
 pub async fn handle_post_profile(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut payload): Json<TradingProfile>,
+    Json(payload): Json<Value>,
 ) -> Response {
     let username = match check_basic_auth(&headers, &state) {
         Some(u) => u,
@@ -373,28 +373,49 @@ pub async fn handle_post_profile(
     };
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
-    payload.id = uuid::Uuid::new_v4().to_string(); // Actually let frontend send ID or we generate
-    
-    let p = payload.clone();
+    let new_id = uuid::Uuid::new_v4().to_string();
+
+    // Extract only what the frontend sends — fill everything else with sensible defaults.
+    let name  = payload.get("name" ).and_then(|v| v.as_str()).unwrap_or("New Profile").to_string();
+    let mode  = payload.get("mode" ).and_then(|v| v.as_str()).unwrap_or("paper").to_string();
+
+    let (default_vol, default_tp, default_stop, default_max_trades) = if mode == "real" {
+        (100.0_f64, 0.2_f64, 0.3_f64, 3_i64)
+    } else {
+        (10.0_f64, 0.2_f64, 0.3_f64, 3_i64)
+    };
+
+    let id_clone = new_id.clone();
+    let un_clone = username.clone();
     let res = state.db.call(move |conn| {
         Ok(conn.execute(
             "INSERT INTO trading_profiles
                 (id,name,mode,is_active,min_entry_spread,max_entry_spread,trade_volume,
                  take_profit_percent,trailing_stop_percent,max_active_trades,commission_rate,
-                 slippage_percent,funding_rate_8h,min_volume_millions,collector_interval_secs,owner,created_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 slippage_percent,funding_rate_8h,min_volume_millions,collector_interval_secs,
+                 owner,created_at,updated_at,disabled_exchanges)
+            VALUES (?,?,?,0,1.0,10.0,?,?,?,?,0.05,0.05,0.01,10.0,5,?,?,?,'[]')",
             params![
-                p.id, p.name, p.mode, p.is_active as i64, p.min_entry_spread, p.max_entry_spread, p.trade_volume,
-                p.take_profit_percent, p.trailing_stop_percent, p.max_active_trades, p.commission_rate,
-                p.slippage_percent, p.funding_rate_8h, p.min_volume_millions, p.collector_interval_secs,
-                username, now, now
+                id_clone, name, mode, default_vol,
+                default_tp, default_stop, default_max_trades,
+                un_clone, now, now
             ],
         )?)
     }).await;
 
-    match res {
-        Ok(_) => (StatusCode::CREATED, Json(payload)).into_response(),
-        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    if let Err(e) = res {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
+
+    // Return the freshly-inserted row from DB so the frontend gets accurate data.
+    let profile = state.db.call(move |conn| {
+        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE id=?")?;
+        Ok(stmt.query_row([new_id], row_to_profile).ok())
+    }).await.unwrap_or(None);
+
+    match profile {
+        Some(p) => (StatusCode::CREATED, Json(serde_json::to_value(p).unwrap_or_default())).into_response(),
+        None    => json_err(StatusCode::INTERNAL_SERVER_ERROR, "Profile created but could not be fetched"),
     }
 }
 

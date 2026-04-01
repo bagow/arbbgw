@@ -45,29 +45,20 @@ pub async fn init_db(db: &Connection) -> Result<()> {
             ",
         )?;
 
+        // Safe, idempotent schema migration — only adds column if it does not exist.
+        // Never touches existing row data.
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'", []);
 
-        // Fix trade_volume for all paper profiles still using old high defaults.
-        // This covers profiles created before the user configured the volume via UI.
-        // Reactivate profiles deactivated by the previous aggressive migration.
-        let _ = conn.execute(
-            "UPDATE trading_profiles SET trade_volume=10.0 WHERE mode='paper' AND trade_volume >= 100.0",
-            [],
-        );
-        // Restore profiles that may have been deactivated by a previous version of this migration.
-        let _ = conn.execute(
-            "UPDATE trading_profiles SET is_active=1 WHERE owner IS NULL AND id NOT IN ('paper-default','real-default') AND mode='paper'",
-            [],
-        );
-
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        // INSERT OR IGNORE — only runs once when the row does not yet exist.
+        // Existing rows are NEVER modified here — user settings are preserved.
         conn.execute(
             "INSERT OR IGNORE INTO trading_profiles
                 (id,name,mode,is_active,min_entry_spread,max_entry_spread,
                  trade_volume,take_profit_percent,trailing_stop_percent,max_active_trades,
                  commission_rate,slippage_percent,funding_rate_8h,min_volume_millions,
                  collector_interval_secs,created_at,updated_at,disabled_exchanges)
-            VALUES ('paper-default','Paper Default','paper',1,1.0,10.0,1000.0,0.1,0.5,5,0.45,0.1,0.01,10.0,5,?,?,'[]')",
+            VALUES ('paper-default','Paper Default','paper',1,1.0,10.0,10.0,0.2,0.3,3,0.05,0.05,0.01,10.0,5,?,?,'[]')",
             params![now, now],
         )?;
         conn.execute(

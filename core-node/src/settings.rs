@@ -67,7 +67,8 @@ const PROFILE_SELECT: &str = "
         funding_rate_8h,
         min_volume_millions,
         collector_interval_secs,
-        pending_commands
+        pending_commands,
+        disabled_exchanges
     FROM trading_profiles
 ";
 
@@ -110,6 +111,15 @@ fn get_i64(row: &rusqlite::Row, idx: usize) -> Option<i64> {
 
 // Column indices match the PROFILE_SELECT list above (0-based).
 fn parse_row(row: &rusqlite::Row) -> TradingSettings {
+    // Parse disabled_exchanges JSON string from DB (col 16) into Vec<String>.
+    // Falls back to empty vec on any parse error.
+    let disabled_exchanges: Vec<String> = row
+        .get::<_, Option<String>>(16)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default();
+
     TradingSettings {
         id:                      row.get(0).unwrap_or_else(|_| "default".to_string()),
         // col 1 = name (unused in TradingSettings)
@@ -117,7 +127,7 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
         is_active:               get_i64(row, 3).unwrap_or(0) != 0,
         min_entry_spread:        get_f64(row, 4).unwrap_or(0.5),
         max_entry_spread:        get_f64(row, 5).unwrap_or(10.0),
-        trade_volume:            get_f64(row, 6).unwrap_or(100.0),
+        trade_volume:            get_f64(row, 6).unwrap_or(10.0),
         take_profit_percent:     get_f64(row, 7).unwrap_or(0.2),
         trailing_stop_percent:   get_f64(row, 8).unwrap_or(0.3),
         max_active_trades:       get_i64(row, 9).unwrap_or(3),
@@ -127,9 +137,7 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
         min_volume_millions:     get_f64(row, 13).unwrap_or(10.0),
         collector_interval_secs: get_i64(row, 14).unwrap_or(5),
         pending_commands:        row.get(15).ok().flatten(),
-        // disabled_exchanges is NOT in PROFILE_SELECT (may not exist in old DBs).
-        // Always default to empty — the DB migration runs on startup.
-        disabled_exchanges: vec![],
+        disabled_exchanges,
     }
 }
 
