@@ -80,6 +80,5 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
     }
 
     rows.sort_by(|a, b| b.spread.partial_cmp(&a.spread).unwrap_or(std::cmp::Ordering::Equal));
-    rows.truncate(TOP_N);
     rows
 }

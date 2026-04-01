@@ -166,7 +166,8 @@ async fn main() -> Result<()> {
                 let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
                 if now_ms.saturating_sub(LAST_SNAP.load(std::sync::atomic::Ordering::Relaxed)) > 1000 {
                     LAST_SNAP.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                    let snapshot_val = serde_json::json!({ "ts": now_ms as i64, "data": spreads }).to_string();
+                    let snapshot_spreads: Vec<_> = spreads.iter().take(50).cloned().collect();
+                    let snapshot_val = serde_json::json!({ "ts": now_ms as i64, "data": snapshot_spreads }).to_string();
                     let cache_db = profiles_db.clone();
                     tokio::spawn(async move {
                         let _ = cache_db.call(move |conn| {
