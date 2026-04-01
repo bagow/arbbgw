@@ -79,7 +79,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
         let net_pct   = net_pnl / trade.volume * 100.0;
 
         // current_spread for THIS specific exchange pair
-        let current_spread = (row.bid_a - row.ask_b) / row.ask_b.max(0.001) * 100.0;
+        let current_spread = if is_a_higher {
+            (row.bid_a - row.ask_b) / row.ask_b.max(0.001) * 100.0
+        } else {
+            (row.bid_b - row.ask_a) / row.ask_a.max(0.001) * 100.0
+        };
         let top_spread = trade.highest_spread.max(current_spread);
 
         let triggered_tp   = net_pct >= tp_pct * 100.0;

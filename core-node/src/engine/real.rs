@@ -178,7 +178,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, http:
         let gross_pnl = pnl_a + pnl_b;
         let net_pnl   = gross_pnl - (4.0 * commission * trade.volume + funding * trade.volume);
         let net_pct   = net_pnl / trade.volume * 100.0;
-        let current_spread = (row.bid_a - row.ask_b).abs() / row.ask_b.max(0.001) * 100.0;
+        let current_spread = if is_a_higher {
+            (row.bid_a - row.ask_b) / row.ask_b.max(0.001) * 100.0
+        } else {
+            (row.bid_b - row.ask_a) / row.ask_a.max(0.001) * 100.0
+        };
         let top_spread = trade.highest_spread.max(current_spread);
         let triggered_tp   = net_pct >= settings.take_profit_percent;
         let triggered_stop = top_spread > settings.trailing_stop_percent && current_spread < top_spread * (1.0 - stop_pct);
