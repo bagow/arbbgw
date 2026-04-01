@@ -9,18 +9,6 @@ on:
         description: 'Deploy vps-api'
         type: boolean
         default: false
-      deploy_collector:
-        description: 'Deploy rust-collector'
-        type: boolean
-        default: false
-      deploy_paper:
-        description: 'Deploy paper-trader'
-        type: boolean
-        default: false
-      deploy_real:
-        description: 'Deploy real-trader'
-        type: boolean
-        default: false
       deploy_core:
         description: 'Deploy core-node (single-process engine)'
         type: boolean
@@ -54,9 +42,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       vps_api:    ${{ steps.filter.outputs.vps_api }}
-      collector:  ${{ steps.filter.outputs.collector }}
-      paper:      ${{ steps.filter.outputs.paper }}
-      real:       ${{ steps.filter.outputs.real }}
       core:       ${{ steps.filter.outputs.core }}
       cloudflared: ${{ steps.filter.outputs.cloudflared }}
       cloudflare: ${{ steps.filter.outputs.cloudflare }}
@@ -69,19 +54,6 @@ jobs:
             vps_api:
               - 'vps-api/**'
               - 'vps-api.service'
-              - 'shared/**'
-              - 'Cargo.toml'
-            collector:
-              - 'rust-collector/**'
-              - 'shared/**'
-              - 'Cargo.toml'
-            paper:
-              - 'paper-trader/**'
-              - 'shared/**'
-              - 'Cargo.toml'
-            real:
-              - 'real-trader/**'
-              - 'real-trader.service'
               - 'shared/**'
               - 'Cargo.toml'
             core:
@@ -143,134 +115,6 @@ jobs:
             sudo systemctl restart vps-api
             sudo systemctl status vps-api
 
-  # --- 3. Деплой rust-collector ---
-  deploy-collector:
-    needs: [check, changes]
-    if: |
-      github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_collector == 'true' ||
-      github.event_name == 'push' && needs.changes.outputs.collector == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "."
-      - name: Build rust-collector
-        run: cargo build --release -p rust-collector
-      - name: Copy to VPS
-        timeout-minutes: 3
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_SSH_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "target/release/rust-collector"
-          target: "/tmp/deploy/"
-          strip_components: 2
-      - name: Install and Restart
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_SSH_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          script: |
-            sudo mv /tmp/deploy/rust-collector /usr/local/bin/
-            sudo chown root:root /usr/local/bin/rust-collector
-            sudo chmod +x /usr/local/bin/rust-collector
-            sudo restorecon -v /usr/local/bin/rust-collector 2>/dev/null || true
-            sudo systemctl restart rust-collector
-            sudo systemctl status rust-collector
-
-  # --- 4. Деплой paper-trader ---
-  deploy-paper:
-    needs: [check, changes]
-    if: |
-      github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_paper == 'true' ||
-      github.event_name == 'push' && needs.changes.outputs.paper == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "."
-      - name: Build paper-trader
-        run: cargo build --release -p paper-trader
-      - name: Copy to VPS
-        timeout-minutes: 3
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_SSH_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "target/release/paper-trader"
-          target: "/tmp/deploy/"
-          strip_components: 2
-      - name: Install and Restart
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_SSH_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          script: |
-            sudo mv /tmp/deploy/paper-trader /usr/local/bin/
-            sudo chown root:root /usr/local/bin/paper-trader
-            sudo chmod +x /usr/local/bin/paper-trader
-            sudo restorecon -v /usr/local/bin/paper-trader 2>/dev/null || true
-            sudo systemctl restart paper-trader
-            sudo systemctl status paper-trader
-
-  # --- 5. Деплой real-trader ---
-  deploy-real:
-    needs: [check, changes]
-    if: |
-      github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_real == 'true' ||
-      github.event_name == 'push' && needs.changes.outputs.real == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "."
-      - name: Build real-trader
-        run: cargo build --release -p real-trader
-      - name: Copy to VPS
-        timeout-minutes: 3
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_SSH_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "target/release/real-trader,real-trader.service"
-          target: "/tmp/deploy/"
-          strip_components: 0
-      - name: Install and Restart
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_SSH_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          script: |
-            sudo mv /tmp/deploy/target/release/real-trader /usr/local/bin/
-            sudo chown root:root /usr/local/bin/real-trader
-            sudo chmod +x /usr/local/bin/real-trader
-            sudo restorecon -v /usr/local/bin/real-trader 2>/dev/null || true
-            if [ -f /tmp/deploy/real-trader.service ]; then
-              sudo mv /tmp/deploy/real-trader.service /etc/systemd/system/
-              sudo systemctl daemon-reload
-              sudo systemctl enable real-trader
-            fi
-            sudo systemctl restart real-trader
-            sudo systemctl status real-trader
-
   # --- 6. Деплой core-node (single-process: collector + trader) ---
   deploy-core:
     needs: [check, changes]
@@ -315,6 +159,9 @@ jobs:
             sudo chmod 644 /etc/systemd/system/core-node.service
             sudo restorecon /etc/systemd/system/core-node.service 2>/dev/null || true
             ls -la /etc/systemd/system/core-node.service
+            sudo systemctl stop rust-collector paper-trader real-trader || true
+            sudo systemctl disable rust-collector paper-trader real-trader || true
+            sudo rm -f /etc/systemd/system/rust-collector.service /etc/systemd/system/paper-trader.service /etc/systemd/system/real-trader.service
             sudo systemctl daemon-reload
             sudo systemctl enable core-node
             sudo systemctl restart core-node || true
