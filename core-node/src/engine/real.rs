@@ -198,6 +198,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, http:
                 conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=? WHERE id=?",
                     params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, r, id])?;
                 Ok(())
+            }).await;
         } else {
             // Did not close, track live PnL for UI
             live_updates.push((trade.id, c_price_a, c_price_b, current_spread, net_pnl));
