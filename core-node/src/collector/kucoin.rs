@@ -26,17 +26,13 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     let http = Client::new();
     let contracts: Value = http.get("https://api-futures.kucoin.com/api/v1/contracts/active")
         .timeout(Duration::from_secs(10)).send().await?.json().await?;
-    let symbols: Vec<String> = contracts["data"].as_array().unwrap_or(&vec![])
-        .iter().filter_map(|c| { let s = c["symbol"].as_str()?; if s.ends_with("USDTM") { Some(s.to_string()) } else { None } }).collect();
-    info!("[kucoin] Found {} USDT-M contracts", symbols.len());
-
-    // Seed volume from REST (WS tickerV2 doesn't carry volume)
-    for sym in &symbols {
-        let normalized = sym.replace("XBTUSDTM", "BTCUSDT").replace("USDTM", "USDT");
-        if let Ok(resp) = http.get(format!("https://api-futures.kucoin.com/api/v1/ticker?symbol={}", sym))
-            .timeout(Duration::from_secs(5)).send().await {
-            if let Ok(data) = resp.json::<Value>().await {
-                let vol_usd = data["data"]["turnoverOf24h"].as_f64().unwrap_or(0.0);
+    let mut symbols = Vec::new();
+    for c in contracts["data"].as_array().unwrap_or(&vec![]) {
+        if let Some(s) = c["symbol"].as_str() {
+            if s.ends_with("USDTM") {
+                symbols.push(s.to_string());
+                let normalized = s.replace("XBTUSDTM", "BTCUSDT").replace("USDTM", "USDT");
+                let vol_usd = c["turnoverOf24h"].as_f64().unwrap_or(0.0);
                 if vol_usd > 0.0 {
                     let mut entry = price_map.entry("kucoin".to_string()).or_default();
                     entry.entry(normalized).or_insert_with(|| TickerData { vol: vol_usd, ..Default::default() }).vol = vol_usd;
@@ -44,6 +40,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             }
         }
     }
+    info!("[kucoin] Found {} USDT-M contracts (volumes seeded)", symbols.len());
 
     let resp: Value = http.post("https://api-futures.kucoin.com/api/v1/bullet-public").send().await?.json().await?;
     let token    = resp["data"]["token"].as_str().ok_or_else(|| anyhow!("No KuCoin WS token"))?;
