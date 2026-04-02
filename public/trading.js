@@ -909,7 +909,7 @@ function renderActiveTable(profileId, active) {
         const bestStr = bestPnl !== null ? bestPnl.toFixed(2) + '%' : '—';
         const isAHigher = t.direction.startsWith(t.exchange_a);
         const rowKey = `${profileId}_${t.id}`;
-        const isExpanded = expandedRows[profileId].has(t.id);
+        const isExpanded = expandedRows[profileId]?.has(t.id);
         const detailDisplay = isExpanded ? 'table-row' : 'none';
 
         const detailRow = `

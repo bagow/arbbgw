@@ -220,7 +220,9 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let body_str = body.to_string();
             if dry_run { info!("[DRY] gate order {} size={}", contract, size); return Ok(format!("dry_{}", Uuid::new_v4())); }
             let resp = http.post(format!("https://api.gateio.ws{}", path)).headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &body_str)).body(body_str).timeout(Duration::from_secs(10)).send().await?;
+            let status = resp.status();
             let v: Value = resp.json().await?;
+            if !status.is_success() { return Err(anyhow::anyhow!("Gate error: {}", v)); }
             Ok(v["id"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| v["id"].as_str().unwrap_or("unknown").to_string()))
         }
         "htx" => {
@@ -229,7 +231,9 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let body = json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":"open","lever_rate":1,"order_price_type":"optimal_20"});
             if dry_run { info!("[DRY] htx order {} {}", cc, side); return Ok(format!("dry_{}", Uuid::new_v4())); }
             let resp = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path))).json(&body).timeout(Duration::from_secs(10)).send().await?;
+            let status = resp.status();
             let v: Value = resp.json().await?;
+            if !status.is_success() || v["status"].as_str() == Some("error") { return Err(anyhow::anyhow!("HTX error: {}", v)); }
             Ok(v["data"]["order_id"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "unknown".to_string()))
         }
         "kucoin" => {
@@ -244,7 +248,9 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
                 .header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig)
                 .header("KC-API-KEY-VERSION", "2").header("Content-Type", "application/json")
                 .body(body_str).timeout(Duration::from_secs(10)).send().await?;
+            let status = resp.status();
             let v: Value = resp.json().await?;
+            if !status.is_success() || v["code"].as_str() != Some("200000") { return Err(anyhow::anyhow!("Kucoin error: {}", v)); }
             Ok(v["data"]["orderId"].as_str().unwrap_or("unknown").to_string())
         }
         _ => Err(anyhow::anyhow!("Unknown exchange: {}", exchange)),
