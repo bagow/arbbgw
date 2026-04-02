@@ -147,7 +147,7 @@ pub fn start_multiplier_fetcher(http: Client) {
                             let lmap = get_launch_times();
                             for c in arr {
                                 if let Some(name) = c["symbol"].as_str() {
-                                    let mut std_name = name.replace("USDM", "USDT");
+                                    let mut std_name = name.replace("USDTM", "USDT").replace("USDM", "USDT");
                                     if std_name == "XBTUSDT" { std_name = "BTCUSDT".to_string(); }
                                     let full_name = format!("kucoin:{}", std_name);
                                     
