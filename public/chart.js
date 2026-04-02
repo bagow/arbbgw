@@ -275,7 +275,14 @@ async function fetchSnapshot() {
         const json = await res.json();
         
         // 1. Snapshot
-        scannerState.snapshot = (json.snapshot?.data || []).filter(r => r.spread >= scannerState.threshold);
+        let rawData = (json.snapshot?.data || []).filter(r => r.spread >= scannerState.threshold);
+        const currentProfile = (typeof profiles !== 'undefined' && typeof activeTabId !== 'undefined') ? profiles.find(p => p.id === activeTabId) : null;
+        if (currentProfile) {
+            let disabled = [];
+            try { disabled = typeof currentProfile.disabled_exchanges === 'string' ? JSON.parse(currentProfile.disabled_exchanges) : (currentProfile.disabled_exchanges || []); } catch(e){}
+            rawData = rawData.filter(r => !disabled.includes(r.exchangeA) && !disabled.includes(r.exchangeB));
+        }
+        scannerState.snapshot = rawData;
         
         // 2. Discover exchanges
         const seen = new Set(scannerState.snapshot.flatMap(r => [r.exchangeA, r.exchangeB]));
