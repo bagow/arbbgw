@@ -160,47 +160,39 @@ pub fn row_to_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradingProfil
 }
 
 pub fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
-    // Column layout (SELECT * FROM trades):
-    // 0:id 1:pair 2:exchange_a 3:exchange_b 4:direction 5:volume
-    // 6:entry_price_a 7:entry_price_b 8:entry_spread 9:entry_time
-    // 10:highest_spread_reached 11:status 12:exit_price_a 13:exit_price_b
-    // 14:exit_spread 15:exit_time 16:pnl 17:gross_pnl 18:commission_cost
-    // 19:funding_cost 20:last_price_a 21:last_price_b 22:last_spread
-    // 23:curr_gross_pnl 24:pnl_a 25:pnl_b 26:close_reason 27:profile_id 28:slippage_cost
     Ok(Trade {
-        id: row.get(0)?,
-        pair: row.get(1)?,
-        exchange_a: row.get(2)?,
-        exchange_b: row.get(3)?,
-        direction: row.get(4)?,
-        volume: row.get(5)?,
-        entry_price_a: row.get(6)?,
-        entry_price_b: row.get(7)?,
-        entry_spread: row.get(8)?,
-        entry_time: row.get(9)?,
-        highest_spread_reached: row.get(10)?,
-        status: row.get(11)?,
-        exit_price_a: row.get(12)?,
-        exit_price_b: row.get(13)?,
-        exit_spread: row.get(14)?,
-        exit_time: row.get(15)?,
-        pnl: row.get(16)?,
-        // col 17 = gross_pnl (stored only in closed trades; mapped into Trade via enrichment)
-        commission_cost: row.get(18)?,
-        funding_cost: row.get(19)?,
-        last_price_a: row.get(20)?,
-        last_price_b: row.get(21)?,
-        last_spread: row.get(22)?,
-        curr_gross_pnl: row.get(23)?,
-        pnl_a: row.get(24)?,
-        pnl_b: row.get(25)?,
-        close_reason: row.get(26)?,
-        profile_id: row.get(27)?,
-        slippage_cost: row.get(28).ok().unwrap_or(None),
+        id: row.get("id")?,
+        pair: row.get("pair")?,
+        exchange_a: row.get("exchange_a")?,
+        exchange_b: row.get("exchange_b")?,
+        direction: row.get("direction")?,
+        volume: row.get("volume")?,
+        entry_price_a: row.get("entry_price_a")?,
+        entry_price_b: row.get("entry_price_b")?,
+        entry_spread: row.get("entry_spread")?,
+        entry_time: row.get("entry_time")?,
+        highest_spread_reached: row.get("highest_spread_reached")?,
+        status: row.get("status")?,
+        exit_price_a: row.get("exit_price_a").unwrap_or(None),
+        exit_price_b: row.get("exit_price_b").unwrap_or(None),
+        exit_spread: row.get("exit_spread").unwrap_or(None),
+        exit_time: row.get("exit_time").unwrap_or(None),
+        pnl: row.get("pnl").unwrap_or(None),
+        commission_cost: row.get("commission_cost").unwrap_or(None),
+        funding_cost: row.get("funding_cost").unwrap_or(None),
+        last_price_a: row.get("last_price_a").unwrap_or(None),
+        last_price_b: row.get("last_price_b").unwrap_or(None),
+        last_spread: row.get("last_spread").unwrap_or(None),
+        curr_gross_pnl: row.get("curr_gross_pnl").unwrap_or(None),
+        pnl_a: row.get("pnl_a").unwrap_or(None),
+        pnl_b: row.get("pnl_b").unwrap_or(None),
+        close_reason: row.get("close_reason").unwrap_or(None),
+        profile_id: row.get("profile_id").unwrap_or(None),
+        slippage_cost: row.get("slippage_cost").unwrap_or(None),
         current_price_a: None,
         current_price_b: None,
         current_spread: None,
         current_pnl: None,
-        gross_pnl: row.get(17).ok(), // gross_pnl col (closed trades only)
+        gross_pnl: row.get("gross_pnl").unwrap_or(None),
     })
 }
