@@ -159,7 +159,6 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     let trades = load_open_trades(&db).await;
     let num_active = trades.len() as i64;
 
-    let commission = settings.commission_rate / 100.0;
     let funding    = settings.funding_rate_8h / 100.0;
     let stop_pct   = settings.trailing_stop_percent / 100.0;
 
@@ -191,7 +190,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * contracts } else { (exit_price_a - trade.entry_price_a) * contracts };
         let pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * contracts } else { (trade.entry_price_b - exit_price_b) * contracts };
         let gross_pnl = pnl_a + pnl_b;
-        let comm_cost = 4.0 * commission * trade.volume;
+        let comm_cost = 0.0;
         let fund_cost = funding * trade.volume;
         let net_pnl   = gross_pnl - (comm_cost + fund_cost);
         let net_pct   = net_pnl / trade.volume * 100.0;
@@ -353,8 +352,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         let pair = row.pair.clone(); let exa = row.exchange_a.clone(); let exb = row.exchange_b.clone();
         let dir = row.direction.clone(); let vol = settings.trade_volume; let sp = row.spread;
-        let commission = settings.commission_rate / 100.0;
-        let comm_cost = 4.0 * commission * vol;
+        let comm_cost = 0.0;
         let profile_id = settings.id.clone();
         let now = now_ms();
         let status = "OPEN";

@@ -571,10 +571,12 @@ function renderSettingsForm(profile) {
                     <input type="number" id="sf-slip-${p.id}" step="0.0001" value="${p.slippage_percent??0.1}" />
                 </div>
                 ` : ''}
+                ${p.mode !== 'real' ? `
                 <div class="form-group">
                     <label>Commission Rate (%)</label>
                     <input type="number" id="sf-comm-${p.id}" step="any" value="${p.commission_rate??0.45}" />
                 </div>
+                ` : ''}
                 <div class="form-group">
                     <label>Min Volume (M$)</label>
                     <input type="number" id="sf-minvol-${p.id}" step="0.1" value="${p.min_volume_millions??10}" />
