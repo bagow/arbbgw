@@ -518,7 +518,7 @@ function renderCexTab(profile, exchangesData) {
                     </div>
                 </div>
                 
-                <div style="flex:1;max-height:160px;overflow-y:auto;margin-bottom:20px;padding-right:8px;">
+                <div style="flex:1;margin-bottom:20px;padding-right:8px;">
                     ${pairsList || '<div class="text-sub" style="font-size:0.9rem;padding:12px 0;">No matching pairs found.</div>'}
                 </div>
                 
