@@ -65,13 +65,19 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                 Some(Ok(Message::Text(text))) => {
                     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
                     if v["type"].as_str() != Some("message") { continue; }
-                    let raw = v["topic"].as_str().unwrap_or("").replace("/contractMarket/tickerV2:", "");
+                    let d = &v["data"];
+                    let raw_sym = d["symbol"].as_str().unwrap_or("").to_string();
+                    let raw = if raw_sym.is_empty() { v["topic"].as_str().unwrap_or("").replace("/contractMarket/tickerV2:", "") } else { raw_sym };
                     let sym = raw.replace("XBTUSDTM", "BTCUSDT").replace("USDTM", "USDT");
                     if sym.is_empty() || !sym.ends_with("USDT") { continue; }
-                    let d = &v["data"];
-                    let bid: f64 = match d["bestBidPrice"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
-                    let ask: f64 = match d["bestAskPrice"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
-                    let price = d["price"].as_str().and_then(|s| s.parse().ok()).unwrap_or((bid+ask)/2.0);
+                    
+                    let parse_f64 = |val: &Value| -> Option<f64> {
+                        val.as_f64().or_else(|| val.as_str().and_then(|s| s.parse().ok()))
+                    };
+                    
+                    let bid: f64 = match parse_f64(&d["bestBidPrice"]) { Some(v) if v > 0.0 => v, _ => continue };
+                    let ask: f64 = match parse_f64(&d["bestAskPrice"]) { Some(v) if v > 0.0 => v, _ => continue };
+                    let price = parse_f64(&d["price"]).unwrap_or((bid+ask)/2.0);
                     let ev = price_map.get("kucoin").and_then(|m| m.get(&sym).map(|d| d.vol)).unwrap_or(0.0);
                     upsert(price_map, signal, sym, TickerData { bid, ask, price, vol: ev, funding_rate: 0.0, last_updated: 0 });
                 }

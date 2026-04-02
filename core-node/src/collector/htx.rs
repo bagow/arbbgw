@@ -61,8 +61,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                 if !sym.ends_with("USDT") { continue; }
                 let tick = &v["tick"];
                 if parts[2] == "bbo" {
-                    let bid: f64 = match tick["bid"].as_f64() { Some(v) if v > 0.0 => v, _ => continue };
-                    let ask: f64 = match tick["ask"].as_f64() { Some(v) if v > 0.0 => v, _ => continue };
+                    let bid: f64 = match tick["bid"][0].as_f64() { Some(v) if v > 0.0 => v, _ => continue };
+                    let ask: f64 = match tick["ask"][0].as_f64() { Some(v) if v > 0.0 => v, _ => continue };
                     let ev = price_map.get("htx").and_then(|m| m.get(&sym).map(|d| d.vol)).unwrap_or(0.0);
                     upsert(price_map, signal, sym, TickerData { bid, ask, price: (bid+ask)/2.0, vol: ev, funding_rate: 0.0, last_updated: 0 });
                 } else if parts[2] == "detail" {
