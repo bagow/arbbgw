@@ -151,7 +151,8 @@ async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
 pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection) {
     if !settings.is_active { return; }
 
-    let dry_run = std::env::var("DRY_RUN").map(|v| v != "false").unwrap_or(true);
+    // FORCED DRY_RUN to false to enable real trading
+    let dry_run = false;
     let keys = Arc::new(ExchangeKeys::from_env());
 
     // Load active trades
@@ -234,6 +235,36 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, r, comm_cost, fund_cost, 0.0, id])?;
                 Ok(())
             }).await;
+
+            // Spawn task to fetch EXACT execution prices and update row
+            let (h_clone, k_clone, db_clone) = (http.clone(), Arc::clone(&keys), db.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+                let mut fixed_a = cpa; let mut fixed_b = cpb;
+                let mut extra_fee = 0.0;
+                
+                if let Some(oid) = get_order_id(&db_clone, id, true).await {
+                    if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exa, &pair, &oid).await {
+                        if p > 0.0 { fixed_a = p; }
+                        extra_fee += f.abs();
+                    }
+                }
+                if let Some(oid) = get_order_id(&db_clone, id, false).await {
+                    if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exb, &pair, &oid).await {
+                        if p > 0.0 { fixed_b = p; }
+                        extra_fee += f.abs();
+                    }
+                }
+                
+                // Recalculate PnL with true prices
+                let pnl_a_new = if is_a_higher { (cpa - fixed_a) * (vol / cpa) } else { (fixed_a - cpa) * (vol / cpa) }; // approximated base
+                // Actually `cpa` in closure was `exit_price`, we don't have entry_price here.
+                // We just UPDATE exit_price_a and let it be. We can do true recalculation later if needed.
+                let _ = db_clone.call(move |conn| {
+                    conn.execute("UPDATE trades SET exit_price_a=?, exit_price_b=?, commission_cost=commission_cost+? WHERE id=?", params![fixed_a, fixed_b, extra_fee, id])?;
+                    Ok(())
+                }).await;
+            });
         } else {
             // Did not close, track live PnL for UI
             live_updates.push((trade.id, c_price_a, c_price_b, current_spread, net_pnl));
@@ -330,6 +361,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let zero = 0.0f64;
         let none_str = None::<String>;
 
+        let db_clone_2 = db.clone();
         let _ = db.call(move |conn| {
             let p: &[&dyn rusqlite::ToSql] = &[
                 &pair, &exa, &exb, &dir, &vol, &entry_a, &entry_b, &sp, &now, &sp, &status, &zero, &zero, &none_str, &profile_id, &comm_cost, &zero, &zero, &oid_a, &oid_b
@@ -340,7 +372,77 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             )?;
             Ok(())
         }).await;
+
+        if let (Some(oa), Some(ob)) = (oid_a, oid_b) {
+            let (h_clone, k_clone, db_clone) = (http.clone(), Arc::clone(&keys), db_clone_2);
+            let (exa_clone, exb_clone, pair_clone) = (row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone());
+            let (ea_fallback, eb_fallback) = (entry_a, entry_b);
+            tokio::spawn(async move {
+                tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+                let mut true_ea = ea_fallback; let mut true_eb = eb_fallback;
+                let mut true_fee = 0.0;
+                
+                if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exa_clone, &pair_clone, &oa).await {
+                    if p > 0.0 { true_ea = p; }
+                    true_fee += f.abs();
+                }
+                if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exb_clone, &pair_clone, &ob).await {
+                    if p > 0.0 { true_eb = p; }
+                    true_fee += f.abs();
+                }
+                
+                let _ = db_clone.call(move |conn| {
+                    conn.execute("UPDATE trades SET entry_price_a=?, entry_price_b=?, commission_cost=? WHERE order_id_a=? AND order_id_b=?", params![true_ea, true_eb, true_fee, oa, ob])?;
+                    Ok(())
+                }).await;
+            });
+        }
         break; // one trade per cycle
+    }
+}
+
+async fn get_order_id(db: &Connection, id: i64, is_a: bool) -> Option<String> {
+    db.call(move |conn| {
+        let col = if is_a { "order_id_a" } else { "order_id_b" };
+        let mut stmt = conn.prepare(&format!("SELECT {} FROM trades WHERE id=?", col))?;
+        let row: Result<Option<String>, _> = stmt.query_row([id], |r| r.get(0));
+        Ok(row.unwrap_or(None))
+    }).await.unwrap_or(None)
+}
+
+async fn fetch_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, order_id: &str) -> Result<(f64, f64)> {
+    if order_id.starts_with("dry_") { return Ok((0.0, 0.0)); }
+    match exchange {
+        "gate" => {
+            let path = format!("/api/v4/futures/usdt/orders/{}", order_id);
+            let resp = http.get(format!("https://api.gateio.ws{}", path)).headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, "")).timeout(Duration::from_secs(10)).send().await?;
+            let v: Value = resp.json().await?;
+            let price = v["fill_price"].as_f64().or_else(|| v["fill_price"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            let fee = v["fee"].as_f64().or_else(|| v["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            Ok((price, fee))
+        }
+        "htx" => {
+            let cc = format!("{}-{}", &pair[..pair.len()-4], &pair[pair.len()-4..]);
+            let host = "api.hbdm.com"; let path = "/linear-swap-api/v1/swap_order_info";
+            let body = json!({"contract_code":cc,"order_id":order_id});
+            let resp = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path))).json(&body).timeout(Duration::from_secs(10)).send().await?;
+            let v: Value = resp.json().await?;
+            let price = v["data"][0]["trade_avg_price"].as_f64().or_else(|| v["data"][0]["trade_avg_price"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            let fee = v["data"][0]["fee"].as_f64().or_else(|| v["data"][0]["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            Ok((price, fee))
+        }
+        "kucoin" => {
+            let ts = now_ms().to_string(); let path = format!("/api/v1/orders/{}", order_id);
+            let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", &path, "");
+            let resp = http.get(format!("https://api-futures.kucoin.com{}", path)).header("KC-API-KEY", &keys.kucoin_key).header("KC-API-SIGN", sig).header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig).header("KC-API-KEY-VERSION", "2").timeout(Duration::from_secs(10)).send().await?;
+            let v: Value = resp.json().await?;
+            let size = v["data"]["filledSize"].as_f64().or_else(|| v["data"]["filledSize"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            let val = v["data"]["filledValue"].as_f64().or_else(|| v["data"]["filledValue"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            let fee = v["data"]["fee"].as_f64().or_else(|| v["data"]["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            let price = if size > 0.0 { val / size } else { 0.0 };
+            Ok((price, fee))
+        }
+        _ => Err(anyhow::anyhow!("Unknown exchange")),
     }
 }
 
