@@ -119,29 +119,27 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
 }
 
 fn upsert_tickers(price_map: &PriceMap, signal: &UpdateSignal, sym: String, price: f64, vol: f64, funding: f64) {
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     {
-        let mut map = price_map.write();
-        let gate_map = map.entry("gate".to_string()).or_default();
+        let mut gate_map = price_map.entry("gate".to_string()).or_default();
         let entry = gate_map.entry(sym).or_default();
         entry.price = price;
         entry.vol = vol;
         entry.funding_rate = funding;
         entry.last_updated = ts;
     }
-    let _ = signal.send(());
+    signal.notify_one();
 }
 
 fn upsert_book(price_map: &PriceMap, signal: &UpdateSignal, sym: String, bid: f64, ask: f64) {
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     {
-        let mut map = price_map.write();
-        let gate_map = map.entry("gate".to_string()).or_default();
+        let mut gate_map = price_map.entry("gate".to_string()).or_default();
         let entry = gate_map.entry(sym).or_default();
         entry.bid = bid;
         entry.ask = ask;
         if entry.price == 0.0 { entry.price = (bid + ask) / 2.0; }
         entry.last_updated = ts;
     }
-    let _ = signal.send(());
+    signal.notify_one();
 }
