@@ -22,15 +22,35 @@ pub async fn run(prices: PriceMap, signal: UpdateSignal) {
 }
 
 async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
+    let client = reqwest::Client::new();
+    let res = client.get("https://api.gateio.ws/api/v4/futures/usdt/contracts")
+        .send().await.context("Gate REST failed")?
+        .json::<Vec<serde_json::Value>>().await.context("Gate JSON parse failed")?;
+    
+    let mut symbols = Vec::new();
+    for c in res {
+        if let Some(name) = c["name"].as_str() {
+            if c["in_delisting"].as_bool().unwrap_or(false) { continue; }
+            symbols.push(name.to_string());
+        }
+    }
+    info!("[gate] Fetched {} symbols from REST", symbols.len());
+
     let (mut ws, _) = connect_async_tls_with_config(
         "wss://fx-ws.gateio.ws/v4/ws/usdt", None, false, None,
     ).await.context("Gate.io WS connect failed")?;
 
     info!("[gate] Connected");
-    ws.send(Message::Text(
-        json!({"time":0,"channel":"futures.tickers","event":"subscribe","payload":["!all"]})
-            .to_string().into()
-    )).await?;
+    
+    // Subscribe in chunks to avoid websocket payload limits
+    for chunk in symbols.chunks(50) {
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        ws.send(Message::Text(
+            json!({"time":ts,"channel":"futures.tickers","event":"subscribe","payload": chunk})
+                .to_string().into()
+        )).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     let mut ping = tokio::time::interval(Duration::from_secs(20));
 
     loop {
@@ -41,7 +61,15 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                     let ch = v["channel"].as_str().unwrap_or("");
                     
                     if ch == "futures.tickers" {
-                        for item in v["result"].as_array().unwrap_or(&vec![]) {
+                        let items = if v["result"].is_array() {
+                            v["result"].as_array().unwrap().clone()
+                        } else if v["result"].is_object() {
+                            vec![v["result"].clone()]
+                        } else {
+                            vec![]
+                        };
+
+                        for item in &items {
                             let sym = item["contract"].as_str().unwrap_or("").replace('_', "");
                             if !sym.ends_with("USDT") { continue; }
                             
