@@ -294,6 +294,7 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
                 gross_pnl             REAL,
                 commission_cost       REAL,
                 funding_cost          REAL,
+                slippage_cost         REAL,
                 last_price_a          REAL,
                 last_price_b          REAL,
                 last_spread           REAL,
@@ -307,6 +308,7 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
         // 2. Migrate older DBs (errors ignored — columns might already exist)
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN gross_pnl REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN profile_id TEXT DEFAULT 'paper-default'", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN slippage_cost REAL", []);
         // 3. Create indexes AFTER ensuring columns exist
         let _ = conn.execute_batch("
             CREATE INDEX IF NOT EXISTS idx_trades_status  ON trades(status);
