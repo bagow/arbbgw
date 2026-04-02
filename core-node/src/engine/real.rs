@@ -468,43 +468,34 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             continue;
         }
 
-        info!("[real] Opening {} {} {} spread={:.4}% (c_a={}, c_b={}) [dry={}]", row.pair, row.exchange_a, row.exchange_b, row.spread, contracts_a, contracts_b, dry_run);
-
-        let (oa, ob) = tokio::join!(
-            place_order(&http, &keys, &row.exchange_a, &row.pair, is_a_higher, contracts_a, dry_run),
-            place_order(&http, &keys, &row.exchange_b, &row.pair, !is_a_higher, contracts_b, dry_run)
-        );
+        info!("[real] Opening A: {} {} (c_a={}) [dry={}]", row.pair, row.exchange_a, contracts_a, dry_run);
+        
+        let oa = place_order(&http, &keys, &row.exchange_a, &row.pair, is_a_higher, contracts_a, dry_run).await;
         let oid_a = match oa { Ok(id) => Some(id), Err(e) => { error!("[LEG_A] {}: {}", row.exchange_a, e); None } };
+
+        if oid_a.is_none() {
+            error!("Skipping {}: Leg A failed, aborting trade entirely.", row.pair);
+            continue;
+        }
+
+        info!("[real] Opening B: {} {} (c_b={}) [dry={}]", row.pair, row.exchange_b, contracts_b, dry_run);
+        
+        let ob = place_order(&http, &keys, &row.exchange_b, &row.pair, !is_a_higher, contracts_b, dry_run).await;
         let oid_b = match ob { Ok(id) => Some(id), Err(e) => { error!("[LEG_B] {}: {}", row.exchange_b, e); None } };
 
         if !dry_run {
-            match (oid_a.is_some(), oid_b.is_some()) {
-                (true, false) => {
-                    error!("🚨 LEG ASYMMETRY: A open, B failed — emergency closing A");
-                    let (h, k, e, p, c) = (http.clone(), Arc::clone(&keys), row.exchange_a.clone(), row.pair.clone(), contracts_a);
-                    tokio::spawn(async move { for attempt in 1u32..=5 {
-                        match close_order(&h, &k, &e, &p, is_a_higher, c, false).await {
-                            Ok(id) => { error!("🛡️ FALLBACK A closed OK {}", id); break; }
-                            Err(e) => { let w = 300 * 2u64.pow(attempt-1); error!("FALLBACK {}/5: {} — {}ms", attempt, e, w); tokio::time::sleep(Duration::from_millis(w)).await; }
-                        }
-                    }});
-                    continue;
-                }
-                (false, true) => {
-                    error!("🚨 LEG ASYMMETRY: A failed, B open — emergency closing B");
-                    let (h, k, e, p, c) = (http.clone(), Arc::clone(&keys), row.exchange_b.clone(), row.pair.clone(), contracts_b);
-                    tokio::spawn(async move { for attempt in 1u32..=5 {
-                        match close_order(&h, &k, &e, &p, !is_a_higher, c, false).await {
-                            Ok(id) => { error!("🛡️ FALLBACK B closed OK {}", id); break; }
-                            Err(e) => { let w = 300 * 2u64.pow(attempt-1); error!("FALLBACK {}/5: {} — {}ms", attempt, e, w); tokio::time::sleep(Duration::from_millis(w)).await; }
-                        }
-                    }});
-                    continue;
-                }
-                (false, false) => { error!("Both legs failed, skipping"); continue; }
-                (true, true) => {}
+            if oid_b.is_none() {
+                error!("🚨 LEG ASYMMETRY: A open, B failed — emergency closing A");
+                let (h, k, e, p, c) = (http.clone(), Arc::clone(&keys), row.exchange_a.clone(), row.pair.clone(), contracts_a);
+                tokio::spawn(async move { for attempt in 1u32..=5 {
+                    match close_order(&h, &k, &e, &p, is_a_higher, c, false).await {
+                        Ok(id) => { error!("🛡️ FALLBACK A closed OK {}", id); break; }
+                        Err(err) => { let w = 300 * 2u64.pow(attempt-1); error!("FALLBACK {}/5: {} — {}ms", attempt, err, w); tokio::time::sleep(Duration::from_millis(w)).await; }
+                    }
+                }});
+                continue;
             }
-        } else if oid_a.is_none() || oid_b.is_none() { continue; }
+        } else if oid_b.is_none() { continue; }
 
         let pair = row.pair.clone(); let exa = row.exchange_a.clone(); let exb = row.exchange_b.clone();
         let dir = row.direction.clone(); let vol = settings.trade_volume; let sp = row.spread;

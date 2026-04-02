@@ -599,11 +599,19 @@ function renderSettingsForm(profile) {
                         style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);">
                         Save Settings
                     </button>
+                    ${p.mode === 'real' ? `
+                        <button type="button"
+                            onclick="marketCloseAll('${p.id}')"
+                            class="trading-save-btn outline-btn"
+                            style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:transparent;color:var(--red);border:1px solid var(--red);">
+                            Market Close All Now
+                        </button>
+                    ` : ''}
                     <button type="button"
-                        onclick="${p.mode === 'real' ? `marketCloseAll('${p.id}')` : `clearTrades('${p.id}', '${p.mode}')`}"
+                        onclick="clearTrades('${p.id}', '${p.mode}')"
                         class="trading-save-btn outline-btn"
-                        style="margin:0 0 0 auto;width:auto;padding:12px 32px;font-size:.95rem;background:transparent;color:var(--red);border:1px solid var(--red);">
-                        ${p.mode === 'real' ? 'Market Close All Now' : 'Clear All Trades'}
+                        style="${p.mode === 'paper' ? 'margin:0 0 0 auto;' : 'margin:0;'}width:auto;padding:12px 32px;font-size:.95rem;background:transparent;color:var(--text-sub);border:1px solid var(--border);">
+                        Clear DB (Wipe Trades)
                     </button>
                 </div>
             </form>
