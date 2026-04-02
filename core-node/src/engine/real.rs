@@ -15,6 +15,8 @@ use sha2::Sha256;
 use tokio_rusqlite::Connection;
 use tracing::{error, info};
 use uuid::Uuid;
+use dashmap::DashMap;
+use std::sync::OnceLock;
 
 use crate::settings::TradingSettings;
 use shared::SpreadRow;
@@ -58,6 +60,87 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64
 }
 
+static MULTIPLIERS: OnceLock<DashMap<String, f64>> = OnceLock::new();
+
+pub fn get_multipliers() -> &'static DashMap<String, f64> {
+    MULTIPLIERS.get_or_init(DashMap::new)
+}
+
+pub fn start_multiplier_fetcher(http: Client) {
+    let map = get_multipliers();
+    // Gate.io
+    tokio::spawn({
+        let http = http.clone();
+        async move {
+            loop {
+                if let Ok(resp) = http.get("https://api.gateio.ws/api/v4/futures/usdt/contracts").send().await {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(arr) = json.as_array() {
+                            let map = get_multipliers();
+                            for c in arr {
+                                if let (Some(name), Some(mult_str)) = (c["name"].as_str(), c["quanto_multiplier"].as_str()) {
+                                    if let Ok(m) = mult_str.parse::<f64>() {
+                                        map.insert(format!("gate:{}", name.replace("_", "")), m);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        }
+    });
+
+    // HTX
+    tokio::spawn({
+        let http = http.clone();
+        async move {
+            loop {
+                if let Ok(resp) = http.get("https://api.hbdm.com/linear-swap-api/v1/swap_contract_info").send().await {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(arr) = json["data"].as_array() {
+                            let map = get_multipliers();
+                            for c in arr {
+                                if let (Some(name), Some(mult)) = (c["contract_code"].as_str(), c["contract_size"].as_f64()) {
+                                    map.insert(format!("htx:{}", name.replace("-", "")), mult);
+                                }
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        }
+    });
+
+    // KuCoin
+    tokio::spawn({
+        let http = http.clone();
+        async move {
+            loop {
+                if let Ok(resp) = http.get("https://api-futures.kucoin.com/api/v1/contracts/active").send().await {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(arr) = json["data"].as_array() {
+                            let map = get_multipliers();
+                            for c in arr {
+                                if let (Some(name), Some(mult)) = (c["symbol"].as_str(), c["multiplier"].as_f64()) {
+                                    // Map XBTUSDM -> BTCUSDT and standard pairs
+                                    let mut std_name = name.replace("USDM", "USDT");
+                                    if std_name == "XBTUSDT" { std_name = "BTCUSDT".to_string(); }
+                                    map.insert(format!("kucoin:{}", std_name), mult);
+                                }
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        }
+    });
+}
+
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64
 }
@@ -98,9 +181,8 @@ fn gate_sign(key: &str, secret: &str, method: &str, path: &str, body: &str) -> r
 
 // ─── Order placement ──────────────────────────────────────────────────────────
 
-async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, volume_usd: f64, price: f64, dry_run: bool) -> Result<String> {
+async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, contracts: i64, dry_run: bool) -> Result<String> {
     let side = if is_short { "sell" } else { "buy" };
-    let contracts = ((volume_usd / price.max(1e-12)).ceil() as i64).max(1);
     match exchange {
         "gate" => {
             let contract = pair.replace("USDT", "_USDT");
@@ -141,8 +223,8 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
     }
 }
 
-async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, was_short: bool, vol: f64, price: f64, dry_run: bool) -> Result<String> {
-    place_order(http, keys, exchange, pair, !was_short, vol, price, dry_run).await
+async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, was_short: bool, contracts: i64, dry_run: bool) -> Result<String> {
+    place_order(http, keys, exchange, pair, !was_short, contracts, dry_run).await
 }
 
 // ─── Engine cycle ─────────────────────────────────────────────────────────────
@@ -166,6 +248,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     let mut live_updates = Vec::new();
     for trade in &trades {
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
+        let current_ms = now_ms();
+        let elapsed = current_ms.saturating_sub(trade.entry_time) as f64 / 1000.0;
+        
+        let contracts_a = trade.contracts_a as f64;
+        let contracts_b = trade.contracts_b as f64;
         
         let data_a = match prices.get(&trade.exchange_a).and_then(|m| m.get(&trade.pair).cloned()) {
             Some(d) => d,
@@ -186,9 +273,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let exit_price_a = if is_a_higher { data_a.ask } else { data_a.bid };
         let exit_price_b = if is_a_higher { data_b.bid } else { data_b.ask };
 
-        let contracts = trade.volume / trade.entry_price_a.max(1e-12);
-        let pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * contracts } else { (exit_price_a - trade.entry_price_a) * contracts };
-        let pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * contracts } else { (trade.entry_price_b - exit_price_b) * contracts };
+        let pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * contracts_a } else { (exit_price_a - trade.entry_price_a) * contracts_a };
+        let pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * contracts_b } else { (trade.entry_price_b - exit_price_b) * contracts_b };
         let gross_pnl = pnl_a + pnl_b;
         let comm_cost = 0.0;
         let fund_cost = funding * trade.volume;
@@ -221,11 +307,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             info!("[real] Closing {} {} reason={} net={:.4} exit_sp={:.4}", trade.id, trade.pair, reason, net_pnl, exit_spread);
             let http = http.clone(); let keys = Arc::clone(&keys);
             let exa = trade.exchange_a.clone(); let exb = trade.exchange_b.clone();
-            let pair = trade.pair.clone(); let vol = trade.volume;
+            let pair = trade.pair.clone();
+            let c_a = trade.contracts_a; let c_b = trade.contracts_b;
             // Execute trade orders on the exchanges using the calculated prices
             tokio::join!(
-                close_order(&http, &keys, &exa, &pair, is_a_higher, vol, exit_price_a, dry_run),
-                close_order(&http, &keys, &exb, &pair, !is_a_higher, vol, exit_price_b, dry_run)
+                close_order(&http, &keys, &exa, &pair, is_a_higher, c_a, dry_run),
+                close_order(&http, &keys, &exb, &pair, !is_a_higher, c_b, dry_run)
             );
             let id = trade.id; let np = net_pnl; let gp = gross_pnl; let cs = current_spread;
             let cpa = exit_price_a; let cpb = exit_price_b; let pa = pnl_a; let pb = pnl_b; let r = reason.to_string();
@@ -312,11 +399,24 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
         let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
         let entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
-        info!("[real] Opening {} {} {} spread={:.4}% [dry={}]", row.pair, row.exchange_a, row.exchange_b, row.spread, dry_run);
+        
+        let map = get_multipliers();
+        let mult_a = map.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|v| *v).unwrap_or(1.0);
+        let mult_b = map.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|v| *v).unwrap_or(1.0);
+        
+        let contracts_a = ((settings.trade_volume / entry_a.max(1e-12)) / mult_a).round() as i64;
+        let contracts_b = ((settings.trade_volume / entry_b.max(1e-12)) / mult_b).round() as i64;
+
+        if contracts_a < 1 || contracts_b < 1 {
+            info!("[real] Skipping pair {}: volume ${} too small for min contract size (a={}, b={})", row.pair, settings.trade_volume, contracts_a, contracts_b);
+            continue;
+        }
+
+        info!("[real] Opening {} {} {} spread={:.4}% (c_a={}, c_b={}) [dry={}]", row.pair, row.exchange_a, row.exchange_b, row.spread, contracts_a, contracts_b, dry_run);
 
         let (oa, ob) = tokio::join!(
-            place_order(&http, &keys, &row.exchange_a, &row.pair, is_a_higher, settings.trade_volume, entry_a, dry_run),
-            place_order(&http, &keys, &row.exchange_b, &row.pair, !is_a_higher, settings.trade_volume, entry_b, dry_run)
+            place_order(&http, &keys, &row.exchange_a, &row.pair, is_a_higher, contracts_a, dry_run),
+            place_order(&http, &keys, &row.exchange_b, &row.pair, !is_a_higher, contracts_b, dry_run)
         );
         let oid_a = match oa { Ok(id) => Some(id), Err(e) => { error!("[LEG_A] {}: {}", row.exchange_a, e); None } };
         let oid_b = match ob { Ok(id) => Some(id), Err(e) => { error!("[LEG_B] {}: {}", row.exchange_b, e); None } };
@@ -325,9 +425,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             match (oid_a.is_some(), oid_b.is_some()) {
                 (true, false) => {
                     error!("🚨 LEG ASYMMETRY: A open, B failed — emergency closing A");
-                    let (h, k, e, p, v) = (http.clone(), Arc::clone(&keys), row.exchange_a.clone(), row.pair.clone(), settings.trade_volume);
+                    let (h, k, e, p, c) = (http.clone(), Arc::clone(&keys), row.exchange_a.clone(), row.pair.clone(), contracts_a);
                     tokio::spawn(async move { for attempt in 1u32..=5 {
-                        match close_order(&h, &k, &e, &p, is_a_higher, v, entry_a, false).await {
+                        match close_order(&h, &k, &e, &p, is_a_higher, c, false).await {
                             Ok(id) => { error!("🛡️ FALLBACK A closed OK {}", id); break; }
                             Err(e) => { let w = 300 * 2u64.pow(attempt-1); error!("FALLBACK {}/5: {} — {}ms", attempt, e, w); tokio::time::sleep(Duration::from_millis(w)).await; }
                         }
@@ -336,9 +436,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 }
                 (false, true) => {
                     error!("🚨 LEG ASYMMETRY: A failed, B open — emergency closing B");
-                    let (h, k, e, p, v) = (http.clone(), Arc::clone(&keys), row.exchange_b.clone(), row.pair.clone(), settings.trade_volume);
+                    let (h, k, e, p, c) = (http.clone(), Arc::clone(&keys), row.exchange_b.clone(), row.pair.clone(), contracts_b);
                     tokio::spawn(async move { for attempt in 1u32..=5 {
-                        match close_order(&h, &k, &e, &p, !is_a_higher, v, entry_b, false).await {
+                        match close_order(&h, &k, &e, &p, !is_a_higher, c, false).await {
                             Ok(id) => { error!("🛡️ FALLBACK B closed OK {}", id); break; }
                             Err(e) => { let w = 300 * 2u64.pow(attempt-1); error!("FALLBACK {}/5: {} — {}ms", attempt, e, w); tokio::time::sleep(Duration::from_millis(w)).await; }
                         }
@@ -363,10 +463,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let db_clone_2 = db.clone();
         let res = db.call(move |conn| {
             let p: &[&dyn rusqlite::ToSql] = &[
-                &pair, &exa, &exb, &dir, &vol, &entry_a, &entry_b, &sp, &now, &sp, &status, &zero, &zero, &none_str, &profile_id, &comm_cost, &zero, &zero, &oid_a, &oid_b
+                &pair, &exa, &exb, &dir, &vol, &entry_a, &entry_b, &sp, &now, &sp, &status, &zero, &zero, &none_str, &profile_id, &comm_cost, &zero, &zero, &oid_a, &oid_b, &contracts_a, &contracts_b
             ];
             conn.execute(
-                "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b,contracts_a,contracts_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 p
             )?;
             Ok::<(), tokio_rusqlite::Error>(())
@@ -449,12 +549,34 @@ async fn fetch_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
 }
 
 #[derive(Debug, Clone)]
-struct Trade { id: i64, pair: String, exchange_a: String, exchange_b: String, direction: String, volume: f64, entry_price_a: f64, entry_price_b: f64, highest_spread: f64, close_reason: Option<String> }
+struct Trade {
+    id: i64,
+    pair: String,
+    exchange_a: String,
+    exchange_b: String,
+    direction: String,
+    volume: f64,
+    entry_price_a: f64,
+    entry_price_b: f64,
+    highest_spread: f64,
+    pnl_a: f64,
+    pnl_b: f64,
+    close_reason: Option<String>,
+    contracts_a: i64,
+    contracts_b: i64,
+}
 
-async fn load_open_trades(db: &Connection) -> Vec<Trade> {
+async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
     db.call(|conn| {
-        let mut stmt = conn.prepare("SELECT id,pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,highest_spread_reached,close_reason FROM trades WHERE status='OPEN'")?;
-        let rows = stmt.query_map([], |row| Ok(Trade { id: row.get(0)?, pair: row.get(1)?, exchange_a: row.get(2)?, exchange_b: row.get(3)?, direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?, highest_spread: row.get(8)?, close_reason: row.get(9)? }))?.filter_map(|r| r.ok()).collect();
-        Ok(rows)
+        let mut stmt = conn.prepare("SELECT id, pair, exchange_a, exchange_b, direction, volume, entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, pnl_a, pnl_b, close_reason, contracts_a, contracts_b FROM trades WHERE status='OPEN' AND profile_id=?")?;
+        let trades = stmt.query_map([p_id], |row| Ok(Trade {
+            id: row.get(0)?, pair: row.get(1)?, exchange_a: row.get(2)?, exchange_b: row.get(3)?,
+            direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?,
+            entry_spread: row.get(8)?, highest_spread: row.get(10)?,
+            pnl_a: row.get(11)?, pnl_b: row.get(12)?, close_reason: row.get(13)?,
+            contracts_a: row.get::<_, Option<i64>>(14)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(6)?.max(1e-12)).round() as i64),
+            contracts_b: row.get::<_, Option<i64>>(15)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(7)?.max(1e-12)).round() as i64),
+        }))?.filter_map(|t| t.ok()).collect::<Vec<_>>();
+        Ok(trades)
     }).await.unwrap_or_default()
 }

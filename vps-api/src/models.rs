@@ -129,6 +129,8 @@ pub struct Trade {
     pub pnl_b: Option<f64>,
     pub close_reason: Option<String>,
     pub profile_id: Option<String>,
+    pub contracts_a: Option<i64>,
+    pub contracts_b: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_price_a: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

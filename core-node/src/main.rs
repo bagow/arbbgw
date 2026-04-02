@@ -59,6 +59,8 @@ async fn main() -> Result<()> {
         .timeout(Duration::from_secs(15))
         .build()?;
 
+    engine::real::start_multiplier_fetcher(http.clone());
+
     // ── Profiles DB (settings) — open and ensure schema is current ───────────
     let profiles_db = Connection::open(&profiles_db_path).await
         .context(format!("Cannot open profiles DB: {}", profiles_db_path))?;
@@ -302,13 +304,21 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
                 pnl_a                 REAL,
                 pnl_b                 REAL,
                 close_reason          TEXT,
-                profile_id            TEXT DEFAULT 'paper-default'
+                profile_id            TEXT DEFAULT 'paper-default',
+                order_id_a            TEXT,
+                order_id_b            TEXT,
+                contracts_a           INTEGER,
+                contracts_b           INTEGER
             );
         ")?;
         // 2. Migrate older DBs (errors ignored — columns might already exist)
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN gross_pnl REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN profile_id TEXT DEFAULT 'paper-default'", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN slippage_cost REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN order_id_a TEXT", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN order_id_b TEXT", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN contracts_a INTEGER", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN contracts_b INTEGER", []);
         // 3. Create indexes AFTER ensuring columns exist
         let _ = conn.execute_batch("
             CREATE INDEX IF NOT EXISTS idx_trades_status  ON trades(status);
