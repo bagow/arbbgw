@@ -325,10 +325,18 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let comm_cost = 4.0 * commission * vol;
         let slip_cost = 4.0 * slippage * vol;
         let profile_id = settings.id.clone();
+        let now = now_ms();
+        let status = "OPEN";
+        let zero = 0.0f64;
+        let none_str = None::<String>;
+
         let _ = db.call(move |conn| {
+            let p: &[&dyn rusqlite::ToSql] = &[
+                &pair, &exa, &exb, &dir, &vol, &entry_a, &entry_b, &sp, &now, &sp, &status, &zero, &zero, &none_str, &profile_id, &comm_cost, &slip_cost, &zero, &oid_a, &oid_b
+            ];
             conn.execute(
                 "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![pair, exa, exb, dir, vol, entry_a, entry_b, sp, now_ms(), sp, "OPEN", 0.0, 0.0, None::<String>, profile_id, comm_cost, slip_cost, 0.0, oid_a, oid_b]
+                p
             )?;
             Ok(())
         }).await;
