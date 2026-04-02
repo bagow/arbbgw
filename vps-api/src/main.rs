@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/update",                  post(routes::handle_update))
         .route("/api/unified",                 get(routes::handle_get_unified))
+        .route("/api/logs/core-node",          get(routes::handle_get_logs))
         .route("/api/trading/settings/all",    get(routes::handle_get_all_settings))
         .route("/api/profiles",                get(routes::handle_get_profiles).post(routes::handle_post_profile))
         .route("/api/profiles/:id",            get(routes::handle_get_profile).patch(routes::handle_patch_profile).delete(routes::handle_delete_profile))

@@ -270,6 +270,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
             <button class="mt-nav-btn ${activeSubTabId==='history'?'mt-nav-btn--active':''}" data-sub="history" onclick="showSubTab(this,'history')">History</button>
             <button class="mt-nav-btn ${activeSubTabId==='cex'?'mt-nav-btn--active':''}" data-sub="cex" onclick="showSubTab(this,'cex')">CEX</button>
             <button class="mt-nav-btn ${activeSubTabId==='settings'?'mt-nav-btn--active':''}" data-sub="settings" onclick="showSubTab(this,'settings')">Settings</button>
+            <button class="mt-nav-btn ${activeSubTabId==='logs'?'mt-nav-btn--active':''}" data-sub="logs" onclick="showSubTab(this,'logs')">Logs</button>
             
             <div id="panel-stats-${profile.id}" style="margin-left:auto;display:flex;align-items:center;gap:10px;">
                 ${renderSubNavStats(active, stats, profile.mode)}
@@ -1079,6 +1080,26 @@ window.showSubTab = function (btn, tab) {
     // (Re)init scanner when tab is shown
     if (tab === 'scanner' && window.initScanner) {
         window.initScanner(activeTabId);
+    }
+    if (tab === 'logs') {
+        window.fetchLogs();
+    }
+};
+
+window.fetchLogs = async function() {
+    const el = document.getElementById('logs-container');
+    if (!el) return;
+    el.textContent = "Loading logs...";
+    try {
+        const res = await fetch('/api/logs/core-node', {
+            headers: { 'X-Username': localStorage.getItem('arb_username') || '' }
+        });
+        if (!res.ok) throw new Error("Status " + res.status);
+        const text = await res.text();
+        el.textContent = text;
+        el.scrollTop = el.scrollHeight;
+    } catch(e) {
+        el.textContent = "Failed to load logs: " + e.message;
     }
 };
 

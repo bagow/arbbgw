@@ -112,6 +112,23 @@ pub async fn handle_get_all_settings(State(state): State<AppState>) -> Response 
     (StatusCode::OK, Json(profiles)).into_response()
 }
 
+// ─── GET /api/logs/core-node ───
+pub async fn handle_get_logs(State(_state): State<AppState>, headers: HeaderMap) -> Response {
+    if authorize(&headers, &_state).is_err() {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"Unauthorized"}))).into_response();
+    }
+    match tokio::process::Command::new("journalctl")
+        .args(["-u", "core-node", "-n", "300", "--no-pager"])
+        .output().await 
+    {
+        Ok(out) => {
+            let s = String::from_utf8_lossy(&out.stdout).to_string();
+            (StatusCode::OK, s).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+    }
+}
+
 // ─── GET /api/profiles ───
 pub async fn handle_get_profiles(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let username = match check_basic_auth(&headers, &state) {
