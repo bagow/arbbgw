@@ -61,13 +61,20 @@ fn now_ms() -> i64 {
 }
 
 static MULTIPLIERS: OnceLock<DashMap<String, f64>> = OnceLock::new();
+static LAUNCH_TIMES: OnceLock<DashMap<String, i64>> = OnceLock::new();
 
 pub fn get_multipliers() -> &'static DashMap<String, f64> {
     MULTIPLIERS.get_or_init(DashMap::new)
 }
 
+pub fn get_launch_times() -> &'static DashMap<String, i64> {
+    LAUNCH_TIMES.get_or_init(DashMap::new)
+}
+
 pub fn start_multiplier_fetcher(http: Client) {
-    let map = get_multipliers();
+    let _ = get_multipliers();
+    let _ = get_launch_times();
+
     // Gate.io
     tokio::spawn({
         let http = http.clone();
@@ -77,11 +84,16 @@ pub fn start_multiplier_fetcher(http: Client) {
                     if let Ok(json) = resp.json::<Value>().await {
                         if let Some(arr) = json.as_array() {
                             let map = get_multipliers();
+                            let lmap = get_launch_times();
                             for c in arr {
-                                if let (Some(name), Some(mult_str)) = (c["name"].as_str(), c["quanto_multiplier"].as_str()) {
+                                let name_stripped = c["name"].as_str().unwrap_or("").replace("_", "");
+                                if let Some(mult_str) = c["quanto_multiplier"].as_str() {
                                     if let Ok(m) = mult_str.parse::<f64>() {
-                                        map.insert(format!("gate:{}", name.replace("_", "")), m);
+                                        map.insert(format!("gate:{}", name_stripped), m);
                                     }
+                                }
+                                if let Some(lt) = c["launch_time"].as_i64() {
+                                    lmap.insert(format!("gate:{}", name_stripped), lt);
                                 }
                             }
                         }
@@ -101,9 +113,18 @@ pub fn start_multiplier_fetcher(http: Client) {
                     if let Ok(json) = resp.json::<Value>().await {
                         if let Some(arr) = json["data"].as_array() {
                             let map = get_multipliers();
+                            let lmap = get_launch_times();
                             for c in arr {
-                                if let (Some(name), Some(mult)) = (c["contract_code"].as_str(), c["contract_size"].as_f64()) {
-                                    map.insert(format!("htx:{}", name.replace("-", "")), mult);
+                                let name_stripped = c["contract_code"].as_str().unwrap_or("").replace("-", "");
+                                if let Some(mult) = c["contract_size"].as_f64() {
+                                    map.insert(format!("htx:{}", name_stripped), mult);
+                                }
+                                if let Some(date_str) = c["create_date"].as_str() {
+                                    if let Ok(dt) = chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d") {
+                                        if let Some(dti) = dt.and_hms_opt(0, 0, 0) {
+                                            lmap.insert(format!("htx:{}", name_stripped), dti.timestamp());
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -123,12 +144,19 @@ pub fn start_multiplier_fetcher(http: Client) {
                     if let Ok(json) = resp.json::<Value>().await {
                         if let Some(arr) = json["data"].as_array() {
                             let map = get_multipliers();
+                            let lmap = get_launch_times();
                             for c in arr {
-                                if let (Some(name), Some(mult)) = (c["symbol"].as_str(), c["multiplier"].as_f64()) {
-                                    // Map XBTUSDM -> BTCUSDT and standard pairs
+                                if let Some(name) = c["symbol"].as_str() {
                                     let mut std_name = name.replace("USDM", "USDT");
                                     if std_name == "XBTUSDT" { std_name = "BTCUSDT".to_string(); }
-                                    map.insert(format!("kucoin:{}", std_name), mult);
+                                    let full_name = format!("kucoin:{}", std_name);
+                                    
+                                    if let Some(mult) = c["multiplier"].as_f64() {
+                                        map.insert(full_name.clone(), mult);
+                                    }
+                                    if let Some(lt) = c["firstOpenDate"].as_i64() {
+                                        lmap.insert(full_name, lt / 1000);
+                                    }
                                 }
                             }
                         }
@@ -408,7 +436,29 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let contracts_b = ((settings.trade_volume / entry_b.max(1e-12)) / mult_b).round() as i64;
 
         if contracts_a < 1 || contracts_b < 1 {
-            info!("[real] Skipping pair {}: volume ${} too small for min contract size (a={}, b={})", row.pair, settings.trade_volume, contracts_a, contracts_b);
+            trace!("Skipping {}: calculated contracts < 1 (A: {}, B: {})", row.pair, contracts_a, contracts_b);
+            continue;
+        }
+
+        let actual_vol_a = contracts_a as f64 * mult_a * entry_a;
+        let actual_vol_b = contracts_b as f64 * mult_b * entry_b;
+        
+        // Strict +/- 10% volume allowance. If the contract mapping doesn't precisely fit the requested trade_volume, SKIP!
+        let max_allowed = settings.trade_volume * 1.10;
+        let min_allowed = settings.trade_volume * 0.90;
+        if actual_vol_a > max_allowed || actual_vol_a < min_allowed || actual_vol_b > max_allowed || actual_vol_b < min_allowed {
+            trace!("Skipping {}: Real USD Volume (A: {:.2}, B: {:.2}) deviates >10% from requested settings volume '{}'.", row.pair, actual_vol_a, actual_vol_b, settings.trade_volume);
+            continue;
+        }
+
+        let lmap = get_launch_times();
+        let age_a = lmap.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|r| *r).unwrap_or(0);
+        let age_b = lmap.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|r| *r).unwrap_or(0);
+        
+        let now_s = now_secs();
+        let thirty_days = 30 * 24 * 3600;
+        if (age_a > 0 && now_s - age_a < thirty_days) || (age_b > 0 && now_s - age_b < thirty_days) {
+            trace!("Skipping {}: newly listed coin (trading < 30 days).", row.pair);
             continue;
         }
 
