@@ -192,7 +192,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let gross_pnl = pnl_a + pnl_b;
         let comm_cost = 4.0 * commission * trade.volume;
         let fund_cost = funding * trade.volume;
-        let net_pnl   = gross_pnl - (comm_cost + fund_cost);
+        let slippage  = settings.slippage_percent / 100.0;
+        let slip_cost = 4.0 * slippage * trade.volume;
+        let net_pnl   = gross_pnl - (comm_cost + fund_cost + slip_cost);
         let net_pct   = net_pnl / trade.volume * 100.0;
         
         let current_spread = if is_a_higher {
@@ -228,8 +230,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let id = trade.id; let np = net_pnl; let gp = gross_pnl; let cs = current_spread;
             let cpa = exit_price_a; let cpb = exit_price_b; let pa = pnl_a; let pb = pnl_b; let r = reason.to_string();
             let _ = db.call(move |conn| {
-                conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=?,commission_cost=?,funding_cost=? WHERE id=?",
-                    params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, r, comm_cost, fund_cost, id])?;
+                conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=?,commission_cost=?,funding_cost=?,slippage_cost=? WHERE id=?",
+                    params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, r, comm_cost, fund_cost, slip_cost, id])?;
                 Ok(())
             }).await;
         } else {

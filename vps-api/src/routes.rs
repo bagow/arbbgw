@@ -199,6 +199,7 @@ pub async fn handle_get_unified(
 
             // commission_cost was stored in the DB at trade open for display purposes.
             let display_comm = t.commission_cost.unwrap_or_else(|| t.volume * 0.0045 * 4.0);
+            let display_slip = t.slippage_cost.unwrap_or_else(|| t.volume * 0.001 * 4.0);
 
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("current_price_a".into(), json!(c_price_a));
@@ -210,6 +211,7 @@ pub async fn handle_get_unified(
                 obj.insert("current_pnl".into(), json!(current_net_pnl));
                 // commission_cost is shown truthfully in the detail card
                 obj.insert("commission_cost".into(), json!(display_comm));
+                obj.insert("slippage_cost".into(), json!(display_slip));
                 obj.insert("pnl_a".into(), json!(t.pnl_a.unwrap_or(pnl_a_fallback)));
                 obj.insert("pnl_b".into(), json!(t.pnl_b.unwrap_or(pnl_b_fallback)));
             }
@@ -228,12 +230,13 @@ pub async fn handle_get_unified(
 
     let history_trades: Vec<serde_json::Value> = history_trades_raw.into_iter().map(|t| {
         let mut v = serde_json::to_value(&t).unwrap_or_default();
-        if t.commission_cost.is_none() {
-            let display_comm = t.volume * 0.0045 * 4.0;
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("commission_cost".into(), json!(display_comm));
-                obj.insert("funding_cost".into(), json!(0.0));
-            }
+        let display_comm = t.commission_cost.unwrap_or_else(|| t.volume * 0.0045 * 4.0);
+        let display_slip = t.slippage_cost.unwrap_or_else(|| t.volume * 0.001 * 4.0);
+        
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("commission_cost".into(), json!(display_comm));
+            obj.insert("slippage_cost".into(), json!(display_slip));
+            if t.funding_cost.is_none() { obj.insert("funding_cost".into(), json!(0.0)); }
         }
         v
     }).collect();

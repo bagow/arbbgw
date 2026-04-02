@@ -113,6 +113,7 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
                 gross_pnl REAL,
                 commission_cost REAL,
                 funding_cost REAL,
+                slippage_cost REAL,
                 last_price_a REAL,
                 last_price_b REAL,
                 last_spread REAL,
@@ -127,6 +128,7 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS idx_trades_exit     ON trades(exit_time);
             ",
         )?;
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN slippage_cost REAL", []);
         Ok(())
     }).await?;
     Ok(())
@@ -164,7 +166,7 @@ pub fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
     // 10:highest_spread_reached 11:status 12:exit_price_a 13:exit_price_b
     // 14:exit_spread 15:exit_time 16:pnl 17:gross_pnl 18:commission_cost
     // 19:funding_cost 20:last_price_a 21:last_price_b 22:last_spread
-    // 23:curr_gross_pnl 24:pnl_a 25:pnl_b 26:close_reason 27:profile_id
+    // 23:curr_gross_pnl 24:pnl_a 25:pnl_b 26:close_reason 27:profile_id 28:slippage_cost
     Ok(Trade {
         id: row.get(0)?,
         pair: row.get(1)?,
@@ -194,6 +196,7 @@ pub fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
         pnl_b: row.get(25)?,
         close_reason: row.get(26)?,
         profile_id: row.get(27)?,
+        slippage_cost: row.get(28).ok().unwrap_or(None),
         current_price_a: None,
         current_price_b: None,
         current_spread: None,

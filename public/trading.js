@@ -926,6 +926,7 @@ function renderActiveTable(profileId, active) {
                         <div class="td-col td-total">
                             <div class="td-line"><span>Gross PnL:</span> <strong style="color:${(t.gross_pnl??0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(t.gross_pnl??0)}</strong></div>
                             <div class="td-line"><span>Comm. Cost:</span> <strong style="color:var(--red)">${fmtCost(t.commission_cost)}</strong></div>
+                            <div class="td-line"><span>Slippage:</span> <strong style="color:var(--red)">${fmtCost(t.slippage_cost)}</strong></div>
                             <div class="td-total-pnl">Net PnL: ${livePnLStr} <span class="text-sub" style="font-weight:400;font-size:.8rem;">(${fmtDuration(Date.now()-t.entry_time)})</span></div>
                             <div style="margin-top:12px;"><button type="button" class="trading-save-btn outline-btn" style="margin:0;width:100%;padding:8px;font-size:12px;" onclick="openChartIframe('${t.pair}','${t.exchange_a}','${t.exchange_b}',${t.entry_time},null)">📊 View Chart</button></div>
                         </div>
@@ -985,6 +986,7 @@ function renderHistoryTable(profileId, history) {
                         </div>
                         <div class="td-col td-total">
                             <div class="td-line"><span>Comm. Paid:</span> <strong style="color:var(--red)">${fmtCost(t.commission_cost)}</strong></div>
+                            <div class="td-line"><span>Slippage:</span> <strong style="color:var(--red)">${fmtCost(t.slippage_cost)}</strong></div>
                             <div class="td-line"><span>Funding:</span> <strong style="color:${(t.funding_cost??0)<=0?'var(--green)':'var(--red)'}">${fmtCost(t.funding_cost)}</strong></div>
                             <div class="td-total-pnl">Net PnL: <span style="color:${pnlColor}">${pnlStr}</span> <span class="text-sub" style="font-weight:400;font-size:.8rem;">(${fmtDuration(t.exit_time-t.entry_time)})</span></div>
                             <div style="margin-top:12px;">

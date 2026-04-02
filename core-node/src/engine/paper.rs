@@ -65,15 +65,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         // We apply a minimal slippage factor here if needed, but let's stick to base bids/asks.
         let slippage = settings.slippage_percent / 100.0;
-        
-        // Entry prices (just for reference on what was done during entry opening):
-        // if is_a_higher { entry_a = row.bid_a * (1 - slippage); entry_b = row.ask_b * (1 + slippage); }
-        
         let c_price_a = data_a.price;
         let c_price_b = data_b.price;
 
-        let exit_price_a = if is_a_higher { data_a.ask * (1.0 + slippage) } else { data_a.bid * (1.0 - slippage) };
-        let exit_price_b = if is_a_higher { data_b.bid * (1.0 - slippage) } else { data_b.ask * (1.0 + slippage) };
+        let exit_price_a = if is_a_higher { data_a.ask } else { data_a.bid };
+        let exit_price_b = if is_a_higher { data_b.bid } else { data_b.ask };
 
         let contracts = trade.volume / trade.entry_price_a.max(1e-12);
 
@@ -83,7 +79,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let gross_pnl = pnl_a + pnl_b;
         let comm_cost = 4.0 * commission * trade.volume;
         let fund_cost = funding * trade.volume;
-        let net_pnl   = gross_pnl - (comm_cost + fund_cost);
+        let slip_cost = 4.0 * slippage * trade.volume;
+        let net_pnl   = gross_pnl - (comm_cost + fund_cost + slip_cost);
         let net_pct   = net_pnl / trade.volume * 100.0;
 
         let current_spread = if is_a_higher {
@@ -115,8 +112,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let cpa = exit_price_a; let cpb = exit_price_b; let pa = pnl_a; let pb = pnl_b;
             let reason_s = reason.to_string();
             let _ = db.call(move |conn| {
-                conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=?,commission_cost=?,funding_cost=? WHERE id=?",
-                    params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, reason_s, comm_cost, fund_cost, id]
+                conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=?,commission_cost=?,funding_cost=?,slippage_cost=? WHERE id=?",
+                    params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, reason_s, comm_cost, fund_cost, slip_cost, id]
                 )?;
                 Ok(())
             }).await;
