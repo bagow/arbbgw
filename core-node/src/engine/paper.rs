@@ -33,21 +33,12 @@ fn now_ms() -> i64 {
 
 /// Called by engine loop on every WS tick for the paper profile.
 /// Reads DB, closes qualifying trades, opens new ones.
-pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http: reqwest::Client, db: Connection) {
+pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, _http: reqwest::Client, db: Connection) {
     if !settings.is_active { return; }
     let profile_id = settings.id.clone();
 
     let trades = load_open_trades(&db, &profile_id).await;
     let num_active = trades.len() as i64;
-
-    // Key = "PAIR|exchange_a|exchange_b" so each exchange-pair combination is distinct.
-    // Without this, multiple pairs sharing the same symbol (e.g. BARDUSDT on okx/bitget AND bybit/binance)
-    // would overwrite each other and the close logic would pick wrong prices → instant ZERO_SPREAD close.
-    let spread_map: std::collections::HashMap<String, &SpreadRow> =
-        spreads.iter().map(|r| {
-            let key = format!("{}|{}|{}", r.pair, r.exchange_a, r.exchange_b);
-            (key, r)
-        }).collect();
 
     let commission = settings.commission_rate / 100.0;
     let funding    = settings.funding_rate_8h / 100.0;
@@ -57,47 +48,66 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, _http
     // Close qualifying trades
     let mut live_updates = Vec::new();
     for trade in &trades {
-        let is_a_higher = trade.direction == format!("{}>{}",trade.exchange_a, trade.exchange_b);
+        let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
 
-        // Look up the spread row for the EXACT same exchange pair as this trade
-        let key = format!("{}|{}|{}", trade.pair, trade.exchange_a, trade.exchange_b);
-        let row = match spread_map.get(&key) {
-            Some(r) => r,
-            None => continue, // spread data not available for this exact pair — skip
+        let data_a = match prices.get(&trade.exchange_a).and_then(|m| m.get(&trade.pair).cloned()) {
+            Some(d) => d,
+            None => continue,
+        };
+        let data_b = match prices.get(&trade.exchange_b).and_then(|m| m.get(&trade.pair).cloned()) {
+            Some(d) => d,
+            None => continue,
         };
 
-        let c_price_a = if is_a_higher { row.bid_a } else { row.ask_a };
-        let c_price_b = if is_a_higher { row.ask_b } else { row.bid_b };
+        // We apply a minimal slippage factor here if needed, but let's stick to base bids/asks.
+        let slippage = settings.slippage_percent / 100.0;
+        
+        // Entry prices (just for reference on what was done during entry opening):
+        // if is_a_higher { entry_a = row.bid_a * (1 - slippage); entry_b = row.ask_b * (1 + slippage); }
+        
+        let c_price_a = data_a.price;
+        let c_price_b = data_b.price;
+
+        let exit_price_a = if is_a_higher { data_a.ask * (1.0 + slippage) } else { data_a.bid * (1.0 - slippage) };
+        let exit_price_b = if is_a_higher { data_b.bid * (1.0 - slippage) } else { data_b.ask * (1.0 + slippage) };
+
         let contracts = trade.volume / trade.entry_price_a.max(0.001);
 
-        let pnl_a = if is_a_higher { (trade.entry_price_a - c_price_a) * contracts } else { (c_price_a - trade.entry_price_a) * contracts };
-        let pnl_b = if is_a_higher { (c_price_b - trade.entry_price_b) * contracts } else { (trade.entry_price_b - c_price_b) * contracts };
+        let pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * contracts } else { (exit_price_a - trade.entry_price_a) * contracts };
+        let pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * contracts } else { (trade.entry_price_b - exit_price_b) * contracts };
+        
         let gross_pnl = pnl_a + pnl_b;
-        let costs     = 4.0 * commission * trade.volume + funding * trade.volume;
+        let costs     = 4.0 * commission * trade.volume + funding * trade.volume; // simple funding proxy
         let net_pnl   = gross_pnl - costs;
         let net_pct   = net_pnl / trade.volume * 100.0;
 
-        // current_spread for THIS specific exchange pair
         let current_spread = if is_a_higher {
-            (row.bid_a - row.ask_b) / row.ask_b.max(0.001) * 100.0
+            (data_a.price - data_b.price) / data_b.price.max(0.001) * 100.0
         } else {
-            (row.bid_b - row.ask_a) / row.ask_a.max(0.001) * 100.0
+            (data_b.price - data_a.price) / data_a.price.max(0.001) * 100.0
         };
+
+        let exit_spread = if is_a_higher {
+            (data_a.ask - data_b.bid) / data_b.bid.max(0.001) * 100.0
+        } else {
+            (data_b.ask - data_a.bid) / data_a.bid.max(0.001) * 100.0
+        };
+
         let top_spread = trade.highest_spread.max(current_spread);
 
         let triggered_tp   = net_pct >= tp_pct * 100.0;
         let stop_limit     = top_spread - settings.trailing_stop_percent;
-        let triggered_stop = current_spread < stop_limit;
-        let zero_spread    = false; // Disable ZERO_SPREAD logic since current_spread can now go negative gracefully
+        let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
+        let zero_spread    = exit_spread <= 0.0 && net_pnl >= 0.0;
 
 
         if triggered_tp || triggered_stop || zero_spread {
-            let reason = if triggered_tp { "TP" } else if triggered_stop { "STOP" } else { "ZERO_SPREAD" };
-            info!("[paper] Closing {} {} reason={} net={:.4} curr_sp={:.4} top_sp={:.4} stop_limit={:.4} gross={:.4}", 
-                trade.id, trade.pair, reason, net_pnl, current_spread, top_spread, stop_limit, gross_pnl);
+            let reason = if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
+            info!("[paper] Closing {} {} reason={} net={:.4} exit_sp={:.4} curr_sp={:.4} top_sp={:.4} stop_limit={:.4} gross={:.4}", 
+                trade.id, trade.pair, reason, net_pnl, exit_spread, current_spread, top_spread, stop_limit, gross_pnl);
 
             let id = trade.id; let np = net_pnl; let gp = gross_pnl; let cs = current_spread;
-            let cpa = c_price_a; let cpb = c_price_b; let pa = pnl_a; let pb = pnl_b;
+            let cpa = exit_price_a; let cpb = exit_price_b; let pa = pnl_a; let pb = pnl_b;
             let reason_s = reason.to_string();
             let _ = db.call(move |conn| {
                 conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=? WHERE id=?",

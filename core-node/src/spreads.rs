@@ -50,28 +50,18 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
 
                 let a_over_b = (data_a.bid - data_b.ask) / data_b.ask * 100.0;
                 let b_over_a = (data_b.bid - data_a.ask) / data_a.ask * 100.0;
-                let (spread, direction, exchange_a, exchange_b, price_a, price_b,
-                     bid_a, ask_a, bid_b, ask_b, vol_a, vol_b, funding_a, funding_b) =
-                    if a_over_b >= b_over_a {
-                        (a_over_b, format!("{name_a}>{name_b}"),
-                         name_a.clone(), name_b.clone(),
-                         data_a.price, data_b.price,
-                         data_a.bid, data_a.ask, data_b.bid, data_b.ask,
-                         data_a.vol, data_b.vol, data_a.funding_rate, data_b.funding_rate)
-                    } else {
-                        (b_over_a, format!("{name_b}>{name_a}"),
-                         name_b.clone(), name_a.clone(),
-                         data_b.price, data_a.price,
-                         data_b.bid, data_b.ask, data_a.bid, data_a.ask,
-                         data_b.vol, data_a.vol, data_b.funding_rate, data_a.funding_rate)
-                    };
+                let (spread, direction) = if a_over_b >= b_over_a {
+                    (a_over_b, format!("{name_a}>{name_b}"))
+                } else {
+                    (b_over_a, format!("{name_b}>{name_a}"))
+                };
 
                 if spread < SPREAD_THRESHOLD || spread > SPREAD_MAX { continue; }
 
                 rows.push(SpreadRow {
-                    pair: sym.clone(), exchange_a, exchange_b,
-                    price_a, price_b, bid_a, ask_a, bid_b, ask_b,
-                    vol_a, vol_b, funding_a, funding_b,
+                    pair: sym.clone(), exchange_a: name_a.clone(), exchange_b: name_b.clone(),
+                    price_a: data_a.price, price_b: data_b.price, bid_a: data_a.bid, ask_a: data_a.ask, bid_b: data_b.bid, ask_b: data_b.ask,
+                    vol_a: data_a.vol, vol_b: data_b.vol, funding_a: data_a.funding_rate, funding_b: data_b.funding_rate,
                     spread: (spread * 10000.0).round() / 10000.0,
                     direction,
                 });

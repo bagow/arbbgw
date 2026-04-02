@@ -185,11 +185,11 @@ async fn main() -> Result<()> {
 
                 // Run paper engine for each paper profile
                 for paper_s in paper_profiles {
-                    engine::paper::run_cycle(spreads.clone(), paper_s, http.clone(), paper_db.clone()).await;
+                    engine::paper::run_cycle(spreads.clone(), prices.clone(), paper_s, http.clone(), paper_db.clone()).await;
                 }
                 // Run real engine for each real profile
                 for real_s in real_profiles {
-                    engine::real::run_cycle(spreads.clone(), real_s, http.clone(), real_db.clone()).await;
+                    engine::real::run_cycle(spreads.clone(), prices.clone(), real_s, http.clone(), real_db.clone()).await;
                 }
             }
         });

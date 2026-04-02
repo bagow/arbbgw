@@ -148,14 +148,11 @@ async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
 // ─── Engine cycle ─────────────────────────────────────────────────────────────
 
 /// Called on every WS tick. Manages real trades in the DB.
-pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, http: Client, db: Connection) {
+pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection) {
     if !settings.is_active { return; }
 
     let dry_run = std::env::var("DRY_RUN").map(|v| v != "false").unwrap_or(true);
     let keys = Arc::new(ExchangeKeys::from_env());
-
-    let spread_map: std::collections::HashMap<String, SpreadRow> =
-        spreads.iter().map(|r| (r.pair.clone(), r.clone())).collect();
 
     // Load active trades
     let trades = load_open_trades(&db).await;
@@ -169,35 +166,60 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, settings: TradingSettings, http:
     let mut live_updates = Vec::new();
     for trade in &trades {
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
-        let row = match spread_map.get(&trade.pair) { Some(r) => r, None => continue };
-        let c_price_a = if is_a_higher { row.bid_a } else { row.ask_a };
-        let c_price_b = if is_a_higher { row.ask_b } else { row.bid_b };
+        
+        let data_a = match prices.get(&trade.exchange_a).and_then(|m| m.get(&trade.pair).cloned()) {
+            Some(d) => d,
+            None => continue,
+        };
+        let data_b = match prices.get(&trade.exchange_b).and_then(|m| m.get(&trade.pair).cloned()) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        let c_price_a = data_a.price;
+        let c_price_b = data_b.price;
+        
+        let exit_price_a = if is_a_higher { data_a.ask } else { data_a.bid };
+        let exit_price_b = if is_a_higher { data_b.bid } else { data_b.ask };
+
         let contracts = trade.volume / trade.entry_price_a.max(0.001);
-        let pnl_a = if is_a_higher { (trade.entry_price_a - c_price_a) * contracts } else { (c_price_a - trade.entry_price_a) * contracts };
-        let pnl_b = if is_a_higher { (c_price_b - trade.entry_price_b) * contracts } else { (trade.entry_price_b - c_price_b) * contracts };
+        let pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * contracts } else { (exit_price_a - trade.entry_price_a) * contracts };
+        let pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * contracts } else { (trade.entry_price_b - exit_price_b) * contracts };
         let gross_pnl = pnl_a + pnl_b;
         let net_pnl   = gross_pnl - (4.0 * commission * trade.volume + funding * trade.volume);
         let net_pct   = net_pnl / trade.volume * 100.0;
+        
         let current_spread = if is_a_higher {
-            (row.bid_a - row.ask_b) / row.ask_b.max(0.001) * 100.0
+            (data_a.price - data_b.price) / data_b.price.max(0.001) * 100.0
         } else {
-            (row.bid_b - row.ask_a) / row.ask_a.max(0.001) * 100.0
+            (data_b.price - data_a.price) / data_a.price.max(0.001) * 100.0
         };
+        
+        let exit_spread = if is_a_higher {
+            (data_a.ask - data_b.bid) / data_b.bid.max(0.001) * 100.0
+        } else {
+            (data_b.ask - data_a.bid) / data_a.bid.max(0.001) * 100.0
+        };
+
         let top_spread = trade.highest_spread.max(current_spread);
+        
         let triggered_tp   = net_pct >= settings.take_profit_percent;
         let triggered_stop = top_spread > settings.trailing_stop_percent && current_spread < top_spread * (1.0 - stop_pct);
-        if triggered_tp || triggered_stop {
-            let reason = if triggered_tp { "TP" } else { "STOP" };
-            info!("[real] Closing {} {} reason={} net={:.4}", trade.id, trade.pair, reason, net_pnl);
+        let zero_spread    = exit_spread <= 0.0 && net_pnl >= 0.0; // hard exit for safety
+
+        if triggered_tp || triggered_stop || zero_spread {
+            let reason = if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
+            info!("[real] Closing {} {} reason={} net={:.4} exit_sp={:.4}", trade.id, trade.pair, reason, net_pnl, exit_spread);
             let http = http.clone(); let keys = Arc::clone(&keys);
             let exa = trade.exchange_a.clone(); let exb = trade.exchange_b.clone();
             let pair = trade.pair.clone(); let vol = trade.volume;
+            // Execute trade orders on the exchanges using the calculated prices
             tokio::join!(
-                close_order(&http, &keys, &exa, &pair, is_a_higher, vol, c_price_a, dry_run),
-                close_order(&http, &keys, &exb, &pair, !is_a_higher, vol, c_price_b, dry_run)
+                close_order(&http, &keys, &exa, &pair, is_a_higher, vol, exit_price_a, dry_run),
+                close_order(&http, &keys, &exb, &pair, !is_a_higher, vol, exit_price_b, dry_run)
             );
             let id = trade.id; let np = net_pnl; let gp = gross_pnl; let cs = current_spread;
-            let cpa = c_price_a; let cpb = c_price_b; let pa = pnl_a; let pb = pnl_b; let r = reason.to_string();
+            let cpa = exit_price_a; let cpb = exit_price_b; let pa = pnl_a; let pb = pnl_b; let r = reason.to_string();
             let _ = db.call(move |conn| {
                 conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=? WHERE id=?",
                     params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, r, id])?;
