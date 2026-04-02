@@ -574,7 +574,7 @@ async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
         let trades = stmt.query_map([p_id], |row| Ok(Trade {
             id: row.get(0)?, pair: row.get(1)?, exchange_a: row.get(2)?, exchange_b: row.get(3)?,
             direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?,
-            entry_spread: row.get(8)?, highest_spread: row.get(10)?,
+            entry_spread: row.get(8)?, entry_time: row.get(9)?, highest_spread: row.get(10)?,
             pnl_a: row.get(11)?, pnl_b: row.get(12)?, close_reason: row.get(13)?,
             contracts_a: row.get::<_, Option<i64>>(14)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(6)?.max(1e-12)).round() as i64),
             contracts_b: row.get::<_, Option<i64>>(15)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(7)?.max(1e-12)).round() as i64),
