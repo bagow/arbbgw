@@ -148,12 +148,12 @@ pub async fn handle_get_unified(
     };
 
     // 1. Get Snapshot and Exchange Maps
-    let snapshot = state.db.call(|conn| {
+    let snapshot = state.trade_db.call(|conn| {
         let row: Result<String, _> = conn.query_row("SELECT value FROM server_cache WHERE key = 'snapshot'", [], |r| r.get(0));
         Ok(if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) })
     }).await.unwrap_or(json!({}));
 
-    let exchanges = state.db.call(|conn| {
+    let exchanges = state.trade_db.call(|conn| {
         let row: Result<String, _> = conn.query_row("SELECT value FROM server_cache WHERE key = 'exchange_maps'", [], |r| r.get(0));
         Ok(if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) })
     }).await.unwrap_or(json!({}));
@@ -363,6 +363,12 @@ pub async fn handle_get_profile(
         Some(u) => u,
         None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
+
+    let (maps_json, _) = state.trade_db.call(move |conn| {
+        let mut stmt = conn.prepare("SELECT value FROM server_cache WHERE key='exchange_maps'")?;
+        let json_str: String = stmt.query_row([], |row| row.get(0))?;
+        Ok::<(String, ()), rusqlite::Error>((json_str, ()))
+    }).await.unwrap_or_else(|_| ("{}".to_string(), ()));
 
     let profile = state.db.call(move |conn| {
         let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE id = ?")?;

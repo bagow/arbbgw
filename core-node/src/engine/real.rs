@@ -320,10 +320,15 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         let pair = row.pair.clone(); let exa = row.exchange_a.clone(); let exb = row.exchange_b.clone();
         let dir = row.direction.clone(); let vol = settings.trade_volume; let sp = row.spread;
+        let commission = settings.commission_rate / 100.0;
+        let slippage = settings.slippage_percent / 100.0;
+        let comm_cost = 4.0 * commission * vol;
+        let slip_cost = 4.0 * slippage * vol;
+        let profile_id = settings.id.clone();
         let _ = db.call(move |conn| {
             conn.execute(
-                "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason,order_id_a,order_id_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![pair, exa, exb, dir, vol, entry_a, entry_b, sp, now_ms(), sp, "OPEN", 0.0, 0.0, None::<String>, oid_a, oid_b]
+                "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![pair, exa, exb, dir, vol, entry_a, entry_b, sp, now_ms(), sp, "OPEN", 0.0, 0.0, None::<String>, profile_id, comm_cost, slip_cost, 0.0, oid_a, oid_b]
             )?;
             Ok(())
         }).await;
