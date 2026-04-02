@@ -569,9 +569,10 @@ struct Trade {
 }
 
 async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
-    db.call(|conn| {
+    let p_id_clone = p_id.to_string();
+    db.call(move |conn| {
         let mut stmt = conn.prepare("SELECT id, pair, exchange_a, exchange_b, direction, volume, entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, pnl_a, pnl_b, close_reason, contracts_a, contracts_b FROM trades WHERE status='OPEN' AND profile_id=?")?;
-        let trades = stmt.query_map([p_id], |row| Ok(Trade {
+        let trades = stmt.query_map([p_id_clone], |row| Ok(Trade {
             id: row.get(0)?, pair: row.get(1)?, exchange_a: row.get(2)?, exchange_b: row.get(3)?,
             direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?,
             entry_spread: row.get(8)?, entry_time: row.get(9)?, highest_spread: row.get(10)?,
