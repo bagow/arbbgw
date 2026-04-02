@@ -120,9 +120,9 @@ jobs:
             sudo restorecon -v /usr/local/bin/vps-api 2>/dev/null || true
             if [ -f /tmp/deploy/vps-api.service ]; then
               sudo mv /tmp/deploy/vps-api.service /etc/systemd/system/
+              sudo restorecon -v /etc/systemd/system/vps-api.service 2>/dev/null || true
               sudo systemctl daemon-reload
               sudo systemctl enable vps-api
-
             fi
             sudo systemctl restart vps-api
             sudo systemctl status vps-api
