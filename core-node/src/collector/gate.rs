@@ -31,35 +31,37 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
         json!({"time":0,"channel":"futures.tickers","event":"subscribe","payload":["!all"]})
             .to_string().into()
     )).await?;
-    ws.send(Message::Text(
-        json!({"time":0,"channel":"futures.book_ticker","event":"subscribe","payload":["!all"]})
-            .to_string().into()
-    )).await?;
+    let mut ping = tokio::time::interval(Duration::from_secs(20));
 
-    while let Some(msg) = ws.next().await {
-        if let Ok(Message::Text(text)) = msg {
-            let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            let ch = v["channel"].as_str().unwrap_or("");
-            
-            if ch == "futures.book_ticker" {
-                let res = &v["result"];
-                let sym = res["s"].as_str().unwrap_or("").replace('_', "");
-                if !sym.ends_with("USDT") { continue; }
-                let bid: f64 = match res["b"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
-                let ask: f64 = match res["a"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
-                let ex = price_map.get("gate").and_then(|m| m.get(&sym).cloned()).unwrap_or_default();
-                upsert(price_map, signal, sym, TickerData { bid, ask, price: (bid+ask)/2.0, vol: ex.vol, funding_rate: ex.funding_rate, last_updated: 0 });
-            } else if ch == "futures.tickers" {
-                for item in v["result"].as_array().unwrap_or(&vec![]) {
-                    let sym = item["contract"].as_str().unwrap_or("").replace('_', "");
-                    if !sym.ends_with("USDT") { continue; }
-                    let vol     = item["volume_24h_quote"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let funding = item["funding_rate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let ex = price_map.get("gate").and_then(|m| m.get(&sym).cloned()).unwrap_or_default();
-                    if ex.bid > 0.0 && ex.ask > 0.0 {
-                        upsert(price_map, signal, sym, TickerData { bid: ex.bid, ask: ex.ask, price: ex.price, vol, funding_rate: funding, last_updated: 0 });
+    loop {
+        tokio::select! {
+            msg = ws.next() => match msg {
+                Some(Ok(Message::Text(text))) => {
+                    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                    let ch = v["channel"].as_str().unwrap_or("");
+                    
+                    if ch == "futures.tickers" {
+                        for item in v["result"].as_array().unwrap_or(&vec![]) {
+                            let sym = item["contract"].as_str().unwrap_or("").replace('_', "");
+                            if !sym.ends_with("USDT") { continue; }
+                            
+                            let bid: f64 = match item["highest_bid"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
+                            let ask: f64 = match item["lowest_ask"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
+                            let price   = item["last"].as_str().and_then(|s| s.parse().ok()).unwrap_or((bid+ask)/2.0);
+                            let vol     = item["volume_24h_quote"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            let funding = item["funding_rate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            
+                            upsert(price_map, signal, sym, TickerData { bid, ask, price, vol, funding_rate: funding, last_updated: 0 });
+                        }
                     }
                 }
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Err(e)) => return Err(e.into()),
+                _ => {}
+            },
+            _ = ping.tick() => {
+                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                ws.send(Message::Text(json!({"time":ts, "channel":"futures.ping"}).to_string().into())).await?;
             }
         }
     }
