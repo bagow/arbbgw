@@ -133,6 +133,8 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
             ",
         )?;
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN slippage_cost REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN commission_cost REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_cost REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN order_id_a TEXT", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN order_id_b TEXT", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN contracts_a INTEGER", []);
