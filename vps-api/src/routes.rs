@@ -114,7 +114,7 @@ pub async fn handle_get_all_settings(State(state): State<AppState>) -> Response 
 
 // ─── GET /api/logs/core-node ───
 pub async fn handle_get_logs(State(_state): State<AppState>, headers: HeaderMap) -> Response {
-    if check_basic_auth(&headers, &_state).is_err() {
+    if check_basic_auth(&headers, &_state).is_none() {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error":"Unauthorized"}))).into_response();
     }
     match tokio::process::Command::new("journalctl")
