@@ -239,7 +239,7 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
         "kucoin" => {
             let sym = format!("{}M", pair);
             let ts = now_ms().to_string(); let path = "/api/v1/orders";
-            let body = json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"market","size":contracts,"leverage":"1"});
+            let body = json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"market","size":contracts,"leverage":"1","marginMode":"CROSS"});
             let body_str = body.to_string();
             let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "POST", path, &body_str);
             if dry_run { info!("[DRY] kucoin order {} {}", sym, side); return Ok(format!("dry_{}", Uuid::new_v4())); }

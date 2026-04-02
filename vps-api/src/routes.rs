@@ -117,12 +117,15 @@ pub async fn handle_get_logs(State(_state): State<AppState>, headers: HeaderMap)
     if check_basic_auth(&headers, &_state).is_none() {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error":"Unauthorized"}))).into_response();
     }
-    match tokio::process::Command::new("journalctl")
-        .args(["-u", "core-node", "-n", "300", "--no-pager"])
+    match tokio::process::Command::new("sudo")
+        .args(["journalctl", "-u", "core-node", "-n", "300", "--no-pager"])
         .output().await 
     {
         Ok(out) => {
-            let s = String::from_utf8_lossy(&out.stdout).to_string();
+            let mut s = String::from_utf8_lossy(&out.stdout).to_string();
+            if s.trim().is_empty() {
+                s = String::from_utf8_lossy(&out.stderr).to_string();
+            }
             (StatusCode::OK, s).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
