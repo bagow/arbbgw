@@ -574,7 +574,7 @@ function renderSettingsForm(profile) {
                 </div>
                 <div class="form-group">
                     <label>Min Volume (M$)</label>
-                    <input type="number" id="sf-minvol-${p.id}" step="1" value="${p.min_volume_millions??10}" />
+                    <input type="number" id="sf-minvol-${p.id}" step="0.1" value="${p.min_volume_millions??10}" />
                 </div>
                 <div class="form-group">
                     <label>Collector Update (s)</label>
