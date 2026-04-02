@@ -7,6 +7,5 @@ cloudflare tunnel
 cloudflare front
 ничего не компилировать(cargo check - запрещен) на впс и на локалке только с помощью github ci/cd просто пуш в гит.
 
-Смотри всегда эти файлы если чтото не понтяно по архитектуре и общему контексту:
-/home/bagow/dev/cryptoarb/cex-arb/AGENT_README.md
-/home/bagow/dev/cryptoarb/cex-arb/real-trading-implementation_plan.md
+Смотри всегда этот файл если чтото не понтяно по архитектуре и общему контексту:
+/home/bagow/dev/cryptoarb/cex-arb/ARCHITECTURE.md

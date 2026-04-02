@@ -23,6 +23,7 @@ struct Trade {
     highest_spread: f64,
     pnl_a: f64,
     pnl_b: f64,
+    close_reason: Option<String>,
 }
 
 fn now_ms() -> i64 {
@@ -102,9 +103,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
         let zero_spread    = exit_spread <= 0.0 && net_pnl >= 0.0;
 
+        let manual_close   = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
 
-        if triggered_tp || triggered_stop || zero_spread {
-            let reason = if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
+        if manual_close || triggered_tp || triggered_stop || zero_spread {
+            let reason = if manual_close { "MANUAL" } else if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
             info!("[paper] Closing {} {} reason={} net={:.4} exit_sp={:.4} curr_sp={:.4} top_sp={:.4} stop_limit={:.4} gross={:.4}", 
                 trade.id, trade.pair, reason, net_pnl, exit_spread, current_spread, top_spread, stop_limit, gross_pnl);
 
@@ -208,7 +210,7 @@ async fn load_open_trades(db: &Connection, profile_id: &str) -> Vec<Trade> {
     let pid = profile_id.to_string();
     db.call(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT id,pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,pnl_a,pnl_b FROM trades WHERE status='OPEN' AND profile_id=?"
+            "SELECT id,pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,pnl_a,pnl_b,close_reason FROM trades WHERE status='OPEN' AND profile_id=?"
         )?;
         let rows = stmt.query_map([&pid], |row| Ok(Trade {
             id: row.get(0)?, pair: row.get(1)?,
@@ -219,6 +221,7 @@ async fn load_open_trades(db: &Connection, profile_id: &str) -> Vec<Trade> {
             entry_time: row.get(9)?,
             highest_spread: row.get(10)?,
             pnl_a: row.get(11)?, pnl_b: row.get(12)?,
+            close_reason: row.get(13)?,
         }))?.filter_map(|r| r.ok()).collect();
         Ok(rows)
     }).await.unwrap_or_default()

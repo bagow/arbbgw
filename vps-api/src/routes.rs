@@ -592,3 +592,48 @@ pub async fn handle_clear_trades(
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
+
+// ─── POST /api/profiles/:id/market-close-all ───
+pub async fn handle_market_close_all(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if check_basic_auth(&headers, &state).is_none() {
+        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
+    }
+
+    let id2 = id.clone();
+    let _ = state.real_db.call(move |conn| {
+        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status='OPEN'", params![id])?;
+        Ok(())
+    }).await;
+    let _ = state.paper_db.call(move |conn| {
+        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status='OPEN'", params![id2])?;
+        Ok(())
+    }).await;
+
+    (StatusCode::OK, Json(json!({ "success": true }))).into_response()
+}
+
+// ─── POST /api/trades/:id/close ───
+pub async fn handle_market_close_trade(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(trade_id): Path<i64>,
+) -> Response {
+    if check_basic_auth(&headers, &state).is_none() {
+        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
+    }
+
+    let _ = state.real_db.call(move |conn| {
+        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status='OPEN'", params![trade_id])?;
+        Ok(())
+    }).await;
+    let _ = state.paper_db.call(move |conn| {
+        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status='OPEN'", params![trade_id])?;
+        Ok(())
+    }).await;
+
+    (StatusCode::OK, Json(json!({ "success": true }))).into_response()
+}

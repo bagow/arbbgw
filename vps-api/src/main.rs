@@ -77,6 +77,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/profiles",                get(routes::handle_get_profiles).post(routes::handle_post_profile))
         .route("/api/profiles/:id",            get(routes::handle_get_profile).patch(routes::handle_patch_profile).delete(routes::handle_delete_profile))
         .route("/api/profiles/:id/trades",     delete(routes::handle_clear_trades))
+        .route("/api/profiles/:id/market-close-all", post(routes::handle_market_close_all))
+        .route("/api/trades/:id/close",        post(routes::handle_market_close_trade))
         .route("/api/debug_ps", get({
             let db_clone = state.db.clone();
             || async move {

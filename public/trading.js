@@ -565,10 +565,12 @@ function renderSettingsForm(profile) {
                     <label>Trailing Stop (%)</label>
                     <input type="number" id="sf-trail-${p.id}" step="0.0001" value="${p.trailing_stop_percent??0.5}" />
                 </div>
+                ${p.mode !== 'real' ? `
                 <div class="form-group">
                     <label>Slippage Rate (%)</label>
                     <input type="number" id="sf-slip-${p.id}" step="0.0001" value="${p.slippage_percent??0.1}" />
                 </div>
+                ` : ''}
                 <div class="form-group">
                     <label>Commission Rate (%)</label>
                     <input type="number" id="sf-comm-${p.id}" step="any" value="${p.commission_rate??0.45}" />
@@ -596,10 +598,10 @@ function renderSettingsForm(profile) {
                         Save Settings
                     </button>
                     <button type="button"
-                        onclick="clearTrades('${p.id}', '${p.mode}')"
+                        onclick="${p.mode === 'real' ? `marketCloseAll('${p.id}')` : `clearTrades('${p.id}', '${p.mode}')`}"
                         class="trading-save-btn outline-btn"
                         style="margin:0 0 0 auto;width:auto;padding:12px 32px;font-size:.95rem;background:transparent;color:var(--red);border:1px solid var(--red);">
-                        Clear All Trades
+                        ${p.mode === 'real' ? 'Market Close All Now' : 'Clear All Trades'}
                     </button>
                 </div>
             </form>
@@ -929,7 +931,10 @@ function renderActiveTable(profileId, active) {
                             <div class="td-line"><span>Comm. Cost:</span> <strong style="color:var(--red)">${fmtCost(t.commission_cost)}</strong></div>
                             <div class="td-line"><span>Slippage:</span> <strong style="color:var(--red)">${fmtCost(t.slippage_cost)}</strong></div>
                             <div class="td-total-pnl">Net PnL: ${livePnLStr} <span class="text-sub" style="font-weight:400;font-size:.8rem;">(${fmtDuration(Date.now()-t.entry_time)})</span></div>
-                            <div style="margin-top:12px;"><button type="button" class="trading-save-btn outline-btn" style="margin:0;width:100%;padding:8px;font-size:12px;" onclick="openChartIframe('${t.pair}','${t.exchange_a}','${t.exchange_b}',${t.entry_time},null)">📊 View Chart</button></div>
+                            <div style="margin-top:12px; display:flex; gap:8px;">
+                                <button type="button" class="trading-save-btn outline-btn" style="margin:0;flex:1;padding:8px;font-size:12px;" onclick="openChartIframe('${t.pair}','${t.exchange_a}','${t.exchange_b}',${t.entry_time},null)">📊 View Chart</button>
+                                <button type="button" class="trading-save-btn outline-btn" style="margin:0;flex:1;padding:8px;font-size:12px;color:var(--red);border-color:var(--red);" onclick="marketCloseTrade('${profileId}', ${t.id}, event)">❌ Market Close</button>
+                            </div>
                         </div>
                     </div>
                 </td>
@@ -1127,6 +1132,25 @@ window.clearTrades = async function (profileId, mode) {
     if (!confirm('Delete ALL active and historical trades for this profile?')) return;
     try {
         await apiFetch(`/api/profiles/${profileId}/trades`, { method: 'DELETE' });
+        await refreshActiveTab();
+    } catch (e) { alert('Failed: ' + e.message); }
+};
+
+window.marketCloseAll = async function (profileId) {
+    if (!confirm('Close ALL active positions on ALL exchanges at market price now?')) return;
+    try {
+        await apiFetch(`/api/profiles/${profileId}/market-close-all`, { method: 'POST' });
+        showToast('Market close requested for all active trades', 'success');
+        await refreshActiveTab();
+    } catch (e) { alert('Failed: ' + e.message); }
+};
+
+window.marketCloseTrade = async function (profileId, tradeId, event) {
+    if (event) event.stopPropagation();
+    if (!confirm('Close this position at market price?')) return;
+    try {
+        await apiFetch(`/api/trades/${tradeId}/close`, { method: 'POST' });
+        showToast('Market close requested', 'success');
         await refreshActiveTab();
     } catch (e) { alert('Failed: ' + e.message); }
 };

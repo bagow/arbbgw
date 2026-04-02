@@ -214,8 +214,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
         let zero_spread    = exit_spread <= 0.0 && net_pnl >= 0.0; // hard exit for safety
 
-        if triggered_tp || triggered_stop || zero_spread {
-            let reason = if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
+        let manual_close   = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
+
+        if manual_close || triggered_tp || triggered_stop || zero_spread {
+            let reason = if manual_close { "MANUAL" } else if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
             info!("[real] Closing {} {} reason={} net={:.4} exit_sp={:.4}", trade.id, trade.pair, reason, net_pnl, exit_spread);
             let http = http.clone(); let keys = Arc::clone(&keys);
             let exa = trade.exchange_a.clone(); let exb = trade.exchange_b.clone();
@@ -321,9 +323,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let pair = row.pair.clone(); let exa = row.exchange_a.clone(); let exb = row.exchange_b.clone();
         let dir = row.direction.clone(); let vol = settings.trade_volume; let sp = row.spread;
         let commission = settings.commission_rate / 100.0;
-        let slippage = settings.slippage_percent / 100.0;
         let comm_cost = 4.0 * commission * vol;
-        let slip_cost = 4.0 * slippage * vol;
         let profile_id = settings.id.clone();
         let now = now_ms();
         let status = "OPEN";
@@ -332,7 +332,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         let _ = db.call(move |conn| {
             let p: &[&dyn rusqlite::ToSql] = &[
-                &pair, &exa, &exb, &dir, &vol, &entry_a, &entry_b, &sp, &now, &sp, &status, &zero, &zero, &none_str, &profile_id, &comm_cost, &slip_cost, &zero, &oid_a, &oid_b
+                &pair, &exa, &exb, &dir, &vol, &entry_a, &entry_b, &sp, &now, &sp, &status, &zero, &zero, &none_str, &profile_id, &comm_cost, &zero, &zero, &oid_a, &oid_b
             ];
             conn.execute(
                 "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -345,12 +345,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 }
 
 #[derive(Debug, Clone)]
-struct Trade { id: i64, pair: String, exchange_a: String, exchange_b: String, direction: String, volume: f64, entry_price_a: f64, entry_price_b: f64, highest_spread: f64 }
+struct Trade { id: i64, pair: String, exchange_a: String, exchange_b: String, direction: String, volume: f64, entry_price_a: f64, entry_price_b: f64, highest_spread: f64, close_reason: Option<String> }
 
 async fn load_open_trades(db: &Connection) -> Vec<Trade> {
     db.call(|conn| {
-        let mut stmt = conn.prepare("SELECT id,pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,highest_spread_reached FROM trades WHERE status='OPEN'")?;
-        let rows = stmt.query_map([], |row| Ok(Trade { id: row.get(0)?, pair: row.get(1)?, exchange_a: row.get(2)?, exchange_b: row.get(3)?, direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?, highest_spread: row.get(8)? }))?.filter_map(|r| r.ok()).collect();
+        let mut stmt = conn.prepare("SELECT id,pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,highest_spread_reached,close_reason FROM trades WHERE status='OPEN'")?;
+        let rows = stmt.query_map([], |row| Ok(Trade { id: row.get(0)?, pair: row.get(1)?, exchange_a: row.get(2)?, exchange_b: row.get(3)?, direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?, highest_spread: row.get(8)?, close_reason: row.get(9)? }))?.filter_map(|r| r.ok()).collect();
         Ok(rows)
     }).await.unwrap_or_default()
 }
