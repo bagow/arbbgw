@@ -217,7 +217,7 @@ pub async fn handle_get_unified(
         v
     }).collect();
 
-    let history_trades = trade_db.call({
+    let history_trades_raw = trade_db.call({
         let p = pid.clone();
         move |conn| {
             let mut stmt = conn.prepare("SELECT * FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time DESC LIMIT 50")?;
@@ -225,6 +225,18 @@ pub async fn handle_get_unified(
             Ok(items)
         }
     }).await.unwrap_or_else(|_| vec![]);
+
+    let history_trades: Vec<serde_json::Value> = history_trades_raw.into_iter().map(|t| {
+        let mut v = serde_json::to_value(&t).unwrap_or_default();
+        if t.commission_cost.is_none() {
+            let display_comm = t.volume * 0.0045 * 4.0;
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("commission_cost".into(), json!(display_comm));
+                obj.insert("funding_cost".into(), json!(0.0));
+            }
+        }
+        v
+    }).collect();
 
     // 4. Compute aggregate stats from FULL history
     let stats = trade_db.call({
