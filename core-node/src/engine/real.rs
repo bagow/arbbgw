@@ -361,6 +361,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let zero = 0.0f64;
         let none_str = None::<String>;
 
+        let (oid_a_clone, oid_b_clone) = (oid_a.clone(), oid_b.clone());
         let db_clone_2 = db.clone();
         let _ = db.call(move |conn| {
             let p: &[&dyn rusqlite::ToSql] = &[
@@ -373,7 +374,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             Ok(())
         }).await;
 
-        if let (Some(oa), Some(ob)) = (oid_a, oid_b) {
+        if let (Some(oa), Some(ob)) = (oid_a_clone, oid_b_clone) {
             let (h_clone, k_clone, db_clone) = (http.clone(), Arc::clone(&keys), db_clone_2);
             let (exa_clone, exb_clone, pair_clone) = (row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone());
             let (ea_fallback, eb_fallback) = (entry_a, entry_b);
