@@ -75,7 +75,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let exit_price_a = if is_a_higher { data_a.ask * (1.0 + slippage) } else { data_a.bid * (1.0 - slippage) };
         let exit_price_b = if is_a_higher { data_b.bid * (1.0 - slippage) } else { data_b.ask * (1.0 + slippage) };
 
-        let contracts = trade.volume / trade.entry_price_a.max(0.001);
+        let contracts = trade.volume / trade.entry_price_a.max(1e-12);
 
         let pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * contracts } else { (exit_price_a - trade.entry_price_a) * contracts };
         let pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * contracts } else { (trade.entry_price_b - exit_price_b) * contracts };
@@ -86,15 +86,15 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let net_pct   = net_pnl / trade.volume * 100.0;
 
         let current_spread = if is_a_higher {
-            (data_a.price - data_b.price) / data_b.price.max(0.001) * 100.0
+            (data_a.price - data_b.price) / data_b.price.max(1e-12) * 100.0
         } else {
-            (data_b.price - data_a.price) / data_a.price.max(0.001) * 100.0
+            (data_b.price - data_a.price) / data_a.price.max(1e-12) * 100.0
         };
 
         let exit_spread = if is_a_higher {
-            (data_a.ask - data_b.bid) / data_b.bid.max(0.001) * 100.0
+            (data_a.ask - data_b.bid) / data_b.bid.max(1e-12) * 100.0
         } else {
-            (data_b.ask - data_a.bid) / data_a.bid.max(0.001) * 100.0
+            (data_b.ask - data_a.bid) / data_a.bid.max(1e-12) * 100.0
         };
 
         let top_spread = trade.highest_spread.max(current_spread);

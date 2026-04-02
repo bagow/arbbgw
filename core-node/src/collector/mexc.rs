@@ -44,7 +44,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                     if !sym.ends_with("USDT") { continue; }
                     let bid: f64 = d["bid1"].as_f64().unwrap_or(0.0);
                     let ask: f64 = d["ask1"].as_f64().unwrap_or(0.0);
-                    let price: f64 = d["lastPrice"].as_f64().unwrap_or(0.0);
+                    let price: f64 = d["lastPrice"].as_f64().unwrap_or((bid+ask)/2.0);
                     let vol: f64 = d["amount24"].as_f64().unwrap_or(0.0);
                     if bid > 0.0 && ask > 0.0 {
                         upsert(price_map, signal, sym, TickerData { bid, ask, price, vol, funding_rate: 0.0, last_updated: 0 });

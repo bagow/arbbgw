@@ -35,7 +35,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             if !sym.ends_with("USDT") { continue; }
             let bid: f64 = t["bidPr"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let ask: f64 = t["askPr"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let price: f64 = t["lastPr"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let price: f64 = t["lastPr"].as_str().and_then(|s| s.parse().ok()).unwrap_or((bid+ask)/2.0);
             let vol: f64 = t["usdtVolume"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
             if bid > 0.0 && ask > 0.0 {
                 upsert(price_map, signal, sym.clone(), TickerData { bid, ask, price, vol, funding_rate: 0.0, last_updated: 0 });
@@ -69,7 +69,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                         if !sym.ends_with("USDT") { continue; }
                         let bid: f64 = d["bidPr"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                         let ask: f64 = d["askPr"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                        let price: f64 = d["lastPr"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                        let price: f64 = d["lastPr"].as_str().and_then(|s| s.parse().ok()).unwrap_or((bid+ask)/2.0);
                         let ev = price_map.get("bitget").and_then(|m| m.get(&sym).map(|d| d.vol)).unwrap_or(0.0);
                         if bid > 0.0 && ask > 0.0 {
                             upsert(price_map, signal, sym, TickerData { bid, ask, price, vol: ev, funding_rate: 0.0, last_updated: 0 });
