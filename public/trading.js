@@ -465,7 +465,8 @@ function renderCexTab(profile, exchangesData) {
     // Real trading: only Gate/HTX/KuCoin have API keys
     const REAL_EXCHANGES = new Set(['gate', 'htx', 'kucoin']);
     const isReal = profile.mode === 'real';
-    const exNames = Object.keys(exchangesData.data)
+    const KNOWN_EXCHANGES = ['binance', 'bitget', 'bybit', 'gate', 'htx', 'kucoin', 'mexc', 'okx'];
+    const exNames = KNOWN_EXCHANGES
         .filter(ex => !isReal || REAL_EXCHANGES.has(ex))
         .sort();
     

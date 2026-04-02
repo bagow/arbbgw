@@ -360,7 +360,9 @@ function renderTable() {
         const s = currentProfile;
         const minS = (s.min_entry_spread !== undefined && s.min_entry_spread !== null) ? s.min_entry_spread : 0;
         const maxS = (s.max_entry_spread !== undefined && s.max_entry_spread !== null) ? s.max_entry_spread : 999;
-        filtered = filtered.filter(r => r.spread >= minS && r.spread <= maxS);
+        let disabled = [];
+        try { disabled = typeof s.disabled_exchanges === 'string' ? JSON.parse(s.disabled_exchanges) : (s.disabled_exchanges || []); } catch(e){}
+        filtered = filtered.filter(r => r.spread >= minS && r.spread <= maxS && !disabled.includes(r.exchangeA) && !disabled.includes(r.exchangeB));
     }
     const sorted = [...filtered].sort((a, b) => {
         const av = a[scannerState.sortKey] ?? 0, bv = b[scannerState.sortKey] ?? 0;
