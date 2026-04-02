@@ -49,6 +49,10 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             json!({"time":ts,"channel":"futures.tickers","event":"subscribe","payload": chunk})
                 .to_string().into()
         )).await?;
+        ws.send(Message::Text(
+            json!({"time":ts,"channel":"futures.book_ticker","event":"subscribe","payload": chunk})
+                .to_string().into()
+        )).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let mut ping = tokio::time::interval(Duration::from_secs(20));
@@ -82,15 +86,23 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                             if !sym.ends_with("USDT") { continue; }
                             
                             let price   = item["last"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                            if price == 0.0 { continue; }
-                            
-                            let bid = item["highest_bid"].as_str().and_then(|s| s.parse().ok()).unwrap_or(price);
-                            let ask = item["lowest_ask"].as_str().and_then(|s| s.parse().ok()).unwrap_or(price);
                             let vol     = item["volume_24h_quote"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                             let funding = item["funding_rate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                             
-                            upsert(price_map, signal, sym, TickerData { bid, ask, price, vol, funding_rate: funding, last_updated: 0 });
+                            upsert_tickers(price_map, signal, sym, price, vol, funding);
                         }
+                    } else if ch == "futures.book_ticker" {
+                        let event = v["event"].as_str().unwrap_or("");
+                        if event == "subscribe" { continue; }
+                        let item = &v["result"];
+                        if !item.is_object() { continue; }
+                        let sym = item["s"].as_str().unwrap_or("").replace('_', "");
+                        if !sym.ends_with("USDT") { continue; }
+                        
+                        let bid: f64 = match item["b"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
+                        let ask: f64 = match item["a"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
+                        
+                        upsert_book(price_map, signal, sym, bid, ask);
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
@@ -106,9 +118,30 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     Ok(())
 }
 
-fn upsert(price_map: &PriceMap, signal: &UpdateSignal, sym: String, mut data: TickerData) {
-    data.last_updated = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    price_map.entry("gate".to_string()).or_default().insert(sym, data);
-    signal.notify_one();
+fn upsert_tickers(price_map: &PriceMap, signal: &UpdateSignal, sym: String, price: f64, vol: f64, funding: f64) {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    {
+        let mut map = price_map.write();
+        let gate_map = map.entry("gate".to_string()).or_default();
+        let entry = gate_map.entry(sym).or_default();
+        entry.price = price;
+        entry.vol = vol;
+        entry.funding_rate = funding;
+        entry.last_updated = ts;
+    }
+    let _ = signal.send(());
+}
+
+fn upsert_book(price_map: &PriceMap, signal: &UpdateSignal, sym: String, bid: f64, ask: f64) {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    {
+        let mut map = price_map.write();
+        let gate_map = map.entry("gate".to_string()).or_default();
+        let entry = gate_map.entry(sym).or_default();
+        entry.bid = bid;
+        entry.ask = ask;
+        if entry.price == 0.0 { entry.price = (bid + ask) / 2.0; }
+        entry.last_updated = ts;
+    }
+    let _ = signal.send(());
 }
