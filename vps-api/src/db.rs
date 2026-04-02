@@ -196,3 +196,4 @@ pub fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
         gross_pnl: row.get("gross_pnl").ok().flatten(),
     })
 }
+ 
