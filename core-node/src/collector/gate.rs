@@ -81,9 +81,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                             let sym = item["contract"].as_str().unwrap_or("").replace('_', "");
                             if !sym.ends_with("USDT") { continue; }
                             
-                            let bid: f64 = match item["highest_bid"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
-                            let ask: f64 = match item["lowest_ask"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
-                            let price   = item["last"].as_str().and_then(|s| s.parse().ok()).unwrap_or((bid+ask)/2.0);
+                            let price   = item["last"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            if price == 0.0 { continue; }
+                            
+                            let bid = item["highest_bid"].as_str().and_then(|s| s.parse().ok()).unwrap_or(price);
+                            let ask = item["lowest_ask"].as_str().and_then(|s| s.parse().ok()).unwrap_or(price);
                             let vol     = item["volume_24h_quote"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                             let funding = item["funding_rate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                             
