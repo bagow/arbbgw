@@ -151,13 +151,13 @@ pub async fn handle_get_unified(
     let snapshot = state.paper_db.call(|conn| {
         let row: Result<String, rusqlite::Error> = conn.query_row("SELECT value FROM server_cache WHERE key = 'snapshot'", [], |r| r.get(0));
         let val: serde_json::Value = if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) };
-        Ok::<serde_json::Value, rusqlite::Error>(val)
+        Ok::<serde_json::Value, tokio_rusqlite::Error>(val)
     }).await.unwrap_or(json!({}));
 
     let exchanges = state.paper_db.call(|conn| {
         let row: Result<String, rusqlite::Error> = conn.query_row("SELECT value FROM server_cache WHERE key = 'exchange_maps'", [], |r| r.get(0));
         let val: serde_json::Value = if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) };
-        Ok::<serde_json::Value, rusqlite::Error>(val)
+        Ok::<serde_json::Value, tokio_rusqlite::Error>(val)
     }).await.unwrap_or(json!({}));
 
     // 2. Get Profiles
@@ -369,7 +369,7 @@ pub async fn handle_get_profile(
     let (maps_json, _) = state.paper_db.call(move |conn| {
         let mut stmt = conn.prepare("SELECT value FROM server_cache WHERE key='exchange_maps'")?;
         let json_str: String = stmt.query_row([], |row| row.get(0))?;
-        Ok::<(String, ()), rusqlite::Error>((json_str, ()))
+        Ok::<(String, ()), tokio_rusqlite::Error>((json_str, ()))
     }).await.unwrap_or_else(|_| ("{}".to_string(), ()));
 
     let profile = state.db.call(move |conn| {
