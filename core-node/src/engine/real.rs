@@ -233,12 +233,11 @@ async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
 pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection) {
     if !settings.is_active { return; }
 
-    // FORCED DRY_RUN to false to enable real trading
     let dry_run = false;
     let keys = Arc::new(ExchangeKeys::from_env());
 
     // Load active trades
-    let trades = load_open_trades(&db).await;
+    let trades = load_open_trades(&db, &settings.id).await;
     let num_active = trades.len() as i64;
 
     let funding    = settings.funding_rate_8h / 100.0;
@@ -308,6 +307,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let http = http.clone(); let keys = Arc::clone(&keys);
             let exa = trade.exchange_a.clone(); let exb = trade.exchange_b.clone();
             let pair = trade.pair.clone();
+            let vol = trade.volume;
             let c_a = trade.contracts_a; let c_b = trade.contracts_b;
             // Execute trade orders on the exchanges using the calculated prices
             tokio::join!(
@@ -558,6 +558,8 @@ struct Trade {
     volume: f64,
     entry_price_a: f64,
     entry_price_b: f64,
+    entry_spread: f64,
+    entry_time: i64,
     highest_spread: f64,
     pnl_a: f64,
     pnl_b: f64,
