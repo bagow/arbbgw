@@ -436,7 +436,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let contracts_b = ((settings.trade_volume / entry_b.max(1e-12)) / mult_b).round() as i64;
 
         if contracts_a < 1 || contracts_b < 1 {
-            trace!("Skipping {}: calculated contracts < 1 (A: {}, B: {})", row.pair, contracts_a, contracts_b);
+            info!("Skipping {}: calculated contracts < 1 (A: {}, B: {})", row.pair, contracts_a, contracts_b);
             continue;
         }
 
@@ -447,7 +447,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let max_allowed = settings.trade_volume * 1.10;
         let min_allowed = settings.trade_volume * 0.90;
         if actual_vol_a > max_allowed || actual_vol_a < min_allowed || actual_vol_b > max_allowed || actual_vol_b < min_allowed {
-            trace!("Skipping {}: Real USD Volume (A: {:.2}, B: {:.2}) deviates >10% from requested settings volume '{}'.", row.pair, actual_vol_a, actual_vol_b, settings.trade_volume);
+            info!("Skipping {}: Real USD Volume (A: {:.2}, B: {:.2}) deviates >10% from requested settings volume '{}'.", row.pair, actual_vol_a, actual_vol_b, settings.trade_volume);
             continue;
         }
 
@@ -458,7 +458,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let now_s = now_secs();
         let thirty_days = 30 * 24 * 3600;
         if (age_a > 0 && now_s - age_a < thirty_days) || (age_b > 0 && now_s - age_b < thirty_days) {
-            trace!("Skipping {}: newly listed coin (trading < 30 days).", row.pair);
+            info!("Skipping {}: newly listed coin (trading < 30 days).", row.pair);
             continue;
         }
 
