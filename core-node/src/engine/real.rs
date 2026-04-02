@@ -176,6 +176,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             None => continue,
         };
 
+        if data_a.bid <= 0.0 || data_a.ask <= 0.0 || data_b.bid <= 0.0 || data_b.ask <= 0.0 { 
+            continue; 
+        }
+
         let c_price_a = data_a.price;
         let c_price_b = data_b.price;
         
@@ -204,7 +208,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let top_spread = trade.highest_spread.max(current_spread);
         
         let triggered_tp   = net_pct >= settings.take_profit_percent;
-        let triggered_stop = top_spread > settings.trailing_stop_percent && current_spread < top_spread * (1.0 - stop_pct);
+        let stop_limit     = top_spread - settings.trailing_stop_percent;
+        let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
         let zero_spread    = exit_spread <= 0.0 && net_pnl >= 0.0; // hard exit for safety
 
         if triggered_tp || triggered_stop || zero_spread {

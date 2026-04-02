@@ -59,6 +59,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             None => continue,
         };
 
+        if data_a.bid <= 0.0 || data_a.ask <= 0.0 || data_b.bid <= 0.0 || data_b.ask <= 0.0 { 
+            continue; 
+        }
+
         // We apply a minimal slippage factor here if needed, but let's stick to base bids/asks.
         let slippage = settings.slippage_percent / 100.0;
         
