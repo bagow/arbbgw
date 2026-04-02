@@ -58,9 +58,17 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             msg = ws.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                    if v.get("error").is_some() {
+                        warn!("[gate] WS Error: {}", text);
+                    }
                     let ch = v["channel"].as_str().unwrap_or("");
                     
                     if ch == "futures.tickers" {
+                        let event = v["event"].as_str().unwrap_or("");
+                        if event == "subscribe" {
+                            info!("[gate] Subscribe OK: {}", text);
+                            continue;
+                        }
                         let items = if v["result"].is_array() {
                             v["result"].as_array().unwrap().clone()
                         } else if v["result"].is_object() {
