@@ -422,7 +422,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
     // ── Open new real trades ──────────────────────────────────────────────────
     if num_active >= settings.max_active_trades { return; }
-    let open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
+    let mut open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
 
     for row in spreads.iter().take(50) {
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
@@ -435,8 +435,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
         
         let map = get_multipliers();
-        let mult_a = map.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|v| *v).unwrap_or(1.0);
-        let mult_b = map.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|v| *v).unwrap_or(1.0);
+        let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) {
+            Some(v) => *v,
+            None => { info!("Skipping {}: waiting for multiplier for {}", row.pair, row.exchange_a); continue; }
+        };
+        let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) {
+            Some(v) => *v,
+            None => { info!("Skipping {}: waiting for multiplier for {}", row.pair, row.exchange_b); continue; }
+        };
         
         let contracts_a = ((settings.trade_volume / entry_a.max(1e-12)) / mult_a).round() as i64;
         let contracts_b = ((settings.trade_volume / entry_b.max(1e-12)) / mult_b).round() as i64;
@@ -521,6 +527,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if let Err(e) = res {
             tracing::error!("[real] FAILED to insert new trade into DB! Error: {:?}", e);
         }
+        
+        open_pairs.insert(row.pair.clone());
 
         if let (Some(oa), Some(ob)) = (oid_a_clone, oid_b_clone) {
             let (h_clone, k_clone, db_clone) = (http.clone(), Arc::clone(&keys), db_clone_2);
