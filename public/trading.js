@@ -1079,7 +1079,7 @@ window.saveSettings = async function (profileId) {
         trailing_stop_percent: parseFloat(g(`sf-trail-${profileId}`)),
         slippage_percent:      parseFloat(g(`sf-slip-${profileId}`)),
         commission_rate:       parseFloat(g(`sf-comm-${profileId}`)),
-        min_volume_millions:   parseInt(g(`sf-minvol-${profileId}`)),
+        min_volume_millions:   parseFloat(g(`sf-minvol-${profileId}`)),
         collector_interval_secs: parseInt(g(`sf-interval-${profileId}`)),
     };
     const btn = document.getElementById(`sf-save-${profileId}`);
