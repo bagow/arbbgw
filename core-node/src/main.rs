@@ -332,3 +332,4 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
 // trigger deploy-core
 // trigger core node again
 
+// trigger deploy
