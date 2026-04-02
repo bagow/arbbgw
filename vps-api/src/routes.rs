@@ -242,7 +242,12 @@ pub async fn handle_get_unified(
         let p = pid.clone();
         move |conn| {
             let mut stmt = conn.prepare("SELECT * FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time DESC LIMIT 50")?;
-            let items: Vec<_> = stmt.query_map([p], row_to_trade)?.filter_map(|r| r.ok()).collect();
+            let items: Vec<_> = stmt.query_map([p], row_to_trade)?.filter_map(|r| {
+                if let Err(e) = &r {
+                    tracing::error!("row_to_trade parse error: {:?}", e);
+                }
+                r.ok()
+            }).collect();
             Ok(items)
         }
     }).await.unwrap_or_else(|_| vec![]);
