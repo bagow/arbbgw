@@ -148,14 +148,16 @@ pub async fn handle_get_unified(
     };
 
     // 1. Get Snapshot and Exchange Maps
-    let snapshot = state.trade_db.call(|conn| {
-        let row: Result<String, _> = conn.query_row("SELECT value FROM server_cache WHERE key = 'snapshot'", [], |r| r.get(0));
-        Ok(if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) })
+    let snapshot = state.paper_db.call(|conn| {
+        let row: Result<String, rusqlite::Error> = conn.query_row("SELECT value FROM server_cache WHERE key = 'snapshot'", [], |r| r.get(0));
+        let val: serde_json::Value = if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) };
+        Ok::<serde_json::Value, rusqlite::Error>(val)
     }).await.unwrap_or(json!({}));
 
-    let exchanges = state.trade_db.call(|conn| {
-        let row: Result<String, _> = conn.query_row("SELECT value FROM server_cache WHERE key = 'exchange_maps'", [], |r| r.get(0));
-        Ok(if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) })
+    let exchanges = state.paper_db.call(|conn| {
+        let row: Result<String, rusqlite::Error> = conn.query_row("SELECT value FROM server_cache WHERE key = 'exchange_maps'", [], |r| r.get(0));
+        let val: serde_json::Value = if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) };
+        Ok::<serde_json::Value, rusqlite::Error>(val)
     }).await.unwrap_or(json!({}));
 
     // 2. Get Profiles
@@ -364,7 +366,7 @@ pub async fn handle_get_profile(
         None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let (maps_json, _) = state.trade_db.call(move |conn| {
+    let (maps_json, _) = state.paper_db.call(move |conn| {
         let mut stmt = conn.prepare("SELECT value FROM server_cache WHERE key='exchange_maps'")?;
         let json_str: String = stmt.query_row([], |row| row.get(0))?;
         Ok::<(String, ()), rusqlite::Error>((json_str, ()))
