@@ -121,7 +121,9 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
                 pnl_a REAL,
                 pnl_b REAL,
                 close_reason TEXT,
-                profile_id TEXT DEFAULT 'paper-default'
+                profile_id TEXT DEFAULT 'paper-default',
+                order_id_a TEXT,
+                order_id_b TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_trades_status   ON trades(status);
             CREATE INDEX IF NOT EXISTS idx_trades_profile  ON trades(profile_id);
@@ -129,6 +131,8 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
             ",
         )?;
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN slippage_cost REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN order_id_a TEXT", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN order_id_b TEXT", []);
         Ok(())
     }).await?;
     Ok(())

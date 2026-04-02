@@ -361,7 +361,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         let (oid_a_clone, oid_b_clone) = (oid_a.clone(), oid_b.clone());
         let db_clone_2 = db.clone();
-        let _ = db.call(move |conn| {
+        let res = db.call(move |conn| {
             let p: &[&dyn rusqlite::ToSql] = &[
                 &pair, &exa, &exb, &dir, &vol, &entry_a, &entry_b, &sp, &now, &sp, &status, &zero, &zero, &none_str, &profile_id, &comm_cost, &zero, &zero, &oid_a, &oid_b
             ];
@@ -369,8 +369,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 p
             )?;
-            Ok(())
+            Ok::<(), tokio_rusqlite::Error>(())
         }).await;
+        if let Err(e) = res {
+            tracing::error!("[real] FAILED to insert new trade into DB! Error: {:?}", e);
+        }
 
         if let (Some(oa), Some(ob)) = (oid_a_clone, oid_b_clone) {
             let (h_clone, k_clone, db_clone) = (http.clone(), Arc::clone(&keys), db_clone_2);
