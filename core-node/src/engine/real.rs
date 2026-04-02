@@ -323,7 +323,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let _ = db.call(move |conn| {
             conn.execute(
                 "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason,order_id_a,order_id_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![pair, exa, exb, dir, vol, entry_a, entry_b, sp, now_ms(), -9999.0, "OPEN", 0.0, 0.0, None::<String>, oid_a, oid_b]
+                params![pair, exa, exb, dir, vol, entry_a, entry_b, sp, now_ms(), sp, "OPEN", 0.0, 0.0, None::<String>, oid_a, oid_b]
             )?;
             Ok(())
         }).await;
