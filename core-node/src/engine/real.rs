@@ -275,177 +275,146 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     let dry_run = false;
     let keys = Arc::new(ExchangeKeys::from_env());
 
-    // Load active trades
     let trades = load_open_trades(&db, &settings.id).await;
     let num_active = trades.len() as i64;
+    let funding = settings.funding_rate_8h / 100.0;
 
-    let funding    = settings.funding_rate_8h / 100.0;
-    let stop_pct   = settings.trailing_stop_percent / 100.0;
-
-    // ── Close qualifying trades ───────────────────────────────────────────────
+    // ── Close qualifying trades ────────────────────────────────────────────────
     let mut live_updates = Vec::new();
     for trade in &trades {
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
-        let current_ms = now_ms();
-        let elapsed = current_ms.saturating_sub(trade.entry_time) as f64 / 1000.0;
-        
-        let contracts_a = trade.contracts_a as f64;
-        let contracts_b = trade.contracts_b as f64;
-        
+        let elapsed_ms = now_ms() - trade.entry_time;
+
+        // CRITICAL: never close a trade before 10s — allows real fill prices to land
+        if elapsed_ms < 10_000 { continue; }
+
+        // CRITICAL: skip trades where entry prices aren't confirmed yet (fast-poll pending)
+        if trade.entry_price_a <= 0.0 || trade.entry_price_b <= 0.0 {
+            info!("[real] Skipping close for {} {} — entry prices not confirmed yet", trade.id, trade.pair);
+            continue;
+        }
+
         let data_a = match prices.get(&trade.exchange_a).and_then(|m| m.get(&trade.pair).cloned()) {
-            Some(d) => d,
-            None => continue,
+            Some(d) => d, None => continue,
         };
         let data_b = match prices.get(&trade.exchange_b).and_then(|m| m.get(&trade.pair).cloned()) {
-            Some(d) => d,
-            None => continue,
+            Some(d) => d, None => continue,
         };
-
-        if data_a.bid <= 0.0 || data_a.ask <= 0.0 || data_b.bid <= 0.0 || data_b.ask <= 0.0 { 
-            continue; 
-        }
-        
-        // Guard: skip trades where entry prices haven't been confirmed yet by fast-poll.
-        // This prevents immediate close-on-open loops and $0 PnL records.
-        if trade.entry_price_a <= 0.0 || trade.entry_price_b <= 0.0 {
-            info!("[real] Skipping trade {} {} — entry prices not yet confirmed, waiting for fast-poll", trade.id, trade.pair);
-            continue;
-        }
-        
-        // Minimum hold time: 5 seconds. Prevents the cycle from closing a trade
-        // the instant it opens (before fast-poll writes real fill prices).
-        let elapsed_ms = now_ms() - trade.entry_time;
-        if elapsed_ms < 5000 {
-            continue;
-        }
+        if data_a.bid <= 0.0 || data_a.ask <= 0.0 || data_b.bid <= 0.0 || data_b.ask <= 0.0 { continue; }
 
         let c_price_a = data_a.price;
         let c_price_b = data_b.price;
-        
+        let contracts_a = trade.contracts_a as f64;
+        let contracts_b = trade.contracts_b as f64;
         let exit_price_a = if is_a_higher { data_a.ask } else { data_a.bid };
         let exit_price_b = if is_a_higher { data_b.bid } else { data_b.ask };
 
-        let pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * contracts_a } else { (exit_price_a - trade.entry_price_a) * contracts_a };
-        let pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * contracts_b } else { (trade.entry_price_b - exit_price_b) * contracts_b };
+        // PnL via volume-ratio (universal across all exchanges)
+        let pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * (trade.volume / trade.entry_price_a) }
+                    else { (exit_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a) };
+        let pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b) }
+                    else { (trade.entry_price_b - exit_price_b) * (trade.volume / trade.entry_price_b) };
         let gross_pnl = pnl_a + pnl_b;
-        let comm_cost = 0.0;
         let fund_cost = funding * trade.volume;
-        let net_pnl   = gross_pnl - (comm_cost + fund_cost);
+        let net_pnl   = gross_pnl - fund_cost;
         let net_pct   = net_pnl / trade.volume * 100.0;
-        
+
         let current_spread = if is_a_higher {
             (data_a.price - data_b.price) / data_b.price.max(1e-12) * 100.0
         } else {
             (data_b.price - data_a.price) / data_a.price.max(1e-12) * 100.0
         };
-        
         let exit_spread = if is_a_higher {
             (data_a.ask - data_b.bid) / data_b.bid.max(1e-12) * 100.0
         } else {
             (data_b.ask - data_a.bid) / data_a.bid.max(1e-12) * 100.0
         };
-
         let top_spread = trade.highest_spread.max(current_spread);
-        
-        let triggered_tp   = net_pct >= settings.take_profit_percent;
-        let stop_limit     = top_spread - settings.trailing_stop_percent;
-        let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
-        let zero_spread    = exit_spread <= 0.0 && net_pnl >= 0.0; // hard exit for safety
+        let stop_limit = top_spread - settings.trailing_stop_percent;
 
         let manual_close   = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
+        let triggered_tp   = net_pct >= settings.take_profit_percent;
+        let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
+        let zero_spread    = exit_spread <= 0.0 && net_pnl >= 0.0;
 
         if manual_close || triggered_tp || triggered_stop || zero_spread {
             let reason = if manual_close { "MANUAL" } else if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
-            info!("[real] Closing {} {} reason={} net={:.4} exit_sp={:.4}", trade.id, trade.pair, reason, net_pnl, exit_spread);
-            let http = http.clone(); let keys = Arc::clone(&keys);
-            let exa = trade.exchange_a.clone(); let exb = trade.exchange_b.clone();
-            let pair = trade.pair.clone();
-            let vol = trade.volume;
-            let c_a = trade.contracts_a; let c_b = trade.contracts_b;
-            // Execute trade orders on the exchanges using the calculated prices
-            tokio::join!(
-                close_order(&http, &keys, &exa, &pair, is_a_higher, c_a, dry_run),
-                close_order(&http, &keys, &exb, &pair, !is_a_higher, c_b, dry_run)
-            );
-            let id = trade.id; let np = net_pnl; let gp = gross_pnl; let cs = current_spread;
-            let cpa = exit_price_a; let cpb = exit_price_b; let pa = pnl_a; let pb = pnl_b; let r = reason.to_string();
-            let _ = db.call(move |conn| {
-                conn.execute("UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=?,commission_cost=?,funding_cost=?,slippage_cost=? WHERE id=?",
-                    params![cpa, cpb, cs, now_ms(), np, gp, pa, pb, gp, r, comm_cost, fund_cost, 0.0, id])?;
-                Ok(())
-            }).await;
+            info!("[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4}", trade.id, trade.pair, reason, net_pct, exit_spread);
 
-            // Spawn task to fetch EXACT execution prices and update row
-            let (h_clone, k_clone, db_clone) = (http.clone(), Arc::clone(&keys), db.clone());
-            let exa_clone = exa.clone();
-            let exb_clone = exb.clone();
-            let pair_clone = pair.clone();
+            let exa = trade.exchange_a.clone(); let exb = trade.exchange_b.clone(); let pair = trade.pair.clone();
+            let c_a = trade.contracts_a; let c_b = trade.contracts_b;
+            let id = trade.id; let vol = trade.volume;
+            let entry_a = trade.entry_price_a; let entry_b = trade.entry_price_b;
+            let h = http.clone(); let k = Arc::clone(&keys); let db_c = db.clone();
+            let r = reason.to_string();
+
             tokio::spawn(async move {
-                // Fast-poll closing order fills: up to 20 attempts, every 50ms
-                let mut fixed_a = cpa; let mut fixed_b = cpb;
-                let mut got_a = false; let mut got_b = false;
-                let mut extra_fee = 0.0;
-                
-                let oid_a_opt = get_order_id(&db_clone, id, true).await;
-                let oid_b_opt = get_order_id(&db_clone, id, false).await;
-                
-                for _attempt in 0..20 {
+                // Place close orders in parallel
+                let (ra, rb) = tokio::join!(
+                    close_order(&h, &k, &exa, &pair, is_a_higher, c_a, dry_run),
+                    close_order(&h, &k, &exb, &pair, !is_a_higher, c_b, dry_run)
+                );
+                let oid_close_a = ra.ok();
+                let oid_close_b = rb.ok();
+
+                // Mark CLOSED immediately with current prices and estimated PnL
+                let _ = db_c.call(move |conn| {
+                    conn.execute(
+                        "UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=?,funding_cost=? WHERE id=?",
+                        params![exit_price_a, exit_price_b, exit_spread, now_ms(), net_pnl, gross_pnl, pnl_a, pnl_b, gross_pnl, r, fund_cost, id]
+                    )?;
+                    Ok(())
+                }).await;
+
+                // Fast-poll real exit prices and recalculate PnL
+                let mut real_exit_a = exit_price_a; let mut real_exit_b = exit_price_b;
+                let mut exit_fee = 0.0; let mut got_a = false; let mut got_b = false;
+
+                for _ in 0..20 {
                     if !got_a {
-                        if let Some(ref oid) = oid_a_opt {
-                            if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exa_clone, &pair_clone, oid).await {
-                                if p > 0.0 { fixed_a = p; got_a = true; extra_fee += f.abs(); }
+                        if let Some(ref oid) = oid_close_a {
+                            if let Ok((p, f)) = fetch_order(&h, &k, &exa, &pair, oid).await {
+                                if p > 0.0 {
+                                    // Sanity: exit can't differ from entry by more than 20%
+                                    if (p - entry_a).abs() / entry_a < 0.20 { real_exit_a = p; }
+                                    else { tracing::warn!("Exit price A sanity fail: entry={} exit={}", entry_a, p); }
+                                    exit_fee += f.abs(); got_a = true;
+                                }
                             }
-                        } else { got_a = true; } // no order id means we don't need to fetch
+                        } else { got_a = true; }
                     }
                     if !got_b {
-                        if let Some(ref oid) = oid_b_opt {
-                            if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exb_clone, &pair_clone, oid).await {
-                                if p > 0.0 { fixed_b = p; got_b = true; extra_fee += f.abs(); }
+                        if let Some(ref oid) = oid_close_b {
+                            if let Ok((p, f)) = fetch_order(&h, &k, &exb, &pair, oid).await {
+                                if p > 0.0 {
+                                    if (p - entry_b).abs() / entry_b < 0.20 { real_exit_b = p; }
+                                    else { tracing::warn!("Exit price B sanity fail: entry={} exit={}", entry_b, p); }
+                                    exit_fee += f.abs(); got_b = true;
+                                }
                             }
                         } else { got_b = true; }
                     }
                     if got_a && got_b { break; }
                     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 }
-                
-                // Recalculate true PnL with real exit prices
-                let _ = db_clone.call(move |conn| {
-                    let mut entry_a = 0.0; let mut entry_b = 0.0; let mut fund = 0.0;
-                    {
-                        if let Ok(mut stmt) = conn.prepare("SELECT entry_price_a, entry_price_b, funding_cost, commission_cost FROM trades WHERE id=?") {
-                            if let Ok(mut rows) = stmt.query([id]) {
-                                if let Ok(Some(row)) = rows.next() {
-                                    entry_a = row.get(0).unwrap_or(0.0);
-                                    entry_b = row.get(1).unwrap_or(0.0);
-                                    fund    = row.get(2).unwrap_or(0.0);
-                                }
-                            }
-                        }
-                    }
-                    if entry_a > 0.0 && entry_b > 0.0 && fixed_a > 0.0 && fixed_b > 0.0 {
-                        // Price sanity: if exit price differs from entry by >20%, keep entry as fallback (bad fill data)
-                        let san_a = (fixed_a - entry_a).abs() / entry_a < 0.20;
-                        let san_b = (fixed_b - entry_b).abs() / entry_b < 0.20;
-                        if !san_a { tracing::warn!("Exit price sanity fail A: entry={} exit={} — using entry as exit", entry_a, fixed_a); fixed_a = entry_a; }
-                        if !san_b { tracing::warn!("Exit price sanity fail B: entry={} exit={} — using entry as exit", entry_b, fixed_b); fixed_b = entry_b; }
-                        
-                        // Use volume-ratio PnL (safe across all exchanges with different multipliers)
-                        let pna = if is_a_higher { (entry_a - fixed_a) * (vol / entry_a) } else { (fixed_a - entry_a) * (vol / entry_a) };
-                        let pnb = if is_a_higher { (fixed_b - entry_b) * (vol / entry_b) } else { (entry_b - fixed_b) * (vol / entry_b) };
-                        let gp = pna + pnb;
-                        let total_commission = extra_fee; // exit fees; entry fees already in commission_cost
-                        let np = gp - fund - total_commission;
-                        tracing::info!("[real] PnL recalc id={} pna={:.4} pnb={:.4} gp={:.4} np={:.4} exit_fee={:.4}", id, pna, pnb, gp, np, extra_fee);
-                        conn.execute("UPDATE trades SET exit_price_a=?, exit_price_b=?, commission_cost=commission_cost+?, pnl_a=?, pnl_b=?, gross_pnl=?, pnl=?, curr_gross_pnl=? WHERE id=?",
-                            params![fixed_a, fixed_b, total_commission, pna, pnb, gp, np, gp, id])?;
-                    }
+
+                // Recalculate PnL with real exit prices
+                let real_pna = if is_a_higher { (entry_a - real_exit_a) * (vol / entry_a) } else { (real_exit_a - entry_a) * (vol / entry_a) };
+                let real_pnb = if is_a_higher { (real_exit_b - entry_b) * (vol / entry_b) } else { (entry_b - real_exit_b) * (vol / entry_b) };
+                let real_gp = real_pna + real_pnb;
+                let real_np = real_gp - fund_cost - exit_fee;
+                info!("[real] PnL final id={} pna={:.4} pnb={:.4} gross={:.4} net={:.4} fee={:.4}", id, real_pna, real_pnb, real_gp, real_np, exit_fee);
+
+                let _ = db_c.call(move |conn| {
+                    conn.execute(
+                        "UPDATE trades SET exit_price_a=?,exit_price_b=?,pnl_a=?,pnl_b=?,gross_pnl=?,pnl=?,commission_cost=commission_cost+?,curr_gross_pnl=? WHERE id=?",
+                        params![real_exit_a, real_exit_b, real_pna, real_pnb, real_gp, real_np, exit_fee, real_gp, id]
+                    )?;
                     Ok(())
                 }).await;
             });
         } else {
-            // Did not close, track live PnL for UI
             live_updates.push((trade.id, c_price_a, c_price_b, current_spread, net_pnl));
-
             if top_spread > trade.highest_spread {
                 let id = trade.id;
                 let _ = db.call(move |conn| {
@@ -478,6 +447,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     }
 
     // ── Open new real trades ──────────────────────────────────────────────────
+    // KEY PRINCIPLE: We do NOT write to DB until BOTH legs are confirmed filled.
+    // This eliminates phantom trades, $0 PnL records, and immediate open/close chaos.
     if num_active >= settings.max_active_trades { return; }
     let mut open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
 
@@ -490,194 +461,163 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
         let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
         let entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
-        
+
+        // Price sanity: both legs must price the same asset — reject if >10% apart
+        let price_ratio = if entry_a > entry_b { entry_a / entry_b } else { entry_b / entry_a };
+        if price_ratio > 1.10 {
+            info!("[SKIP] {} price sanity: A={:.6} B={:.6} ratio={:.3} — rejecting mismatched contracts", row.pair, entry_a, entry_b, price_ratio);
+            continue;
+        }
+
         let map = get_multipliers();
         let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) {
             Some(v) => *v,
-            None => { info!("Skipping {}: waiting for multiplier for {}", row.pair, row.exchange_a); continue; }
+            None => { info!("[SKIP] {}: no multiplier for {}", row.pair, row.exchange_a); continue; }
         };
         let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) {
             Some(v) => *v,
-            None => { info!("Skipping {}: waiting for multiplier for {}", row.pair, row.exchange_b); continue; }
+            None => { info!("[SKIP] {}: no multiplier for {}", row.pair, row.exchange_b); continue; }
         };
-        
+
+        // Calculate A contracts from target volume
         let contracts_a = ((settings.trade_volume / entry_a.max(1e-12)) / mult_a).round() as i64;
-        let contracts_b = ((settings.trade_volume / entry_b.max(1e-12)) / mult_b).round() as i64;
-
-        if contracts_a < 1 || contracts_b < 1 {
-            info!("Skipping {}: calculated contracts < 1 (A: {}, B: {})", row.pair, contracts_a, contracts_b);
-            continue;
-        }
-
-        // Price sanity check: entry prices must be within 10% of each other.
-        // A larger deviation usually means the ticker data is mismatched (different tokens, stale data, etc.)
-        let price_ratio = if entry_a > entry_b { entry_a / entry_b } else { entry_b / entry_a };
-        if price_ratio > 1.10 {
-            info!("[SKIP] {} price sanity fail: A={:.6} B={:.6} ratio={:.3} — likely different tokens or stale data", row.pair, entry_a, entry_b, price_ratio);
-            continue;
-        }
+        if contracts_a < 1 { info!("[SKIP] {}: contracts_a < 1", row.pair); continue; }
 
         let actual_vol_a = contracts_a as f64 * mult_a * entry_a;
-        let actual_vol_b = contracts_b as f64 * mult_b * entry_b;
-
-        // Re-derive contracts_b so that DOLLAR NOTIONAL matches contracts_a exactly.
-        // This prevents volume mismatch (e.g. 83 vs 80 contracts) caused by different prices on each exchange.
+        // Derive contracts_b from A's ACTUAL notional to match dollar-for-dollar
         let contracts_b = ((actual_vol_a / entry_b.max(1e-12)) / mult_b).round() as i64;
+        if contracts_b < 1 { info!("[SKIP] {}: contracts_b < 1", row.pair); continue; }
+
         let actual_vol_b = contracts_b as f64 * mult_b * entry_b;
-        
-        info!("[real] Sizing {}: A={} c={} vol_a=${:.3} | B={} c={} vol_b=${:.3}", 
-            row.pair, row.exchange_a, contracts_a, actual_vol_a, row.exchange_b, contracts_b, actual_vol_b);
-        
-        // Volume sanity: both sides must be within 5% of each other
-        if contracts_b < 1 {
-            info!("Skipping {}: re-derived contracts_b < 1", row.pair);
-            continue;
-        }
         let vol_diff_pct = (actual_vol_a - actual_vol_b).abs() / actual_vol_a * 100.0;
         if vol_diff_pct > 5.0 {
-            info!("[SKIP] {} volume mismatch after re-derive: A=${:.3} B=${:.3} ({:.1}% diff)", row.pair, actual_vol_a, actual_vol_b, vol_diff_pct);
+            info!("[SKIP] {} vol mismatch A=${:.3} B=${:.3} ({:.1}%)", row.pair, actual_vol_a, actual_vol_b, vol_diff_pct);
             continue;
         }
-
-        // Also check vs requested trade_volume (±10%)
-        let max_allowed = settings.trade_volume * 1.10;
-        let min_allowed = settings.trade_volume * 0.90;
-        if actual_vol_a > max_allowed || actual_vol_a < min_allowed {
-            info!("Skipping {}: vol_a ${:.3} deviates >10% from target ${}", row.pair, actual_vol_a, settings.trade_volume);
+        // Target volume tolerance ±15%
+        let max_v = settings.trade_volume * 1.15;
+        let min_v = settings.trade_volume * 0.85;
+        if actual_vol_a > max_v || actual_vol_a < min_v {
+            info!("[SKIP] {} vol_a ${:.3} out of ±15% of target ${}", row.pair, actual_vol_a, settings.trade_volume);
             continue;
         }
 
         let lmap = get_launch_times();
-        let age_a = lmap.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|r| *r).unwrap_or(0);
-        let age_b = lmap.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|r| *r).unwrap_or(0);
-        
         let now_s = now_secs();
         let thirty_days = 30 * 24 * 3600;
+        let age_a = lmap.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|r| *r).unwrap_or(0);
+        let age_b = lmap.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|r| *r).unwrap_or(0);
         if (age_a > 0 && now_s - age_a < thirty_days) || (age_b > 0 && now_s - age_b < thirty_days) {
-            info!("Skipping {}: newly listed coin (trading < 30 days).", row.pair);
-            continue;
+            info!("[SKIP] {} newly listed (<30d)", row.pair); continue;
         }
 
-        info!("[real] Opening A: {} {} (c_a={}) [dry={}]", row.pair, row.exchange_a, contracts_a, dry_run);
-        
-        let oa = place_order(&http, &keys, &row.exchange_a, &row.pair, is_a_higher, contracts_a, dry_run, false).await;
-        let oid_a = match oa { Ok(id) => Some(id), Err(e) => { error!("[LEG_A] {}: {}", row.exchange_a, e); None } };
+        info!("[real] Placing orders: {} A={} c={} vol=${:.3} | B={} c={} vol=${:.3} spread={:.4}%",
+            row.pair, row.exchange_a, contracts_a, actual_vol_a, row.exchange_b, contracts_b, actual_vol_b, row.spread);
 
-        if oid_a.is_none() {
-            error!("Skipping {}: Leg A failed, aborting trade entirely.", row.pair);
-            continue;
-        }
+        // Place both legs in parallel for speed
+        let exa = row.exchange_a.clone(); let exb = row.exchange_b.clone(); let pair = row.pair.clone();
+        let (oa_result, ob_result) = tokio::join!(
+            place_order(&http, &keys, &exa, &pair, is_a_higher, contracts_a, dry_run, false),
+            place_order(&http, &keys, &exb, &pair, !is_a_higher, contracts_b, dry_run, false)
+        );
 
-        info!("[real] Opening B: {} {} (c_b={}) [dry={}]", row.pair, row.exchange_b, contracts_b, dry_run);
-        
-        let ob = place_order(&http, &keys, &row.exchange_b, &row.pair, !is_a_higher, contracts_b, dry_run, false).await;
-        let oid_b = match ob { Ok(id) => Some(id), Err(e) => { error!("[LEG_B] {}: {}", row.exchange_b, e); None } };
-
-        if !dry_run {
-            if oid_b.is_none() {
-                error!("🚨 LEG ASYMMETRY: A open, B failed — emergency closing A");
-                let (h, k, e, p, c) = (http.clone(), Arc::clone(&keys), row.exchange_a.clone(), row.pair.clone(), contracts_a);
-                tokio::spawn(async move { for attempt in 1u32..=5 {
-                    match close_order(&h, &k, &e, &p, is_a_higher, c, false).await {
-                        Ok(id) => { error!("🛡️ FALLBACK A closed OK {}", id); break; }
-                        Err(err) => { let w = 300 * 2u64.pow(attempt-1); error!("FALLBACK {}/5: {} — {}ms", attempt, err, w); tokio::time::sleep(Duration::from_millis(w)).await; }
-                    }
-                }});
+        let oid_a = match oa_result {
+            Ok(id) => id,
+            Err(e) => {
+                error!("[real] LEG_A failed {}/{}: {}", exa, pair, e);
+                // If A failed, B might have been placed — try to close B conservatively
+                if let Ok(oid_b) = &ob_result {
+                    let (hc, kc, ec, pc) = (http.clone(), Arc::clone(&keys), exb.clone(), pair.clone());
+                    let oid_b_c = oid_b.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        let _ = close_order(&hc, &kc, &ec, &pc, !is_a_higher, contracts_b, false).await;
+                    });
+                }
                 continue;
             }
-        } else if oid_b.is_none() { continue; }
+        };
+        let oid_b = match ob_result {
+            Ok(id) => id,
+            Err(e) => {
+                error!("[real] LEG_B failed {}/{}: {} — emergency close A", exb, pair, e);
+                let (hc, kc, ec, pc) = (http.clone(), Arc::clone(&keys), exa.clone(), pair.clone());
+                tokio::spawn(async move {
+                    for attempt in 1u32..=5 {
+                        match close_order(&hc, &kc, &ec, &pc, is_a_higher, contracts_a, false).await {
+                            Ok(id) => { error!("🛡️ Emergency close A ok: {}", id); break; }
+                            Err(err) => { let w = 200 * 2u64.pow(attempt-1); tokio::time::sleep(Duration::from_millis(w)).await; error!("Emergency close A {}/5: {}", attempt, err); }
+                        }
+                    }
+                });
+                continue;
+            }
+        };
 
-        let pair = row.pair.clone(); let exa = row.exchange_a.clone(); let exb = row.exchange_b.clone();
-        let dir = row.direction.clone(); let vol = settings.trade_volume; let sp = row.spread;
-        let comm_cost = 0.0;
+        // ── Fast-poll both fills simultaneously (max 750ms) ───────────────────
+        // We do NOT write to DB until BOTH fills are confirmed with real prices.
+        let mut fill_a = 0.0f64; let mut fee_a = 0.0f64;
+        let mut fill_b = 0.0f64; let mut fee_b = 0.0f64;
+        let mut got_a = dry_run; let mut got_b = dry_run; // skip poll for dry runs
+
+        for _ in 0..15 {
+            if !got_a {
+                if let Ok((p, f)) = fetch_order(&http, &keys, &exa, &pair, &oid_a).await {
+                    if p > 0.0 { fill_a = p; fee_a = f.abs(); got_a = true; }
+                }
+            }
+            if !got_b {
+                if let Ok((p, f)) = fetch_order(&http, &keys, &exb, &pair, &oid_b).await {
+                    if p > 0.0 { fill_b = p; fee_b = f.abs(); got_b = true; }
+                }
+            }
+            if got_a && got_b { break; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Use scanner entry prices as fallback for dry runs
+        if dry_run { fill_a = entry_a; fill_b = entry_b; }
+
+        if !got_a || !got_b {
+            error!("[real] Fill confirmation timeout: {} A_fill={:.6} B_fill={:.6} — NOT writing to DB", pair, fill_a, fill_b);
+            // Emergency close whichever leg filled
+            if got_a && fill_a > 0.0 {
+                let (hc, kc, ec, pc) = (http.clone(), Arc::clone(&keys), exa.clone(), pair.clone());
+                tokio::spawn(async move { let _ = close_order(&hc, &kc, &ec, &pc, is_a_higher, contracts_a, false).await; });
+            }
+            if got_b && fill_b > 0.0 {
+                let (hc, kc, ec, pc) = (http.clone(), Arc::clone(&keys), exb.clone(), pair.clone());
+                tokio::spawn(async move { let _ = close_order(&hc, &kc, &ec, &pc, !is_a_higher, contracts_b, false).await; });
+            }
+            continue; // ← DO NOT INSERT TO DB
+        }
+
+        // ── Both legs confirmed! Write to DB with real fill prices ────────────
+        let vol = settings.trade_volume;
+        let dir = row.direction.clone();
+        let sp  = row.spread;
         let profile_id = settings.id.clone();
-        let now = now_ms();
-        let status = "OPEN";
-        let zero = 0.0f64;
-        let none_str = None::<String>;
+        let entry_comm = fee_a + fee_b;
+        let entry_time = now_ms();
+        let oid_a_db = oid_a.clone(); let oid_b_db = oid_b.clone();
 
-        let (oid_a_clone, oid_b_clone) = (oid_a.clone(), oid_b.clone());
-        let db_clone_2 = db.clone();
+        info!("[real] Both filled! {} A={:.6}(c={}) B={:.6}(c={}) fees={:.4}", pair, fill_a, contracts_a, fill_b, contracts_b, entry_comm);
+
         let res = db.call(move |conn| {
-            let p: &[&dyn rusqlite::ToSql] = &[
-                &pair, &exa, &exb, &dir, &vol, &entry_a, &entry_b, &sp, &now, &sp, &status, &zero, &zero, &none_str, &profile_id, &comm_cost, &zero, &zero, &oid_a, &oid_b, &contracts_a, &contracts_b
-            ];
             conn.execute(
-                "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,close_reason,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b,contracts_a,contracts_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                p
+                "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b,contracts_a,contracts_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![pair, exa, exb, dir, vol, fill_a, fill_b, sp, entry_time, sp, "OPEN", 0.0f64, 0.0f64, profile_id, entry_comm, 0.0f64, 0.0f64, oid_a_db, oid_b_db, contracts_a, contracts_b]
             )?;
             Ok::<(), tokio_rusqlite::Error>(())
         }).await;
-        if let Err(e) = res {
-            tracing::error!("[real] FAILED to insert new trade into DB! Error: {:?}", e);
-        }
-        
-        open_pairs.insert(row.pair.clone());
 
-        if let (Some(oa), Some(ob)) = (oid_a_clone, oid_b_clone) {
-            let (h_clone, k_clone, db_clone) = (http.clone(), Arc::clone(&keys), db_clone_2);
-            let (exa_clone, exb_clone, pair_clone) = (row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone());
-            tokio::spawn(async move {
-                let mut true_ea = 0.0; let mut true_eb = 0.0;
-                let mut true_fee = 0.0;
-                
-                // Fast-poll: up to 15 times, every 50ms (max 750ms).
-                // If it opened, it breaks immediately (10-50ms usually).
-                for _attempt in 0..15 {
-                    if true_ea == 0.0 {
-                        if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exa_clone, &pair_clone, &oa).await {
-                            if p > 0.0 { true_ea = p; true_fee += f.abs(); }
-                        }
-                    }
-                    if true_eb == 0.0 {
-                        if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exb_clone, &pair_clone, &ob).await {
-                            if p > 0.0 { true_eb = p; true_fee += f.abs(); }
-                        }
-                    }
-                    
-                    if true_ea > 0.0 && true_eb > 0.0 {
-                        break;
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                }
-                
-                if true_ea > 0.0 && true_eb > 0.0 {
-                    let _ = db_clone.call(move |conn| {
-                        conn.execute("UPDATE trades SET entry_price_a=?, entry_price_b=?, commission_cost=? WHERE order_id_a=? AND order_id_b=?", params![true_ea, true_eb, true_fee, oa, ob])?;
-                        Ok(())
-                    }).await;
-                } else {
-                    let status = if true_ea == 0.0 && true_eb == 0.0 { "CANCELED" } else { "FAILED_ASYMMETRIC" };
-                    tracing::warn!("Market execution anomaly: {} A_fill={} B_fill={}. Marking as {}", pair_clone, true_ea, true_eb, status);
-                    let _ = db_clone.call(move |conn| {
-                        conn.execute("UPDATE trades SET status=?, close_reason='Execution Failed', entry_price_a=?, entry_price_b=? WHERE order_id_a=? AND order_id_b=?", params![status, true_ea, true_eb, oa, ob])?;
-                        Ok(())
-                    }).await;
-                    
-                    if true_ea > 0.0 {
-                        tracing::error!("🚨 EMERGENCY CLOSE A: {} {} (A filled, B didn't)", exa_clone, pair_clone);
-                        let (hc, kc, ec, pc, ca, ia) = (h_clone.clone(), Arc::clone(&k_clone), exa_clone, pair_clone.clone(), contracts_a, is_a_higher);
-                        tokio::spawn(async move { let _ = close_order(&hc, &kc, &ec, &pc, ia, ca, false).await; });
-                    }
-                    if true_eb > 0.0 {
-                        tracing::error!("🚨 EMERGENCY CLOSE B: {} {} (B filled, A didn't)", exb_clone, pair_clone);
-                        let (hc, kc, ec, pc, cb, ib) = (h_clone.clone(), Arc::clone(&k_clone), exb_clone, pair_clone.clone(), contracts_b, !is_a_higher);
-                        tokio::spawn(async move { let _ = close_order(&hc, &kc, &ec, &pc, ib, cb, false).await; });
-                    }
-                }
-            });
+        if let Err(e) = res {
+            error!("[real] DB INSERT failed after fill: {:?}", e);
+        } else {
+            open_pairs.insert(row.pair.clone());
         }
         break; // one trade per cycle
     }
-}
-
-async fn get_order_id(db: &Connection, id: i64, is_a: bool) -> Option<String> {
-    db.call(move |conn| {
-        let col = if is_a { "order_id_a" } else { "order_id_b" };
-        let mut stmt = conn.prepare(&format!("SELECT {} FROM trades WHERE id=?", col))?;
-        let row: Result<Option<String>, _> = stmt.query_row([id], |r| r.get(0));
-        Ok(row.unwrap_or(None))
-    }).await.unwrap_or(None)
 }
 
 async fn fetch_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, order_id: &str) -> Result<(f64, f64)> {
@@ -704,36 +644,27 @@ async fn fetch_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
         "kucoin" => {
             let ts = now_ms().to_string(); let path = format!("/api/v1/orders/{}", order_id);
             let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", &path, "");
-            let resp = http.get(format!("https://api-futures.kucoin.com{}", path)).header("KC-API-KEY", &keys.kucoin_key).header("KC-API-SIGN", sig).header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig).header("KC-API-KEY-VERSION", "2").timeout(Duration::from_secs(10)).send().await?;
+            let resp = http.get(format!("https://api-futures.kucoin.com{}", path))
+                .header("KC-API-KEY", &keys.kucoin_key).header("KC-API-SIGN", sig)
+                .header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig)
+                .header("KC-API-KEY-VERSION", "2").timeout(Duration::from_secs(10)).send().await?;
             let v: Value = resp.json().await?;
             let size = v["data"]["dealSize"].as_f64().or_else(|| v["data"]["filledSize"].as_f64()).or_else(|| v["data"]["dealSize"].as_str().and_then(|s| s.parse().ok())).or_else(|| v["data"]["filledSize"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
-            let val = v["data"]["dealValue"].as_f64().or_else(|| v["data"]["filledValue"].as_f64()).or_else(|| v["data"]["dealValue"].as_str().and_then(|s| s.parse().ok())).or_else(|| v["data"]["filledValue"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
-            let fee = v["data"]["fee"].as_f64().or_else(|| v["data"]["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            let val  = v["data"]["dealValue"].as_f64().or_else(|| v["data"]["filledValue"].as_f64()).or_else(|| v["data"]["dealValue"].as_str().and_then(|s| s.parse().ok())).or_else(|| v["data"]["filledValue"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            let fee  = v["data"]["fee"].as_f64().or_else(|| v["data"]["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
             let price = if size > 0.0 { val / size } else { 0.0 };
             Ok((price, fee))
         }
-        _ => Err(anyhow::anyhow!("Unknown exchange")),
+        _ => Err(anyhow::anyhow!("Unknown exchange: {}", exchange)),
     }
 }
 
 #[derive(Debug, Clone)]
 struct Trade {
-    id: i64,
-    pair: String,
-    exchange_a: String,
-    exchange_b: String,
-    direction: String,
-    volume: f64,
-    entry_price_a: f64,
-    entry_price_b: f64,
-    entry_spread: f64,
-    entry_time: i64,
-    highest_spread: f64,
-    pnl_a: f64,
-    pnl_b: f64,
-    close_reason: Option<String>,
-    contracts_a: i64,
-    contracts_b: i64,
+    id: i64, pair: String, exchange_a: String, exchange_b: String, direction: String,
+    volume: f64, entry_price_a: f64, entry_price_b: f64, entry_spread: f64,
+    entry_time: i64, highest_spread: f64, pnl_a: f64, pnl_b: f64,
+    close_reason: Option<String>, contracts_a: i64, contracts_b: i64,
 }
 
 async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
@@ -751,3 +682,5 @@ async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
         Ok(trades)
     }).await.unwrap_or_default()
 }
+
+
