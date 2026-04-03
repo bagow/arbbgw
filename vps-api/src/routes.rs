@@ -234,8 +234,8 @@ pub async fn handle_get_unified(
                 // commission_cost is shown truthfully in the detail card
                 obj.insert("commission_cost".into(), json!(display_comm));
                 obj.insert("slippage_cost".into(), json!(display_slip));
-                obj.insert("pnl_a".into(), json!(t.pnl_a.unwrap_or(pnl_a_fallback)));
-                obj.insert("pnl_b".into(), json!(t.pnl_b.unwrap_or(pnl_b_fallback)));
+                obj.insert("pnl_a".into(), json!(pnl_a_fallback));
+                obj.insert("pnl_b".into(), json!(pnl_b_fallback));
             }
         }
         v
