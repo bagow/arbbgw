@@ -577,15 +577,27 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let (h_clone, k_clone, db_clone) = (http.clone(), Arc::clone(&keys), db_clone_2);
             let (exa_clone, exb_clone, pair_clone) = (row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone());
             tokio::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
                 let mut true_ea = 0.0; let mut true_eb = 0.0;
                 let mut true_fee = 0.0;
                 
-                if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exa_clone, &pair_clone, &oa).await {
-                    true_ea = p; true_fee += f.abs();
-                }
-                if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exb_clone, &pair_clone, &ob).await {
-                    true_eb = p; true_fee += f.abs();
+                // Fast-poll: up to 15 times, every 50ms (max 750ms).
+                // If it opened, it breaks immediately (10-50ms usually).
+                for _attempt in 0..15 {
+                    if true_ea == 0.0 {
+                        if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exa_clone, &pair_clone, &oa).await {
+                            if p > 0.0 { true_ea = p; true_fee += f.abs(); }
+                        }
+                    }
+                    if true_eb == 0.0 {
+                        if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exb_clone, &pair_clone, &ob).await {
+                            if p > 0.0 { true_eb = p; true_fee += f.abs(); }
+                        }
+                    }
+                    
+                    if true_ea > 0.0 && true_eb > 0.0 {
+                        break;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 }
                 
                 if true_ea > 0.0 && true_eb > 0.0 {
