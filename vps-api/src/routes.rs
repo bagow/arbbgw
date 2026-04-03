@@ -118,7 +118,7 @@ pub async fn handle_get_logs(State(_state): State<AppState>, headers: HeaderMap)
         return (StatusCode::UNAUTHORIZED, Json(json!({"error":"Unauthorized"}))).into_response();
     }
     match tokio::process::Command::new("sudo")
-        .args(["journalctl", "-u", "core-node", "-n", "300", "--no-pager"])
+        .args(["journalctl", "-u", "core-node", "-n", "300", "-r", "--no-pager"])
         .output().await 
     {
         Ok(out) => {

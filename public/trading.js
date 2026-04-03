@@ -200,6 +200,11 @@ async function refreshActiveTab() {
         history = profile.mode === 'real' ? (real?.history || []) : (trades?.history || []);
     }
 
+    // Auto-refresh logs if the logs tab is currently active
+    if (activeSubTabId === 'logs') {
+        window.fetchLogs(true);
+    }
+
     // Use per-profile stats if available, fall back to global
     const stats = profile_stats || (profile.mode === 'real' ? (real?.stats || {}) : (trades?.stats || {}));
 
@@ -376,9 +381,12 @@ function renderPanel(profile, active, history, stats, exchanges) {
         <div class="mt-content" id="mt-sub-logs" style="display:${activeSubTabId==='logs'?'block':'none'}; padding: 24px;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
                 <h2 style="margin:0;">System Logs (core-node)</h2>
-                <button class="trading-save-btn outline-btn" onclick="window.fetchLogs()" style="padding:8px 16px; width:auto; margin:0;">Refresh</button>
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <span style="color:var(--text-sub); font-size:0.85rem;" id="logs-status">Auto-updating...</span>
+                    <button class="trading-save-btn outline-btn" onclick="window.fetchLogs(false)" style="padding:8px 16px; width:auto; margin:0;">Force Refresh</button>
+                </div>
             </div>
-            <div id="logs-container" style="background:var(--bg-row-alt); color:var(--text); padding:16px; border:1px solid var(--border-dim); border-radius:8px; height:65vh; overflow-y:auto; font-family:var(--font-mono); font-size: 0.85rem; white-space:pre-wrap;"></div>
+            <div id="logs-container" style="background:var(--bg-row-alt); color:var(--text); padding:16px; border:1px solid var(--border-dim); border-radius:8px; height:65vh; overflow-y:auto; font-family:var(--font-mono); font-size: 1.1rem; line-height: 1.6; white-space:pre-wrap;"></div>
         </div>
     `;
 
@@ -1095,10 +1103,15 @@ window.showSubTab = function (btn, tab) {
     }
 };
 
-window.fetchLogs = async function() {
+window.fetchLogs = async function(isBackground = false) {
     const el = document.getElementById('logs-container');
     if (!el) return;
-    el.textContent = "Loading logs...";
+    
+    // Only show loading text if not doing an auto-refresh in the background, to prevent flickering
+    if (!isBackground) {
+        el.textContent = "Loading logs...";
+    }
+    
     try {
         const creds = localStorage.getItem('cex_auth') || '';
         const res = await fetch('/api/logs/core-node', {
@@ -1107,10 +1120,26 @@ window.fetchLogs = async function() {
         if (res.status === 401) throw new Error("Unauthorized");
         if (!res.ok) throw new Error("Status " + res.status);
         const text = await res.text();
-        el.textContent = text;
-        el.scrollTop = el.scrollHeight;
+        
+        // Preserve scroll position if user is scrolled down, otherwise stick to top since newest logs are now on top
+        const isScrolled = el.scrollTop > 10;
+        
+        if (el.textContent !== text) {
+            el.textContent = text;
+        }
+        
+        if (!isScrolled) {
+            el.scrollTop = 0;
+        }
+        
+        const statusEl = document.getElementById('logs-status');
+        if (statusEl) statusEl.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
     } catch(e) {
-        el.textContent = "Failed to load logs: " + e.message;
+        if (!isBackground) {
+            el.textContent = "Failed to load logs: " + e.message;
+        }
+        const statusEl = document.getElementById('logs-status');
+        if (statusEl) statusEl.textContent = `Error: ${e.message}`;
     }
 };
 
