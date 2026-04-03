@@ -481,7 +481,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     if num_active >= settings.max_active_trades { return; }
     let mut open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
 
-    for row in spreads.iter().take(50) {
+    for row in spreads.iter().take(500) {
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
         if open_pairs.contains(&row.pair) { continue; }
         if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) { continue; }
@@ -519,12 +519,31 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         let actual_vol_a = contracts_a as f64 * mult_a * entry_a;
         let actual_vol_b = contracts_b as f64 * mult_b * entry_b;
+
+        // Re-derive contracts_b so that DOLLAR NOTIONAL matches contracts_a exactly.
+        // This prevents volume mismatch (e.g. 83 vs 80 contracts) caused by different prices on each exchange.
+        let contracts_b = ((actual_vol_a / entry_b.max(1e-12)) / mult_b).round() as i64;
+        let actual_vol_b = contracts_b as f64 * mult_b * entry_b;
         
-        // Strict +/- 10% volume allowance. If the contract mapping doesn't precisely fit the requested trade_volume, SKIP!
+        info!("[real] Sizing {}: A={} c={} vol_a=${:.3} | B={} c={} vol_b=${:.3}", 
+            row.pair, row.exchange_a, contracts_a, actual_vol_a, row.exchange_b, contracts_b, actual_vol_b);
+        
+        // Volume sanity: both sides must be within 5% of each other
+        if contracts_b < 1 {
+            info!("Skipping {}: re-derived contracts_b < 1", row.pair);
+            continue;
+        }
+        let vol_diff_pct = (actual_vol_a - actual_vol_b).abs() / actual_vol_a * 100.0;
+        if vol_diff_pct > 5.0 {
+            info!("[SKIP] {} volume mismatch after re-derive: A=${:.3} B=${:.3} ({:.1}% diff)", row.pair, actual_vol_a, actual_vol_b, vol_diff_pct);
+            continue;
+        }
+
+        // Also check vs requested trade_volume (±10%)
         let max_allowed = settings.trade_volume * 1.10;
         let min_allowed = settings.trade_volume * 0.90;
-        if actual_vol_a > max_allowed || actual_vol_a < min_allowed || actual_vol_b > max_allowed || actual_vol_b < min_allowed {
-            info!("Skipping {}: Real USD Volume (A: {:.2}, B: {:.2}) deviates >10% from requested settings volume '{}'.", row.pair, actual_vol_a, actual_vol_b, settings.trade_volume);
+        if actual_vol_a > max_allowed || actual_vol_a < min_allowed {
+            info!("Skipping {}: vol_a ${:.3} deviates >10% from target ${}", row.pair, actual_vol_a, settings.trade_volume);
             continue;
         }
 
