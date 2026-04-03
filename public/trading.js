@@ -381,8 +381,12 @@ function renderPanel(profile, active, history, stats, exchanges) {
         <div class="mt-content" id="mt-sub-logs" style="display:${activeSubTabId==='logs'?'block':'none'}; padding: 24px;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
                 <h2 style="margin:0;">System Logs (core-node)</h2>
-                <div style="display:flex; align-items:center; gap:12px;">
+                <div style="display:flex; align-items:center; gap:16px;">
                     <span style="color:var(--text-sub); font-size:0.85rem;" id="logs-status">Auto-updating...</span>
+                    <div style="background:var(--bg-row); padding:4px; border-radius:6px; display:flex; gap:4px;">
+                        <button class="mt-nav-btn ${window.logViewMode==='trade'?'mt-nav-btn--active':''}" id="btn-log-trade" onclick="setLogView('trade')" style="padding:6px 16px; margin:0; font-size:13px;">Trades</button>
+                        <button class="mt-nav-btn ${window.logViewMode==='tech'?'mt-nav-btn--active':''}" id="btn-log-tech" onclick="setLogView('tech')" style="padding:6px 16px; margin:0; font-size:13px;">Technical</button>
+                    </div>
                     <button class="trading-save-btn outline-btn" onclick="window.fetchLogs(false)" style="padding:8px 16px; width:auto; margin:0;">Force Refresh</button>
                 </div>
             </div>
@@ -1102,54 +1106,55 @@ window.showSubTab = function (btn, tab) {
         window.fetchLogs();
     }
 };
+window.logViewMode = window.logViewMode || 'trade';
+window.lastFetchedLogs = window.lastFetchedLogs || '';
 
-window.fetchLogs = async function(isBackground = false) {
+window.setLogView = function(mode) {
+    window.logViewMode = mode;
+    document.getElementById('btn-log-trade').classList.toggle('mt-nav-btn--active', mode === 'trade');
+    document.getElementById('btn-log-tech').classList.toggle('mt-nav-btn--active', mode === 'tech');
+    if (window.lastFetchedLogs) {
+        window.renderLogsHTML(window.lastFetchedLogs);
+    }
+};
+
+window.renderLogsHTML = function(text) {
     const el = document.getElementById('logs-container');
     if (!el) return;
-    
-    // Only show loading text if not doing an auto-refresh in the background, to prevent flickering
-    if (!isBackground) {
-        el.textContent = "Loading logs...";
-    }
-    
-    try {
-        const creds = localStorage.getItem('cex_auth') || '';
-        const res = await fetch('/api/logs/core-node', {
-            headers: { 'Authorization': 'Basic ' + creds }
-        });
-        if (res.status === 401) throw new Error("Unauthorized");
-        if (!res.ok) throw new Error("Status " + res.status);
-        const text = await res.text();
+    const isScrolled = el.scrollTop > 10;
         
-        // Preserve scroll position if user is scrolled down, otherwise stick to top since newest logs are now on top
-        const isScrolled = el.scrollTop > 10;
-        
-        const formatLogLine = (line) => {
-            if (!line.trim()) return '';
-            let cleanLine = line;
-            const match = line.match(/Z\s+(INFO|ERROR|WARN|DEBUG)\s+core_node.*?:\s+(.*)/);
-            if (match) {
-                const timeMatch = line.match(/(\d{2}:\d{2}:\d{2})\.\d+Z/);
-                const timeStr = timeMatch ? `[${timeMatch[1]}] ` : '';
-                cleanLine = `${timeStr}[${match[1]}] ${match[2]}`;
-            } else if (line.includes('core-node')) {
-                cleanLine = line.split('core-node')[1] || line;
-            }
+    const formatLogLine = (line) => {
+        if (!line.trim()) return '';
+        let cleanLine = line;
+        const match = line.match(/Z\s+(INFO|ERROR|WARN|DEBUG)\s+core_node.*?:\s+(.*)/);
+        if (match) {
+            const timeMatch = line.match(/(\d{2}:\d{2}:\d{2})\.\d+Z/);
+            const timeStr = timeMatch ? `[${timeMatch[1]}] ` : '';
+            cleanLine = `${timeStr}[${match[1]}] ${match[2]}`;
+        } else if (line.includes('core-node')) {
+            cleanLine = line.split('core-node')[1] || line;
+        }
 
-            // Filter out logs unrelated to the active tab
-            const currentProfile = profiles.find(p => p.id === activeTabId);
-            const currentMode = currentProfile ? currentProfile.mode : 'paper';
+        // Context filtering
+        const currentProfile = profiles.find(p => p.id === activeTabId);
+        const currentMode = currentProfile ? currentProfile.mode : 'paper';
 
-            if (currentMode === 'real' && cleanLine.includes('[paper]')) return '';
-            if (currentMode === 'paper' && cleanLine.includes('[real]')) return '';
-            if (cleanLine.includes('[settings]')) {
-                if (!cleanLine.includes(`id=${activeTabId}`)) return '';
-            }
+        if (currentMode === 'real' && cleanLine.includes('[paper]')) return '';
+        if (currentMode === 'paper' && cleanLine.includes('[real]')) return '';
+        if (cleanLine.includes('[settings]')) {
+            if (!cleanLine.includes(`id=${activeTabId}`)) return '';
+        }
 
-            let html = escHtml(cleanLine);
-            let style = 'color: var(--text);';
+        // Sub-Type filtering (Trades vs Technical)
+        const isTradeLog = cleanLine.includes('[real]') || cleanLine.includes('[paper]') || cleanLine.includes('[settings]');
+        const isTechLog = !isTradeLog;
+        if (window.logViewMode === 'trade' && isTechLog) return '';
+        if (window.logViewMode === 'tech' && isTradeLog) return '';
 
-            if (html.includes('[ERROR]')) {
+        let html = escHtml(cleanLine);
+        let style = 'color: var(--text);';
+
+        if (html.includes('[ERROR]')) {
                 html = '❌ ' + html;
                 style = 'color: #ff4b4b; font-weight: bold;';
             } else if (html.includes('[SKIP]')) {
@@ -1186,13 +1191,30 @@ window.fetchLogs = async function(isBackground = false) {
         if (!isScrolled) {
             el.scrollTop = 0;
         }
+};
+
+window.fetchLogs = async function(isBackground = false) {
+    const el = document.getElementById('logs-container');
+    if (!el) return;
+    
+    if (!isBackground) el.textContent = "Loading logs...";
+    
+    try {
+        const creds = localStorage.getItem('cex_auth') || '';
+        const res = await fetch('/api/logs/core-node', {
+            headers: { 'Authorization': 'Basic ' + creds }
+        });
+        if (res.status === 401) throw new Error("Unauthorized");
+        if (!res.ok) throw new Error("Status " + res.status);
+        const text = await res.text();
+        
+        window.lastFetchedLogs = text;
+        window.renderLogsHTML(text);
         
         const statusEl = document.getElementById('logs-status');
         if (statusEl) statusEl.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
     } catch(e) {
-        if (!isBackground) {
-            el.textContent = "Failed to load logs: " + e.message;
-        }
+        if (!isBackground) el.textContent = "Failed to load logs: " + e.message;
         const statusEl = document.getElementById('logs-status');
         if (statusEl) statusEl.textContent = `Error: ${e.message}`;
     }
