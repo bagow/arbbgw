@@ -1947,28 +1947,33 @@ input:checked+.slider:before {
     padding: 0 6px 0 8px !important;
   }
 
+  /* ── Hide table footer to prevent colspan stretch ────────────────────────── */
+  .trading-table-wrap table tfoot {
+    display: none !important;
+  }
+
   /* ── CRITICAL: Break detail rows out of table min-width constraint ────────── 
      Only target EXPANDED rows (JS sets display:table-row on expansion).
-     Rows with display:none stay hidden (JS inline style wins without !important). */
+     Rows with display:none stay hidden. Width uses 100% to avoid VW overflow. */
   tr[id^="detail-"][style*="table-row"] {
     display: block !important;
-    width: 100vw !important;
-    max-width: 100vw !important;
+    width: 100% !important;
+    max-width: 100% !important;
   }
   tr[id^="detail-"][style*="table-row"] > td.p-0 {
     display: block !important;
     width: 100% !important;
-    max-width: 100vw !important;
+    max-width: 100% !important;
     box-sizing: border-box !important;
     padding: 0 !important;
   }
   .trade-details-box {
     width: 100% !important;
-    max-width: 100vw !important;
+    max-width: 100% !important;
     box-sizing: border-box !important;
     flex-direction: column !important;
-    gap: 10px !important;
-    padding: 10px !important;
+    gap: 12px !important;
+    padding: 12px !important;
     overflow: hidden !important;
   }
   .td-col {
@@ -1976,6 +1981,20 @@ input:checked+.slider:before {
     width: 100% !important;
     box-sizing: border-box !important;
   }
+  
+  /* Increased Font Sizes for readability (+20-30%) */
+  .td-header {
+    font-size: 1.15rem !important;
+  }
+  .td-line {
+    font-size: 1.05rem !important;
+    padding: 6px 10px !important;
+  }
+  .td-total-pnl {
+    font-size: 1.25rem !important;
+    margin-top: 10px !important;
+  }
+
   .td-col.td-total {
     border-left: none !important;
     border-top: 1px solid var(--border-dim) !important;
