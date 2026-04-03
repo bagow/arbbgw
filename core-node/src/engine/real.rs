@@ -285,9 +285,6 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
         let elapsed_ms = now_ms() - trade.entry_time;
 
-        // CRITICAL: never close a trade before 10s — allows real fill prices to land
-        if elapsed_ms < 10_000 { continue; }
-
         // CRITICAL: skip trades where entry prices aren't confirmed yet (fast-poll pending)
         if trade.entry_price_a <= 0.0 || trade.entry_price_b <= 0.0 {
             info!("[real] Skipping close for {} {} — entry prices not confirmed yet", trade.id, trade.pair);
@@ -578,21 +575,13 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         // Use scanner entry prices as fallback for dry runs
         if dry_run { fill_a = entry_a; fill_b = entry_b; }
 
-        if !got_a || !got_b {
-            error!("[real] Fill confirmation timeout: {} A_fill={:.6} B_fill={:.6} — NOT writing to DB", pair, fill_a, fill_b);
-            // Emergency close whichever leg filled
-            if got_a && fill_a > 0.0 {
-                let (hc, kc, ec, pc) = (http.clone(), Arc::clone(&keys), exa.clone(), pair.clone());
-                tokio::spawn(async move { let _ = close_order(&hc, &kc, &ec, &pc, is_a_higher, contracts_a, false).await; });
-            }
-            if got_b && fill_b > 0.0 {
-                let (hc, kc, ec, pc) = (http.clone(), Arc::clone(&keys), exb.clone(), pair.clone());
-                tokio::spawn(async move { let _ = close_order(&hc, &kc, &ec, &pc, !is_a_higher, contracts_b, false).await; });
-            }
+        if !got_a && !got_b {
+            error!("[real] Fill confirmation timeout: {} no fills at all — NOT writing to DB", pair);
             continue; // ← DO NOT INSERT TO DB
         }
 
-        // ── Both legs confirmed! Write to DB with real fill prices ────────────
+        // ── At least one leg confirmed! Write to DB with real fill prices ────────────
+        let status = if got_a && got_b { "OPEN" } else { "FAILED_ASYMMETRIC" };
         let vol = settings.trade_volume;
         let dir = row.direction.clone();
         let sp  = row.spread;
@@ -601,20 +590,60 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let entry_time = now_ms();
         let oid_a_db = oid_a.clone(); let oid_b_db = oid_b.clone();
 
-        info!("[real] Both filled! {} A={:.6}(c={}) B={:.6}(c={}) fees={:.4}", pair, fill_a, contracts_a, fill_b, contracts_b, entry_comm);
+        info!("[real] Inserting trade: {} status={} A={:.6}(c={}) B={:.6}(c={}) fees={:.4}", pair, status, fill_a, contracts_a, fill_b, contracts_b, entry_comm);
 
         let res = db.call(move |conn| {
             conn.execute(
                 "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b,contracts_a,contracts_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![pair, exa, exb, dir, vol, fill_a, fill_b, sp, entry_time, sp, "OPEN", 0.0f64, 0.0f64, profile_id, entry_comm, 0.0f64, 0.0f64, oid_a_db, oid_b_db, contracts_a, contracts_b]
+                params![pair, exa, exb, dir, vol, fill_a, fill_b, sp, entry_time, sp, status, 0.0f64, 0.0f64, profile_id, entry_comm, 0.0f64, 0.0f64, oid_a_db, oid_b_db, contracts_a, contracts_b]
             )?;
-            Ok::<(), tokio_rusqlite::Error>(())
+            Ok::<i64, tokio_rusqlite::Error>(conn.last_insert_rowid())
         }).await;
 
-        if let Err(e) = res {
-            error!("[real] DB INSERT failed after fill: {:?}", e);
-        } else {
-            open_pairs.insert(row.pair.clone());
+        match res {
+            Ok(trade_id) => {
+                if status == "FAILED_ASYMMETRIC" {
+                    let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
+                    let (exa_c, exb_c, pair_c) = (row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone());
+                    tokio::spawn(async move {
+                        error!("🚨 EMERGENCY CLOSE {} {} (Asymmetric fill) — trade_id={}", exa_c, pair_c, trade_id);
+                        let (mut raid, mut rbid) = (None, None);
+                        if got_a && fill_a > 0.0 { raid = close_order(&hc, &kc, &exa_c, &pair_c, is_a_higher, contracts_a, false).await.ok(); }
+                        if got_b && fill_b > 0.0 { rbid = close_order(&hc, &kc, &exb_c, &pair_c, !is_a_higher, contracts_b, false).await.ok(); }
+                        
+                        let mut fa = 0.0; let mut fb = 0.0; let mut ec = 0.0;
+                        for _ in 0..15 {
+                            if fa == 0.0 && raid.is_some() {
+                                if let Ok((p, f)) = fetch_order(&hc, &kc, &exa_c, &pair_c, raid.as_ref().unwrap()).await {
+                                    if p > 0.0 { fa = p; ec += f.abs(); }
+                                }
+                            }
+                            if fb == 0.0 && rbid.is_some() {
+                                if let Ok((p, f)) = fetch_order(&hc, &kc, &exb_c, &pair_c, rbid.as_ref().unwrap()).await {
+                                    if p > 0.0 { fb = p; ec += f.abs(); }
+                                }
+                            }
+                            if (raid.is_none() || fa > 0.0) && (rbid.is_none() || fb > 0.0) { break; }
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                        
+                        let r_pna = if fa > 0.0 && fill_a > 0.0 { if is_a_higher { (fill_a - fa)*(vol/fill_a) } else { (fa - fill_a)*(vol/fill_a) } } else { 0.0 };
+                        let r_pnb = if fb > 0.0 && fill_b > 0.0 { if is_a_higher { (fb - fill_b)*(vol/fill_b) } else { (fill_b - fb)*(vol/fill_b) } } else { 0.0 };
+                        let np = r_pna + r_pnb - (ec + entry_comm); // rough PnL estimate
+                        
+                        let _ = db_c.call(move |conn| {
+                            conn.execute("UPDATE trades SET status='CLOSED', close_reason='Execution Failed', exit_price_a=?, exit_price_b=?, commission_cost=commission_cost+?, pnl_a=?, pnl_b=?, gross_pnl=?, pnl=?, curr_gross_pnl=? WHERE id=?",
+                                params![fa, fb, ec, r_pna, r_pnb, r_pna+r_pnb, np, r_pna+r_pnb, trade_id])?;
+                            Ok(())
+                        }).await;
+                    });
+                } else {
+                    open_pairs.insert(row.pair.clone());
+                }
+            }
+            Err(e) => {
+                error!("[real] DB INSERT failed: {:?}", e);
+            }
         }
         break; // one trade per cycle
     }
