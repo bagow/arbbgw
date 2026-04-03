@@ -1947,9 +1947,28 @@ input:checked+.slider:before {
     padding: 0 6px 0 8px !important;
   }
 
-  /* ── Hide table footer to prevent colspan stretch ────────────────────────── */
+  /* ── Fix table footer to prevent colspan stretch but keep it visible ──────── */
   .trading-table-wrap table tfoot {
-    display: none !important;
+    display: block !important;
+    width: 100% !important;
+  }
+  .trading-table-wrap table tfoot tr {
+    display: flex !important;
+    justify-content: space-between !important;
+    width: 100% !important;
+    border-top: 1px solid var(--border-dim) !important;
+  }
+  .trading-table-wrap table tfoot td {
+    border: none !important;
+    padding: 8px 10px !important;
+    display: block !important;
+  }
+  .trading-table-wrap table tfoot td:last-child {
+    display: none !important; /* Hide the empty padding cell */
+  }
+  .trading-table-wrap table tfoot td:first-child {
+    flex: 1;
+    text-align: left !important;
   }
 
   /* ── CRITICAL: Break detail rows out of table min-width constraint ────────── 
