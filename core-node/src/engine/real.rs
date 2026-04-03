@@ -576,25 +576,42 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if let (Some(oa), Some(ob)) = (oid_a_clone, oid_b_clone) {
             let (h_clone, k_clone, db_clone) = (http.clone(), Arc::clone(&keys), db_clone_2);
             let (exa_clone, exb_clone, pair_clone) = (row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone());
-            let (ea_fallback, eb_fallback) = (entry_a, entry_b);
             tokio::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-                let mut true_ea = ea_fallback; let mut true_eb = eb_fallback;
+                tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
+                let mut true_ea = 0.0; let mut true_eb = 0.0;
                 let mut true_fee = 0.0;
                 
                 if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exa_clone, &pair_clone, &oa).await {
-                    if p > 0.0 { true_ea = p; }
-                    true_fee += f.abs();
+                    true_ea = p; true_fee += f.abs();
                 }
                 if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exb_clone, &pair_clone, &ob).await {
-                    if p > 0.0 { true_eb = p; }
-                    true_fee += f.abs();
+                    true_eb = p; true_fee += f.abs();
                 }
                 
-                let _ = db_clone.call(move |conn| {
-                    conn.execute("UPDATE trades SET entry_price_a=?, entry_price_b=?, commission_cost=? WHERE order_id_a=? AND order_id_b=?", params![true_ea, true_eb, true_fee, oa, ob])?;
-                    Ok(())
-                }).await;
+                if true_ea > 0.0 && true_eb > 0.0 {
+                    let _ = db_clone.call(move |conn| {
+                        conn.execute("UPDATE trades SET entry_price_a=?, entry_price_b=?, commission_cost=? WHERE order_id_a=? AND order_id_b=?", params![true_ea, true_eb, true_fee, oa, ob])?;
+                        Ok(())
+                    }).await;
+                } else {
+                    let status = if true_ea == 0.0 && true_eb == 0.0 { "CANCELED" } else { "FAILED_ASYMMETRIC" };
+                    tracing::warn!("Market execution anomaly: {} A_fill={} B_fill={}. Marking as {}", pair_clone, true_ea, true_eb, status);
+                    let _ = db_clone.call(move |conn| {
+                        conn.execute("UPDATE trades SET status=?, close_reason='Execution Failed', entry_price_a=?, entry_price_b=? WHERE order_id_a=? AND order_id_b=?", params![status, true_ea, true_eb, oa, ob])?;
+                        Ok(())
+                    }).await;
+                    
+                    if true_ea > 0.0 {
+                        tracing::error!("🚨 EMERGENCY CLOSE A: {} {} (A filled, B didn't)", exa_clone, pair_clone);
+                        let (hc, kc, ec, pc, ca, ia) = (h_clone.clone(), Arc::clone(&k_clone), exa_clone, pair_clone.clone(), contracts_a, is_a_higher);
+                        tokio::spawn(async move { let _ = close_order(&hc, &kc, &ec, &pc, ia, ca, false).await; });
+                    }
+                    if true_eb > 0.0 {
+                        tracing::error!("🚨 EMERGENCY CLOSE B: {} {} (B filled, A didn't)", exb_clone, pair_clone);
+                        let (hc, kc, ec, pc, cb, ib) = (h_clone.clone(), Arc::clone(&k_clone), exb_clone, pair_clone.clone(), contracts_b, !is_a_higher);
+                        tokio::spawn(async move { let _ = close_order(&hc, &kc, &ec, &pc, ib, cb, false).await; });
+                    }
+                }
             });
         }
         break; // one trade per cycle
