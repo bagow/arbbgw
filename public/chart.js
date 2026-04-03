@@ -418,6 +418,23 @@ document.addEventListener('click', e => {
 
 // ─── Modal ────────────────────────────────────────────────────────────────────
 window.openModal = async function(row) {
+    if (!modalTitle) {
+        const $ = (id) => document.getElementById(id);
+        modalTitle = $('modal-title');
+        modalSub = $('modal-sub');
+        modalBackdrop = $('modal-backdrop');
+        wsLabelA = $('ws-label-a');
+        wsLabelB = $('ws-label-b');
+        wsStatus = $('ws-status');
+        legendDyn = $('legend-dynamic');
+        svgP = $('chart-prices');
+        svgH = $('chart-hist');
+        priceLinesG = $('price-lines');
+        chartLegend = $('chart-legend');
+        const modalClose = $('modal-close');
+        if (modalClose) modalClose.onclick = () => window.closeModal();
+    }
+
     if (scannerState.isModalOpen) return;
     scannerState.isModalOpen = true;
     scannerState.activeRowKey = rowKey(row);
