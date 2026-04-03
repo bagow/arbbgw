@@ -304,6 +304,20 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if data_a.bid <= 0.0 || data_a.ask <= 0.0 || data_b.bid <= 0.0 || data_b.ask <= 0.0 { 
             continue; 
         }
+        
+        // Guard: skip trades where entry prices haven't been confirmed yet by fast-poll.
+        // This prevents immediate close-on-open loops and $0 PnL records.
+        if trade.entry_price_a <= 0.0 || trade.entry_price_b <= 0.0 {
+            info!("[real] Skipping trade {} {} — entry prices not yet confirmed, waiting for fast-poll", trade.id, trade.pair);
+            continue;
+        }
+        
+        // Minimum hold time: 5 seconds. Prevents the cycle from closing a trade
+        // the instant it opens (before fast-poll writes real fill prices).
+        let elapsed_ms = now_ms() - trade.entry_time;
+        if elapsed_ms < 5000 {
+            continue;
+        }
 
         let c_price_a = data_a.price;
         let c_price_b = data_b.price;
