@@ -75,7 +75,7 @@ jobs:
     needs: [check, changes]
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_vps_api == 'true' ||
-      github.event_name == 'push' && true
+      github.event_name == 'push' && needs.changes.outputs.vps_api == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
