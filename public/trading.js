@@ -1091,9 +1091,11 @@ window.fetchLogs = async function() {
     if (!el) return;
     el.textContent = "Loading logs...";
     try {
+        const creds = localStorage.getItem('cex_auth') || '';
         const res = await fetch('/api/logs/core-node', {
-            headers: { 'X-Username': localStorage.getItem('arb_username') || '' }
+            headers: { 'Authorization': 'Basic ' + creds }
         });
+        if (res.status === 401) throw new Error("Unauthorized");
         if (!res.ok) throw new Error("Status " + res.status);
         const text = await res.text();
         el.textContent = text;

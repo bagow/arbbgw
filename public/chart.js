@@ -13,6 +13,15 @@
 // ─── Backend URL (VPS via Cloudflare Tunnel) ──────────────────────────────────
 const API_BASE = '';
 
+async function authFetch(url, options = {}) {
+    const creds = localStorage.getItem('cex_auth');
+    if (creds) {
+        options.headers = options.headers || {};
+        options.headers['Authorization'] = 'Basic ' + creds;
+    }
+    return fetch(url, options);
+}
+
 // ─── Exchange config ───────────────────────────────────────────────────────────
 const KNOWN_EXCHANGES = ['binance', 'bybit', 'okx', 'gate', 'bitget', 'mexc', 'htx', 'bingx', 'kucoin', 'xt', 'coinex'];
 
@@ -171,7 +180,7 @@ async function fetchKlines(exchange, pair, tfSec, endTime = null) {
         // Simplest: 15s is ONLY for the active pair comparison.
         if (scannerState.activeRow && (exchange === scannerState.activeRow.exchangeA || exchange === scannerState.activeRow.exchangeB)) {
             try {
-                const res = await fetch(`${API_BASE}/api/history/${pair}/${scannerState.activeRow.exchangeA}/${scannerState.activeRow.exchangeB}`);
+                const res = await authFetch(`${API_BASE}/api/history/${pair}/${scannerState.activeRow.exchangeA}/${scannerState.activeRow.exchangeB}`);
                 const json = await res.json();
                 const history = json.history || [];
                 // Map history to kline format {ts, close}
@@ -192,7 +201,7 @@ async function fetchKlines(exchange, pair, tfSec, endTime = null) {
     try {
         // All exchanges are routed via Worker proxy as per AGENT_README.md
         const endQ = endTime ? `?endTime=${endTime}` : '';
-        const res = await fetch(`${API_BASE}/api/klines/${exchange}/${pair}/${proxyInterval}/500${endQ}`);
+        const res = await authFetch(`${API_BASE}/api/klines/${exchange}/${pair}/${proxyInterval}/500${endQ}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         return (json.klines || []).filter(c => c.close > 0);
@@ -270,7 +279,7 @@ async function fetchSnapshot() {
     setStatus('loading', 'Fetching data…');
     try {
         const url = `${API_BASE}/api/unified?min=${scannerState.threshold}&max=${scannerState.maxSpread}`;
-        const res = await fetch(url);
+        const res = await authFetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         
@@ -1098,7 +1107,7 @@ async function loadScannerSettings(profileId = null) {
     try {
         // 1. Try profile-specific settings first
         if (profileId) {
-            const res = await fetch(`${API_BASE}/api/profiles/${profileId}`);
+            const res = await authFetch(`${API_BASE}/api/profiles/${profileId}`);
             if (res.ok) {
                 const data = await res.json();
                 if (data && data.min_entry_spread != null) {
@@ -1112,7 +1121,7 @@ async function loadScannerSettings(profileId = null) {
         }
 
         // 2. Fallback to global settings
-        const gRes = await fetch(`${API_BASE}/api/trading/settings`);
+        const gRes = await authFetch(`${API_BASE}/api/trading/settings`);
         if (gRes.ok) {
             const gData = await gRes.json();
             scannerState.threshold = parseFloat(gData.min_entry_spread) || 1;
