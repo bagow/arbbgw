@@ -362,6 +362,8 @@ function renderExchangeFilters() {
 
 // ─── Table ────────────────────────────────────────────────────────────────────
 function renderTable() {
+    if (!refs.tableBody) return;
+
     // Only rows where BOTH exchanges are active in the filter
     let filtered = scannerState.snapshot.filter(r =>
         scannerState.activeExchanges.has(r.exchangeA) && scannerState.activeExchanges.has(r.exchangeB)
