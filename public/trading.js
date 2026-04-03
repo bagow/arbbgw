@@ -321,20 +321,20 @@ function renderPanel(profile, active, history, stats, exchanges) {
             <div class="trading-table-wrap">
                 <table>
                     <thead><tr>
-                        <th>Pair</th><th>Direction</th><th>Amount</th>
-                        <th>Entry Spread</th><th>Cur / Max Spread</th>
-                        <th>Net Live PnL</th><th>Time</th>
+                        <th>Pair</th><th>Net Live PnL</th><th>Entry Spread</th>
+                        <th>Cur / Max Spread</th><th>Direction</th><th>Amount</th>
+                        <th>Time</th>
                     </tr></thead>
                     <tbody id="t-active-body-${profile.id}">
                         ${active === null ? '<tr><td colspan="7" class="text-center text-sub">Loading…</td></tr>' : ''}
                     </tbody>
                     <tfoot style="background:var(--bg-row-alt);font-weight:600;">
                         <tr>
-                            <td colspan="5" style="text-align:right;border-top:1px solid var(--border-dim)">
-                                Total (<span id="t-count-${profile.id}">${active?.length??0}</span> trades)
+                            <td style="white-space:nowrap;border-top:1px solid var(--border-dim)">
+                                Total (<span id="t-count-${profile.id}">${active?.length??0}</span>)
                             </td>
                             <td id="t-live-pnl-${profile.id}" style="color:var(--text);border-top:1px solid var(--border-dim)">$0.00</td>
-                            <td style="border-top:1px solid var(--border-dim)"></td>
+                            <td colspan="5" style="border-top:1px solid var(--border-dim)"></td>
                         </tr>
                     </tfoot>
                 </table>
@@ -346,21 +346,21 @@ function renderPanel(profile, active, history, stats, exchanges) {
             <div class="trading-table-wrap">
                 <table>
                     <thead><tr>
-                        <th>Pair</th><th>Direction</th><th>Amount</th>
-                        <th>PnL</th><th>Entry→Exit Spread</th><th>Reason</th><th>Exit Time</th>
+                        <th>Pair</th><th>PnL</th><th>Entry→Exit Spread</th>
+                        <th>Direction</th><th>Amount</th><th>Reason</th><th>Exit Time</th>
                     </tr></thead>
                     <tbody id="t-history-body-${profile.id}">
                         ${history === null ? '<tr><td colspan="7" class="text-center text-sub">Loading…</td></tr>' : ''}
                     </tbody>
                     <tfoot style="background:var(--bg-row-alt);font-weight:600;">
                         <tr>
-                            <td colspan="3" style="text-align:right;border-top:1px solid var(--border-dim)">
-                                Total (<span id="h-count-${profile.id}">${stats?.total_trades??0}</span> trades)
+                            <td style="white-space:nowrap;border-top:1px solid var(--border-dim)">
+                                Total (<span id="h-count-${profile.id}">${stats?.total_trades??0}</span>)
                             </td>
                             <td id="h-pnl-${profile.id}" style="color:${(stats?.total_pnl||0)>=0?'var(--green)':'var(--red)'};border-top:1px solid var(--border-dim)">
                                 ${fmtPnL(stats?.total_pnl||0)}
                             </td>
-                            <td colspan="3" style="border-top:1px solid var(--border-dim)"></td>
+                            <td colspan="5" style="border-top:1px solid var(--border-dim)"></td>
                         </tr>
                     </tfoot>
                 </table>
@@ -975,11 +975,11 @@ function renderActiveTable(profileId, active) {
         return `
             <tr class="clickable-row main-trade-row" onclick="toggleRow('${profileId}',${t.id})">
                 <td><strong>${t.pair}</strong></td>
-                <td><span style="color:var(--text-sub)">${t.direction}</span></td>
-                <td>$${t.volume}</td>
+                <td>${livePnLStr}</td>
                 <td>${(t.entry_spread??0).toFixed(2)}%</td>
                 <td>${curSpread} / <span style="color:var(--green)">${bestStr}</span></td>
-                <td>${livePnLStr}</td>
+                <td><span style="color:var(--text-sub)">${t.direction}</span></td>
+                <td>$${t.volume}</td>
                 <td style="color:var(--text-sub)">${time}</td>
             </tr>${detailRow}`;
     }).join('');
@@ -1039,10 +1039,10 @@ function renderHistoryTable(profileId, history) {
         return `
             <tr class="clickable-row main-trade-row" onclick="toggleRow('${profileId}','h_${t.id}')">
                 <td><strong>${t.pair}</strong></td>
-                <td><span style="color:var(--text-sub)">${t.direction}</span></td>
-                <td>$${t.volume}</td>
                 <td style="color:${pnlColor};font-weight:600">${pnlStr}</td>
                 <td>${(t.entry_spread??0).toFixed(2)}% &rarr; ${(t.exit_spread??0).toFixed(2)}%</td>
+                <td><span style="color:var(--text-sub)">${t.direction}</span></td>
+                <td>$${t.volume}</td>
                 <td><span class="badge ${t.close_reason==='TP'?'badge-long':t.close_reason==='STOP'?'badge-short':'badge-neutral'}">${t.close_reason??'—'}</span></td>
                 <td style="color:var(--text-sub)">${time}</td>
             </tr>${detailRow}`;
