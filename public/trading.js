@@ -371,6 +371,15 @@ function renderPanel(profile, active, history, stats, exchanges) {
         <div class="mt-content" id="mt-sub-settings" style="display:${activeSubTabId==='settings'?'block':'none'}; padding: 24px;">
             ${renderSettingsForm(profile)}
         </div>
+
+        <!-- Logs sub-panel -->
+        <div class="mt-content" id="mt-sub-logs" style="display:${activeSubTabId==='logs'?'block':'none'}; padding: 24px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                <h2 style="margin:0;">System Logs (core-node)</h2>
+                <button class="trading-save-btn outline-btn" onclick="window.fetchLogs()" style="padding:8px 16px; width:auto; margin:0;">Refresh</button>
+            </div>
+            <div id="logs-container" style="background:var(--bg-row-alt); color:var(--text); padding:16px; border:1px solid var(--border-dim); border-radius:8px; height:65vh; overflow-y:auto; font-family:var(--font-mono); font-size: 0.85rem; white-space:pre-wrap;"></div>
+        </div>
     `;
 
     if (active !== null) {
