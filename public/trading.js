@@ -1124,8 +1124,55 @@ window.fetchLogs = async function(isBackground = false) {
         // Preserve scroll position if user is scrolled down, otherwise stick to top since newest logs are now on top
         const isScrolled = el.scrollTop > 10;
         
-        if (el.textContent !== text) {
-            el.textContent = text;
+        const formatLogLine = (line) => {
+            if (!line.trim()) return '';
+            let cleanLine = line;
+            const match = line.match(/Z\s+(INFO|ERROR|WARN|DEBUG)\s+core_node.*?:\s+(.*)/);
+            if (match) {
+                // Add timestamp from the log if we want, or just omit the long boilerplate
+                const timeMatch = line.match(/(\d{2}:\d{2}:\d{2})\.\d+Z/);
+                const timeStr = timeMatch ? `[${timeMatch[1]}] ` : '';
+                cleanLine = `${timeStr}[${match[1]}] ${match[2]}`;
+            } else if (line.includes('core-node')) {
+                // Fallback strip
+                cleanLine = line.split('core-node')[1] || line;
+            }
+
+            let html = escHtml(cleanLine);
+            let style = 'color: var(--text);';
+
+            if (html.includes('[ERROR]')) {
+                html = '❌ ' + html;
+                style = 'color: #ff4b4b; font-weight: bold;';
+            } else if (html.includes('[SKIP]')) {
+                html = '⏭️ ' + html;
+                style = 'color: var(--text-sub);';
+            } else if (html.includes('Placing orders:')) {
+                html = '🚀 ' + html;
+                style = 'color: #00f2fe;';
+            } else if (html.includes('Inserting trade:')) {
+                html = '✅ <strong>' + html + '</strong>';
+                style = 'color: var(--green);';
+            } else if (html.includes('PnL final')) {
+                html = '💰 <strong>' + html + '</strong>';
+                style = 'color: #ffcc00;';
+            } else if (html.includes('[settings]')) {
+                html = '⚙️ ' + html;
+                style = 'color: #a8b2d1;';
+            } else if (html.includes('Emergency close') || html.includes('FAILED_ASYMMETRIC')) {
+                html = '🛡️ ' + html;
+                style = 'color: #ff4b4b; background: rgba(255,0,0,0.1); padding: 2px 4px; border-radius: 4px;';
+            }
+
+            // Bold the pair names (e.g. BTCUSDT)
+            html = html.replace(/\b([A-Z0-9]{2,}USDT)\b/g, '<span style="color:#fff;font-weight:700;">$1</span>');
+            return `<div style="padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.02); ${style}">${html}</div>`;
+        };
+
+        const formattedHTML = text.split('\n').filter(l => l.trim()).map(formatLogLine).join('');
+        
+        if (el.innerHTML !== formattedHTML) {
+            el.innerHTML = formattedHTML;
         }
         
         if (!isScrolled) {
