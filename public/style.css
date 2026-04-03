@@ -1819,30 +1819,19 @@ input:checked+.slider:before {
     flex-shrink: 0;
   }
 
-  /* ── Active & History tables: visually collapse columns (keep DOM structure for colspan) ── */
-  .trading-table-wrap table thead tr th:nth-child(2),
-  .trading-table-wrap table thead tr th:nth-child(3),
-  .trading-table-wrap table thead tr th:nth-child(5),
-  .trading-table-wrap table tbody tr:not([id^="detail-"]) td:nth-child(2),
-  .trading-table-wrap table tbody tr:not([id^="detail-"]) td:nth-child(3),
-  .trading-table-wrap table tbody tr:not([id^="detail-"]) td:nth-child(5) {
-    /* Using width: 0 instead of display: none to guarantee colspan="7" works correctly! */
-    display: table-cell !important;
-    width: 0 !important;
-    min-width: 0 !important;
-    max-width: 0 !important;
-    padding: 0 !important;
-    margin: 0 !important;
-    border: none !important;
-    overflow: hidden !important;
-    font-size: 0 !important;
-    white-space: nowrap !important;
-    opacity: 0 !important;
+  /* ── 1. Enable Horizontal Scroll for Trading Tables (like Subnav) ──────── */
+  .trading-table-wrap {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none; /* Firefox */
+  }
+  .trading-table-wrap::-webkit-scrollbar {
+    display: none; /* Safari/Chrome */
   }
   
-  /* override global min-width for active/history tables */
+  /* Make table expand beyond screen width so it scrolls */
   .trading-table-wrap table {
-    min-width: unset !important;
+    min-width: max-content !important;
     width: 100% !important;
   }
 
@@ -1858,18 +1847,17 @@ input:checked+.slider:before {
     width: 100% !important;
   }
 
-  /* ── Reduce padding & allow wrapping so long columns (e.g. Dates) fit ──── */
+  /* ── 2. Restore padding & wrap behavior, but increase Font Sizes ───────── */
   .trading-table-wrap table th,
   .trading-table-wrap table td {
-    padding: 8px 6px !important;
-    white-space: normal !important; /* Allow dates & badges to wrap to new lines */
-    word-break: break-word; 
+    padding: 10px 10px !important;
+    white-space: nowrap !important; /* Keep on one line since we can scroll */
   }
   .trading-table-wrap table th {
-    font-size: .65rem !important;
+    font-size: .8rem !important; /* Larger headers */
   }
   .trading-table-wrap table td {
-    font-size: .75rem !important;
+    font-size: 1rem !important; /* Larger main row text to match details */
   }
 
   /* PnL summary column: full width, no left border */
