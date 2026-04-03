@@ -1847,6 +1847,20 @@ input:checked+.slider:before {
     width: 100% !important;
   }
 
+  /* ── Reduce padding & allow wrapping so long columns (e.g. Dates) fit ──── */
+  .trading-table-wrap table th,
+  .trading-table-wrap table td {
+    padding: 8px 6px !important;
+    white-space: normal !important; /* Allow dates & badges to wrap to new lines */
+    word-break: break-word; 
+  }
+  .trading-table-wrap table th {
+    font-size: .65rem !important;
+  }
+  .trading-table-wrap table td {
+    font-size: .75rem !important;
+  }
+
   /* PnL summary column: full width, no left border */
   .td-col.td-total {
     border-left: none !important;
