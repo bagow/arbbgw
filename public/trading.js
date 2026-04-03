@@ -1417,17 +1417,15 @@ document.getElementById('exchange-modal').addEventListener('click', e => {
 
 const fmtPnL = v => { 
     const n = Number(v)||0; 
-    if (n === 0) return '$0.00';
+    if (n === 0) return '$0.00000';
     let abs = Math.abs(n);
-    let str = abs < 0.01 ? abs.toFixed(5) : abs.toFixed(2);
-    return (n>0?'+':'-') + '$' + str; 
+    return (n>0?'+':'-') + '$' + abs.toFixed(5); 
 };
 const fmtCost = v => { 
     const n = Number(v)||0; 
-    if (n === 0) return '$0.00';
+    if (n === 0) return '$0.00000';
     let abs = Math.abs(n);
-    let str = abs < 0.01 ? abs.toFixed(5) : abs.toFixed(2);
-    return n>0 ? `-$${str}` : `+$${str}`; 
+    return n>0 ? `-$${abs.toFixed(5)}` : `+$${abs.toFixed(5)}`; 
 };
 const fmtDuration = ms => { const s=Math.floor(ms/1000); if(s<60) return s+'s'; const m=Math.floor(s/60); if(m<60) return m+'m '+(s%60)+'s'; const h=Math.floor(m/60); if(h<24) return h+'h '+(m%60)+'m'; return Math.floor(h/24)+'d '+(h%24)+'h'; };
 const escHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');

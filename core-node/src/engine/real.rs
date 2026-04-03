@@ -399,13 +399,25 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let real_pna = if is_a_higher { (entry_a - real_exit_a) * (vol / entry_a) } else { (real_exit_a - entry_a) * (vol / entry_a) };
                 let real_pnb = if is_a_higher { (real_exit_b - entry_b) * (vol / entry_b) } else { (entry_b - real_exit_b) * (vol / entry_b) };
                 let real_gp = real_pna + real_pnb;
-                let real_np = real_gp - fund_cost - exit_fee;
-                info!("[real] PnL final id={} pna={:.4} pnb={:.4} gross={:.4} net={:.4} fee={:.4}", id, real_pna, real_pnb, real_gp, real_np, exit_fee);
+                
+                let mut slip_cost_exit_a = 0.0;
+                if real_exit_a > 0.0 {
+                    if is_a_higher { slip_cost_exit_a = (real_exit_a - exit_price_a) * (vol / entry_a); }
+                    else           { slip_cost_exit_a = (exit_price_a - real_exit_a) * (vol / entry_a); }
+                }
+                let mut slip_cost_exit_b = 0.0;
+                if real_exit_b > 0.0 {
+                    if !is_a_higher { slip_cost_exit_b = (real_exit_b - exit_price_b) * (vol / entry_b); }
+                    else            { slip_cost_exit_b = (exit_price_b - real_exit_b) * (vol / entry_b); }
+                }
+                let exit_slip = slip_cost_exit_a + slip_cost_exit_b;
+
+                info!("[real] PnL raw id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", id, real_pna, real_pnb, real_gp, exit_fee, exit_slip);
 
                 let _ = db_c.call(move |conn| {
                     conn.execute(
-                        "UPDATE trades SET exit_price_a=?,exit_price_b=?,pnl_a=?,pnl_b=?,gross_pnl=?,pnl=?,commission_cost=commission_cost+?,curr_gross_pnl=? WHERE id=?",
-                        params![real_exit_a, real_exit_b, real_pna, real_pnb, real_gp, real_np, exit_fee, real_gp, id]
+                        "UPDATE trades SET exit_price_a=?,exit_price_b=?,pnl_a=?,pnl_b=?,gross_pnl=?,commission_cost=commission_cost+?,slippage_cost=slippage_cost+?,curr_gross_pnl=?, pnl=(?-funding_cost-(commission_cost+?)) WHERE id=?",
+                        params![real_exit_a, real_exit_b, real_pna, real_pnb, real_gp, exit_fee, exit_slip, real_gp, real_gp, exit_fee, id]
                     )?;
                     Ok(())
                 }).await;
@@ -589,15 +601,27 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         
         let entry_comm = fee_a + fee_b;
 
+        let mut slip_cost_a = 0.0;
+        if fill_a > 0.0 {
+            if is_a_higher { slip_cost_a = (entry_a - fill_a) * (vol / entry_a); }
+            else           { slip_cost_a = (fill_a - entry_a) * (vol / entry_a); }
+        }
+        let mut slip_cost_b = 0.0;
+        if fill_b > 0.0 {
+            if !is_a_higher { slip_cost_b = (entry_b - fill_b) * (vol / entry_b); }
+            else            { slip_cost_b = (fill_b - entry_b) * (vol / entry_b); }
+        }
+        let entry_slip = slip_cost_a + slip_cost_b;
+
         let entry_time = now_ms();
         let oid_a_db = oid_a.clone(); let oid_b_db = oid_b.clone();
 
-        info!("[real] Inserting trade: {} status={} A={:.6}(c={}) B={:.6}(c={}) fees={:.4}", pair, status, fill_a, contracts_a, fill_b, contracts_b, entry_comm);
+        info!("[real] Inserting trade: {} status={} A={:.6}(c={}) B={:.6}(c={}) fees={:.4} slip={:.4}", pair, status, fill_a, contracts_a, fill_b, contracts_b, entry_comm, entry_slip);
 
         let res = db.call(move |conn| {
             conn.execute(
                 "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b,contracts_a,contracts_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![pair, exa, exb, dir, vol, fill_a, fill_b, sp, entry_time, sp, status, 0.0f64, 0.0f64, profile_id, entry_comm, 0.0f64, 0.0f64, oid_a_db, oid_b_db, contracts_a, contracts_b]
+                params![pair, exa, exb, dir, vol, fill_a, fill_b, sp, entry_time, sp, status, 0.0f64, 0.0f64, profile_id, entry_comm, entry_slip, 0.0f64, oid_a_db, oid_b_db, contracts_a, contracts_b]
             )?;
             Ok::<i64, tokio_rusqlite::Error>(conn.last_insert_rowid())
         }).await;
