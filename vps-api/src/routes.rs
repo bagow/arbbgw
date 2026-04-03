@@ -217,20 +217,21 @@ pub async fn handle_get_unified(
 
             // curr_gross_pnl now stores NET pnl (paper-trader writes net after comm+funding).
             // Use it directly as current_pnl — no further deductions.
-            let current_net_pnl = t.curr_gross_pnl.unwrap_or(pnl_a_fallback + pnl_b_fallback);
-
             let display_comm = t.commission_cost.unwrap_or(0.0);
             let display_slip = t.slippage_cost.unwrap_or(0.0);
+            
+            let gross = pnl_a_fallback + pnl_b_fallback;
+            let current_net_pnl = gross - display_comm - display_slip - t.funding_cost.unwrap_or(0.0);
 
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("current_price_a".into(), json!(c_price_a));
                 obj.insert("current_price_b".into(), json!(c_price_b));
                 obj.insert("current_spread".into(), json!(c_spread));
                 // gross_pnl = raw price movement before costs (for reference display)
-                obj.insert("gross_pnl".into(), json!(pnl_a_fallback + pnl_b_fallback));
-                // current_pnl = the authoritative net figure from paper-trader
+                obj.insert("gross_pnl".into(), json!(gross));
+                // current_pnl is the mathematically correct net figure
                 obj.insert("current_pnl".into(), json!(current_net_pnl));
-                // commission_cost is shown truthfully in the detail card
+                // costs
                 obj.insert("commission_cost".into(), json!(display_comm));
                 obj.insert("slippage_cost".into(), json!(display_slip));
                 obj.insert("pnl_a".into(), json!(pnl_a_fallback));
