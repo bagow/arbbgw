@@ -707,7 +707,11 @@ async fn fetch_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let size = v["data"]["dealSize"].as_f64().or_else(|| v["data"]["filledSize"].as_f64()).or_else(|| v["data"]["dealSize"].as_str().and_then(|s| s.parse().ok())).or_else(|| v["data"]["filledSize"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
             let val  = v["data"]["dealValue"].as_f64().or_else(|| v["data"]["filledValue"].as_f64()).or_else(|| v["data"]["dealValue"].as_str().and_then(|s| s.parse().ok())).or_else(|| v["data"]["filledValue"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
             let fee  = v["data"]["fee"].as_f64().or_else(|| v["data"]["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
-            let price = if size > 0.0 { val / size } else { 0.0 };
+            
+            let map = get_multipliers();
+            let mult = map.get(&format!("kucoin:{}", pair)).map(|m| *m).unwrap_or(1.0);
+            
+            let price = if size > 0.0 && mult > 0.0 { val / (size * mult) } else { 0.0 };
             Ok((price, fee))
         }
         _ => Err(anyhow::anyhow!("Unknown exchange: {}", exchange)),
