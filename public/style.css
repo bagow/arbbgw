@@ -1819,20 +1819,31 @@ input:checked+.slider:before {
     flex-shrink: 0;
   }
 
-  /* ── Active trade: main row table columns — hide less important cols ─────── */
+  /* ── Active & History tables: visually collapse columns (keep DOM structure for colspan) ── */
   .trading-table-wrap table thead tr th:nth-child(2),
   .trading-table-wrap table thead tr th:nth-child(3),
-  .trading-table-wrap table thead tr th:nth-child(5) {
-    display: none;
+  .trading-table-wrap table thead tr th:nth-child(5),
+  .trading-table-wrap table tbody tr:not([id^="detail-"]) td:nth-child(2),
+  .trading-table-wrap table tbody tr:not([id^="detail-"]) td:nth-child(3),
+  .trading-table-wrap table tbody tr:not([id^="detail-"]) td:nth-child(5) {
+    /* Using width: 0 instead of display: none to guarantee colspan="7" works correctly! */
+    display: table-cell !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    overflow: hidden !important;
+    font-size: 0 !important;
+    white-space: nowrap !important;
+    opacity: 0 !important;
   }
-  .trading-table-wrap table tbody tr td:nth-child(2),
-  .trading-table-wrap table tbody tr td:nth-child(3),
-  .trading-table-wrap table tbody tr td:nth-child(5) {
-    display: none;
-  }
+  
   /* override global min-width for active/history tables */
   .trading-table-wrap table {
     min-width: unset !important;
+    width: 100% !important;
   }
 
   /* ── Trade detail accordion: stack legs vertically ───────────────────────── */
@@ -1987,14 +1998,12 @@ input:checked+.slider:before {
 
   /* ── CRITICAL: Break detail rows out of table min-width constraint ────────── 
      Only target EXPANDED rows (JS sets display:table-row on expansion).
-     Rows with display:none stay hidden. Width uses 100% to avoid VW overflow. */
+     Now relying natively on colspan="7" spanning the 0-width columns! */
   tr[id^="detail-"][style*="table-row"] {
-    display: block !important;
     width: 100% !important;
     max-width: 100% !important;
   }
   tr[id^="detail-"][style*="table-row"] > td.p-0 {
-    display: block !important;
     width: 100% !important;
     max-width: 100% !important;
     box-sizing: border-box !important;
