@@ -1946,4 +1946,52 @@ input:checked+.slider:before {
     font-size: .72rem !important;
     padding: 0 6px 0 8px !important;
   }
+
+  /* ── CRITICAL: Break detail rows out of table min-width constraint ────────── 
+     The parent table has min-width:600px which pushes detail td to 600px.
+     We make the detail tr/td behave as block at viewport width instead.       */
+  tr[id^="detail-"] {
+    display: block !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
+    position: relative;
+    left: 0;
+  }
+  tr[id^="detail-"] > td.p-0 {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100vw !important;
+    box-sizing: border-box !important;
+    padding: 0 !important;
+  }
+  .trade-details-box {
+    width: 100% !important;
+    max-width: 100vw !important;
+    box-sizing: border-box !important;
+    flex-direction: column !important;
+    gap: 10px !important;
+    padding: 10px !important;
+    overflow: hidden !important;
+  }
+  .td-col {
+    min-width: unset !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  .td-col.td-total {
+    border-left: none !important;
+    border-top: 1px solid var(--border-dim) !important;
+    padding-left: 0 !important;
+    padding-top: 10px !important;
+  }
+  /* Action buttons: stacked column */
+  .td-col .trade-action-btns,
+  .td-col > div[style*="gap:8px"] {
+    flex-direction: column !important;
+  }
+  .td-col .trade-action-btns .trading-save-btn,
+  .td-col > div[style*="gap:8px"] .trading-save-btn {
+    flex: unset !important;
+    width: 100% !important;
+  }
 }
