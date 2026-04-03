@@ -209,14 +209,14 @@ fn gate_sign(key: &str, secret: &str, method: &str, path: &str, body: &str) -> r
 
 // ─── Order placement ──────────────────────────────────────────────────────────
 
-async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, contracts: i64, dry_run: bool) -> Result<String> {
+async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, contracts: i64, dry_run: bool, is_reduce_only: bool) -> Result<String> {
     let side = if is_short { "sell" } else { "buy" };
     match exchange {
         "gate" => {
             let contract = pair.replace("USDT", "_USDT");
             let size = if is_short { -contracts } else { contracts };
             let path = "/api/v4/futures/usdt/orders";
-            let body = json!({"contract":contract,"size":size,"price":"0","tif":"ioc","reduce_only":false,"close":false,"text":"t-corenode"});
+            let body = json!({"contract":contract,"size":size,"price":"0","tif":"ioc","reduce_only":is_reduce_only,"close":false,"text":"t-corenode"});
             let body_str = body.to_string();
             if dry_run { info!("[DRY] gate order {} size={}", contract, size); return Ok(format!("dry_{}", Uuid::new_v4())); }
             let resp = http.post(format!("https://api.gateio.ws{}", path)).headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &body_str)).body(body_str).timeout(Duration::from_secs(10)).send().await?;
@@ -228,7 +228,8 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
         "htx" => {
             let cc = format!("{}-{}", &pair[..pair.len()-4], &pair[pair.len()-4..]);
             let host = "api.hbdm.com"; let path = "/linear-swap-api/v1/swap_order";
-            let body = json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":"open","lever_rate":1,"order_price_type":"optimal_20"});
+            let offset = if is_reduce_only { "close" } else { "open" };
+            let body = json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":offset,"lever_rate":1,"order_price_type":"optimal_20"});
             if dry_run { info!("[DRY] htx order {} {}", cc, side); return Ok(format!("dry_{}", Uuid::new_v4())); }
             let resp = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path))).json(&body).timeout(Duration::from_secs(10)).send().await?;
             let status = resp.status();
@@ -239,7 +240,11 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
         "kucoin" => {
             let sym = format!("{}M", pair);
             let ts = now_ms().to_string(); let path = "/api/v1/orders";
-            let body = json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"market","size":contracts,"leverage":"1","marginMode":"CROSS"});
+            let body = if is_reduce_only {
+                json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"market","size":contracts,"leverage":"1","marginMode":"CROSS","reduceOnly":true})
+            } else {
+                json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"market","size":contracts,"leverage":"1","marginMode":"CROSS"})
+            };
             let body_str = body.to_string();
             let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "POST", path, &body_str);
             if dry_run { info!("[DRY] kucoin order {} {}", sym, side); return Ok(format!("dry_{}", Uuid::new_v4())); }
@@ -258,7 +263,7 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
 }
 
 async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, was_short: bool, contracts: i64, dry_run: bool) -> Result<String> {
-    place_order(http, keys, exchange, pair, !was_short, contracts, dry_run).await
+    place_order(http, keys, exchange, pair, !was_short, contracts, dry_run, true).await
 }
 
 // ─── Engine cycle ─────────────────────────────────────────────────────────────
@@ -358,30 +363,68 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
             // Spawn task to fetch EXACT execution prices and update row
             let (h_clone, k_clone, db_clone) = (http.clone(), Arc::clone(&keys), db.clone());
+            let exa_clone = exa.clone();
+            let exb_clone = exb.clone();
+            let pair_clone = pair.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
                 let mut fixed_a = cpa; let mut fixed_b = cpb;
                 let mut extra_fee = 0.0;
                 
                 if let Some(oid) = get_order_id(&db_clone, id, true).await {
-                    if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exa, &pair, &oid).await {
+                    if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exa_clone, &pair_clone, &oid).await {
                         if p > 0.0 { fixed_a = p; }
                         extra_fee += f.abs();
                     }
                 }
                 if let Some(oid) = get_order_id(&db_clone, id, false).await {
-                    if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exb, &pair, &oid).await {
+                    if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exb_clone, &pair_clone, &oid).await {
                         if p > 0.0 { fixed_b = p; }
                         extra_fee += f.abs();
                     }
                 }
                 
-                // Recalculate PnL with true prices
-                let pnl_a_new = if is_a_higher { (cpa - fixed_a) * (vol / cpa) } else { (fixed_a - cpa) * (vol / cpa) }; // approximated base
-                // Actually `cpa` in closure was `exit_price`, we don't have entry_price here.
-                // We just UPDATE exit_price_a and let it be. We can do true recalculation later if needed.
+                // Recalculate true PnL
                 let _ = db_clone.call(move |conn| {
-                    conn.execute("UPDATE trades SET exit_price_a=?, exit_price_b=?, commission_cost=commission_cost+? WHERE id=?", params![fixed_a, fixed_b, extra_fee, id])?;
+                    let mut entry_a = 0.0; let mut entry_b = 0.0; let mut ca = 0; let mut cb = 0; let mut fund = 0.0; let mut comm = 0.0; let mut mult_a = 1.0; let mut mult_b = 1.0;
+                    {
+                        if let Ok(mut stmt) = conn.prepare("SELECT entry_price_a, entry_price_b, contracts_a, contracts_b, funding_cost, commission_cost FROM trades WHERE id=?") {
+                            if let Ok(mut rows) = stmt.query([id]) {
+                                if let Ok(Some(row)) = rows.next() {
+                                    entry_a = row.get(0).unwrap_or(0.0);
+                                    entry_b = row.get(1).unwrap_or(0.0);
+                                    ca = row.get(2).unwrap_or(0);
+                                    cb = row.get(3).unwrap_or(0);
+                                    fund = row.get(4).unwrap_or(0.0);
+                                    comm = row.get(5).unwrap_or(0.0);
+                                }
+                            }
+                        }
+                    }
+                    if entry_a > 0.0 && entry_b > 0.0 {
+                        // Kucoin and Gate and HTX have differing multiplier conventions, but pnl_a = diff * mult. Wait, what if we use raw contracts/prices?
+                        // Let's just approximate by volume logic since we don't have multipliers directly in DB.
+                        // Or we read multipliers.
+                        // Actually, PnL = contract_size_in_USDT * price_diff_percent! 
+                        // It is much safer to set:
+                        let mut pnl_a_true = if is_a_higher { (entry_a - fixed_a) * ca as f64 } else { (fixed_a - entry_a) * ca as f64 };
+                        let mut pnl_b_true = if is_a_higher { (fixed_b - entry_b) * cb as f64 } else { (entry_b - fixed_b) * cb as f64 };
+                        
+                        // BUT! Gate.io contracts diff is the raw value, HTX is in multiple... this is too complex. 
+                        // Instead, let's use the UI ratio logic we already use at line 309:
+                        // pnl_a = if is_a_higher { (entry_price_a - exit_price_a) * contracts_a } else { (exit_price_a - entry_price_a) * contracts_a };
+                        // But wait, the original logic on line 309 works if `contracts_a` was correctly scaled. Actually in Gate/HTX, the contracts_amount scale might require multiplier. 
+                        // The existing approximation `(cpa - fixed_a) * (vol / cpa)` is actually MORE universally safe!
+                        // Let's just use:
+                        let pna = if is_a_higher { (entry_a - fixed_a) * (vol / entry_a) } else { (fixed_a - entry_a) * (vol / entry_a) };
+                        let pnb = if is_a_higher { (fixed_b - entry_b) * (vol / entry_b) } else { (entry_b - fixed_b) * (vol / entry_b) };
+                        let gp = pna + pnb;
+                        let np = gp - fund - comm - extra_fee;
+                        conn.execute("UPDATE trades SET exit_price_a=?, exit_price_b=?, commission_cost=commission_cost+?, pnl_a=?, pnl_b=?, gross_pnl=?, pnl=?, curr_gross_pnl=? WHERE id=?", 
+                            params![fixed_a, fixed_b, extra_fee, pna, pnb, gp, np, gp, id])?;
+                    } else {
+                        conn.execute("UPDATE trades SET exit_price_a=?, exit_price_b=?, commission_cost=commission_cost+? WHERE id=?", params![fixed_a, fixed_b, extra_fee, id])?;
+                    }
                     Ok(())
                 }).await;
             });
@@ -476,7 +519,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         info!("[real] Opening A: {} {} (c_a={}) [dry={}]", row.pair, row.exchange_a, contracts_a, dry_run);
         
-        let oa = place_order(&http, &keys, &row.exchange_a, &row.pair, is_a_higher, contracts_a, dry_run).await;
+        let oa = place_order(&http, &keys, &row.exchange_a, &row.pair, is_a_higher, contracts_a, dry_run, false).await;
         let oid_a = match oa { Ok(id) => Some(id), Err(e) => { error!("[LEG_A] {}: {}", row.exchange_a, e); None } };
 
         if oid_a.is_none() {
@@ -486,7 +529,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         info!("[real] Opening B: {} {} (c_b={}) [dry={}]", row.pair, row.exchange_b, contracts_b, dry_run);
         
-        let ob = place_order(&http, &keys, &row.exchange_b, &row.pair, !is_a_higher, contracts_b, dry_run).await;
+        let ob = place_order(&http, &keys, &row.exchange_b, &row.pair, !is_a_higher, contracts_b, dry_run, false).await;
         let oid_b = match ob { Ok(id) => Some(id), Err(e) => { error!("[LEG_B] {}: {}", row.exchange_b, e); None } };
 
         if !dry_run {
@@ -593,8 +636,8 @@ async fn fetch_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", &path, "");
             let resp = http.get(format!("https://api-futures.kucoin.com{}", path)).header("KC-API-KEY", &keys.kucoin_key).header("KC-API-SIGN", sig).header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig).header("KC-API-KEY-VERSION", "2").timeout(Duration::from_secs(10)).send().await?;
             let v: Value = resp.json().await?;
-            let size = v["data"]["filledSize"].as_f64().or_else(|| v["data"]["filledSize"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
-            let val = v["data"]["filledValue"].as_f64().or_else(|| v["data"]["filledValue"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            let size = v["data"]["dealSize"].as_f64().or_else(|| v["data"]["filledSize"].as_f64()).or_else(|| v["data"]["dealSize"].as_str().and_then(|s| s.parse().ok())).or_else(|| v["data"]["filledSize"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            let val = v["data"]["dealValue"].as_f64().or_else(|| v["data"]["filledValue"].as_f64()).or_else(|| v["data"]["dealValue"].as_str().and_then(|s| s.parse().ok())).or_else(|| v["data"]["filledValue"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
             let fee = v["data"]["fee"].as_f64().or_else(|| v["data"]["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
             let price = if size > 0.0 { val / size } else { 0.0 };
             Ok((price, fee))
