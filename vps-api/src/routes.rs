@@ -257,8 +257,8 @@ pub async fn handle_get_unified(
 
     let history_trades: Vec<serde_json::Value> = history_trades_raw.into_iter().map(|t| {
         let mut v = serde_json::to_value(&t).unwrap_or_default();
-        let display_comm = t.commission_cost.unwrap_or_else(|| t.volume * 0.0045 * 4.0);
-        let display_slip = t.slippage_cost.unwrap_or_else(|| t.volume * 0.001 * 4.0);
+        let display_comm = t.commission_cost.unwrap_or(0.0);
+        let display_slip = t.slippage_cost.unwrap_or(0.0);
         
         if let Some(obj) = v.as_object_mut() {
             obj.insert("commission_cost".into(), json!(display_comm));
