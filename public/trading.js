@@ -964,7 +964,7 @@ function renderActiveTable(profileId, active) {
                             <div class="td-line"><span>Slippage:</span> <strong style="color:var(--red)">${fmtCost(t.slippage_cost)}</strong></div>
                             <div class="td-total-pnl">Net PnL: ${livePnLStr} <span class="text-sub" style="font-weight:400;font-size:.8rem;">(${fmtDuration(Date.now()-t.entry_time)})</span></div>
                             <div style="margin-top:12px; display:flex; gap:8px;">
-                                <button type="button" class="trading-save-btn outline-btn" style="margin:0;flex:1;padding:8px;font-size:12px;" onclick="openChartIframe('${t.pair}','${t.exchange_a}','${t.exchange_b}',${t.entry_time},null)">📊 View Chart</button>
+                                <button type="button" class="trading-save-btn outline-btn" style="margin:0;flex:1;padding:8px;font-size:12px;" onclick='openModal({pair:"${t.pair}",exchangeA:"${t.exchange_a}",exchangeB:"${t.exchange_b}",priceA:${t.entry_price_a},priceB:${t.entry_price_b},spread:${t.entry_spread},volA:0,volB:0,direction:"${t.direction}",entryTime:${t.entry_time},exitTime:null})'>📊 View Chart</button>
                                 <button type="button" class="trading-save-btn outline-btn" style="margin:0;flex:1;padding:8px;font-size:12px;color:var(--red);border-color:var(--red);" onclick="marketCloseTrade('${profileId}', ${t.id}, event)">❌ Market Close</button>
                             </div>
                         </div>
