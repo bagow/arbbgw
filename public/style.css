@@ -1976,8 +1976,10 @@ input:checked+.slider:before {
     padding: 0 !important;
   }
   .trade-details-box {
-    width: 100% !important;
-    max-width: 100% !important;
+    position: sticky !important;
+    left: 0 !important;
+    width: calc(100vw - 14px) !important; /* Screen width minus container padding/borders */
+    max-width: calc(100vw - 14px) !important;
     box-sizing: border-box !important;
     flex-direction: column !important;
     gap: 12px !important;
