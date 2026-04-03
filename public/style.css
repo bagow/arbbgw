@@ -1779,3 +1779,171 @@ input:checked+.slider:before {
   letter-spacing: .06em;
   color: var(--text-sub);
 }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   MOBILE RESPONSIVE — phones ≤ 600px
+   ══════════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 600px) {
+
+  /* ── Subnav: horizontal scroll, no wrap ─────────────────────────────────── */
+  .mt-subnav {
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    gap: 6px !important;
+    padding: 6px 8px !important;
+  }
+  .mt-subnav::-webkit-scrollbar { display: none; }
+
+  /* Stats (Active/PnL/Real badge) move below subnav into its own bar */
+  .mt-subnav > div[id^="panel-stats-"] {
+    flex-shrink: 0;
+    margin-left: 0 !important;
+    background: var(--bg-row-alt);
+    border-top: 1px solid var(--border-dim);
+    order: 99;
+    width: 100%;
+    padding: 4px 8px;
+    justify-content: center !important;
+    flex-wrap: wrap;
+    gap: 8px !important;
+    font-size: .75rem;
+  }
+
+  /* Nav buttons: smaller on mobile */
+  .mt-nav-btn {
+    padding: 4px 10px !important;
+    font-size: .72rem !important;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* ── Active trade: main row table columns — hide less important cols ─────── */
+  .trading-table-wrap table thead tr th:nth-child(2),
+  .trading-table-wrap table thead tr th:nth-child(3),
+  .trading-table-wrap table thead tr th:nth-child(5) {
+    display: none;
+  }
+  .trading-table-wrap table tbody tr td:nth-child(2),
+  .trading-table-wrap table tbody tr td:nth-child(3),
+  .trading-table-wrap table tbody tr td:nth-child(5) {
+    display: none;
+  }
+  /* override global min-width for active/history tables */
+  .trading-table-wrap table {
+    min-width: unset !important;
+  }
+
+  /* ── Trade detail accordion: stack legs vertically ───────────────────────── */
+  .trade-details-box {
+    flex-direction: column !important;
+    gap: 12px !important;
+    padding: 12px 10px !important;
+  }
+
+  .td-col {
+    min-width: unset !important;
+    width: 100% !important;
+  }
+
+  /* PnL summary column: full width, no left border */
+  .td-col.td-total {
+    border-left: none !important;
+    border-top: 1px solid var(--border-dim) !important;
+    padding-left: 0 !important;
+    padding-top: 12px !important;
+  }
+
+  .td-line {
+    font-size: .8rem !important;
+    padding: 5px 8px !important;
+  }
+
+  .td-total-pnl {
+    font-size: .95rem !important;
+  }
+
+  /* PnL summary card inline badges */
+  .td-total .td-line {
+    background: var(--bg-row-alt);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    margin-bottom: 4px;
+  }
+
+  /* ── Detail row action buttons: stack vertically ─────────────────────────── */
+  .trade-details-box > div > div[style*="display:flex"][style*="gap:8px"] {
+    flex-direction: column !important;
+  }
+
+  /* Buttons inside detail box */
+  .trade-details-box .trading-save-btn {
+    width: 100% !important;
+    flex: unset !important;
+    padding: 10px !important;
+    font-size: .8rem !important;
+  }
+
+  /* ── Logs panel header: stack to column ──────────────────────────────────── */
+  #mt-sub-logs > div:first-child {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 10px !important;
+  }
+
+  #mt-sub-logs > div:first-child h2 {
+    font-size: 1rem !important;
+    margin: 0 !important;
+  }
+
+  #mt-sub-logs > div:first-child > div {
+    width: 100% !important;
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+  }
+
+  #mt-sub-logs > div:first-child > div button {
+    flex: 1 !important;
+    text-align: center !important;
+    justify-content: center !important;
+  }
+
+  /* Logs container font smaller on mobile */
+  #logs-container {
+    font-size: .75rem !important;
+    height: 55vh !important;
+    padding: 10px !important;
+  }
+
+  /* ── Main content padding reduction ─────────────────────────────────────── */
+  .trading-main {
+    padding: 10px 6px !important;
+  }
+
+  #mt-sub-logs,
+  #mt-sub-settings,
+  #mt-sub-dashboard {
+    padding: 12px 10px !important;
+  }
+
+  /* ── Settings grid: single column ───────────────────────────────────────── */
+  .settings-grid {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 12px !important;
+    padding: 12px !important;
+  }
+
+  /* ── Chart modal: full screen ────────────────────────────────────────────── */
+  .modal-backdrop .modal-content {
+    padding: 8px !important;
+    border-radius: 0 !important;
+  }
+
+  /* ── Tab-bar: smaller text ───────────────────────────────────────────────── */
+  .tab-item {
+    min-width: 90px !important;
+    font-size: .72rem !important;
+    padding: 0 6px 0 8px !important;
+  }
+}
