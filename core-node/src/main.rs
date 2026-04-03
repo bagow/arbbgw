@@ -319,6 +319,14 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN order_id_b TEXT", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN contracts_a INTEGER", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN contracts_b INTEGER", []);
+        // New columns that were missing in previous migrations:
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN last_price_a REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN last_price_b REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN last_spread REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN curr_gross_pnl REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN pnl_a REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN pnl_b REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN close_reason TEXT", []);
         // 3. Create indexes AFTER ensuring columns exist
         let _ = conn.execute_batch("
             CREATE INDEX IF NOT EXISTS idx_trades_status  ON trades(status);

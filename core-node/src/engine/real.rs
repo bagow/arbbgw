@@ -344,6 +344,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let entry_a = trade.entry_price_a; let entry_b = trade.entry_price_b;
             let h = http.clone(); let k = Arc::clone(&keys); let db_c = db.clone();
             let r = reason.to_string();
+            let cr = settings.commission_rate;
 
             tokio::spawn(async move {
                 // Place close orders in parallel
@@ -393,6 +394,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     }
                     if got_a && got_b { break; }
                     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+
+                if exit_fee <= 0.0 {
+                    exit_fee = vol * (cr / 100.0) * 2.0;
                 }
 
                 // Recalculate PnL with real exit prices
@@ -586,7 +591,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let dir = row.direction.clone();
         let sp  = row.spread;
         let profile_id = settings.id.clone();
-        let entry_comm = fee_a + fee_b;
+        
+        let mut entry_comm = fee_a + fee_b;
+        if entry_comm <= 0.0 {
+            entry_comm = vol * (settings.commission_rate / 100.0) * 2.0;
+        }
+
         let entry_time = now_ms();
         let oid_a_db = oid_a.clone(); let oid_b_db = oid_b.clone();
 
