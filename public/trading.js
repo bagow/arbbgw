@@ -1129,13 +1129,21 @@ window.fetchLogs = async function(isBackground = false) {
             let cleanLine = line;
             const match = line.match(/Z\s+(INFO|ERROR|WARN|DEBUG)\s+core_node.*?:\s+(.*)/);
             if (match) {
-                // Add timestamp from the log if we want, or just omit the long boilerplate
                 const timeMatch = line.match(/(\d{2}:\d{2}:\d{2})\.\d+Z/);
                 const timeStr = timeMatch ? `[${timeMatch[1]}] ` : '';
                 cleanLine = `${timeStr}[${match[1]}] ${match[2]}`;
             } else if (line.includes('core-node')) {
-                // Fallback strip
                 cleanLine = line.split('core-node')[1] || line;
+            }
+
+            // Filter out logs unrelated to the active tab
+            const currentProfile = profiles.find(p => p.id === activeTabId);
+            const currentMode = currentProfile ? currentProfile.mode : 'paper';
+
+            if (currentMode === 'real' && cleanLine.includes('[paper]')) return '';
+            if (currentMode === 'paper' && cleanLine.includes('[real]')) return '';
+            if (cleanLine.includes('[settings]')) {
+                if (!cleanLine.includes(`id=${activeTabId}`)) return '';
             }
 
             let html = escHtml(cleanLine);
