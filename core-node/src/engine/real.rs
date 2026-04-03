@@ -367,63 +367,63 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let exb_clone = exb.clone();
             let pair_clone = pair.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+                // Fast-poll closing order fills: up to 20 attempts, every 50ms
                 let mut fixed_a = cpa; let mut fixed_b = cpb;
+                let mut got_a = false; let mut got_b = false;
                 let mut extra_fee = 0.0;
                 
-                if let Some(oid) = get_order_id(&db_clone, id, true).await {
-                    if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exa_clone, &pair_clone, &oid).await {
-                        if p > 0.0 { fixed_a = p; }
-                        extra_fee += f.abs();
+                let oid_a_opt = get_order_id(&db_clone, id, true).await;
+                let oid_b_opt = get_order_id(&db_clone, id, false).await;
+                
+                for _attempt in 0..20 {
+                    if !got_a {
+                        if let Some(ref oid) = oid_a_opt {
+                            if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exa_clone, &pair_clone, oid).await {
+                                if p > 0.0 { fixed_a = p; got_a = true; extra_fee += f.abs(); }
+                            }
+                        } else { got_a = true; } // no order id means we don't need to fetch
                     }
-                }
-                if let Some(oid) = get_order_id(&db_clone, id, false).await {
-                    if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exb_clone, &pair_clone, &oid).await {
-                        if p > 0.0 { fixed_b = p; }
-                        extra_fee += f.abs();
+                    if !got_b {
+                        if let Some(ref oid) = oid_b_opt {
+                            if let Ok((p, f)) = fetch_order(&h_clone, &k_clone, &exb_clone, &pair_clone, oid).await {
+                                if p > 0.0 { fixed_b = p; got_b = true; extra_fee += f.abs(); }
+                            }
+                        } else { got_b = true; }
                     }
+                    if got_a && got_b { break; }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 }
                 
-                // Recalculate true PnL
+                // Recalculate true PnL with real exit prices
                 let _ = db_clone.call(move |conn| {
-                    let mut entry_a = 0.0; let mut entry_b = 0.0; let mut ca = 0; let mut cb = 0; let mut fund = 0.0; let mut comm = 0.0; let mut mult_a = 1.0; let mut mult_b = 1.0;
+                    let mut entry_a = 0.0; let mut entry_b = 0.0; let mut fund = 0.0;
                     {
-                        if let Ok(mut stmt) = conn.prepare("SELECT entry_price_a, entry_price_b, contracts_a, contracts_b, funding_cost, commission_cost FROM trades WHERE id=?") {
+                        if let Ok(mut stmt) = conn.prepare("SELECT entry_price_a, entry_price_b, funding_cost, commission_cost FROM trades WHERE id=?") {
                             if let Ok(mut rows) = stmt.query([id]) {
                                 if let Ok(Some(row)) = rows.next() {
                                     entry_a = row.get(0).unwrap_or(0.0);
                                     entry_b = row.get(1).unwrap_or(0.0);
-                                    ca = row.get(2).unwrap_or(0);
-                                    cb = row.get(3).unwrap_or(0);
-                                    fund = row.get(4).unwrap_or(0.0);
-                                    comm = row.get(5).unwrap_or(0.0);
+                                    fund    = row.get(2).unwrap_or(0.0);
                                 }
                             }
                         }
                     }
-                    if entry_a > 0.0 && entry_b > 0.0 {
-                        // Kucoin and Gate and HTX have differing multiplier conventions, but pnl_a = diff * mult. Wait, what if we use raw contracts/prices?
-                        // Let's just approximate by volume logic since we don't have multipliers directly in DB.
-                        // Or we read multipliers.
-                        // Actually, PnL = contract_size_in_USDT * price_diff_percent! 
-                        // It is much safer to set:
-                        let mut pnl_a_true = if is_a_higher { (entry_a - fixed_a) * ca as f64 } else { (fixed_a - entry_a) * ca as f64 };
-                        let mut pnl_b_true = if is_a_higher { (fixed_b - entry_b) * cb as f64 } else { (entry_b - fixed_b) * cb as f64 };
+                    if entry_a > 0.0 && entry_b > 0.0 && fixed_a > 0.0 && fixed_b > 0.0 {
+                        // Price sanity: if exit price differs from entry by >20%, keep entry as fallback (bad fill data)
+                        let san_a = (fixed_a - entry_a).abs() / entry_a < 0.20;
+                        let san_b = (fixed_b - entry_b).abs() / entry_b < 0.20;
+                        if !san_a { tracing::warn!("Exit price sanity fail A: entry={} exit={} — using entry as exit", entry_a, fixed_a); fixed_a = entry_a; }
+                        if !san_b { tracing::warn!("Exit price sanity fail B: entry={} exit={} — using entry as exit", entry_b, fixed_b); fixed_b = entry_b; }
                         
-                        // BUT! Gate.io contracts diff is the raw value, HTX is in multiple... this is too complex. 
-                        // Instead, let's use the UI ratio logic we already use at line 309:
-                        // pnl_a = if is_a_higher { (entry_price_a - exit_price_a) * contracts_a } else { (exit_price_a - entry_price_a) * contracts_a };
-                        // But wait, the original logic on line 309 works if `contracts_a` was correctly scaled. Actually in Gate/HTX, the contracts_amount scale might require multiplier. 
-                        // The existing approximation `(cpa - fixed_a) * (vol / cpa)` is actually MORE universally safe!
-                        // Let's just use:
+                        // Use volume-ratio PnL (safe across all exchanges with different multipliers)
                         let pna = if is_a_higher { (entry_a - fixed_a) * (vol / entry_a) } else { (fixed_a - entry_a) * (vol / entry_a) };
                         let pnb = if is_a_higher { (fixed_b - entry_b) * (vol / entry_b) } else { (entry_b - fixed_b) * (vol / entry_b) };
                         let gp = pna + pnb;
-                        let np = gp - fund - comm - extra_fee;
-                        conn.execute("UPDATE trades SET exit_price_a=?, exit_price_b=?, commission_cost=commission_cost+?, pnl_a=?, pnl_b=?, gross_pnl=?, pnl=?, curr_gross_pnl=? WHERE id=?", 
-                            params![fixed_a, fixed_b, extra_fee, pna, pnb, gp, np, gp, id])?;
-                    } else {
-                        conn.execute("UPDATE trades SET exit_price_a=?, exit_price_b=?, commission_cost=commission_cost+? WHERE id=?", params![fixed_a, fixed_b, extra_fee, id])?;
+                        let total_commission = extra_fee; // exit fees; entry fees already in commission_cost
+                        let np = gp - fund - total_commission;
+                        tracing::info!("[real] PnL recalc id={} pna={:.4} pnb={:.4} gp={:.4} np={:.4} exit_fee={:.4}", id, pna, pnb, gp, np, extra_fee);
+                        conn.execute("UPDATE trades SET exit_price_a=?, exit_price_b=?, commission_cost=commission_cost+?, pnl_a=?, pnl_b=?, gross_pnl=?, pnl=?, curr_gross_pnl=? WHERE id=?",
+                            params![fixed_a, fixed_b, total_commission, pna, pnb, gp, np, gp, id])?;
                     }
                     Ok(())
                 }).await;
@@ -492,6 +492,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         if contracts_a < 1 || contracts_b < 1 {
             info!("Skipping {}: calculated contracts < 1 (A: {}, B: {})", row.pair, contracts_a, contracts_b);
+            continue;
+        }
+
+        // Price sanity check: entry prices must be within 10% of each other.
+        // A larger deviation usually means the ticker data is mismatched (different tokens, stale data, etc.)
+        let price_ratio = if entry_a > entry_b { entry_a / entry_b } else { entry_b / entry_a };
+        if price_ratio > 1.10 {
+            info!("[SKIP] {} price sanity fail: A={:.6} B={:.6} ratio={:.3} — likely different tokens or stale data", row.pair, entry_a, entry_b, price_ratio);
             continue;
         }
 
