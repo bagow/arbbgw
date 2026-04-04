@@ -3,6 +3,10 @@
 
 use crate::state::PriceMap;
 use shared::SpreadRow;
+use dashmap::DashMap;
+use std::sync::OnceLock;
+
+static STRUCTURAL_EMA: OnceLock<DashMap<String, (f64, f64)>> = OnceLock::new();
 
 const SPREAD_THRESHOLD: f64 = -1.0;
 const SPREAD_MAX:       f64 = 50.0;
@@ -56,12 +60,30 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
                     (b_over_a, format!("{name_b}>{name_a}"))
                 };
 
+                let ema_key = format!("{}|{}|{}|{}", sym, name_a, name_b, direction);
+                let now_f64 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+                
+                let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
+                let structural_spread = if let Some(mut entry) = ema_map.get_mut(&ema_key) {
+                    let (old_ema, last_updated) = *entry;
+                    let dt = (now_f64 - last_updated).max(0.0);
+                    let tau = 86400.0; // 24 hours
+                    let alpha = 1.0 - (-dt / tau).exp();
+                    let new_ema = old_ema + alpha * (spread - old_ema);
+                    *entry = (new_ema, now_f64);
+                    new_ema
+                } else {
+                    ema_map.insert(ema_key, (spread, now_f64));
+                    spread
+                };
+
                 if spread < SPREAD_THRESHOLD || spread > SPREAD_MAX { continue; }
 
                 rows.push(SpreadRow {
                     pair: sym.clone(), exchange_a: name_a.clone(), exchange_b: name_b.clone(),
                     price_a: data_a.price, price_b: data_b.price, bid_a: data_a.bid, ask_a: data_a.ask, bid_b: data_b.bid, ask_b: data_b.ask,
                     vol_a: data_a.vol, vol_b: data_b.vol, funding_a: data_a.funding_rate, funding_b: data_b.funding_rate,
+                    structural_spread,
                     spread: (spread * 10000.0).round() / 10000.0,
                     direction,
                 });
