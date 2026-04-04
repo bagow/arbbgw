@@ -84,10 +84,8 @@ async fn fetch_htx_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
 pub async fn run(http: Client, prices: PriceMap) {
     // Wait for collectors to populate the price map (up to 15s)
     for _ in 0..30 {
-        if !prices.is_empty() {
-            let total: usize = prices.iter().map(|e| e.value().len()).sum();
-            if total > 100 { break; }
-        }
+        let total: usize = prices.iter().map(|e| e.value().len()).sum();
+        if total > 100 { break; }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
@@ -102,13 +100,13 @@ pub async fn run(http: Client, prices: PriceMap) {
             let ex_a = &exchanges[i];
             let ex_b = &exchanges[j];
 
-            let map_a = match prices.get(ex_a) { Some(m) => m, None => continue };
-            let map_b = match prices.get(ex_b) { Some(m) => m, None => continue };
+            let map_a = match prices.get(ex_a.as_str()) { Some(m) => m, None => continue };
+            let map_b = match prices.get(ex_b.as_str()) { Some(m) => m, None => continue };
 
             // Only warm pairs present on BOTH exchanges
-            let pairs: Vec<String> = map_a.iter()
-                .filter(|e| map_b.contains_key(e.key().as_str()))
-                .map(|e| e.key().clone())
+            let pairs: Vec<String> = map_a.keys()
+                .filter(|k| map_b.contains_key(k.as_str()))
+                .cloned()
                 .collect();
 
             for pair in &pairs {
