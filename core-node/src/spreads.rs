@@ -10,7 +10,6 @@ static STRUCTURAL_EMA: OnceLock<DashMap<String, (f64, f64)>> = OnceLock::new();
 
 const SPREAD_THRESHOLD: f64 = -1.0;
 const SPREAD_MAX:       f64 = 50.0;
-const TOP_N:            usize = 1000;
 const STALE_SECS:       u64 = 30;
 const INTRA_SPREAD_LIMIT: f64 = 1.02;
 const MAX_FUNDING_DIFF: f64 = 0.005;   // 0.5% per 8h
