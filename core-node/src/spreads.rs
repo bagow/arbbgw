@@ -94,3 +94,25 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
     rows.sort_by(|a, b| b.spread.partial_cmp(&a.spread).unwrap_or(std::cmp::Ordering::Equal));
     rows
 }
+
+/// Pre-seed the STRUCTURAL_EMA from historical (timestamp, spread, direction, pair, ex_a, ex_b) data.
+/// Replays the history in chronological order through the same Time-Decay EMA formula,
+/// so the engine starts with a realistic 24h baseline instead of waiting for live accumulation.
+pub fn warmup_ema_from_history(history: &[(f64, f64, String, String, String, String)]) {
+    let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
+    let tau = 86400.0_f64;
+
+    // Sort chronologically (history from API may be newest-first)
+    let mut sorted = history.to_vec();
+    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (ts, spread, direction, pair, ex_a, ex_b) in &sorted {
+        let key = format!("{}|{}|{}|{}", pair, ex_a, ex_b, direction);
+        let mut entry = ema_map.entry(key).or_insert((*spread, *ts));
+        let (old_ema, last_ts) = *entry;
+        let dt = (ts - last_ts).max(0.0);
+        let alpha = 1.0 - (-dt / tau).exp();
+        let new_ema = old_ema + alpha * (spread - old_ema);
+        *entry = (new_ema, *ts);
+    }
+}

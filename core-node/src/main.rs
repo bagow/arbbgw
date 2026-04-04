@@ -3,6 +3,7 @@
 mod settings;
 mod spreads;
 mod state;
+mod ema_warmup;
 
 use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc, time::Duration};
 
@@ -89,6 +90,13 @@ async fn main() -> Result<()> {
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::mexc::run(p, s).await }); }
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::okx::run(p, s).await }); }
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::bitget::run(p, s).await }); }
+
+    // ── EMA Warmup: pre-seed structural spread norms from 24h candle history ──
+    {
+        let http_w  = http.clone();
+        let prices_w = prices.clone();
+        tokio::spawn(async move { ema_warmup::run(http_w, prices_w).await });
+    }
 
     // ── Trade DBs ────────────────────────────────────────────────────────────
     let real_db = Connection::open(&real_db_path).await
