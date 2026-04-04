@@ -5,13 +5,12 @@
 
 use reqwest::Client;
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::state::PriceMap;
 use crate::spreads::warmup_ema_from_history;
 
-const CANDLE_INTERVAL_SECS: f64 = 60.0; // 1-minute candles
-const LOOKBACK_SECS: u64 = 86_400;       // 24 hours
+const LOOKBACK_SECS: u64 = 86_400; // 24 hours
 
 // ─── Gate.io: fetch 1-min candles for a USDT perp ────────────────────────────
 
@@ -134,7 +133,7 @@ pub async fn run(http: Client, prices: PriceMap) {
                     } else {
                         (spread_ba, format!("{ex_b}>{ex_a}"))
                     };
-                    history.push((*ts, spread, direction, pair.clone(), ex_a.clone(), ex_b.clone()));
+                    history.push((*ts, spread, direction, pair.to_string(), ex_a.to_string(), ex_b.to_string()));
                 }
 
                 warmup_ema_from_history(&history);
