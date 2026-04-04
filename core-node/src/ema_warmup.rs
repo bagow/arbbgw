@@ -22,7 +22,7 @@ async fn fetch_gate_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
         "https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={}&interval=1m&from={}&limit=1440",
         contract, from
     );
-    let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(15)).send().await {
+    let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
         Ok(r) => match r.json().await { Ok(j) => j, Err(_) => return vec![] },
         Err(_) => return vec![],
     };
@@ -45,7 +45,7 @@ async fn fetch_kucoin_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
         "https://api-futures.kucoin.com/api/v1/kline/query?symbol={}&granularity=1&from={}&to={}",
         sym, from * 1000, now_secs() * 1000
     );
-    let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(15)).send().await {
+    let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
         Ok(r) => match r.json().await { Ok(j) => j, Err(_) => return vec![] },
         Err(_) => return vec![],
     };
@@ -67,7 +67,7 @@ async fn fetch_htx_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
         "https://api.hbdm.com/linear-swap-ex/market/history/kline?contract_code={}&period=1min&size=1440",
         sym
     );
-    let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(15)).send().await {
+    let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
         Ok(r) => match r.json().await { Ok(j) => j, Err(_) => return vec![] },
         Err(_) => return vec![],
     };
