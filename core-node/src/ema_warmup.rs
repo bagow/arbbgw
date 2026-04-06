@@ -100,14 +100,16 @@ pub async fn run(http: Client, prices: PriceMap) {
             let ex_a = &exchanges[i];
             let ex_b = &exchanges[j];
 
-            let map_a = match prices.get(ex_a.as_str()) { Some(m) => m, None => continue };
-            let map_b = match prices.get(ex_b.as_str()) { Some(m) => m, None => continue };
+            let pairs: Vec<String> = {
+                let map_a = match prices.get(ex_a.as_str()) { Some(m) => m, None => continue };
+                let map_b = match prices.get(ex_b.as_str()) { Some(m) => m, None => continue };
 
-            // Only warm pairs present on BOTH exchanges
-            let pairs: Vec<String> = map_a.keys()
-                .filter(|k| map_b.contains_key(k.as_str()))
-                .cloned()
-                .collect();
+                // Only warm pairs present on BOTH exchanges
+                map_a.keys()
+                    .filter(|k| map_b.contains_key(k.as_str()))
+                    .cloned()
+                    .collect()
+            };
 
             for pair in &pairs {
                 // Fetch candles from both exchanges

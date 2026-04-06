@@ -285,51 +285,66 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
         let elapsed_ms = now_ms() - trade.entry_time;
 
+        let manual_close = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
+
         // CRITICAL: skip trades where entry prices aren't confirmed yet (fast-poll pending)
-        if trade.entry_price_a <= 0.0 || trade.entry_price_b <= 0.0 {
+        // Bypass this check if the user is forcing a manual close.
+        if (trade.entry_price_a <= 0.0 || trade.entry_price_b <= 0.0) && !manual_close {
             info!("[real] Skipping close for {} {} — entry prices not confirmed yet", trade.id, trade.pair);
             continue;
         }
 
-        let data_a = match prices.get(&trade.exchange_a).and_then(|m| m.get(&trade.pair).cloned()) {
-            Some(d) => d, None => continue,
-        };
-        let data_b = match prices.get(&trade.exchange_b).and_then(|m| m.get(&trade.pair).cloned()) {
-            Some(d) => d, None => continue,
-        };
-        if data_a.bid <= 0.0 || data_a.ask <= 0.0 || data_b.bid <= 0.0 || data_b.ask <= 0.0 { continue; }
+        let data_a = prices.get(&trade.exchange_a).and_then(|m| m.get(&trade.pair).cloned());
+        let data_b = prices.get(&trade.exchange_b).and_then(|m| m.get(&trade.pair).cloned());
 
-        let c_price_a = data_a.price;
-        let c_price_b = data_b.price;
+        if (data_a.is_none() || data_b.is_none()) && !manual_close { continue; }
+        
+        // Fallback prices in case of missing WebSocket data during a manual close
+        let mut exit_price_a = trade.entry_price_a.max(1e-12);
+        let mut exit_price_b = trade.entry_price_b.max(1e-12);
+        let mut c_price_a = exit_price_a;
+        let mut c_price_b = exit_price_b;
+        let mut current_spread = 0.0;
+        let mut exit_spread = 0.0;
+
+        if let (Some(da), Some(db)) = (&data_a, &data_b) {
+            if da.bid <= 0.0 || da.ask <= 0.0 || db.bid <= 0.0 || db.ask <= 0.0 {
+                if !manual_close { continue; }
+            } else {
+                c_price_a = da.price;
+                c_price_b = db.price;
+                exit_price_a = if is_a_higher { da.ask } else { da.bid };
+                exit_price_b = if is_a_higher { db.bid } else { db.ask };
+                
+                current_spread = if is_a_higher {
+                    (da.price - db.price) / db.price.max(1e-12) * 100.0
+                } else {
+                    (db.price - da.price) / da.price.max(1e-12) * 100.0
+                };
+                exit_spread = if is_a_higher {
+                    (da.ask - db.bid) / db.bid.max(1e-12) * 100.0
+                } else {
+                    (db.ask - da.bid) / da.bid.max(1e-12) * 100.0
+                };
+            }
+        }
+
         let contracts_a = trade.contracts_a as f64;
         let contracts_b = trade.contracts_b as f64;
-        let exit_price_a = if is_a_higher { data_a.ask } else { data_a.bid };
-        let exit_price_b = if is_a_higher { data_b.bid } else { data_b.ask };
 
         // PnL via volume-ratio (universal across all exchanges)
-        let pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * (trade.volume / trade.entry_price_a) }
-                    else { (exit_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a) };
-        let pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b) }
-                    else { (trade.entry_price_b - exit_price_b) * (trade.volume / trade.entry_price_b) };
+        let pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) }
+                    else { (exit_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) };
+        let pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) }
+                    else { (trade.entry_price_b - exit_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) };
         let gross_pnl = pnl_a + pnl_b;
         let fund_cost = funding * trade.volume;
         let net_pnl   = gross_pnl - fund_cost;
         let net_pct   = net_pnl / trade.volume * 100.0;
 
-        let current_spread = if is_a_higher {
-            (data_a.price - data_b.price) / data_b.price.max(1e-12) * 100.0
-        } else {
-            (data_b.price - data_a.price) / data_a.price.max(1e-12) * 100.0
-        };
-        let exit_spread = if is_a_higher {
-            (data_a.ask - data_b.bid) / data_b.bid.max(1e-12) * 100.0
-        } else {
-            (data_b.ask - data_a.bid) / data_a.bid.max(1e-12) * 100.0
-        };
         let top_spread = trade.highest_spread.max(current_spread);
         let stop_limit = top_spread - settings.trailing_stop_percent;
 
-        let manual_close   = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
         let triggered_tp   = net_pct >= settings.take_profit_percent;
         let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
         let zero_spread    = exit_spread <= 0.0 && net_pnl >= 0.0;

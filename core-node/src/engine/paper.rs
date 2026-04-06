@@ -51,26 +51,44 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     for trade in &trades {
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
 
-        let data_a = match prices.get(&trade.exchange_a).and_then(|m| m.get(&trade.pair).cloned()) {
-            Some(d) => d,
-            None => continue,
-        };
-        let data_b = match prices.get(&trade.exchange_b).and_then(|m| m.get(&trade.pair).cloned()) {
-            Some(d) => d,
-            None => continue,
-        };
+        let manual_close = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
 
-        if data_a.bid <= 0.0 || data_a.ask <= 0.0 || data_b.bid <= 0.0 || data_b.ask <= 0.0 { 
-            continue; 
+        let data_a = prices.get(&trade.exchange_a).and_then(|m| m.get(&trade.pair).cloned());
+        let data_b = prices.get(&trade.exchange_b).and_then(|m| m.get(&trade.pair).cloned());
+
+        if (data_a.is_none() || data_b.is_none()) && !manual_close { continue; }
+
+        let mut exit_price_a = trade.entry_price_a.max(1e-12);
+        let mut exit_price_b = trade.entry_price_b.max(1e-12);
+        let mut c_price_a = exit_price_a;
+        let mut c_price_b = exit_price_b;
+        let mut current_spread = 0.0;
+        let mut exit_spread = 0.0;
+
+        if let (Some(da), Some(db)) = (&data_a, &data_b) {
+            if da.bid <= 0.0 || da.ask <= 0.0 || db.bid <= 0.0 || db.ask <= 0.0 { 
+                if !manual_close { continue; } 
+            } else {
+                c_price_a = da.price;
+                c_price_b = db.price;
+                exit_price_a = if is_a_higher { da.ask } else { da.bid };
+                exit_price_b = if is_a_higher { db.bid } else { db.ask };
+
+                current_spread = if is_a_higher {
+                    (da.price - db.price) / db.price.max(1e-12) * 100.0
+                } else {
+                    (db.price - da.price) / da.price.max(1e-12) * 100.0
+                };
+                exit_spread = if is_a_higher {
+                    (da.ask - db.bid) / db.bid.max(1e-12) * 100.0
+                } else {
+                    (db.ask - da.bid) / da.bid.max(1e-12) * 100.0
+                };
+            }
         }
 
         // We apply a minimal slippage factor here if needed, but let's stick to base bids/asks.
         let slippage = settings.slippage_percent / 100.0;
-        let c_price_a = data_a.price;
-        let c_price_b = data_b.price;
-
-        let exit_price_a = if is_a_higher { data_a.ask } else { data_a.bid };
-        let exit_price_b = if is_a_higher { data_b.bid } else { data_b.ask };
 
         let contracts = trade.volume / trade.entry_price_a.max(1e-12);
 
@@ -84,26 +102,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let net_pnl   = gross_pnl - (comm_cost + fund_cost + slip_cost);
         let net_pct   = net_pnl / trade.volume * 100.0;
 
-        let current_spread = if is_a_higher {
-            (data_a.price - data_b.price) / data_b.price.max(1e-12) * 100.0
-        } else {
-            (data_b.price - data_a.price) / data_a.price.max(1e-12) * 100.0
-        };
-
-        let exit_spread = if is_a_higher {
-            (data_a.ask - data_b.bid) / data_b.bid.max(1e-12) * 100.0
-        } else {
-            (data_b.ask - data_a.bid) / data_a.bid.max(1e-12) * 100.0
-        };
-
         let top_spread = trade.highest_spread.max(current_spread);
 
         let triggered_tp   = net_pct >= tp_pct * 100.0;
         let stop_limit     = top_spread - settings.trailing_stop_percent;
         let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
         let zero_spread    = exit_spread <= 0.0 && net_pnl >= 0.0;
-
-        let manual_close   = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
 
         if manual_close || triggered_tp || triggered_stop || zero_spread {
             let reason = if manual_close { "MANUAL" } else if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
