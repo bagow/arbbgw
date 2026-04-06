@@ -345,6 +345,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let entry_a = trade.entry_price_a; let entry_b = trade.entry_price_b;
             let h = http.clone(); let k = Arc::clone(&keys); let db_c = db.clone();
             let r = reason.to_string();
+            let settings_comm = settings.commission_rate;
 
             tokio::spawn(async move {
                 // Place close orders in parallel
@@ -412,6 +413,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     else            { slip_cost_exit_b = (exit_price_b - real_exit_b) * (vol / entry_b); }
                 }
                 let exit_slip = slip_cost_exit_a + slip_cost_exit_b;
+
+                // Fallback: if exchange didn't report fees, estimate from commission_rate (2 exit legs)
+                if exit_fee < 1e-9 {
+                    exit_fee = vol * 2.0 * (settings_comm / 100.0);
+                }
 
                 info!("[real] PnL raw id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", id, real_pna, real_pnb, real_gp, exit_fee, exit_slip);
 
@@ -608,7 +614,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let sp  = row.spread;
         let profile_id = settings.id.clone();
         
-        let entry_comm = fee_a + fee_b;
+        // Use actual exchange-reported fees if available, fall back to settings-based estimate
+        let api_comm = fee_a + fee_b;
+        let entry_comm = if api_comm > 1e-9 {
+            api_comm
+        } else {
+            // API didn't report fees — estimate from commission_rate setting (2 legs)
+            vol * 2.0 * (settings.commission_rate / 100.0)
+        };
 
         let mut slip_cost_a = 0.0;
         if fill_a > 0.0 {
