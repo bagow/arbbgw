@@ -184,8 +184,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let profile_id = settings.id.clone();
         let commission = settings.commission_rate / 100.0;
         let slippage = settings.slippage_percent / 100.0;
-        let comm_cost = 4.0 * commission * vol;
-        let slip_cost = 4.0 * slippage * vol;
+        let comm_cost = 2.0 * commission * vol;
+        let slip_cost = 2.0 * slippage * vol;
 
         let now = now_ms();
         let status = "OPEN";

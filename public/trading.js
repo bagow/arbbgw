@@ -593,12 +593,10 @@ function renderSettingsForm(profile) {
                     <input type="number" id="sf-slip-${p.id}" step="0.0001" value="${p.slippage_percent??0.1}" />
                 </div>
                 ` : ''}
-                ${p.mode !== 'real' ? `
                 <div class="form-group">
                     <label>Commission Rate (%)</label>
-                    <input type="number" id="sf-comm-${p.id}" step="any" value="${p.commission_rate??0.45}" />
+                    <input type="number" id="sf-comm-${p.id}" step="any" value="${p.commission_rate??0.045}" />
                 </div>
-                ` : ''}
                 <div class="form-group">
                     <label>Min Volume (M$)</label>
                     <input type="number" id="sf-minvol-${p.id}" step="0.1" value="${p.min_volume_millions??10}" />
@@ -951,12 +949,14 @@ function renderActiveTable(profileId, active) {
                             <div class="td-line"><span>Entry:</span> <strong>${t.entry_price_a}</strong></div>
                             <div class="td-line"><span>Current:</span> <strong>${t.current_price_a ?? '—'}</strong></div>
                             <div class="td-line"><span>Leg PnL:</span> <strong style="color:${(t.pnl_a??0)>0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl_a??0)}</strong></div>
+                            <div class="td-line"><span>Funding In:</span> <strong class="funding-countdown" style="font-family:monospace; color:var(--text-sub)">--:--:--</strong></div>
                         </div>
                         <div class="td-col">
                             <div class="td-header">${t.exchange_b} <span class="badge ${!isAHigher ? 'badge-short' : 'badge-long'}">${!isAHigher ? 'SHORT' : 'LONG'}</span></div>
                             <div class="td-line"><span>Entry:</span> <strong>${t.entry_price_b}</strong></div>
                             <div class="td-line"><span>Current:</span> <strong>${t.current_price_b ?? '—'}</strong></div>
                             <div class="td-line"><span>Leg PnL:</span> <strong style="color:${(t.pnl_b??0)>0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl_b??0)}</strong></div>
+                            <div class="td-line"><span>Funding In:</span> <strong class="funding-countdown" style="font-family:monospace; color:var(--text-sub)">--:--:--</strong></div>
                         </div>
                         <div class="td-col td-total">
                             <div class="td-line"><span>Gross PnL:</span> <strong style="color:${(t.gross_pnl??0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(t.gross_pnl??0)}</strong></div>
@@ -1432,4 +1432,22 @@ const escHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', boot);
+
+// Funding countdown updater (8-hour marks: 00:00, 08:00, 16:00 UTC)
+setInterval(() => {
+    const now = new Date();
+    let target = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+    while (target <= now) {
+        target.setUTCHours(target.getUTCHours() + 8);
+    }
+    const diff = target - now;
+    const h = String(Math.floor(diff / 3600000)).padStart(2, '0');
+    const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2, '0');
+    const s = String(Math.floor((diff % 60000) / 1000)).padStart(2, '0');
+    const timeStr = `${h}h ${m}m ${s}s`;
+    
+    document.querySelectorAll('.funding-countdown').forEach(el => {
+        el.textContent = timeStr;
+    });
+}, 1000);
 // trigger deploy
