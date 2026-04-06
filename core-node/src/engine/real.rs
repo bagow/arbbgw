@@ -727,7 +727,6 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             Err(e) => {
                 let err_str = e.to_string();
                 error!("[real] LEG_A failed {}/{}: {}", exa, pair, err_str);
-                // Cooldown: if margin/balance error, cool down the exchange; always cool down the pair
                 if err_str.contains("insufficient") || err_str.contains("exceeds the balance") || err_str.contains("minimum amount") {
                     ex_cd.insert(exa.clone(), now);
                     error!("[real] Exchange {} cooled down for 10 min", exa);
@@ -741,6 +740,20 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                         let _ = close_order(&hc, &kc, &ec, &pc, !is_a_higher, contracts_b, false).await;
                     });
                 }
+                // Record failed attempt in DB for history visibility
+                let reason = format!("LEG_A_FAILED: {}", &err_str[..err_str.len().min(120)]);
+                let db_c = db.clone();
+                let (p, ea, eb, d, sp, pid) = (pair.clone(), exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
+                let entry_time = now_ms();
+                tokio::spawn(async move {
+                    let _ = db_c.call(move |conn| {
+                        conn.execute(
+                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            params![p, ea, eb, d, 0.0f64, 0.0f64, 0.0f64, sp, entry_time, sp, "CLOSED", 0.0f64, 0.0f64, pid, 0.0f64, 0.0f64, 0.0f64, reason, 0.0f64, 0.0f64]
+                        )?;
+                        Ok(())
+                    }).await;
+                });
                 continue;
             }
         };
@@ -762,6 +775,20 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                             Err(err) => { let w = 200 * 2u64.pow(attempt-1); tokio::time::sleep(Duration::from_millis(w)).await; error!("Emergency close A {}/5: {}", attempt, err); }
                         }
                     }
+                });
+                // Record failed attempt in DB for history visibility
+                let reason = format!("LEG_B_FAILED: {}", &err_str[..err_str.len().min(120)]);
+                let db_c = db.clone();
+                let (p, ea, eb, d, sp, pid) = (pair.clone(), exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
+                let entry_time = now_ms();
+                tokio::spawn(async move {
+                    let _ = db_c.call(move |conn| {
+                        conn.execute(
+                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            params![p, ea, eb, d, 0.0f64, 0.0f64, 0.0f64, sp, entry_time, sp, "CLOSED", 0.0f64, 0.0f64, pid, 0.0f64, 0.0f64, 0.0f64, reason, 0.0f64, 0.0f64]
+                        )?;
+                        Ok(())
+                    }).await;
                 });
                 continue;
             }
