@@ -169,10 +169,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     for row in spreads.iter().take(50) {
         if num_active + 1 > settings.max_active_trades { break; }
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
-        // Smart structural filter: deviation above structural baseline must cover costs
-        let break_even_pct = settings.break_even_fraction() * 100.0 * 1.5;
+        // Absolute floor: spread must exceed round-trip costs
+        let break_even_pct = settings.break_even_fraction() * 100.0;
+        if row.spread < break_even_pct * 1.2 {
+            continue;
+        }
+        // Smart structural filter: deviation above baseline must also cover costs
         let deviation = row.spread - row.structural_spread;
-        if deviation < break_even_pct {
+        if deviation < break_even_pct * 1.5 {
             continue;
         }
 

@@ -777,11 +777,13 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     static DIAG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dtick = DIAG_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if dtick % 100 == 0 {
+        let be_pct = settings.break_even_fraction() * 100.0;
         let in_range = spreads.iter().filter(|r| r.spread >= settings.min_entry_spread && r.spread <= settings.max_entry_spread).count();
+        let above_floor = spreads.iter().filter(|r| r.spread >= be_pct * 1.2).count();
         let supported = spreads.iter().filter(|r| keys.supports(&r.exchange_a) && keys.supports(&r.exchange_b)).count();
-        let cooled_ex: Vec<_> = ex_cd.iter().filter(|e| now - *e.value() < 600_000).map(|e| e.key().clone()).collect();
-        info!("[diag] spreads={} in_range={} supported={} active={}/{} cooled_exchanges={:?}",
-            spreads.len(), in_range, supported, num_active, settings.max_active_trades, cooled_ex);
+        let cooled_ex: Vec<_> = ex_cd.iter().filter(|e| now - *e.value() < 1_800_000).map(|e| e.key().clone()).collect();
+        info!("[diag] spreads={} in_range={} above_floor(>{:.2}%)={} supported={} active={}/{} cooled={:?}",
+            spreads.len(), in_range, be_pct * 1.2, above_floor, supported, num_active, settings.max_active_trades, cooled_ex);
     }
 
     // Only open ONE trade per engine cycle to prevent burst-opening
@@ -791,10 +793,16 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if opened_this_cycle { break; }
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
 
-        // Smart structural filter: deviation above baseline must cover round-trip costs
-        let break_even_pct = settings.break_even_fraction() * 100.0 * 1.5; // 150% safety margin
+        // Absolute floor: spread must exceed round-trip costs regardless of structural deviation
+        // Without this, a spread of 0.64% with costs of 1.23% would be entered if structural was negative
+        let break_even_pct = settings.break_even_fraction() * 100.0;
+        if row.spread < break_even_pct * 1.2 {
+            continue; // spread too small to cover costs even with 20% safety margin
+        }
+
+        // Smart structural filter: deviation above baseline must ALSO cover costs
         let deviation = row.spread - row.structural_spread;
-        if deviation < break_even_pct { continue; }
+        if deviation < break_even_pct * 1.5 { continue; }
 
         if open_pairs.contains(&row.pair) { continue; }
 
