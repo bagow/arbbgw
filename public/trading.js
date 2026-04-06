@@ -593,10 +593,7 @@ function renderSettingsForm(profile) {
                     <input type="number" id="sf-slip-${p.id}" step="0.0001" value="${p.slippage_percent??0.1}" />
                 </div>
                 ` : ''}
-                <div class="form-group">
-                    <label>Commission Rate (%)</label>
-                    <input type="number" id="sf-comm-${p.id}" step="any" value="${p.commission_rate??0.045}" />
-                </div>
+
                 <div class="form-group">
                     <label>Min Volume (M$)</label>
                     <input type="number" id="sf-minvol-${p.id}" step="0.1" value="${p.min_volume_millions??10}" />
@@ -1243,7 +1240,7 @@ window.saveSettings = async function (profileId) {
         take_profit_percent:   parseFloat(g(`sf-tp-${profileId}`)),
         trailing_stop_percent: parseFloat(g(`sf-trail-${profileId}`)),
         slippage_percent:      parseFloat(g(`sf-slip-${profileId}`)),
-        commission_rate:       parseFloat(g(`sf-comm-${profileId}`)),
+
         min_volume_millions:   parseFloat(g(`sf-minvol-${profileId}`)),
         collector_interval_secs: parseInt(g(`sf-interval-${profileId}`)),
     };

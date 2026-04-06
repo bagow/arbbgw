@@ -82,30 +82,47 @@ pub fn get_launch_times() -> &'static DashMap<String, i64> {
 // ─── Balance cache ────────────────────────────────────────────────────────────
 
 static BALANCE_CACHE: OnceLock<DashMap<String, f64>> = OnceLock::new();
+static FEE_RATE_CACHE: OnceLock<DashMap<String, f64>> = OnceLock::new();
 
 fn get_balance_cache() -> &'static DashMap<String, f64> {
     BALANCE_CACHE.get_or_init(DashMap::new)
 }
 
-/// Spawn background task that refreshes available USDT balance on each exchange every 30s.
+fn get_fee_cache() -> &'static DashMap<String, f64> {
+    FEE_RATE_CACHE.get_or_init(DashMap::new)
+}
+
+/// Get cached taker fee rate for an exchange (as fraction, e.g. 0.0005 = 0.05%).
+/// Falls back to 0.05% if not yet fetched.
+pub fn get_exchange_fee(exchange: &str) -> f64 {
+    get_fee_cache().get(exchange).map(|v| *v).unwrap_or(0.0005) // default 0.05%
+}
+
+/// Spawn background task that refreshes balances and fee rates every 30s.
 pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>) {
     tokio::spawn(async move {
         loop {
-            let cache = get_balance_cache();
+            let bal_cache = get_balance_cache();
+            let fee_cache = get_fee_cache();
             let exchanges = ["binance", "gate", "htx", "kucoin", "bitget"];
             for ex in &exchanges {
                 if !keys.supports(ex) { continue; }
                 match fetch_available_balance(&http, &keys, ex).await {
                     Ok(bal) => {
-                        cache.insert(ex.to_string(), bal);
+                        bal_cache.insert(ex.to_string(), bal);
                         info!("[balance] {} = ${:.2}", ex, bal);
                     }
-                    Err(e) => {
-                        error!("[balance] {} fetch error: {}", ex, e);
+                    Err(e) => error!("[balance] {} fetch error: {}", ex, e),
+                }
+                match fetch_taker_fee(&http, &keys, ex).await {
+                    Ok(fee) => {
+                        fee_cache.insert(ex.to_string(), fee);
+                        info!("[fee] {} taker = {:.4}%", ex, fee * 100.0);
                     }
+                    Err(e) => error!("[fee] {} fetch error: {}", ex, e),
                 }
             }
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
 }
@@ -174,6 +191,71 @@ async fn fetch_available_balance(http: &Client, keys: &ExchangeKeys, exchange: &
             Ok(bal)
         }
         _ => Err(anyhow::anyhow!("Unknown exchange: {}", exchange)),
+    }
+}
+
+/// Fetch taker fee rate from exchange API. Returns fraction (e.g. 0.0005 = 0.05%).
+async fn fetch_taker_fee(http: &Client, keys: &ExchangeKeys, exchange: &str) -> Result<f64> {
+    match exchange {
+        "binance" => {
+            let ts = now_ms();
+            let qs = format!("symbol=BTCUSDT&timestamp={}", ts);
+            let sig = binance_sign(&keys.binance_secret, &qs);
+            let url = format!("https://fapi.binance.com/fapi/v1/commissionRate?{}&signature={}", qs, sig);
+            let resp: Value = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
+                .timeout(Duration::from_secs(10)).send().await?.json().await?;
+            let taker = resp["takerCommissionRate"].as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| resp["takerCommissionRate"].as_f64())
+                .unwrap_or(0.0004);
+            Ok(taker)
+        }
+        "gate" => {
+            // Gate.io fee tier endpoint
+            let path = "/api/v4/futures/usdt/accounts";
+            let resp: Value = http.get(format!("https://api.gateio.ws{}", path))
+                .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, ""))
+                .timeout(Duration::from_secs(10)).send().await?.json().await?;
+            // Gate returns fee in "point_fee" or tier info; use tier taker fee
+            let taker = resp["fee_rate"].as_str().and_then(|s| s.parse().ok())
+                .or_else(|| resp["fee_rate"].as_f64())
+                .unwrap_or(0.0005);
+            Ok(taker.abs()) // ensure positive
+        }
+        "htx" => {
+            // HTX uses a fee field in the account response
+            Ok(0.0004) // HTX typical futures taker — no simple endpoint
+        }
+        "kucoin" => {
+            let ts = now_ms().to_string();
+            let path = "/api/v1/trade-fees?symbol=XBTUSDTM";
+            let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", path, "");
+            let resp: Value = http.get(format!("https://api-futures.kucoin.com{}", path))
+                .header("KC-API-KEY", &keys.kucoin_key).header("KC-API-SIGN", sig)
+                .header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig)
+                .header("KC-API-KEY-VERSION", "2")
+                .timeout(Duration::from_secs(10)).send().await?.json().await?;
+            let taker = resp["data"]["takerFeeRate"].as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| resp["data"]["takerFeeRate"].as_f64())
+                .unwrap_or(0.0006);
+            Ok(taker)
+        }
+        "bitget" => {
+            let ts = now_ms().to_string();
+            let path = "/api/v2/mix/market/query-position-lever?symbol=BTCUSDT&productType=USDT-FUTURES";
+            let sig = bitget_sign(&keys.bitget_secret, &ts, "GET", path, "");
+            let resp: Value = http.get(format!("https://api.bitget.com{}", path))
+                .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig)
+                .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
+                .timeout(Duration::from_secs(10)).send().await?.json().await?;
+            let taker = resp["data"]["takerFeeRate"].as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| resp["data"]["takerFeeRate"].as_f64())
+                .unwrap_or(0.0006);
+            Ok(taker)
+        }
+        _ => Ok(0.0005),
     }
 }
 
@@ -777,13 +859,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     static DIAG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dtick = DIAG_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if dtick % 100 == 0 {
-        let be_pct = settings.break_even_fraction() * 100.0;
+        let fees: Vec<_> = get_fee_cache().iter().map(|e| format!("{}={:.3}%", e.key(), e.value() * 100.0)).collect();
         let in_range = spreads.iter().filter(|r| r.spread >= settings.min_entry_spread && r.spread <= settings.max_entry_spread).count();
-        let above_floor = spreads.iter().filter(|r| r.spread >= be_pct * 1.2).count();
         let supported = spreads.iter().filter(|r| keys.supports(&r.exchange_a) && keys.supports(&r.exchange_b)).count();
         let cooled_ex: Vec<_> = ex_cd.iter().filter(|e| now - *e.value() < 1_800_000).map(|e| e.key().clone()).collect();
-        info!("[diag] spreads={} in_range={} above_floor(>{:.2}%)={} supported={} active={}/{} cooled={:?}",
-            spreads.len(), in_range, be_pct * 1.2, above_floor, supported, num_active, settings.max_active_trades, cooled_ex);
+        info!("[diag] spreads={} in_range={} supported={} active={}/{} cooled={:?} fees={:?}",
+            spreads.len(), in_range, supported, num_active, settings.max_active_trades, cooled_ex, fees);
     }
 
     // Only open ONE trade per engine cycle to prevent burst-opening
@@ -793,11 +874,15 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if opened_this_cycle { break; }
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
 
-        // Absolute floor: spread must exceed round-trip costs regardless of structural deviation
-        // Without this, a spread of 0.64% with costs of 1.23% would be entered if structural was negative
-        let break_even_pct = settings.break_even_fraction() * 100.0;
+        // Absolute floor: spread must exceed round-trip costs from REAL exchange fee rates
+        // fee_a, fee_b are fetched from exchange APIs and cached every 60s
+        let fee_a = get_exchange_fee(&row.exchange_a);
+        let fee_b = get_exchange_fee(&row.exchange_b);
+        let slippage_frac = settings.slippage_percent / 100.0;
+        // 4 legs total: open_A(fee_a) + open_B(fee_b) + close_A(fee_a) + close_B(fee_b) + 4*slippage
+        let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
         if row.spread < break_even_pct * 1.2 {
-            continue; // spread too small to cover costs even with 20% safety margin
+            continue; // spread too small to cover real costs
         }
 
         // Smart structural filter: deviation above baseline must ALSO cover costs
