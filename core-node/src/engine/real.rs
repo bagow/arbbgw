@@ -477,7 +477,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     else { (trade.entry_price_b - c_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) };
         let live_gross_pnl = live_pnl_a + live_pnl_b;
         let fund_cost = funding * trade.volume;
-        let live_net_pnl = live_gross_pnl - trade.commission_cost - trade.slippage_cost - fund_cost;
+        let live_net_pnl = live_gross_pnl - trade.commission_cost - fund_cost;
 
         // PnL for CLOSE TRIGGERS (using bid/ask — pessimistic, for safe execution)
         let exec_pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) }
@@ -485,7 +485,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let exec_pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) }
                     else { (trade.entry_price_b - exit_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) };
         let exec_gross_pnl = exec_pnl_a + exec_pnl_b;
-        let exec_net_pnl = exec_gross_pnl - trade.commission_cost - trade.slippage_cost - fund_cost;
+        let exec_net_pnl = exec_gross_pnl - trade.commission_cost - fund_cost;
         let exec_net_pct = exec_net_pnl / trade.volume * 100.0;
 
         let top_spread = trade.highest_spread.max(current_spread);
