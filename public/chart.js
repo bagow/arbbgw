@@ -289,7 +289,18 @@ async function fetchSnapshot() {
         if (currentProfile) {
             let disabled = [];
             try { disabled = typeof currentProfile.disabled_exchanges === 'string' ? JSON.parse(currentProfile.disabled_exchanges) : (currentProfile.disabled_exchanges || []); } catch(e){}
-            rawData = rawData.filter(r => !disabled.includes(r.exchangeA) && !disabled.includes(r.exchangeB));
+            
+            const minEntrySpread = currentProfile.min_entry_spread || 0.5;
+            const maxStructural = minEntrySpread * 0.3; // matches the core-node 30% check
+
+            rawData = rawData.filter(r => {
+                if (disabled.includes(r.exchangeA) || disabled.includes(r.exchangeB)) return false;
+                
+                // Mute "mirage" spreads just like the backend engine does
+                if (Math.abs(r.structural_spread || 0) >= maxStructural) return false;
+
+                return true;
+            });
         }
         scannerState.snapshot = rawData;
         
