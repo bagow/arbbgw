@@ -1,56 +1,11 @@
-//! core-node settings module — mirrors vps-api trading_profiles table
+//! core-node settings module — loads profiles from vps-api.db
+//!
+//! The canonical TradingSettings struct lives in the `shared` crate.
+//! This module only handles SQLite ↔ struct mapping.
 
-use serde::{Deserialize, Serialize};
+pub use shared::TradingSettings;
+
 use tokio_rusqlite::Connection;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TradingSettings {
-    pub id: String,
-    pub is_active: bool,
-    pub min_entry_spread: f64,
-    pub max_entry_spread: f64,
-    pub trade_volume: f64,
-    pub take_profit_percent: f64,
-    pub trailing_stop_percent: f64,
-    pub max_active_trades: i64,
-    pub commission_rate: f64,
-    pub slippage_percent: f64,
-    pub funding_rate_8h: f64,
-    pub min_volume_millions: f64,
-    pub collector_interval_secs: i64,
-    pub pending_commands: Option<String>,
-    pub disabled_exchanges: Vec<String>,
-}
-
-impl Default for TradingSettings {
-    fn default() -> Self {
-        Self {
-            id: "default".to_string(),
-            is_active: false,
-            min_entry_spread: 0.5,
-            max_entry_spread: 10.0,
-            trade_volume: 100.0,
-            take_profit_percent: 0.2,
-            trailing_stop_percent: 0.3,
-            max_active_trades: 3,
-            commission_rate: 0.05,
-            slippage_percent: 0.05,
-            funding_rate_8h: 0.01,
-            min_volume_millions: 10.0,
-            collector_interval_secs: 5,
-            pending_commands: None,
-            disabled_exchanges: vec![],
-        }
-    }
-}
-
-impl TradingSettings {
-    /// Minimum fraction of trade volume needed to break even on a round-trip.
-    /// Accounts for 4 commission legs (entry A, entry B, exit A, exit B) and slippage.
-    pub fn break_even_fraction(&self) -> f64 {
-        4.0 * (self.commission_rate / 100.0 + self.slippage_percent / 100.0)
-    }
-}
 
 // Explicit SELECT column list — NEVER use SELECT * because column indices
 // depend on the physical schema order on VPS (may differ from code expectations

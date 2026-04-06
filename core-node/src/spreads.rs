@@ -4,6 +4,7 @@
 use crate::state::PriceMap;
 use shared::SpreadRow;
 use dashmap::DashMap;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 static STRUCTURAL_EMA: OnceLock<DashMap<String, (f64, f64)>> = OnceLock::new();
@@ -20,18 +21,29 @@ const BLACKLIST: &[&str] = &[
 
 /// Compute spread opportunities from PriceMap.
 /// Called directly by the engine loop — zero serialization/HTTP overhead.
+///
+/// Snapshots the entire DashMap into plain HashMaps first to minimize
+/// lock hold time and avoid blocking WS collector writes.
 pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
-    let exchanges: Vec<String> = price_map.iter().map(|e| e.key().clone()).collect();
-    let mut rows = Vec::new();
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now_f64 = now_secs as f64;
 
-    for i in 0..exchanges.len() {
-        for j in (i + 1)..exchanges.len() {
-            let name_a = &exchanges[i];
-            let name_b = &exchanges[j];
-            let map_a = match price_map.get(name_a) { Some(m) => m, None => continue };
-            let map_b = match price_map.get(name_b) { Some(m) => m, None => continue };
+    // Snapshot: take a quick read of each exchange shard into owned HashMaps.
+    // This releases the DashMap refs immediately so collectors are never blocked.
+    let snapshot: Vec<(String, HashMap<String, shared::TickerData>)> = price_map
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.value().clone()))
+        .collect();
+
+    let min_v = min_vol_m * 1_000_000.0;
+    let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
+    let mut rows = Vec::with_capacity(512);
+
+    for i in 0..snapshot.len() {
+        for j in (i + 1)..snapshot.len() {
+            let (name_a, map_a) = &snapshot[i];
+            let (name_b, map_b) = &snapshot[j];
 
             for (sym, data_a) in map_a.iter() {
                 let data_b = match map_b.get(sym.as_str()) { Some(d) => d, None => continue };
@@ -44,7 +56,6 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
                 if data_a.bid <= 0.0 || data_a.ask <= 0.0 || data_b.bid <= 0.0 || data_b.ask <= 0.0 { continue; }
                 if data_a.ask > data_a.bid * INTRA_SPREAD_LIMIT || data_b.ask > data_b.bid * INTRA_SPREAD_LIMIT { continue; }
 
-                let min_v = min_vol_m * 1_000_000.0;
                 if data_a.vol <= 0.0 || data_a.vol < min_v || data_b.vol <= 0.0 || data_b.vol < min_v { continue; }
 
                 if data_a.funding_rate != 0.0 && data_b.funding_rate != 0.0 {
@@ -59,10 +70,9 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
                     (b_over_a, format!("{name_b}>{name_a}"))
                 };
 
+                if spread < SPREAD_THRESHOLD || spread > SPREAD_MAX { continue; }
+
                 let ema_key = format!("{}|{}|{}|{}", sym, name_a, name_b, direction);
-                let now_f64 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
-                
-                let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
                 let structural_spread = if let Some(mut entry) = ema_map.get_mut(&ema_key) {
                     let (old_ema, last_updated) = *entry;
                     let dt = (now_f64 - last_updated).max(0.0);
@@ -76,8 +86,6 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
                     spread
                 };
 
-                if spread < SPREAD_THRESHOLD || spread > SPREAD_MAX { continue; }
-
                 rows.push(SpreadRow {
                     pair: sym.clone(), exchange_a: name_a.clone(), exchange_b: name_b.clone(),
                     price_a: data_a.price, price_b: data_b.price, bid_a: data_a.bid, ask_a: data_a.ask, bid_b: data_b.bid, ask_b: data_b.ask,
@@ -90,7 +98,8 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
         }
     }
 
-    rows.sort_by(|a, b| b.spread.partial_cmp(&a.spread).unwrap_or(std::cmp::Ordering::Equal));
+    // Partial sort: we only need top spreads, but full sort is fine for ~1-5k rows
+    rows.sort_unstable_by(|a, b| b.spread.partial_cmp(&a.spread).unwrap_or(std::cmp::Ordering::Equal));
     rows
 }
 

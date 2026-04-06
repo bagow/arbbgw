@@ -6,6 +6,7 @@ mod state;
 mod ema_warmup;
 
 use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc, time::Duration};
+use tokio::sync::RwLock;
 
 use anyhow::{Context, Result};
 use axum::{routing::get, Router};
@@ -127,6 +128,25 @@ async fn main() -> Result<()> {
         let _ = std::fs::write("/tmp/core-node-profiles.txt", &lines);
     }
 
+    // ── Cached settings (refreshed every 2s from DB, not per-tick) ────────────
+    let paper_settings_cache: Arc<RwLock<Vec<settings::TradingSettings>>> = Arc::new(RwLock::new(Vec::new()));
+    let real_settings_cache: Arc<RwLock<Vec<settings::TradingSettings>>> = Arc::new(RwLock::new(Vec::new()));
+
+    // Initial load
+    *paper_settings_cache.write().await = load_all_settings(&profiles_db, "paper").await;
+    *real_settings_cache.write().await = load_all_settings(&profiles_db, "real").await;
+
+    // Background refresher — every 2 seconds
+    settings::spawn_all_settings_refresher(profiles_db.clone(), "paper", paper_settings_cache.clone(), 2);
+    settings::spawn_all_settings_refresher(profiles_db.clone(), "real", real_settings_cache.clone(), 2);
+
+    // ── Exchange keys — loaded once at startup ───────────────────────────────
+    let exchange_keys = Arc::new(engine::real::ExchangeKeys::from_env());
+    info!("Exchange keys loaded: gate={} htx={} kucoin={} binance={} bitget={}",
+        exchange_keys.supports("gate"), exchange_keys.supports("htx"),
+        exchange_keys.supports("kucoin"), exchange_keys.supports("binance"),
+        exchange_keys.supports("bitget"));
+
     // ── Engine loop (wakes on every WS tick) ─────────────────────────────────
     {
         let prices      = prices.clone();
@@ -134,26 +154,28 @@ async fn main() -> Result<()> {
         let http        = http.clone();
         let real_db     = real_db.clone();
         let paper_db    = paper_db.clone();
-        let profiles_db = profiles_db.clone();
+        let paper_cache = paper_settings_cache.clone();
+        let real_cache  = real_settings_cache.clone();
+        let keys        = exchange_keys.clone();
 
         tokio::spawn(async move {
             let mut last_run = std::time::Instant::now();
             loop {
                 signal.notified().await;
                 let elapsed = last_run.elapsed();
-                if elapsed < Duration::from_millis(50) {
-                    tokio::time::sleep(Duration::from_millis(50) - elapsed).await;
+                if elapsed < Duration::from_millis(10) {
+                    tokio::time::sleep(Duration::from_millis(10) - elapsed).await;
                 }
                 last_run = std::time::Instant::now();
 
-                // Load ALL profiles DIRECTLY from database (bypasses any caching bugs)
-                let paper_profiles = settings::load_all_settings(&profiles_db, "paper").await;
-                let real_profiles  = settings::load_all_settings(&profiles_db, "real").await;
+                // Read cached settings (no SQL, just RwLock read)
+                let paper_profiles = paper_cache.read().await.clone();
+                let real_profiles  = real_cache.read().await.clone();
 
-                // Log settings being used (every ~5s = ~100 ticks at 50ms)
+                // Log settings being used (every ~5s = ~500 ticks at 10ms)
                 static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if tick % 20 == 0 {
+                if tick % 500 == 0 {
                     for p in paper_profiles.iter() {
                         info!("[settings] paper id={} active={} vol={} tp={}% min_spread={}",
                             p.id, p.is_active, p.trade_volume, p.take_profit_percent, p.min_entry_spread);
@@ -171,14 +193,15 @@ async fn main() -> Result<()> {
 
                 let spreads = compute_spreads(&prices, min_vol);
                 
-                // Publish snapshot to UI frontend (throttle to 1000ms to avoid db lock overhead)
+                // Publish snapshot to UI frontend (throttle to 1000ms)
+                // Writes to paper_db (server_cache) to avoid locking profiles_db
                 static LAST_SNAP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
                 if now_ms.saturating_sub(LAST_SNAP.load(std::sync::atomic::Ordering::Relaxed)) > 1000 {
                     LAST_SNAP.store(now_ms, std::sync::atomic::Ordering::Relaxed);
                     let snapshot_spreads: Vec<_> = spreads.iter().take(500).cloned().collect();
                     let snapshot_val = serde_json::json!({ "ts": now_ms as i64, "data": snapshot_spreads }).to_string();
-                    let cache_db = profiles_db.clone();
+                    let cache_db = paper_db.clone();
                     tokio::spawn(async move {
                         let _ = cache_db.call(move |conn| {
                             let _ = conn.execute("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);", []);
@@ -199,7 +222,7 @@ async fn main() -> Result<()> {
                 }
                 // Run real engine for each real profile
                 for real_s in real_profiles {
-                    engine::real::run_cycle(spreads.clone(), prices.clone(), real_s, http.clone(), real_db.clone()).await;
+                    engine::real::run_cycle(spreads.clone(), prices.clone(), real_s, http.clone(), real_db.clone(), keys.clone()).await;
                 }
             }
         });
@@ -207,8 +230,9 @@ async fn main() -> Result<()> {
 
     // ── Publish exchange_maps to server_cache every 30s (feeds CEX tab) ──────
     {
-        let prices_snap = prices.clone();
-        let cache_db    = profiles_db.clone();
+        let prices_snap  = prices.clone();
+        let cache_db     = paper_db.clone();  // write to paper-trader.db, not profiles
+        let paper_cache  = paper_settings_cache.clone();
         tokio::spawn(async move {
             // Wait just 5s for collectors to connect, then publish immediately
             // Subsequent updates every 30s
@@ -220,7 +244,7 @@ async fn main() -> Result<()> {
                 } else {
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
-                let paper_debug = settings::load_all_settings(&cache_db, "paper").await;
+                let paper_debug = paper_cache.read().await.clone();
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()

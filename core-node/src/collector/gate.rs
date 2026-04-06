@@ -13,7 +13,7 @@ pub async fn run(prices: PriceMap, signal: UpdateSignal) {
     loop {
         info!("[gate] Connecting...");
         match handler(&prices, &signal).await {
-            Ok(_)  => warn!("[gate] WS closed, reconnecting..."),
+            Ok(_)  => { warn!("[gate] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
             Err(e) => error!("[gate] Error: {}. Reconnecting in {:?}", e, backoff),
         }
         tokio::time::sleep(backoff).await;

@@ -18,8 +18,7 @@ use uuid::Uuid;
 use dashmap::DashMap;
 use std::sync::OnceLock;
 
-use crate::settings::TradingSettings;
-use shared::SpreadRow;
+use shared::{TradingSettings, SpreadRow};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -407,11 +406,10 @@ async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
 // ─── Engine cycle ─────────────────────────────────────────────────────────────
 
 /// Called on every WS tick. Manages real trades in the DB.
-pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection) {
+pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection, keys: Arc<ExchangeKeys>) {
     if !settings.is_active { return; }
 
     let dry_run = false;
-    let keys = Arc::new(ExchangeKeys::from_env());
 
     let trades = load_open_trades(&db, &settings.id).await;
     let num_active = trades.len() as i64;
@@ -563,16 +561,15 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let real_pnb = if is_a_higher { (real_exit_b - entry_b) * (vol / entry_b) } else { (entry_b - real_exit_b) * (vol / entry_b) };
                 let real_gp = real_pna + real_pnb;
                 
-                let mut slip_cost_exit_a = 0.0;
-                if real_exit_a > 0.0 {
-                    if is_a_higher { slip_cost_exit_a = (real_exit_a - exit_price_a) * (vol / entry_a); }
-                    else           { slip_cost_exit_a = (exit_price_a - real_exit_a) * (vol / entry_a); }
-                }
-                let mut slip_cost_exit_b = 0.0;
-                if real_exit_b > 0.0 {
-                    if !is_a_higher { slip_cost_exit_b = (real_exit_b - exit_price_b) * (vol / entry_b); }
-                    else            { slip_cost_exit_b = (exit_price_b - real_exit_b) * (vol / entry_b); }
-                }
+                // Exit slippage cost — clamped to >= 0 (price improvement is not cost)
+                let slip_cost_exit_a = if real_exit_a > 0.0 {
+                    if is_a_higher { ((real_exit_a - exit_price_a) * (vol / entry_a)).max(0.0) }
+                    else           { ((exit_price_a - real_exit_a) * (vol / entry_a)).max(0.0) }
+                } else { 0.0 };
+                let slip_cost_exit_b = if real_exit_b > 0.0 {
+                    if !is_a_higher { ((real_exit_b - exit_price_b) * (vol / entry_b)).max(0.0) }
+                    else            { ((exit_price_b - real_exit_b) * (vol / entry_b)).max(0.0) }
+                } else { 0.0 };
                 let exit_slip = slip_cost_exit_a + slip_cost_exit_b;
 
                 // Fallback: if exchange didn't report fees, estimate from commission_rate (2 exit legs)
@@ -936,16 +933,16 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             vol * 2.0 * (settings.commission_rate / 100.0)
         };
 
-        let mut slip_cost_a = 0.0;
-        if fill_a > 0.0 {
-            if is_a_higher { slip_cost_a = (entry_a - fill_a) * (vol / entry_a); }
-            else           { slip_cost_a = (fill_a - entry_a) * (vol / entry_a); }
-        }
-        let mut slip_cost_b = 0.0;
-        if fill_b > 0.0 {
-            if !is_a_higher { slip_cost_b = (entry_b - fill_b) * (vol / entry_b); }
-            else            { slip_cost_b = (fill_b - entry_b) * (vol / entry_b); }
-        }
+        // Slippage cost: difference between expected and actual fill price.
+        // Clamped to >= 0 — price improvement is not a "cost".
+        let slip_cost_a = if fill_a > 0.0 {
+            if is_a_higher { ((entry_a - fill_a) * (vol / entry_a)).max(0.0) }
+            else           { ((fill_a - entry_a) * (vol / entry_a)).max(0.0) }
+        } else { 0.0 };
+        let slip_cost_b = if fill_b > 0.0 {
+            if !is_a_higher { ((entry_b - fill_b) * (vol / entry_b)).max(0.0) }
+            else            { ((fill_b - entry_b) * (vol / entry_b)).max(0.0) }
+        } else { 0.0 };
         let entry_slip = slip_cost_a + slip_cost_b;
 
         let entry_time = now_ms();
@@ -1010,6 +1007,32 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 async fn fetch_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, order_id: &str) -> Result<(f64, f64)> {
     if order_id.starts_with("dry_") { return Ok((0.0, 0.0)); }
     match exchange {
+        "binance" => {
+            let ts = now_ms();
+            let qs = format!("symbol={}&orderId={}&timestamp={}", pair, order_id, ts);
+            let sig = binance_sign(&keys.binance_secret, &qs);
+            let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
+            let resp = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
+                .timeout(Duration::from_secs(10)).send().await?;
+            let v: Value = resp.json().await?;
+            // avgPrice = weighted average fill price; commission in quote asset
+            let price = v["avgPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let fee = v["commission"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            Ok((price, fee))
+        }
+        "bitget" => {
+            let ts = now_ms().to_string();
+            let path = format!("/api/v2/mix/order/detail?symbol={}&orderId={}&productType=USDT-FUTURES", pair, order_id);
+            let sig = bitget_sign(&keys.bitget_secret, &ts, "GET", &path, "");
+            let resp = http.get(format!("https://api.bitget.com{}", path))
+                .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig)
+                .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
+                .timeout(Duration::from_secs(10)).send().await?;
+            let v: Value = resp.json().await?;
+            let price = v["data"]["priceAvg"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let fee = v["data"]["fee"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            Ok((price, fee.abs()))
+        }
         "gate" => {
             let path = format!("/api/v4/futures/usdt/orders/{}", order_id);
             let resp = http.get(format!("https://api.gateio.ws{}", path)).headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, "")).timeout(Duration::from_secs(10)).send().await?;
@@ -1113,14 +1136,18 @@ async fn get_funding_rate(http: &Client, exchange: &str, pair: &str) -> (f64, i6
 async fn fetch_funding_rate_api(http: &Client, exchange: &str, pair: &str) -> Option<(f64, i64)> {
     match exchange {
         "gate" => {
-            let url = format!("https://api.gateio.ws/api/v4/futures/usdt/contracts/{}", pair);
+            // Gate.io contract names use underscore: BTCUSDT → BTC_USDT
+            let contract = pair.replace("USDT", "_USDT");
+            let url = format!("https://api.gateio.ws/api/v4/futures/usdt/contracts/{}", contract);
             let resp = http.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
             let rate = resp["funding_rate"].as_str()?.parse::<f64>().ok()?;
             let next = resp["funding_next_apply"].as_f64()? as i64 * 1000; // seconds→ms
             Some((rate, next))
         }
         "kucoin" => {
-            let url = format!("https://api-futures.kucoin.com/api/v1/funding-rate/{}/current", pair);
+            // KuCoin futures symbol: BTCUSDT → BTCUSDTM
+            let sym = format!("{}M", pair);
+            let url = format!("https://api-futures.kucoin.com/api/v1/funding-rate/{}/current", sym);
             let resp = http.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
             let rate = resp["data"]["value"].as_f64()?;
             let next = resp["data"]["timePoint"].as_i64()? + 8 * 3600 * 1000; // next = current + 8h

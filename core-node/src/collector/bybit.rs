@@ -14,7 +14,7 @@ pub async fn run(prices: PriceMap, signal: UpdateSignal) {
     loop {
         info!("[bybit] Connecting...");
         match handler(&prices, &signal).await {
-            Ok(_)  => warn!("[bybit] WS closed, reconnecting..."),
+            Ok(_)  => { warn!("[bybit] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
             Err(e) => error!("[bybit] Error: {}. Reconnecting in {:?}", e, backoff),
         }
         tokio::time::sleep(backoff).await;

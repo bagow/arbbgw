@@ -79,6 +79,48 @@ async fn fetch_htx_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
     }).collect()
 }
 
+// ─── Binance: fetch 1-min klines ─────────────────────────────────────────────
+
+async fn fetch_binance_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
+    let from = now_secs() - LOOKBACK_SECS;
+    let url = format!(
+        "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval=1m&startTime={}&limit=1440",
+        pair, from * 1000
+    );
+    let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
+        Ok(r) => match r.json().await { Ok(j) => j, Err(_) => return vec![] },
+        Err(_) => return vec![],
+    };
+    let arr = match v.as_array() { Some(a) => a, None => return vec![] };
+    arr.iter().filter_map(|c| {
+        // Binance klines: [openTime, open, high, low, close, vol, closeTime, ...]
+        let ts = c[0].as_f64()? / 1000.0; // ms → secs
+        let close = c[4].as_str().and_then(|s| s.parse().ok()).or_else(|| c[4].as_f64())?;
+        Some((ts, close))
+    }).collect()
+}
+
+// ─── Bybit: fetch 1-min klines ───────────────────────────────────────────────
+
+async fn fetch_bybit_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
+    let from = now_secs() - LOOKBACK_SECS;
+    let url = format!(
+        "https://api.bybit.com/v5/market/kline?category=linear&symbol={}&interval=1&start={}&limit=1000",
+        pair, from * 1000
+    );
+    let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
+        Ok(r) => match r.json().await { Ok(j) => j, Err(_) => return vec![] },
+        Err(_) => return vec![],
+    };
+    let arr = match v["result"]["list"].as_array() { Some(a) => a, None => return vec![] };
+    arr.iter().filter_map(|c| {
+        // Bybit klines: [startTime, open, high, low, close, vol, turnover]
+        let ts = c[0].as_str().and_then(|s| s.parse::<f64>().ok())? / 1000.0;
+        let close = c[4].as_str().and_then(|s| s.parse().ok())?;
+        Some((ts, close))
+    }).collect()
+}
+
 // ─── Main warmup function — called from main.rs after WS collectors start ────
 
 pub async fn run(http: Client, prices: PriceMap) {
@@ -152,6 +194,8 @@ async fn fetch_candles_for(http: &Client, exchange: &str, pair: &str) -> Vec<(f6
         "gate"    => fetch_gate_candles(http, pair).await,
         "kucoin"  => fetch_kucoin_candles(http, pair).await,
         "htx"     => fetch_htx_candles(http, pair).await,
+        "binance" => fetch_binance_candles(http, pair).await,
+        "bybit"   => fetch_bybit_candles(http, pair).await,
         _         => vec![],
     }
 }

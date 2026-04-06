@@ -114,14 +114,10 @@ impl Default for TradingSettings {
 
 impl TradingSettings {
     /// Minimum spread (as fraction, not %) needed to cover all round-trip costs.
-    /// Formula: 4 × commission + 2 × slippage (entry legs only).
+    /// Formula: 4 × (commission + slippage) — both occur on all 4 legs
+    /// (entry A, entry B, exit A, exit B).
     pub fn break_even_fraction(&self) -> f64 {
-        4.0 * (self.commission_rate / 100.0) + 2.0 * (self.slippage_percent / 100.0)
-    }
-
-    /// Returns true if the spread (in %) clears break-even plus a 50% safety margin.
-    pub fn spread_is_profitable(&self, spread_pct: f64) -> bool {
-        spread_pct / 100.0 >= self.break_even_fraction() * 1.5
+        4.0 * (self.commission_rate / 100.0 + self.slippage_percent / 100.0)
     }
 }
 
