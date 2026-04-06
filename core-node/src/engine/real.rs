@@ -30,6 +30,8 @@ pub struct ExchangeKeys {
     pub gate_key:    String, pub gate_secret:    String,
     pub htx_key:     String, pub htx_secret:     String,
     pub kucoin_key:  String, pub kucoin_secret:  String, pub kucoin_passphrase: String,
+    pub binance_key: String, pub binance_secret: String,
+    pub bitget_key:  String, pub bitget_secret:  String, pub bitget_passphrase: String,
 }
 
 impl ExchangeKeys {
@@ -42,13 +44,20 @@ impl ExchangeKeys {
             kucoin_key:         std::env::var("KUCOIN_KEY").unwrap_or_default(),
             kucoin_secret:      std::env::var("KUCOIN_SECRET").unwrap_or_default(),
             kucoin_passphrase:  std::env::var("KUCOIN_PASSPHRASE").unwrap_or_default(),
+            binance_key:        std::env::var("BINANCE_KEY").unwrap_or_default(),
+            binance_secret:     std::env::var("BINANCE_SECRET").unwrap_or_default(),
+            bitget_key:         std::env::var("BITGET_KEY").unwrap_or_default(),
+            bitget_secret:      std::env::var("BITGET_SECRET").unwrap_or_default(),
+            bitget_passphrase:  std::env::var("BITGET_PASSPHRASE").unwrap_or_default(),
         }
     }
     pub fn supports(&self, ex: &str) -> bool {
         match ex {
-            "gate"   => !self.gate_key.is_empty(),
-            "htx"    => !self.htx_key.is_empty(),
-            "kucoin" => !self.kucoin_key.is_empty(),
+            "gate"    => !self.gate_key.is_empty(),
+            "htx"     => !self.htx_key.is_empty(),
+            "kucoin"  => !self.kucoin_key.is_empty(),
+            "binance" => !self.binance_key.is_empty(),
+            "bitget"  => !self.bitget_key.is_empty(),
             _ => false,
         }
     }
@@ -206,12 +215,61 @@ fn gate_sign(key: &str, secret: &str, method: &str, path: &str, body: &str) -> r
     h.insert("Timestamp", ts.parse().unwrap()); h.insert("Content-Type", "application/json".parse().unwrap());
     h
 }
+fn binance_sign(secret: &str, qs: &str) -> String {
+    hmac_sha256_hex(secret.as_bytes(), qs)
+}
+fn bitget_sign(secret: &str, ts: &str, method: &str, path: &str, body: &str) -> String {
+    hmac_sha256_b64(secret.as_bytes(), &format!("{}{}{}{}", ts, method, path, body))
+}
 
 // ─── Order placement ──────────────────────────────────────────────────────────
 
 async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, contracts: i64, dry_run: bool, is_reduce_only: bool) -> Result<String> {
     let side = if is_short { "sell" } else { "buy" };
     match exchange {
+        "binance" => {
+            let ts = now_ms();
+            let path = "/fapi/v1/order";
+            let mut qs = format!("symbol={}&side={}&type=MARKET&quantity={}&timestamp={}", pair, side.to_uppercase(), contracts, ts);
+            if is_reduce_only { qs.push_str("&reduceOnly=true"); }
+            let sig = binance_sign(&keys.binance_secret, &qs);
+            let full_url = format!("https://fapi.binance.com{}?{}&signature={}", path, qs, sig);
+            
+            if dry_run { info!("[DRY] binance order {} size={}", pair, contracts); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            let resp = http.post(full_url).header("X-MBX-APIKEY", &keys.binance_key)
+                .timeout(Duration::from_secs(10)).send().await?;
+            let status = resp.status();
+            let v: Value = resp.json().await?;
+            if !status.is_success() { return Err(anyhow::anyhow!("Binance error: {}", v)); }
+            Ok(v["orderId"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "unknown".to_string()))
+        }
+        "bitget" => {
+            let ts = now_ms().to_string();
+            let path = "/api/v2/mix/order/place-order";
+            let trade_side = if is_reduce_only { "close" } else { "open" };
+            let body = json!({
+                "symbol": pair,
+                "productType": "USDT-FUMAX",
+                "marginMode": "crossed",
+                "marginCoin": "USDT",
+                "size": contracts.to_string(), // Bitget often requires string values
+                "side": side,
+                "tradeSide": trade_side,
+                "orderType": "market"
+            });
+            let body_str = body.to_string();
+            let sig = bitget_sign(&keys.bitget_secret, &ts, "POST", path, &body_str);
+            if dry_run { info!("[DRY] bitget order {} size={}", pair, contracts); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            let resp = http.post(format!("https://api.bitget.com{}", path))
+                .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig)
+                .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
+                .header("Content-Type", "application/json")
+                .body(body_str).timeout(Duration::from_secs(10)).send().await?;
+            let status = resp.status();
+            let v: Value = resp.json().await?;
+            if !status.is_success() || v["code"].as_str() != Some("00000") { return Err(anyhow::anyhow!("Bitget error: {}", v)); }
+            Ok(v["data"]["orderId"].as_str().unwrap_or_else(|| "unknown").to_string())
+        }
         "gate" => {
             let contract = pair.replace("USDT", "_USDT");
             let size = if is_short { -contracts } else { contracts };
