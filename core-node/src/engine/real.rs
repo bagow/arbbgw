@@ -625,13 +625,15 @@ async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
 
 /// Called on every WS tick. Manages real trades in the DB.
 pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection, keys: Arc<ExchangeKeys>) {
-    if !settings.is_active { return; }
-
     let dry_run = false;
 
     let trades = load_open_trades(&db, &settings.id).await;
     let num_active = trades.len() as i64;
     let funding = settings.funding_rate_8h / 100.0;
+
+    // NOTE: We process closes ALWAYS (even when is_active=false)
+    // so that MANUAL_CLOSE from the UI works even when the bot is stopped.
+    // Only new trade entries are gated by is_active.
 
     // ── Close qualifying trades ────────────────────────────────────────────────
     let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64)> = Vec::new();
@@ -845,6 +847,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     // ── Open new real trades ──────────────────────────────────────────────────
     // KEY PRINCIPLE: We do NOT write to DB until BOTH legs are confirmed filled.
     // This eliminates phantom trades, $0 PnL records, and immediate open/close chaos.
+    if !settings.is_active { return; } // only block NEW entries, not closes above
     if num_active >= settings.max_active_trades { return; }
     let open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
 

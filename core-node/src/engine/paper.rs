@@ -35,7 +35,6 @@ fn now_ms() -> i64 {
 /// Called by engine loop on every WS tick for the paper profile.
 /// Reads DB, closes qualifying trades, opens new ones.
 pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, _http: reqwest::Client, db: Connection) {
-    if !settings.is_active { return; }
     let profile_id = settings.id.clone();
 
     let trades = load_open_trades(&db, &profile_id).await;
@@ -160,6 +159,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     }
 
     // ── Open new paper trades ─────────────────────────────────────────────────
+    if !settings.is_active { return; } // only block NEW entries, not closes above
     if num_active >= settings.max_active_trades { return; }
 
     let open_pairs: std::collections::HashSet<String> = trades.iter()
