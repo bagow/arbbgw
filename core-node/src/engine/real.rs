@@ -470,26 +470,34 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let contracts_a = trade.contracts_a as f64;
         let contracts_b = trade.contracts_b as f64;
 
-        // PnL via volume-ratio (universal across all exchanges)
-        let pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) }
-                    else { (exit_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) };
-        let pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) }
-                    else { (trade.entry_price_b - exit_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) };
-        let gross_pnl = pnl_a + pnl_b;
+        // PnL for DISPLAY (using mark/mid prices — matches exchange PnL)
+        let live_pnl_a = if is_a_higher { (trade.entry_price_a - c_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) }
+                    else { (c_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) };
+        let live_pnl_b = if is_a_higher { (c_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) }
+                    else { (trade.entry_price_b - c_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) };
+        let live_gross_pnl = live_pnl_a + live_pnl_b;
         let fund_cost = funding * trade.volume;
-        let net_pnl   = gross_pnl - fund_cost;
-        let net_pct   = net_pnl / trade.volume * 100.0;
+        let live_net_pnl = live_gross_pnl - trade.commission_cost - trade.slippage_cost - fund_cost;
+
+        // PnL for CLOSE TRIGGERS (using bid/ask — pessimistic, for safe execution)
+        let exec_pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) }
+                    else { (exit_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) };
+        let exec_pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) }
+                    else { (trade.entry_price_b - exit_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) };
+        let exec_gross_pnl = exec_pnl_a + exec_pnl_b;
+        let exec_net_pnl = exec_gross_pnl - trade.commission_cost - trade.slippage_cost - fund_cost;
+        let exec_net_pct = exec_net_pnl / trade.volume * 100.0;
 
         let top_spread = trade.highest_spread.max(current_spread);
         let stop_limit = top_spread - settings.trailing_stop_percent;
 
-        let triggered_tp   = net_pct >= settings.take_profit_percent;
+        let triggered_tp   = exec_net_pct >= settings.take_profit_percent;
         let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
-        let zero_spread    = exit_spread <= 0.0 && net_pnl >= 0.0;
+        let zero_spread    = exit_spread <= 0.0 && exec_net_pnl >= 0.0;
 
         if manual_close || triggered_tp || triggered_stop || zero_spread {
             let reason = if manual_close { "MANUAL" } else if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
-            info!("[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4} norm={:.4}", trade.id, trade.pair, reason, net_pct, exit_spread,
+            info!("[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4} norm={:.4}", trade.id, trade.pair, reason, exec_net_pct, exit_spread,
                 spreads.iter().find(|s| s.pair == trade.pair && s.direction == trade.direction).map(|s| s.structural_spread).unwrap_or(0.0));
 
             let exa = trade.exchange_a.clone(); let exb = trade.exchange_b.clone(); let pair = trade.pair.clone();
@@ -513,7 +521,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let _ = db_c.call(move |conn| {
                     conn.execute(
                         "UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=?,funding_cost=? WHERE id=?",
-                        params![exit_price_a, exit_price_b, exit_spread, now_ms(), net_pnl, gross_pnl, pnl_a, pnl_b, gross_pnl, r, fund_cost, id]
+                        params![exit_price_a, exit_price_b, exit_spread, now_ms(), exec_net_pnl, exec_gross_pnl, exec_pnl_a, exec_pnl_b, exec_gross_pnl, r, fund_cost, id]
                     )?;
                     Ok(())
                 }).await;
@@ -583,7 +591,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 }).await;
             });
         } else {
-            live_updates.push((trade.id, c_price_a, c_price_b, current_spread, net_pnl));
+            live_updates.push((trade.id, c_price_a, c_price_b, current_spread, live_net_pnl));
             if top_spread > trade.highest_spread {
                 let id = trade.id;
                 let _ = db.call(move |conn| {
@@ -962,12 +970,13 @@ struct Trade {
     volume: f64, entry_price_a: f64, entry_price_b: f64, entry_spread: f64,
     entry_time: i64, highest_spread: f64, pnl_a: f64, pnl_b: f64,
     close_reason: Option<String>, contracts_a: i64, contracts_b: i64,
+    commission_cost: f64, slippage_cost: f64,
 }
 
 async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
     let p_id_clone = p_id.to_string();
     db.call(move |conn| {
-        let mut stmt = conn.prepare("SELECT id, pair, exchange_a, exchange_b, direction, volume, entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, pnl_a, pnl_b, close_reason, contracts_a, contracts_b FROM trades WHERE status='OPEN' AND profile_id=?")?;
+        let mut stmt = conn.prepare("SELECT id, pair, exchange_a, exchange_b, direction, volume, entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, pnl_a, pnl_b, close_reason, contracts_a, contracts_b, commission_cost, slippage_cost FROM trades WHERE status='OPEN' AND profile_id=?")?;
         let trades = stmt.query_map([p_id_clone], |row| Ok(Trade {
             id: row.get(0)?, pair: row.get(1)?, exchange_a: row.get(2)?, exchange_b: row.get(3)?,
             direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?,
@@ -975,6 +984,8 @@ async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
             pnl_a: row.get(11)?, pnl_b: row.get(12)?, close_reason: row.get(13)?,
             contracts_a: row.get::<_, Option<i64>>(14)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(6)?.max(1e-12)).round() as i64),
             contracts_b: row.get::<_, Option<i64>>(15)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(7)?.max(1e-12)).round() as i64),
+            commission_cost: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+            slippage_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
         }))?.filter_map(|t| t.ok()).collect::<Vec<_>>();
         Ok(trades)
     }).await.unwrap_or_default()
