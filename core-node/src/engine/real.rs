@@ -704,6 +704,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         info!("[real] Placing orders: {} A={} c={} vol=${:.3} | B={} c={} vol=${:.3} spread={:.4}% (Norm: {:.4}%, Dev: {:.4}%)",
             row.pair, row.exchange_a, contracts_a, actual_vol_a, row.exchange_b, contracts_b, actual_vol_b, row.spread, row.structural_spread, deviation);
 
+        // Reserve this pair BEFORE placing orders — prevents retrying on failure
+        open_pairs.insert(row.pair.clone());
+        active_count += 1;
+
         // Place both legs in parallel for speed
         let exa = row.exchange_a.clone(); let exb = row.exchange_b.clone(); let pair = row.pair.clone();
         let (oa_result, ob_result) = tokio::join!(
@@ -816,9 +820,6 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         match res {
             Ok(trade_id) => {
-                // Track this pair so we don't open it again in the same cycle
-                open_pairs.insert(row.pair.clone());
-                active_count += 1;
                 if status == "FAILED_ASYMMETRIC" {
                     let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
                     let (exa_c, exb_c, pair_c) = (row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone());
