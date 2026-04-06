@@ -740,28 +740,68 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     error!("[real] Exchange {} cooled down for 10 min", exa);
                 }
                 pair_cd.insert(pair.clone(), now);
-                // Emergency close B if it succeeded
-                if let Ok(_) = &ob_result {
-                    let (hc, kc, ec, pc) = (http.clone(), Arc::clone(&keys), exb.clone(), pair.clone());
-                    tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        let _ = close_order(&hc, &kc, &ec, &pc, !is_a_higher, contracts_b, false).await;
-                    });
-                }
-                // Record failed attempt in DB for history visibility
-                // LEG_A failed. If LEG_B succeeded, we emergency-closed it → commission for B open+close
-                let b_opened = ob_result.is_ok();
-                let est_comm = if b_opened { actual_vol_b * 2.0 * (settings.commission_rate / 100.0) } else { 0.0 };
-                let est_pnl = -est_comm; // lost the round-trip commission
                 let reason = format!("LEG_A_FAILED: {}", &err_str[..err_str.len().min(120)]);
-                let db_c = db.clone();
-                let (p, ea, eb, d, sp, pid) = (pair.clone(), exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
-                let entry_time = now_ms();
+                let b_opened = ob_result.is_ok();
+                let oid_b_opt = ob_result.ok();
+                // Merge emergency close + DB insert into one spawn for real data
+                let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
+                let (ec, pc) = (exb.clone(), pair.clone());
+                let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
+                let comm_rate = settings.commission_rate;
                 tokio::spawn(async move {
+                    if !b_opened {
+                        // Both legs failed — no position opened, just record it
+                        let _ = db_c.call(move |conn| {
+                            conn.execute(
+                                "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                params![pc, ea_s, eb_s, d, 0.0f64, 0.0f64, 0.0f64, sp, now_ms(), now_ms(), sp, "CLOSED", 0.0f64, 0.0f64, pid, 0.0f64, 0.0f64, 0.0f64, reason, 0.0f64, 0.0f64]
+                            )?;
+                            Ok(())
+                        }).await;
+                        return;
+                    }
+                    // B opened — fetch entry fill, emergency close, fetch close fill
+                    let oid_b_ref = oid_b_opt.unwrap();
+                    let mut entry_fill = entry_b;
+                    let mut total_fee = 0.0f64;
+                    for _ in 0..10 {
+                        if let Ok((p, f)) = fetch_order(&hc, &kc, &ec, &pc, &oid_b_ref).await {
+                            if p > 0.0 { entry_fill = p; total_fee += f.abs(); break; }
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let mut close_oid = None;
+                    for attempt in 1u32..=5 {
+                        match close_order(&hc, &kc, &ec, &pc, !is_a_higher, contracts_b, false).await {
+                            Ok(id) => { error!("🛡️ Emergency close B ok: {}", id); close_oid = Some(id); break; }
+                            Err(err) => { let w = 200 * 2u64.pow(attempt-1); tokio::time::sleep(Duration::from_millis(w)).await; error!("Emergency close B {}/5: {}", attempt, err); }
+                        }
+                    }
+                    let mut close_fill = entry_fill;
+                    if let Some(ref coid) = close_oid {
+                        for _ in 0..10 {
+                            if let Ok((p, f)) = fetch_order(&hc, &kc, &ec, &pc, coid).await {
+                                if p > 0.0 { close_fill = p; total_fee += f.abs(); break; }
+                            }
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    }
+                    let qty = actual_vol_b / entry_fill.max(1e-12);
+                    let gross_pnl = if !is_a_higher {
+                        (entry_fill - close_fill) * qty  // B was short
+                    } else {
+                        (close_fill - entry_fill) * qty  // B was long
+                    };
+                    if total_fee < 1e-9 { total_fee = actual_vol_b * 2.0 * (comm_rate / 100.0); }
+                    let net_pnl = gross_pnl - total_fee;
+                    let entry_time = now_ms();
+                    error!("[real] LEG_A_FAILED {} real PnL: entry={:.6} close={:.6} gross={:.4} fee={:.4} net={:.4}",
+                        pc, entry_fill, close_fill, gross_pnl, total_fee, net_pnl);
                     let _ = db_c.call(move |conn| {
                         conn.execute(
-                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            params![p, ea, eb, d, 0.0f64, 0.0f64, 0.0f64, sp, entry_time, entry_time, sp, "CLOSED", 0.0f64, 0.0f64, pid, est_comm, 0.0f64, 0.0f64, reason, est_pnl, 0.0f64]
+                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl,exit_price_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            params![pc, ea_s, eb_s, d, actual_vol_b, 0.0f64, entry_fill, sp, entry_time, entry_time, sp, "CLOSED", 0.0f64, gross_pnl, pid, total_fee, 0.0f64, 0.0f64, reason, net_pnl, gross_pnl, close_fill]
                         )?;
                         Ok(())
                     }).await;
@@ -779,27 +819,63 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     error!("[real] Exchange {} cooled down for 10 min", exb);
                 }
                 pair_cd.insert(pair.clone(), now);
-                let (hc, kc, ec, pc) = (http.clone(), Arc::clone(&keys), exa.clone(), pair.clone());
+                let reason = format!("LEG_B_FAILED: {}", &err_str[..err_str.len().min(120)]);
+                let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
+                let (ec, pc) = (exa.clone(), pair.clone());
+                let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
+                let oid_a_c = oid_a.clone();
+                let comm_rate = settings.commission_rate;
                 tokio::spawn(async move {
+                    // 1. Fetch real entry fill price + fee
+                    let mut entry_fill = entry_a;
+                    let mut total_fee = 0.0f64;
+                    for _ in 0..10 {
+                        if let Ok((p, f)) = fetch_order(&hc, &kc, &ec, &pc, &oid_a_c).await {
+                            if p > 0.0 { entry_fill = p; total_fee += f.abs(); break; }
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+
+                    // 2. Emergency close LEG_A
+                    let mut close_oid = None;
                     for attempt in 1u32..=5 {
                         match close_order(&hc, &kc, &ec, &pc, is_a_higher, contracts_a, false).await {
-                            Ok(id) => { error!("🛡️ Emergency close A ok: {}", id); break; }
+                            Ok(id) => { error!("🛡️ Emergency close A ok: {}", id); close_oid = Some(id); break; }
                             Err(err) => { let w = 200 * 2u64.pow(attempt-1); tokio::time::sleep(Duration::from_millis(w)).await; error!("Emergency close A {}/5: {}", attempt, err); }
                         }
                     }
-                });
-                // Record failed attempt in DB — LEG_A was opened and emergency closed → commission for A open+close
-                let est_comm = actual_vol_a * 2.0 * (settings.commission_rate / 100.0);
-                let est_pnl = -est_comm;
-                let reason = format!("LEG_B_FAILED: {}", &err_str[..err_str.len().min(120)]);
-                let db_c = db.clone();
-                let (p, ea, eb, d, sp, pid) = (pair.clone(), exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
-                let entry_time = now_ms();
-                tokio::spawn(async move {
+
+                    // 3. Fetch real close fill price + fee
+                    let mut close_fill = entry_fill;
+                    if let Some(ref coid) = close_oid {
+                        for _ in 0..10 {
+                            if let Ok((p, f)) = fetch_order(&hc, &kc, &ec, &pc, coid).await {
+                                if p > 0.0 { close_fill = p; total_fee += f.abs(); break; }
+                            }
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    }
+
+                    // 4. Calculate real PnL from open→close price movement
+                    let qty = actual_vol_a / entry_fill.max(1e-12);
+                    let gross_pnl = if is_a_higher {
+                        (entry_fill - close_fill) * qty  // short: profit if price dropped
+                    } else {
+                        (close_fill - entry_fill) * qty  // long: profit if price rose
+                    };
+                    // Fallback commission if exchange didn't report fees
+                    if total_fee < 1e-9 { total_fee = actual_vol_a * 2.0 * (comm_rate / 100.0); }
+                    let net_pnl = gross_pnl - total_fee;
+                    let entry_time = now_ms();
+
+                    error!("[real] LEG_B_FAILED {} real PnL: entry={:.6} close={:.6} gross={:.4} fee={:.4} net={:.4}",
+                        pc, entry_fill, close_fill, gross_pnl, total_fee, net_pnl);
+
+                    // 5. Write to DB with real numbers
                     let _ = db_c.call(move |conn| {
                         conn.execute(
-                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            params![p, ea, eb, d, actual_vol_a, entry_a, 0.0f64, sp, entry_time, entry_time, sp, "CLOSED", 0.0f64, 0.0f64, pid, est_comm, 0.0f64, 0.0f64, reason, est_pnl, 0.0f64]
+                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl,exit_price_a) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            params![pc, ea_s, eb_s, d, actual_vol_a, entry_fill, 0.0f64, sp, entry_time, entry_time, sp, "CLOSED", gross_pnl, 0.0f64, pid, total_fee, 0.0f64, 0.0f64, reason, net_pnl, gross_pnl, close_fill]
                         )?;
                         Ok(())
                     }).await;
