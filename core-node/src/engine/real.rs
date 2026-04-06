@@ -332,14 +332,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let manual_close   = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
         let triggered_tp   = net_pct >= settings.take_profit_percent;
         let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
-        
-        // Stat-Arb Mean Reversion logic
-        let structural_norm = spreads.iter().find(|s| s.pair == trade.pair && s.direction == trade.direction).map(|s| s.structural_spread).unwrap_or(0.0);
-        let mean_reverted   = exit_spread <= structural_norm && net_pnl >= 0.0;
+        let zero_spread    = exit_spread <= 0.0 && net_pnl >= 0.0;
 
-        if manual_close || triggered_tp || triggered_stop || mean_reverted {
-            let reason = if manual_close { "MANUAL" } else if triggered_tp { "TP" } else if mean_reverted { "MEAN_REVERSION" } else { "STOP" };
-            info!("[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4}", trade.id, trade.pair, reason, net_pct, exit_spread);
+        if manual_close || triggered_tp || triggered_stop || zero_spread {
+            let reason = if manual_close { "MANUAL" } else if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
+            info!("[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4} norm={:.4}", trade.id, trade.pair, reason, net_pct, exit_spread,
+                spreads.iter().find(|s| s.pair == trade.pair && s.direction == trade.direction).map(|s| s.structural_spread).unwrap_or(0.0));
 
             let exa = trade.exchange_a.clone(); let exb = trade.exchange_b.clone(); let pair = trade.pair.clone();
             let c_a = trade.contracts_a; let c_b = trade.contracts_b;
@@ -466,7 +464,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
     for row in spreads.iter().take(500) {
         let deviation = row.spread - row.structural_spread;
-        if deviation < settings.min_entry_spread || deviation > settings.max_entry_spread { continue; }
+        // Entry based on ABSOLUTE spread (original logic), log structural norm for monitoring
+        if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
         if open_pairs.contains(&row.pair) { continue; }
         if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) { continue; }
         if settings.disabled_exchanges.contains(&row.exchange_a) || settings.disabled_exchanges.contains(&row.exchange_b) { continue; }
