@@ -749,6 +749,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     });
                 }
                 // Record failed attempt in DB for history visibility
+                // LEG_A failed. If LEG_B succeeded, we emergency-closed it → commission for B open+close
+                let b_opened = ob_result.is_ok();
+                let est_comm = if b_opened { actual_vol_b * 2.0 * (settings.commission_rate / 100.0) } else { 0.0 };
+                let est_pnl = -est_comm; // lost the round-trip commission
                 let reason = format!("LEG_A_FAILED: {}", &err_str[..err_str.len().min(120)]);
                 let db_c = db.clone();
                 let (p, ea, eb, d, sp, pid) = (pair.clone(), exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
@@ -756,8 +760,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 tokio::spawn(async move {
                     let _ = db_c.call(move |conn| {
                         conn.execute(
-                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            params![p, ea, eb, d, 0.0f64, 0.0f64, 0.0f64, sp, entry_time, sp, "CLOSED", 0.0f64, 0.0f64, pid, 0.0f64, 0.0f64, 0.0f64, reason, 0.0f64, 0.0f64]
+                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            params![p, ea, eb, d, 0.0f64, 0.0f64, 0.0f64, sp, entry_time, entry_time, sp, "CLOSED", 0.0f64, 0.0f64, pid, est_comm, 0.0f64, 0.0f64, reason, est_pnl, 0.0f64]
                         )?;
                         Ok(())
                     }).await;
@@ -784,7 +788,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                         }
                     }
                 });
-                // Record failed attempt in DB for history visibility
+                // Record failed attempt in DB — LEG_A was opened and emergency closed → commission for A open+close
+                let est_comm = actual_vol_a * 2.0 * (settings.commission_rate / 100.0);
+                let est_pnl = -est_comm;
                 let reason = format!("LEG_B_FAILED: {}", &err_str[..err_str.len().min(120)]);
                 let db_c = db.clone();
                 let (p, ea, eb, d, sp, pid) = (pair.clone(), exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
@@ -792,8 +798,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 tokio::spawn(async move {
                     let _ = db_c.call(move |conn| {
                         conn.execute(
-                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            params![p, ea, eb, d, 0.0f64, 0.0f64, 0.0f64, sp, entry_time, sp, "CLOSED", 0.0f64, 0.0f64, pid, 0.0f64, 0.0f64, 0.0f64, reason, 0.0f64, 0.0f64]
+                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            params![p, ea, eb, d, actual_vol_a, entry_a, 0.0f64, sp, entry_time, entry_time, sp, "CLOSED", 0.0f64, 0.0f64, pid, est_comm, 0.0f64, 0.0f64, reason, est_pnl, 0.0f64]
                         )?;
                         Ok(())
                     }).await;
