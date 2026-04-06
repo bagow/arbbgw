@@ -165,6 +165,15 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     for row in spreads.iter().take(50) {
         if num_active + 1 > settings.max_active_trades { break; }
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
+        
+        let deviation = row.spread - row.structural_spread;
+        if row.structural_spread.abs() >= settings.min_entry_spread * 0.3 {
+            continue;
+        }
+        if deviation < settings.min_entry_spread * 0.5 {
+            continue;
+        }
+
         // Skip if already have an open trade for this exact exchange pair
         let key = format!("{}|{}|{}", row.pair, row.exchange_a, row.exchange_b);
         if open_pairs.contains(&key) { continue; }
