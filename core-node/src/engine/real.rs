@@ -619,33 +619,52 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     // KEY PRINCIPLE: We do NOT write to DB until BOTH legs are confirmed filled.
     // This eliminates phantom trades, $0 PnL records, and immediate open/close chaos.
     if num_active >= settings.max_active_trades { return; }
-    let mut open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
-    let mut active_count = num_active;
+    let open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
 
-    // Diagnostic: log how many spreads we're evaluating (throttled)
+    // ── Cooldown maps (persist across cycles to prevent spam) ─────────────────
+    static EXCHANGE_COOLDOWN: OnceLock<DashMap<String, i64>> = OnceLock::new();
+    static PAIR_COOLDOWN: OnceLock<DashMap<String, i64>> = OnceLock::new();
+    let ex_cd = EXCHANGE_COOLDOWN.get_or_init(DashMap::new);
+    let pair_cd = PAIR_COOLDOWN.get_or_init(DashMap::new);
+    let now = now_ms();
+
+    // Diagnostic logging (throttled)
     static DIAG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dtick = DIAG_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if dtick % 50 == 0 {
+    if dtick % 100 == 0 {
         let in_range = spreads.iter().filter(|r| r.spread >= settings.min_entry_spread && r.spread <= settings.max_entry_spread).count();
         let supported = spreads.iter().filter(|r| keys.supports(&r.exchange_a) && keys.supports(&r.exchange_b)).count();
-        info!("[diag] spreads total={} in_range={} supported_exchanges={} max_trades={} active={}",
-            spreads.len(), in_range, supported, settings.max_active_trades, num_active);
+        let cooled_ex: Vec<_> = ex_cd.iter().filter(|e| now - *e.value() < 600_000).map(|e| e.key().clone()).collect();
+        info!("[diag] spreads={} in_range={} supported={} active={}/{} cooled_exchanges={:?}",
+            spreads.len(), in_range, supported, num_active, settings.max_active_trades, cooled_ex);
     }
 
-    for row in spreads.iter().take(500) {
-        // Enforce max_active_trades within the loop
-        if active_count >= settings.max_active_trades { break; }
+    // Only open ONE trade per engine cycle to prevent burst-opening
+    let mut opened_this_cycle = false;
+
+    for row in spreads.iter().take(200) {
+        if opened_this_cycle { break; }
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
-        // Smart structural filter: the deviation above the structural baseline
-        // must be enough to cover round-trip costs (commissions + slippage)
-        let break_even_pct = settings.break_even_fraction() * 100.0 * 1.5; // 150% of break-even as safety
+
+        // Smart structural filter: deviation above baseline must cover round-trip costs
+        let break_even_pct = settings.break_even_fraction() * 100.0 * 1.5; // 150% safety margin
         let deviation = row.spread - row.structural_spread;
-        if deviation < break_even_pct {
-            continue;
-        }
+        if deviation < break_even_pct { continue; }
+
         if open_pairs.contains(&row.pair) { continue; }
+
+        // Exchange support check
         if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) { continue; }
         if settings.disabled_exchanges.contains(&row.exchange_a) || settings.disabled_exchanges.contains(&row.exchange_b) { continue; }
+
+        // Exchange cooldown check (10 min after margin/balance error)
+        let cd_a = ex_cd.get(&row.exchange_a).map(|v| *v).unwrap_or(0);
+        let cd_b = ex_cd.get(&row.exchange_b).map(|v| *v).unwrap_or(0);
+        if now - cd_a < 600_000 || now - cd_b < 600_000 { continue; }
+
+        // Pair cooldown check (5 min after any failure)
+        let cd_pair = pair_cd.get(&row.pair).map(|v| *v).unwrap_or(0);
+        if now - cd_pair < 300_000 { continue; }
 
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
         let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
@@ -654,42 +673,34 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         // Price sanity: both legs must price the same asset — reject if >10% apart
         let price_ratio = if entry_a > entry_b { entry_a / entry_b } else { entry_b / entry_a };
         if price_ratio > 1.10 {
-            info!("[SKIP] {} price sanity: A={:.6} B={:.6} ratio={:.3} — rejecting mismatched contracts", row.pair, entry_a, entry_b, price_ratio);
+            info!("[SKIP] {} price sanity: A={:.6} B={:.6} ratio={:.3}", row.pair, entry_a, entry_b, price_ratio);
             continue;
         }
 
         let map = get_multipliers();
         let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) {
             Some(v) => *v,
-            None => { info!("[SKIP] {}: no multiplier for {}", row.pair, row.exchange_a); continue; }
+            None => { continue; } // silent skip — multiplier not loaded yet
         };
         let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) {
             Some(v) => *v,
-            None => { info!("[SKIP] {}: no multiplier for {}", row.pair, row.exchange_b); continue; }
+            None => { continue; }
         };
 
-        // Calculate A contracts from target volume
         let contracts_a = ((settings.trade_volume / entry_a.max(1e-12)) / mult_a).round() as i64;
-        if contracts_a < 1 { info!("[SKIP] {}: contracts_a < 1", row.pair); continue; }
+        if contracts_a < 1 { continue; }
 
         let actual_vol_a = contracts_a as f64 * mult_a * entry_a;
-        // Derive contracts_b from A's ACTUAL notional to match dollar-for-dollar
         let contracts_b = ((actual_vol_a / entry_b.max(1e-12)) / mult_b).round() as i64;
-        if contracts_b < 1 { info!("[SKIP] {}: contracts_b < 1", row.pair); continue; }
+        if contracts_b < 1 { continue; }
 
         let actual_vol_b = contracts_b as f64 * mult_b * entry_b;
         let vol_diff_pct = (actual_vol_a - actual_vol_b).abs() / actual_vol_a * 100.0;
-        if vol_diff_pct > 5.0 {
-            info!("[SKIP] {} vol mismatch A=${:.3} B=${:.3} ({:.1}%)", row.pair, actual_vol_a, actual_vol_b, vol_diff_pct);
-            continue;
-        }
-        // Target volume tolerance ±15%
+        if vol_diff_pct > 5.0 { continue; }
+
         let max_v = settings.trade_volume * 1.15;
         let min_v = settings.trade_volume * 0.85;
-        if actual_vol_a > max_v || actual_vol_a < min_v {
-            info!("[SKIP] {} vol_a ${:.3} out of ±15% of target ${}", row.pair, actual_vol_a, settings.trade_volume);
-            continue;
-        }
+        if actual_vol_a > max_v || actual_vol_a < min_v { continue; }
 
         let lmap = get_launch_times();
         let now_s = now_secs();
@@ -697,18 +708,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let age_a = lmap.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|r| *r).unwrap_or(0);
         let age_b = lmap.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|r| *r).unwrap_or(0);
         if (age_a > 0 && now_s - age_a < thirty_days) || (age_b > 0 && now_s - age_b < thirty_days) {
-            info!("[SKIP] {} newly listed (<30d)", row.pair); continue;
+            continue;
         }
 
-        let deviation = row.spread - row.structural_spread;
-        info!("[real] Placing orders: {} A={} c={} vol=${:.3} | B={} c={} vol=${:.3} spread={:.4}% (Norm: {:.4}%, Dev: {:.4}%)",
-            row.pair, row.exchange_a, contracts_a, actual_vol_a, row.exchange_b, contracts_b, actual_vol_b, row.spread, row.structural_spread, deviation);
+        info!("[real] Placing orders: {} A={} c={} vol=${:.3} | B={} c={} vol=${:.3} spread={:.4}% (struct={:.4}% dev={:.4}% be={:.4}%)",
+            row.pair, row.exchange_a, contracts_a, actual_vol_a, row.exchange_b, contracts_b, actual_vol_b,
+            row.spread, row.structural_spread, deviation, break_even_pct);
 
-        // Reserve this pair BEFORE placing orders — prevents retrying on failure
-        open_pairs.insert(row.pair.clone());
-        active_count += 1;
-
-        // Place both legs in parallel for speed
+        // Place both legs in parallel
         let exa = row.exchange_a.clone(); let exb = row.exchange_b.clone(); let pair = row.pair.clone();
         let (oa_result, ob_result) = tokio::join!(
             place_order(&http, &keys, &exa, &pair, is_a_higher, contracts_a, dry_run, false),
@@ -718,11 +725,17 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let oid_a = match oa_result {
             Ok(id) => id,
             Err(e) => {
-                error!("[real] LEG_A failed {}/{}: {}", exa, pair, e);
-                // If A failed, B might have been placed — try to close B conservatively
-                if let Ok(oid_b) = &ob_result {
+                let err_str = e.to_string();
+                error!("[real] LEG_A failed {}/{}: {}", exa, pair, err_str);
+                // Cooldown: if margin/balance error, cool down the exchange; always cool down the pair
+                if err_str.contains("insufficient") || err_str.contains("exceeds the balance") || err_str.contains("minimum amount") {
+                    ex_cd.insert(exa.clone(), now);
+                    error!("[real] Exchange {} cooled down for 10 min", exa);
+                }
+                pair_cd.insert(pair.clone(), now);
+                // Emergency close B if it succeeded
+                if let Ok(_) = &ob_result {
                     let (hc, kc, ec, pc) = (http.clone(), Arc::clone(&keys), exb.clone(), pair.clone());
-                    let oid_b_c = oid_b.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(200)).await;
                         let _ = close_order(&hc, &kc, &ec, &pc, !is_a_higher, contracts_b, false).await;
@@ -734,7 +747,13 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let oid_b = match ob_result {
             Ok(id) => id,
             Err(e) => {
-                error!("[real] LEG_B failed {}/{}: {} — emergency close A", exb, pair, e);
+                let err_str = e.to_string();
+                error!("[real] LEG_B failed {}/{}: {} — emergency close A", exb, pair, err_str);
+                if err_str.contains("insufficient") || err_str.contains("exceeds the balance") || err_str.contains("minimum amount") {
+                    ex_cd.insert(exb.clone(), now);
+                    error!("[real] Exchange {} cooled down for 10 min", exb);
+                }
+                pair_cd.insert(pair.clone(), now);
                 let (hc, kc, ec, pc) = (http.clone(), Arc::clone(&keys), exa.clone(), pair.clone());
                 tokio::spawn(async move {
                     for attempt in 1u32..=5 {
@@ -747,6 +766,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 continue;
             }
         };
+
+        // Mark this cycle as having opened a trade (only 1 per cycle)
+        opened_this_cycle = true;
 
         // ── Fast-poll both fills simultaneously (max 750ms) ───────────────────
         // We do NOT write to DB until BOTH fills are confirmed with real prices.
