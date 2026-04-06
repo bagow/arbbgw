@@ -175,6 +175,86 @@ pub fn start_multiplier_fetcher(http: Client) {
             }
         }
     });
+
+    // Binance USDT-M Futures
+    tokio::spawn({
+        let http = http.clone();
+        async move {
+            loop {
+                if let Ok(resp) = http.get("https://fapi.binance.com/fapi/v1/exchangeInfo").send().await {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(symbols) = json["symbols"].as_array() {
+                            let map = get_multipliers();
+                            let lmap = get_launch_times();
+                            let mut count = 0u32;
+                            for s in symbols {
+                                let sym = s["symbol"].as_str().unwrap_or("");
+                                if !sym.ends_with("USDT") { continue; }
+                                if s["contractType"].as_str() != Some("PERPETUAL") { continue; }
+                                // Extract stepSize from LOT_SIZE filter as the multiplier
+                                if let Some(filters) = s["filters"].as_array() {
+                                    for f in filters {
+                                        if f["filterType"].as_str() == Some("LOT_SIZE") {
+                                            if let Some(ss) = f["stepSize"].as_str() {
+                                                if let Ok(step) = ss.parse::<f64>() {
+                                                    if step > 0.0 {
+                                                        map.insert(format!("binance:{}", sym), step);
+                                                        count += 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(ot) = s["onboardDate"].as_i64() {
+                                    lmap.insert(format!("binance:{}", sym), ot / 1000);
+                                }
+                            }
+                            info!("[multipliers] Binance: loaded {} symbols", count);
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        }
+    });
+
+    // Bitget USDT-M Futures
+    tokio::spawn({
+        let http = http.clone();
+        async move {
+            loop {
+                if let Ok(resp) = http.get("https://api.bitget.com/api/v2/mix/market/contracts?productType=USDT-FUTURES").send().await {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(arr) = json["data"].as_array() {
+                            let map = get_multipliers();
+                            let lmap = get_launch_times();
+                            let mut count = 0u32;
+                            for c in arr {
+                                let sym = c["symbol"].as_str().unwrap_or("");
+                                // Bitget uses e.g. "BTCUSDT" symbol names
+                                if let Some(sm) = c["sizeMultiplier"].as_str() {
+                                    if let Ok(m) = sm.parse::<f64>() {
+                                        if m > 0.0 {
+                                            map.insert(format!("bitget:{}", sym), m);
+                                            count += 1;
+                                        }
+                                    }
+                                }
+                                if let Some(lt) = c["listTime"].as_str() {
+                                    if let Ok(ts) = lt.parse::<i64>() {
+                                        lmap.insert(format!("bitget:{}", sym), ts / 1000);
+                                    }
+                                }
+                            }
+                            info!("[multipliers] Bitget: loaded {} symbols", count);
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        }
+    });
 }
 
 
@@ -541,13 +621,20 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     if num_active >= settings.max_active_trades { return; }
     let mut open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
 
+    // Diagnostic: log how many spreads we're evaluating (throttled)
+    static DIAG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dtick = DIAG_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if dtick % 50 == 0 {
+        let in_range = spreads.iter().filter(|r| r.spread >= settings.min_entry_spread && r.spread <= settings.max_entry_spread).count();
+        let supported = spreads.iter().filter(|r| keys.supports(&r.exchange_a) && keys.supports(&r.exchange_b)).count();
+        info!("[diag] spreads total={} in_range={} supported_exchanges={} max_trades={} active={}",
+            spreads.len(), in_range, supported, settings.max_active_trades, num_active);
+    }
+
     for row in spreads.iter().take(500) {
-        let deviation = row.spread - row.structural_spread;
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
-        if row.structural_spread.abs() >= settings.min_entry_spread * 0.3 {
-            continue;
-        }
-        if deviation < settings.min_entry_spread * 0.5 {
+        // Only block truly broken/depegged pairs (structural > 5%)
+        if row.structural_spread.abs() > 5.0 {
             continue;
         }
         if open_pairs.contains(&row.pair) { continue; }
