@@ -877,15 +877,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                             Ok(())
                         }).await;
                     });
-                } else {
-                    open_pairs.insert(row.pair.clone());
                 }
             }
             Err(e) => {
                 error!("[real] DB INSERT failed: {:?}", e);
             }
         }
-        break; // one trade per cycle
     }
 }
 
