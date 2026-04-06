@@ -466,6 +466,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let deviation = row.spread - row.structural_spread;
         // Entry based on ABSOLUTE spread (original logic), log structural norm for monitoring
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
+        // Structural spread filter: if 24h average is already >= threshold, it's a persistent
+        // structural spread, not a temporary arbitrage opportunity — skip it
+        if row.structural_spread >= settings.min_entry_spread {
+            continue;
+        }
         if open_pairs.contains(&row.pair) { continue; }
         if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) { continue; }
         if settings.disabled_exchanges.contains(&row.exchange_a) || settings.disabled_exchanges.contains(&row.exchange_b) { continue; }
