@@ -141,4 +141,7 @@ pub struct Trade {
     pub current_pnl: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gross_pnl: Option<f64>,
+    pub funding_rate_a: Option<f64>,
+    pub funding_rate_b: Option<f64>,
+    pub funding_next_ts: Option<i64>,
 }

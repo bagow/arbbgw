@@ -940,6 +940,17 @@ function renderActiveTable(profileId, active) {
         const isExpanded = expandedRows[profileId]?.has(t.id);
         const detailDisplay = isExpanded ? 'table-row' : 'none';
 
+        // Funding rate display
+        const frA = t.funding_rate_a ?? 0;
+        const frB = t.funding_rate_b ?? 0;
+        const frA_pct = (frA * 100).toFixed(4);
+        const frB_pct = (frB * 100).toFixed(4);
+        const frA_cost = (frA * (t.volume ?? 0)).toFixed(4);
+        const frB_cost = (frB * (t.volume ?? 0)).toFixed(4);
+        const frA_color = frA >= 0 ? 'var(--red)' : 'var(--green)';
+        const frB_color = frB >= 0 ? 'var(--red)' : 'var(--green)';
+        const fundNextTs = t.funding_next_ts ?? 0;
+
         const detailRow = `
             <tr id="detail-${rowKey}" style="display:${detailDisplay}">
                 <td colspan="7" class="p-0">
@@ -949,19 +960,20 @@ function renderActiveTable(profileId, active) {
                             <div class="td-line"><span>Entry:</span> <strong>${t.entry_price_a}</strong></div>
                             <div class="td-line"><span>Current:</span> <strong>${t.current_price_a ?? '—'}</strong></div>
                             <div class="td-line"><span>Leg PnL:</span> <strong style="color:${(t.pnl_a??0)>0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl_a??0)}</strong></div>
-                            <div class="td-line"><span>Funding In:</span> <strong class="funding-countdown" style="font-family:monospace; color:var(--text-sub)">--:--:--</strong></div>
+                            <div class="td-line"><span>Funding Rate:</span> <strong style="color:${frA_color}">${frA_pct}%</strong> <span class="text-sub" style="font-size:.75rem">($${frA_cost}/8h)</span></div>
                         </div>
                         <div class="td-col">
                             <div class="td-header">${t.exchange_b} <span class="badge ${!isAHigher ? 'badge-short' : 'badge-long'}">${!isAHigher ? 'SHORT' : 'LONG'}</span></div>
                             <div class="td-line"><span>Entry:</span> <strong>${t.entry_price_b}</strong></div>
                             <div class="td-line"><span>Current:</span> <strong>${t.current_price_b ?? '—'}</strong></div>
                             <div class="td-line"><span>Leg PnL:</span> <strong style="color:${(t.pnl_b??0)>0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl_b??0)}</strong></div>
-                            <div class="td-line"><span>Funding In:</span> <strong class="funding-countdown" style="font-family:monospace; color:var(--text-sub)">--:--:--</strong></div>
+                            <div class="td-line"><span>Funding Rate:</span> <strong style="color:${frB_color}">${frB_pct}%</strong> <span class="text-sub" style="font-size:.75rem">($${frB_cost}/8h)</span></div>
                         </div>
                         <div class="td-col td-total">
                             <div class="td-line"><span>Gross PnL:</span> <strong style="color:${(t.gross_pnl??0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(t.gross_pnl??0)}</strong></div>
                             <div class="td-line"><span>Comm. Cost:</span> <strong style="color:var(--red)">${fmtCost(t.commission_cost)}</strong></div>
                             <div class="td-line"><span>Slippage:</span> <strong style="color:var(--red)">${fmtCost(t.slippage_cost)}</strong></div>
+                            <div class="td-line"><span>Funding In:</span> <strong class="funding-countdown" data-next="${fundNextTs}" style="font-family:'Roboto Mono',monospace; font-variant-numeric:tabular-nums; color:var(--text-sub)">--:--:--</strong></div>
                             <div class="td-total-pnl">Net PnL: ${livePnLStr} <span class="text-sub" style="font-weight:400;font-size:.8rem;">(${fmtDuration(Date.now()-t.entry_time)})</span></div>
                             <div style="margin-top:12px; display:flex; gap:8px;">
                                 <button type="button" class="trading-save-btn outline-btn" style="margin:0;flex:1;padding:8px;font-size:12px;" onclick='openModal({pair:"${t.pair}",exchangeA:"${t.exchange_a}",exchangeB:"${t.exchange_b}",priceA:${t.entry_price_a},priceB:${t.entry_price_b},spread:${t.entry_spread},volA:0,volB:0,direction:"${t.direction}",entryTime:${t.entry_time},exitTime:null})'>📊 View Chart</button>
@@ -1433,21 +1445,24 @@ const escHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'
 // ─── Start ────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', boot);
 
-// Funding countdown updater (8-hour marks: 00:00, 08:00, 16:00 UTC)
+// Funding countdown updater — uses real exchange timestamp when available
 setInterval(() => {
-    const now = new Date();
-    let target = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
-    while (target <= now) {
-        target.setUTCHours(target.getUTCHours() + 8);
+    const now = Date.now();
+    // Fallback: next 8h UTC mark
+    let fallbackTarget = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate(), 0, 0, 0));
+    while (fallbackTarget.getTime() <= now) {
+        fallbackTarget.setUTCHours(fallbackTarget.getUTCHours() + 8);
     }
-    const diff = target - now;
-    const h = String(Math.floor(diff / 3600000)).padStart(2, '0');
-    const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2, '0');
-    const s = String(Math.floor((diff % 60000) / 1000)).padStart(2, '0');
-    const timeStr = `${h}h ${m}m ${s}s`;
-    
+
     document.querySelectorAll('.funding-countdown').forEach(el => {
-        el.textContent = timeStr;
+        const nextTs = parseInt(el.dataset.next || '0');
+        const target = (nextTs > now) ? nextTs : fallbackTarget.getTime();
+        const diff = target - now;
+        if (diff <= 0) { el.textContent = '00h 00m 00s'; return; }
+        const h = String(Math.floor(diff / 3600000)).padStart(2, '0');
+        const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2, '0');
+        const s = String(Math.floor((diff % 60000) / 1000)).padStart(2, '0');
+        el.textContent = `${h}h ${m}m ${s}s`;
     });
 }, 1000);
-// trigger deploy
+

@@ -204,38 +204,31 @@ pub async fn handle_get_unified(
         }
     }).await.unwrap_or_else(|_| vec![]);
 
-    // Enrich active trades with live PnL from last_price columns written by paper-trader
+    // Enrich active trades with live PnL from last_price columns written by core-node
     let active_enriched: Vec<serde_json::Value> = active_trades.iter().map(|t| {
         let mut v = serde_json::to_value(t).unwrap_or_default();
         if let (Some(c_price_a), Some(c_price_b), Some(c_spread)) = (t.last_price_a, t.last_price_b, t.last_spread) {
             let is_a_higher = t.direction.starts_with(&t.exchange_a);
-            // Compute per-leg PnL for display (used as fallback if paper-trader hasn't written pnl_a/pnl_b yet)
             let coins_a = t.volume / t.entry_price_a;
             let coins_b = t.volume / t.entry_price_b;
-            let pnl_a_fallback = if is_a_higher { (t.entry_price_a - c_price_a) * coins_a } else { (c_price_a - t.entry_price_a) * coins_a };
-            let pnl_b_fallback = if is_a_higher { (c_price_b - t.entry_price_b) * coins_b } else { (t.entry_price_b - c_price_b) * coins_b };
+            let pnl_a_calc = if is_a_higher { (t.entry_price_a - c_price_a) * coins_a } else { (c_price_a - t.entry_price_a) * coins_a };
+            let pnl_b_calc = if is_a_higher { (c_price_b - t.entry_price_b) * coins_b } else { (t.entry_price_b - c_price_b) * coins_b };
 
-            // curr_gross_pnl now stores NET pnl (paper-trader writes net after comm+funding).
-            // Use it directly as current_pnl — no further deductions.
             let display_comm = t.commission_cost.unwrap_or(0.0);
-            let display_slip = t.slippage_cost.unwrap_or(0.0);
-            
-            let gross = pnl_a_fallback + pnl_b_fallback;
-            let current_net_pnl = gross - display_comm - display_slip - t.funding_cost.unwrap_or(0.0);
+            // NOTE: slippage NOT subtracted — it's already embedded in entry_price (which is actual fill)
+            let gross = pnl_a_calc + pnl_b_calc;
+            let current_net_pnl = gross - display_comm - t.funding_cost.unwrap_or(0.0);
 
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("current_price_a".into(), json!(c_price_a));
                 obj.insert("current_price_b".into(), json!(c_price_b));
                 obj.insert("current_spread".into(), json!(c_spread));
-                // gross_pnl = raw price movement before costs (for reference display)
                 obj.insert("gross_pnl".into(), json!(gross));
-                // current_pnl is the mathematically correct net figure
                 obj.insert("current_pnl".into(), json!(current_net_pnl));
-                // costs
                 obj.insert("commission_cost".into(), json!(display_comm));
-                obj.insert("slippage_cost".into(), json!(display_slip));
-                obj.insert("pnl_a".into(), json!(pnl_a_fallback));
-                obj.insert("pnl_b".into(), json!(pnl_b_fallback));
+                obj.insert("slippage_cost".into(), json!(t.slippage_cost.unwrap_or(0.0)));
+                obj.insert("pnl_a".into(), json!(pnl_a_calc));
+                obj.insert("pnl_b".into(), json!(pnl_b_calc));
             }
         }
         v

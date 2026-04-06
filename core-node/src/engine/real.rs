@@ -418,7 +418,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     let funding = settings.funding_rate_8h / 100.0;
 
     // ── Close qualifying trades ────────────────────────────────────────────────
-    let mut live_updates = Vec::new();
+    let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64)> = Vec::new();
     for trade in &trades {
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
         let elapsed_ms = now_ms() - trade.entry_time;
@@ -591,7 +591,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 }).await;
             });
         } else {
-            live_updates.push((trade.id, c_price_a, c_price_b, current_spread, live_net_pnl));
+            // Fetch real funding rates from exchange APIs (cached 5 min)
+            let (fr_a, next_a) = get_funding_rate(&http, &trade.exchange_a, &trade.pair).await;
+            let (fr_b, next_b) = get_funding_rate(&http, &trade.exchange_b, &trade.pair).await;
+            let fund_next = next_a.min(next_b); // nearest funding event
+            live_updates.push((trade.id, c_price_a, c_price_b, current_spread, live_net_pnl, fr_a, fr_b, fund_next));
             if top_spread > trade.highest_spread {
                 let id = trade.id;
                 let _ = db.call(move |conn| {
@@ -612,9 +616,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let _ = db_clone.call(move |conn| {
                 let tx = conn.transaction()?;
                 {
-                    let mut stmt = tx.prepare_cached("UPDATE trades SET last_price_a=?, last_price_b=?, last_spread=?, curr_gross_pnl=? WHERE id=?")?;
-                    for (id, pa, pb, cs, pnl) in live_updates {
-                        stmt.execute(params![pa, pb, cs, pnl, id])?;
+                    let mut stmt = tx.prepare_cached("UPDATE trades SET last_price_a=?, last_price_b=?, last_spread=?, curr_gross_pnl=?, funding_rate_a=?, funding_rate_b=?, funding_next_ts=? WHERE id=?")?;
+                    for (id, pa, pb, cs, pnl, fra, frb, fnt) in live_updates {
+                        stmt.execute(params![pa, pb, cs, pnl, fra, frb, fnt, id])?;
                     }
                 }
                 tx.commit()?;
@@ -1073,4 +1077,70 @@ async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
     }).await.unwrap_or_default()
 }
 
+// ── Funding rate cache ──────────────────────────────────────────────────────
+#[derive(Clone, Debug)]
+struct FundingInfo {
+    rate: f64,        // current funding rate (e.g. 0.0001 = 0.01%)
+    next_ts: i64,     // unix timestamp (ms) of next funding apply
+    fetched_at: i64,  // when this was cached
+}
 
+static FUNDING_CACHE: OnceLock<DashMap<String, FundingInfo>> = OnceLock::new();
+
+/// Fetch funding rate from exchange REST API (cached for 5 min)
+async fn get_funding_rate(http: &Client, exchange: &str, pair: &str) -> (f64, i64) {
+    let cache = FUNDING_CACHE.get_or_init(DashMap::new);
+    let key = format!("{}:{}", exchange, pair);
+    let now = now_ms();
+
+    // Return cached if fresh (< 5 min)
+    if let Some(entry) = cache.get(&key) {
+        if now - entry.fetched_at < 300_000 {
+            return (entry.rate, entry.next_ts);
+        }
+    }
+
+    let result = fetch_funding_rate_api(http, exchange, pair).await;
+    if let Some((rate, next_ts)) = result {
+        cache.insert(key, FundingInfo { rate, next_ts, fetched_at: now });
+        (rate, next_ts)
+    } else {
+        // Cache miss — return 0
+        (0.0, 0)
+    }
+}
+
+async fn fetch_funding_rate_api(http: &Client, exchange: &str, pair: &str) -> Option<(f64, i64)> {
+    match exchange {
+        "gate" => {
+            let url = format!("https://api.gateio.ws/api/v4/futures/usdt/contracts/{}", pair);
+            let resp = http.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            let rate = resp["funding_rate"].as_str()?.parse::<f64>().ok()?;
+            let next = resp["funding_next_apply"].as_f64()? as i64 * 1000; // seconds→ms
+            Some((rate, next))
+        }
+        "kucoin" => {
+            let url = format!("https://api-futures.kucoin.com/api/v1/funding-rate/{}/current", pair);
+            let resp = http.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            let rate = resp["data"]["value"].as_f64()?;
+            let next = resp["data"]["timePoint"].as_i64()? + 8 * 3600 * 1000; // next = current + 8h
+            Some((rate, next))
+        }
+        "binance" => {
+            let url = format!("https://fapi.binance.com/fapi/v1/premiumIndex?symbol={}", pair);
+            let resp = http.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            let rate = resp["lastFundingRate"].as_str()?.parse::<f64>().ok()?;
+            let next = resp["nextFundingTime"].as_i64()?;
+            Some((rate, next))
+        }
+        "bitget" => {
+            let url = format!("https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol={}&productType=USDT-FUTURES", pair);
+            let resp = http.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            let rate = resp["data"].as_array()?.first()?["fundingRate"].as_str()?.parse::<f64>().ok()?;
+            let next_str = resp["data"].as_array()?.first()?["nextUpdate"].as_str()?;
+            let next = next_str.parse::<i64>().ok()?;
+            Some((rate, next))
+        }
+        _ => None,
+    }
+}

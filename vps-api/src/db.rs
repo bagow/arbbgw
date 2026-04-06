@@ -139,6 +139,9 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN order_id_b TEXT", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN contracts_a INTEGER", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN contracts_b INTEGER", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_rate_a REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_rate_b REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_next_ts INTEGER", []);
         Ok(())
     }).await?;
     Ok(())
@@ -206,6 +209,9 @@ pub fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
         current_spread: None,
         current_pnl: None,
         gross_pnl: row.get("gross_pnl").unwrap_or(None),
+        funding_rate_a: row.get("funding_rate_a").unwrap_or(None),
+        funding_rate_b: row.get("funding_rate_b").unwrap_or(None),
+        funding_next_ts: row.get("funding_next_ts").unwrap_or(None),
     })
 }
  
