@@ -44,6 +44,14 @@ impl Default for TradingSettings {
     }
 }
 
+impl TradingSettings {
+    /// Minimum fraction of trade volume needed to break even on a round-trip.
+    /// Accounts for 4 commission legs (entry A, entry B, exit A, exit B) and slippage.
+    pub fn break_even_fraction(&self) -> f64 {
+        4.0 * (self.commission_rate / 100.0 + self.slippage_percent / 100.0)
+    }
+}
+
 // Explicit SELECT column list — NEVER use SELECT * because column indices
 // depend on the physical schema order on VPS (may differ from code expectations
 // if columns were added via ALTER TABLE historically).

@@ -620,6 +620,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     // This eliminates phantom trades, $0 PnL records, and immediate open/close chaos.
     if num_active >= settings.max_active_trades { return; }
     let mut open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
+    let mut active_count = num_active;
 
     // Diagnostic: log how many spreads we're evaluating (throttled)
     static DIAG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -632,9 +633,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     }
 
     for row in spreads.iter().take(500) {
+        // Enforce max_active_trades within the loop
+        if active_count >= settings.max_active_trades { break; }
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
-        // Only block truly broken/depegged pairs (structural > 5%)
-        if row.structural_spread.abs() > 5.0 {
+        // Smart structural filter: the deviation above the structural baseline
+        // must be enough to cover round-trip costs (commissions + slippage)
+        let break_even_pct = settings.break_even_fraction() * 100.0 * 1.5; // 150% of break-even as safety
+        let deviation = row.spread - row.structural_spread;
+        if deviation < break_even_pct {
             continue;
         }
         if open_pairs.contains(&row.pair) { continue; }
@@ -810,6 +816,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         match res {
             Ok(trade_id) => {
+                // Track this pair so we don't open it again in the same cycle
+                open_pairs.insert(row.pair.clone());
+                active_count += 1;
                 if status == "FAILED_ASYMMETRIC" {
                     let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
                     let (exa_c, exb_c, pair_c) = (row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone());

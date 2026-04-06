@@ -169,8 +169,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     for row in spreads.iter().take(50) {
         if num_active + 1 > settings.max_active_trades { break; }
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
-        
-        // Only block truly broken/depegged pairs (structural > 5%)\n        if row.structural_spread.abs() > 5.0 {\n            continue;\n        }
+        // Smart structural filter: deviation above structural baseline must cover costs
+        let break_even_pct = settings.break_even_fraction() * 100.0 * 1.5;
+        let deviation = row.spread - row.structural_spread;
+        if deviation < break_even_pct {
+            continue;
+        }
 
         // Skip if already have an open trade for this exact exchange pair
         let key = format!("{}|{}|{}", row.pair, row.exchange_a, row.exchange_b);
