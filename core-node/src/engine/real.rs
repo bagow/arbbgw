@@ -79,6 +79,142 @@ pub fn get_launch_times() -> &'static DashMap<String, i64> {
     LAUNCH_TIMES.get_or_init(DashMap::new)
 }
 
+// ─── Balance cache ────────────────────────────────────────────────────────────
+
+static BALANCE_CACHE: OnceLock<DashMap<String, f64>> = OnceLock::new();
+
+fn get_balance_cache() -> &'static DashMap<String, f64> {
+    BALANCE_CACHE.get_or_init(DashMap::new)
+}
+
+/// Spawn background task that refreshes available USDT balance on each exchange every 30s.
+pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>) {
+    tokio::spawn(async move {
+        loop {
+            let cache = get_balance_cache();
+            let exchanges = ["binance", "gate", "htx", "kucoin", "bitget"];
+            for ex in &exchanges {
+                if !keys.supports(ex) { continue; }
+                match fetch_available_balance(&http, &keys, ex).await {
+                    Ok(bal) => {
+                        cache.insert(ex.to_string(), bal);
+                        info!("[balance] {} = ${:.2}", ex, bal);
+                    }
+                    Err(e) => {
+                        error!("[balance] {} fetch error: {}", ex, e);
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
+}
+
+async fn fetch_available_balance(http: &Client, keys: &ExchangeKeys, exchange: &str) -> Result<f64> {
+    match exchange {
+        "binance" => {
+            let ts = now_ms();
+            let qs = format!("timestamp={}", ts);
+            let sig = binance_sign(&keys.binance_secret, &qs);
+            let url = format!("https://fapi.binance.com/fapi/v2/balance?{}&signature={}", qs, sig);
+            let resp: Value = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
+                .timeout(Duration::from_secs(10)).send().await?.json().await?;
+            // Find USDT balance
+            let bal = resp.as_array().and_then(|arr| {
+                arr.iter().find(|a| a["asset"].as_str() == Some("USDT"))
+                    .and_then(|a| a["availableBalance"].as_str().and_then(|s| s.parse().ok()))
+            }).unwrap_or(0.0);
+            Ok(bal)
+        }
+        "gate" => {
+            let path = "/api/v4/futures/usdt/accounts";
+            let resp: Value = http.get(format!("https://api.gateio.ws{}", path))
+                .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, ""))
+                .timeout(Duration::from_secs(10)).send().await?.json().await?;
+            let bal = resp["available"].as_str().and_then(|s| s.parse().ok())
+                .or_else(|| resp["available"].as_f64()).unwrap_or(0.0);
+            Ok(bal)
+        }
+        "htx" => {
+            let host = "api.hbdm.com";
+            let path = "/linear-swap-api/v1/swap_account_info";
+            let body = json!({"margin_account": "USDT"});
+            let resp: Value = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path)))
+                .json(&body).timeout(Duration::from_secs(10)).send().await?.json().await?;
+            let bal = resp["data"].as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|a| a["withdraw_available"].as_f64())
+                .unwrap_or(0.0);
+            Ok(bal)
+        }
+        "kucoin" => {
+            let ts = now_ms().to_string();
+            let path = "/api/v1/account-overview?currency=USDT";
+            let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", path, "");
+            let resp: Value = http.get(format!("https://api-futures.kucoin.com{}", path))
+                .header("KC-API-KEY", &keys.kucoin_key).header("KC-API-SIGN", sig)
+                .header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig)
+                .header("KC-API-KEY-VERSION", "2")
+                .timeout(Duration::from_secs(10)).send().await?.json().await?;
+            let bal = resp["data"]["availableBalance"].as_f64()
+                .or_else(|| resp["data"]["availableBalance"].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0.0);
+            Ok(bal)
+        }
+        "bitget" => {
+            let ts = now_ms().to_string();
+            let path = "/api/v2/mix/account/account?symbol=BTCUSDT&productType=USDT-FUTURES&marginCoin=USDT";
+            let sig = bitget_sign(&keys.bitget_secret, &ts, "GET", path, "");
+            let resp: Value = http.get(format!("https://api.bitget.com{}", path))
+                .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig)
+                .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
+                .timeout(Duration::from_secs(10)).send().await?.json().await?;
+            let bal = resp["data"]["available"].as_str().and_then(|s| s.parse().ok())
+                .or_else(|| resp["data"]["available"].as_f64()).unwrap_or(0.0);
+            Ok(bal)
+        }
+        _ => Err(anyhow::anyhow!("Unknown exchange: {}", exchange)),
+    }
+}
+
+/// Check if exchange has enough margin for the notional volume.
+/// Returns true if balance is unknown (don't block on missing cache).
+fn has_sufficient_margin(exchange: &str, notional_usd: f64) -> bool {
+    let cache = get_balance_cache();
+    match cache.get(exchange) {
+        Some(bal) => {
+            let available = *bal;
+            // Require at least 1.5x notional (to account for existing positions + fees)
+            available >= notional_usd * 1.5
+        }
+        None => true, // No data yet — allow (fail-safe)
+    }
+}
+
+/// Deduct notional from cached balance after a successful trade open.
+fn deduct_cached_balance(exchange: &str, notional_usd: f64) {
+    let cache = get_balance_cache();
+    if let Some(mut bal) = cache.get_mut(exchange) {
+        *bal = (*bal - notional_usd).max(0.0);
+    }
+}
+
+/// Check if an exchange error is a margin/balance/position-limit issue.
+/// These errors mean the exchange WILL reject orders — no point retrying soon.
+fn is_margin_error(err: &str) -> bool {
+    let s = err.to_lowercase();
+    s.contains("insufficient")
+        || s.contains("exceeds the balance")
+        || s.contains("minimum amount")
+        || s.contains("notional must be no smaller")
+        || s.contains("maximum allowable position")
+        || s.contains("margin is insufficient")
+        || s.contains("less than the minimum")
+        || s.contains("order amount exceeds")
+        || s.contains("not enough")
+        || s.contains("balance not enough")
+}
+
 pub fn start_multiplier_fetcher(http: Client) {
     let _ = get_multipliers();
     let _ = get_launch_times();
@@ -666,10 +802,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) { continue; }
         if settings.disabled_exchanges.contains(&row.exchange_a) || settings.disabled_exchanges.contains(&row.exchange_b) { continue; }
 
-        // Exchange cooldown check (10 min after margin/balance error)
+        // Exchange cooldown check (30 min after margin/balance error)
         let cd_a = ex_cd.get(&row.exchange_a).map(|v| *v).unwrap_or(0);
         let cd_b = ex_cd.get(&row.exchange_b).map(|v| *v).unwrap_or(0);
-        if now - cd_a < 600_000 || now - cd_b < 600_000 { continue; }
+        if now - cd_a < 1_800_000 || now - cd_b < 1_800_000 { continue; }
 
         // Pair cooldown check (5 min after any failure)
         let cd_pair = pair_cd.get(&row.pair).map(|v| *v).unwrap_or(0);
@@ -720,89 +856,53 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             continue;
         }
 
+        // ── PRE-FLIGHT BALANCE CHECK ──────────────────────────────────────────
+        if !has_sufficient_margin(&row.exchange_a, actual_vol_a) {
+            info!("[SKIP] {} — {} insufficient margin (need ${:.0}, cached bal too low)",
+                row.pair, row.exchange_a, actual_vol_a);
+            continue;
+        }
+        if !has_sufficient_margin(&row.exchange_b, actual_vol_b) {
+            info!("[SKIP] {} — {} insufficient margin (need ${:.0}, cached bal too low)",
+                row.pair, row.exchange_b, actual_vol_b);
+            continue;
+        }
+
         info!("[real] Placing orders: {} A={} c={} vol=${:.3} | B={} c={} vol=${:.3} spread={:.4}% (struct={:.4}% dev={:.4}% be={:.4}%)",
             row.pair, row.exchange_a, contracts_a, actual_vol_a, row.exchange_b, contracts_b, actual_vol_b,
             row.spread, row.structural_spread, deviation, break_even_pct);
 
-        // Place both legs in parallel
-        let exa = row.exchange_a.clone(); let exb = row.exchange_b.clone(); let pair = row.pair.clone();
-        let (oa_result, ob_result) = tokio::join!(
-            place_order(&http, &keys, &exa, &pair, is_a_higher, contracts_a, dry_run, false),
-            place_order(&http, &keys, &exb, &pair, !is_a_higher, contracts_b, dry_run, false)
-        );
+        // ── SEQUENTIAL LEG PLACEMENT ─────────────────────────────────────────
+        // Place LEG_A first. If it fails → no exposure, no loss.
+        // Only if LEG_A succeeds → place LEG_B.
+        // This eliminates the asymmetric-fill problem where one leg succeeds
+        // and the other fails, forcing an expensive emergency close.
 
-        let oid_a = match oa_result {
+        let exa = row.exchange_a.clone();
+        let exb = row.exchange_b.clone();
+        let pair = row.pair.clone();
+
+        // ── LEG_A ────────────────────────────────────────────────────────────
+        let oid_a = match place_order(&http, &keys, &exa, &pair, is_a_higher, contracts_a, dry_run, false).await {
             Ok(id) => id,
             Err(e) => {
                 let err_str = e.to_string();
                 error!("[real] LEG_A failed {}/{}: {}", exa, pair, err_str);
-                if err_str.contains("insufficient") || err_str.contains("exceeds the balance") || err_str.contains("minimum amount") {
+                if is_margin_error(&err_str) {
                     ex_cd.insert(exa.clone(), now);
-                    error!("[real] Exchange {} cooled down for 10 min", exa);
+                    deduct_cached_balance(&exa, f64::MAX); // mark as zero
+                    error!("[real] Exchange {} cooled down for 30 min (margin error)", exa);
                 }
                 pair_cd.insert(pair.clone(), now);
+                // LEG_A failed BEFORE any position opened → record and move on (no exposure!)
                 let reason = format!("LEG_A_FAILED: {}", &err_str[..err_str.len().min(120)]);
-                let b_opened = ob_result.is_ok();
-                let oid_b_opt = ob_result.ok();
-                // Merge emergency close + DB insert into one spawn for real data
-                let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
-                let (ec, pc) = (exb.clone(), pair.clone());
-                let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
-                let comm_rate = settings.commission_rate;
+                let (db_c, ea_s, eb_s, d, sp, pid) = (db.clone(), exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
+                let pc = pair.clone();
                 tokio::spawn(async move {
-                    if !b_opened {
-                        // Both legs failed — no position opened, just record it
-                        let _ = db_c.call(move |conn| {
-                            conn.execute(
-                                "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                params![pc, ea_s, eb_s, d, 0.0f64, 0.0f64, 0.0f64, sp, now_ms(), now_ms(), sp, "CLOSED", 0.0f64, 0.0f64, pid, 0.0f64, 0.0f64, 0.0f64, reason, 0.0f64, 0.0f64]
-                            )?;
-                            Ok(())
-                        }).await;
-                        return;
-                    }
-                    // B opened — fetch entry fill, emergency close, fetch close fill
-                    let oid_b_ref = oid_b_opt.unwrap();
-                    let mut entry_fill = entry_b;
-                    let mut total_fee = 0.0f64;
-                    for _ in 0..10 {
-                        if let Ok((p, f)) = fetch_order(&hc, &kc, &ec, &pc, &oid_b_ref).await {
-                            if p > 0.0 { entry_fill = p; total_fee += f.abs(); break; }
-                        }
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    let mut close_oid = None;
-                    for attempt in 1u32..=5 {
-                        match close_order(&hc, &kc, &ec, &pc, !is_a_higher, contracts_b, false).await {
-                            Ok(id) => { error!("🛡️ Emergency close B ok: {}", id); close_oid = Some(id); break; }
-                            Err(err) => { let w = 200 * 2u64.pow(attempt-1); tokio::time::sleep(Duration::from_millis(w)).await; error!("Emergency close B {}/5: {}", attempt, err); }
-                        }
-                    }
-                    let mut close_fill = entry_fill;
-                    if let Some(ref coid) = close_oid {
-                        for _ in 0..10 {
-                            if let Ok((p, f)) = fetch_order(&hc, &kc, &ec, &pc, coid).await {
-                                if p > 0.0 { close_fill = p; total_fee += f.abs(); break; }
-                            }
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                        }
-                    }
-                    let qty = actual_vol_b / entry_fill.max(1e-12);
-                    let gross_pnl = if !is_a_higher {
-                        (entry_fill - close_fill) * qty  // B was short
-                    } else {
-                        (close_fill - entry_fill) * qty  // B was long
-                    };
-                    if total_fee < 1e-9 { total_fee = actual_vol_b * 2.0 * (comm_rate / 100.0); }
-                    let net_pnl = gross_pnl - total_fee;
-                    let entry_time = now_ms();
-                    error!("[real] LEG_A_FAILED {} real PnL: entry={:.6} close={:.6} gross={:.4} fee={:.4} net={:.4}",
-                        pc, entry_fill, close_fill, gross_pnl, total_fee, net_pnl);
                     let _ = db_c.call(move |conn| {
                         conn.execute(
-                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl,exit_price_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            params![pc, ea_s, eb_s, d, actual_vol_b, 0.0f64, entry_fill, sp, entry_time, entry_time, sp, "CLOSED", 0.0f64, gross_pnl, pid, total_fee, 0.0f64, 0.0f64, reason, net_pnl, gross_pnl, close_fill]
+                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            params![pc, ea_s, eb_s, d, 0.0f64, 0.0f64, 0.0f64, sp, now_ms(), now_ms(), sp, "CLOSED", 0.0f64, 0.0f64, pid, 0.0f64, 0.0f64, 0.0f64, reason, 0.0f64, 0.0f64]
                         )?;
                         Ok(())
                     }).await;
@@ -810,14 +910,20 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 continue;
             }
         };
-        let oid_b = match ob_result {
+
+        // LEG_A succeeded! Deduct from cached balance.
+        deduct_cached_balance(&exa, actual_vol_a);
+
+        // ── LEG_B (only executed after LEG_A confirmed) ──────────────────────
+        let oid_b = match place_order(&http, &keys, &exb, &pair, !is_a_higher, contracts_b, dry_run, false).await {
             Ok(id) => id,
             Err(e) => {
                 let err_str = e.to_string();
                 error!("[real] LEG_B failed {}/{}: {} — emergency close A", exb, pair, err_str);
-                if err_str.contains("insufficient") || err_str.contains("exceeds the balance") || err_str.contains("minimum amount") {
+                if is_margin_error(&err_str) {
                     ex_cd.insert(exb.clone(), now);
-                    error!("[real] Exchange {} cooled down for 10 min", exb);
+                    deduct_cached_balance(&exb, f64::MAX); // mark as zero
+                    error!("[real] Exchange {} cooled down for 30 min (margin error)", exb);
                 }
                 pair_cd.insert(pair.clone(), now);
                 let reason = format!("LEG_B_FAILED: {}", &err_str[..err_str.len().min(120)]);
@@ -884,6 +990,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 continue;
             }
         };
+
+        // LEG_B also succeeded! Deduct from cached balance.
+        deduct_cached_balance(&exb, actual_vol_b);
 
         // Mark this cycle as having opened a trade (only 1 per cycle)
         opened_this_cycle = true;

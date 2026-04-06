@@ -147,6 +147,9 @@ async fn main() -> Result<()> {
         exchange_keys.supports("kucoin"), exchange_keys.supports("binance"),
         exchange_keys.supports("bitget"));
 
+    // ── Balance fetcher — refreshes available margin every 30s ────────────────
+    engine::real::start_balance_fetcher(http.clone(), exchange_keys.clone());
+
     // ── Engine loop (wakes on every WS tick) ─────────────────────────────────
     {
         let prices      = prices.clone();

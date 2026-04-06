@@ -1010,7 +1010,7 @@ function renderHistoryTable(profileId, history) {
         const time = new Date(t.exit_time).toLocaleString('en-GB', { timeZone: 'Europe/Kyiv' });
         const pnl = t.pnl ?? 0;
         const pnlColor = pnl > 0 ? 'var(--green)' : 'var(--red)';
-        const pnlStr = (pnl > 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
+        const pnlStr = (pnl > 0 ? '+' : pnl < 0 ? '-' : '') + '$' + Math.abs(pnl).toFixed(2);
         const rowKey = `${profileId}_h_${t.id}`;
         const isExpanded = expandedRows[profileId]?.has('h_' + t.id);
         const isAHigher = t.direction.startsWith(t.exchange_a);
