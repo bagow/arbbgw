@@ -205,14 +205,18 @@ async fn fetch_available_balance(http: &Client, keys: &ExchangeKeys, exchange: &
         }
         "bitget" => {
             let ts = now_ms().to_string();
-            let path = "/api/v2/mix/account/account?symbol=BTCUSDT&productType=USDT-FUTURES&marginCoin=USDT";
+            let path = "/api/v2/mix/account/accounts?productType=USDT-FUTURES";
             let sig = bitget_sign(&keys.bitget_secret, &ts, "GET", path, "");
             let resp: Value = http.get(format!("https://api.bitget.com{}", path))
                 .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig)
                 .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
                 .timeout(Duration::from_secs(10)).send().await?.json().await?;
-            let bal = resp["data"]["available"].as_str().and_then(|s| s.parse().ok())
-                .or_else(|| resp["data"]["available"].as_f64()).unwrap_or(0.0);
+            // data is array of accounts, find USDT marginCoin
+            let bal = resp["data"].as_array()
+                .and_then(|arr| arr.iter().find(|a| a["marginCoin"].as_str() == Some("USDT")))
+                .and_then(|a| a["available"].as_str().and_then(|s| s.parse().ok())
+                    .or_else(|| a["accountEquity"].as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(0.0);
             Ok(bal)
         }
         "bybit" => {
@@ -230,7 +234,8 @@ async fn fetch_available_balance(http: &Client, keys: &ExchangeKeys, exchange: &
                 .and_then(|arr| arr.first())
                 .and_then(|a| a["coin"].as_array())
                 .and_then(|coins| coins.iter().find(|c| c["coin"].as_str() == Some("USDT")))
-                .and_then(|c| c["availableToWithdraw"].as_str().and_then(|s| s.parse().ok()))
+                .and_then(|c| c["walletBalance"].as_str().and_then(|s| s.parse().ok())
+                    .or_else(|| c["equity"].as_str().and_then(|s| s.parse().ok())))
                 .unwrap_or(0.0);
             Ok(bal)
         }
