@@ -79,22 +79,22 @@
     <!-- ── Chart Modal (Integrated) ────────────────────────────────────────── -->
     <div id="modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true">
         <div class="modal">
-            <div class="modal-header">
-                <div>
-                    <div class="modal-title" id="modal-title">–</div>
-                    <div class="modal-sub" id="modal-sub">–</div>
+            <div class="modal-header" style="display:flex; flex-direction:column; gap:16px;">
+                <div style="display:flex; justify-content:space-between; width:100%; align-items:flex-start;">
+                    <div>
+                        <div class="modal-title" id="modal-title">–</div>
+                        <div class="modal-sub" id="modal-sub">–</div>
+                    </div>
+                    <button class="modal-close" id="modal-close" style="align-self:flex-start;">✕</button>
                 </div>
-                <div class="modal-header-right">
-                    <div class="tf-bar">
-                        <button class="tf-btn" data-tf="15" id="tf-15s">15s</button>
+                <div class="modal-header-right" style="width:100%;">
+                    <div class="tf-bar" style="display:flex; width:100%; gap:8px;">
                         <button class="tf-btn tf-btn--active" data-tf="60" id="tf-1m">1m</button>
                         <button class="tf-btn" data-tf="180" id="tf-3m">3m</button>
                         <button class="tf-btn" data-tf="300" id="tf-5m">5m</button>
                         <button class="tf-btn" data-tf="900" id="tf-15m">15m</button>
+                        <a id="tv-link" class="tv-btn" href="#" target="_blank" rel="noopener noreferrer">TV</a>
                     </div>
-
-                    <a id="tv-link" class="tv-btn" href="#" target="_blank" rel="noopener noreferrer">TV</a>
-                    <button class="modal-close" id="modal-close">✕</button>
                 </div>
             </div>
             <div id="chart-legend" class="chart-legend"></div>

@@ -498,6 +498,9 @@ function updateVolumeInfo(row) {
     const volEl = $('chart-volume-info');
     if (!volEl || !row) return;
 
+    const exA = row.exchangeA;
+    const exB = row.exchangeB;
+
     // Try to find volume in snapshot if current row has 0
     let vA = row.volA;
     let vB = row.volB;
@@ -522,8 +525,6 @@ function updateVolumeInfo(row) {
         return '$' + Number(v).toFixed(0);
     };
 
-    const exA = row.exchangeA;
-    const exB = row.exchangeB;
     const colA = EXCHANGE_COLORS[exA] || '#60a5fa';
     const colB = EXCHANGE_COLORS[exB] || '#34d399';
 
