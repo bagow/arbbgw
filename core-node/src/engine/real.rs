@@ -1091,13 +1091,13 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         }
 
         // ── PRE-FLIGHT: Min notional (Binance requires >= $5) ─────────────────
-        if (exa == "binance" && actual_vol_a < 5.05) || (exb == "binance" && actual_vol_b < 5.05) {
+        if (row.exchange_a == "binance" && actual_vol_a < 5.05) || (row.exchange_b == "binance" && actual_vol_b < 5.05) {
             continue; // would be rejected by Binance min notional
         }
 
         // ── PRE-FLIGHT: Tick sizes must be loaded ─────────────────────────────
-        let has_tick_a = get_tick_sizes().contains_key(&format!("{}:{}", exa, pair));
-        let has_tick_b = get_tick_sizes().contains_key(&format!("{}:{}", exb, pair));
+        let has_tick_a = get_tick_sizes().contains_key(&format!("{}:{}", row.exchange_a, row.pair));
+        let has_tick_b = get_tick_sizes().contains_key(&format!("{}:{}", row.exchange_b, row.pair));
         if !has_tick_a || !has_tick_b {
             continue; // tick sizes not loaded yet — price rounding would be unreliable
         }
