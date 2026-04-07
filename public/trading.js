@@ -593,12 +593,10 @@ function renderSettingsForm(profile) {
                     <label>Trailing Stop (%)</label>
                     <input type="number" id="sf-trail-${p.id}" step="0.0001" value="${p.trailing_stop_percent??0.5}" />
                 </div>
-                ${p.mode !== 'real' ? `
                 <div class="form-group">
-                    <label>Slippage Rate (%)</label>
-                    <input type="number" id="sf-slip-${p.id}" step="0.0001" value="${p.slippage_percent??0.1}" />
+                    <label>Slippage / IOC Tolerance (%)</label>
+                    <input type="number" id="sf-slip-${p.id}" step="0.01" value="${p.slippage_percent??0.3}" />
                 </div>
-                ` : ''}
 
                 <div class="form-group">
                     <label>Min Volume (M$)</label>
