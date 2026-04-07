@@ -1239,32 +1239,31 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
 
         // Absolute floor: spread must exceed round-trip costs from REAL exchange fee rates
-        // fee_a, fee_b are fetched from exchange APIs and cached every 60s
         let fee_a = get_exchange_fee(&row.exchange_a);
         let fee_b = get_exchange_fee(&row.exchange_b);
         let slippage_frac = settings.slippage_percent / 100.0;
-        // 4 legs total: open_A(fee_a) + open_B(fee_b) + close_A(fee_a) + close_B(fee_b) + 4*slippage
         let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
-        if row.spread < break_even_pct * 1.5 {
-            continue; // spread too small to cover real costs (1.5x safety margin)
-        }
 
-        // Smart structural filter: deviation above baseline must ALSO cover costs
+        // Dynamic safety margin: stricter for high-fee exchanges
+        let max_fee = fee_a.max(fee_b);
+        let safety = if max_fee >= 0.0008 { 2.0 }       // >=0.08% fee (Bybit etc)
+                     else if max_fee >= 0.0006 { 1.5 }   // 0.06-0.08%
+                     else { 1.3 };                        // <0.06%
+
+        if row.spread < break_even_pct * safety { continue; }
+
         let deviation = row.spread - row.structural_spread;
-        if deviation < break_even_pct * 1.5 { continue; }
+        if deviation < break_even_pct * safety { continue; }
 
         if open_pairs.contains(&row.pair) { continue; }
 
-        // Exchange support check
         if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) { continue; }
         if settings.disabled_exchanges.contains(&row.exchange_a) || settings.disabled_exchanges.contains(&row.exchange_b) { continue; }
 
-        // Exchange cooldown check (30 min after margin/balance error)
         let cd_a = ex_cd.get(&row.exchange_a).map(|v| *v).unwrap_or(0);
         let cd_b = ex_cd.get(&row.exchange_b).map(|v| *v).unwrap_or(0);
         if now - cd_a < 1_800_000 || now - cd_b < 1_800_000 { continue; }
 
-        // Pair cooldown check (5 min after any failure)
         let cd_pair = pair_cd.get(&row.pair).map(|v| *v).unwrap_or(0);
         if now - cd_pair < 300_000 { continue; }
 
@@ -1272,56 +1271,32 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
         let entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
 
-        // Price sanity: both legs must price the same asset — reject if >10% apart
         let price_ratio = if entry_a > entry_b { entry_a / entry_b } else { entry_b / entry_a };
-        if price_ratio > 1.10 {
-            info!("[SKIP] {} price sanity: A={:.6} B={:.6} ratio={:.3}", row.pair, entry_a, entry_b, price_ratio);
-            continue;
-        }
+        if price_ratio > 1.10 { continue; }
 
         // ── LIQUIDITY DEPTH FILTER ────────────────────────────────────────────
-        // Check that the best bid/ask level has enough volume for our trade.
-        // bid_size/ask_size are in USD, populated by WS collectors.
         let data_a = prices.get(&row.exchange_a).and_then(|m| m.get(&row.pair).cloned());
         let data_b = prices.get(&row.exchange_b).and_then(|m| m.get(&row.pair).cloned());
         let min_depth_usd = settings.trade_volume * 2.0;
         if let (Some(ref da), Some(ref db)) = (&data_a, &data_b) {
-            // For the selling side (is_a_higher=true → sell A, buy B), check bid_size on A and ask_size on B
             let depth_sell = if is_a_higher { da.bid_size } else { db.bid_size };
             let depth_buy  = if is_a_higher { db.ask_size } else { da.ask_size };
-            if depth_sell > 0.0 && depth_sell < min_depth_usd {
-                continue; // not enough depth on the sell side
-            }
-            if depth_buy > 0.0 && depth_buy < min_depth_usd {
-                continue; // not enough depth on the buy side
-            }
-
-            // ── INTRA-SPREAD FILTER ───────────────────────────────────────────
-            // If bid-ask spread on either exchange is too wide, the pair is illiquid NOW
+            if depth_sell > 0.0 && depth_sell < min_depth_usd { continue; }
+            if depth_buy > 0.0 && depth_buy < min_depth_usd { continue; }
             let intra_a = (da.ask - da.bid) / da.bid.max(1e-12) * 100.0;
             let intra_b = (db.ask - db.bid) / db.bid.max(1e-12) * 100.0;
-            if intra_a > 0.5 || intra_b > 0.5 {
-                continue; // > 0.5% bid-ask spread = too illiquid
-            }
+            if intra_a > 0.5 || intra_b > 0.5 { continue; }
         }
 
         let map = get_multipliers();
-        let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) {
-            Some(v) => *v,
-            None => { continue; } // silent skip — multiplier not loaded yet
-        };
-        let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) {
-            Some(v) => *v,
-            None => { continue; }
-        };
+        let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) { Some(v) => *v, None => continue };
+        let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) { Some(v) => *v, None => continue };
 
         let contracts_a = ((settings.trade_volume / entry_a.max(1e-12)) / mult_a).round() as i64;
         if contracts_a < 1 { continue; }
-
         let actual_vol_a = contracts_a as f64 * mult_a * entry_a;
         let contracts_b = ((actual_vol_a / entry_b.max(1e-12)) / mult_b).round() as i64;
         if contracts_b < 1 { continue; }
-
         let actual_vol_b = contracts_b as f64 * mult_b * entry_b;
         let vol_diff_pct = (actual_vol_a - actual_vol_b).abs() / actual_vol_a * 100.0;
         if vol_diff_pct > 5.0 { continue; }
@@ -1335,307 +1310,177 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let thirty_days = 30 * 24 * 3600;
         let age_a = lmap.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|r| *r).unwrap_or(0);
         let age_b = lmap.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|r| *r).unwrap_or(0);
-        if (age_a > 0 && now_s - age_a < thirty_days) || (age_b > 0 && now_s - age_b < thirty_days) {
-            continue;
-        }
+        if (age_a > 0 && now_s - age_a < thirty_days) || (age_b > 0 && now_s - age_b < thirty_days) { continue; }
 
-        // ── PRE-FLIGHT BALANCE CHECK ──────────────────────────────────────────
-        if !has_sufficient_margin(&row.exchange_a, actual_vol_a) {
-            info!("[SKIP] {} — {} insufficient margin (need ${:.0}, cached bal too low)",
-                row.pair, row.exchange_a, actual_vol_a);
-            continue;
-        }
-        if !has_sufficient_margin(&row.exchange_b, actual_vol_b) {
-            info!("[SKIP] {} — {} insufficient margin (need ${:.0}, cached bal too low)",
-                row.pair, row.exchange_b, actual_vol_b);
-            continue;
-        }
+        if !has_sufficient_margin(&row.exchange_a, actual_vol_a) { continue; }
+        if !has_sufficient_margin(&row.exchange_b, actual_vol_b) { continue; }
+        if (row.exchange_a == "binance" && actual_vol_a < 5.05) || (row.exchange_b == "binance" && actual_vol_b < 5.05) { continue; }
 
-        // ── PRE-FLIGHT: Min notional (Binance requires >= $5) ─────────────────
-        if (row.exchange_a == "binance" && actual_vol_a < 5.05) || (row.exchange_b == "binance" && actual_vol_b < 5.05) {
-            continue; // would be rejected by Binance min notional
-        }
-
-        // ── PRE-FLIGHT: Tick sizes must be loaded ─────────────────────────────
         let has_tick_a = get_tick_sizes().contains_key(&format!("{}:{}", row.exchange_a, row.pair));
         let has_tick_b = get_tick_sizes().contains_key(&format!("{}:{}", row.exchange_b, row.pair));
-        if !has_tick_a || !has_tick_b {
-            continue; // tick sizes not loaded yet — price rounding would be unreliable
-        }
+        if !has_tick_a || !has_tick_b { continue; }
 
-        // ── COMPUTE PROTECTIVE LIMIT PRICES ──────────────────────────────────
-        // Limit IOC: max price we will pay (buy) / min price we will accept (sell)
-        // max_slip_frac controls how far from best bid/ask we allow execution.
-        // Floor at 0.3% — altcoin books can move 0.1-0.5% between WS tick and order arrival.
+        // ── LIMIT PRICES ─────────────────────────────────────────────────────
         let max_slip_frac = (settings.slippage_percent / 100.0).max(0.003);
-        let limit_price_a = if is_a_higher {
-            // Selling on A (short) → min price = bid * (1 - slip)
-            entry_a * (1.0 - max_slip_frac)
-        } else {
-            // Buying on A (long) → max price = ask * (1 + slip)
-            entry_a * (1.0 + max_slip_frac)
-        };
-        let limit_price_b = if is_a_higher {
-            // Buying on B (long) → max price = ask * (1 + slip)
-            entry_b * (1.0 + max_slip_frac)
-        } else {
-            // Selling on B (short) → min price = bid * (1 - slip)
-            entry_b * (1.0 - max_slip_frac)
-        };
-
-        info!("[real] Placing orders: {} A={} c={} vol=${:.3} lim={:.6} | B={} c={} vol=${:.3} lim={:.6} spread={:.4}% (struct={:.4}% dev={:.4}% be={:.4}%)",
-            row.pair, row.exchange_a, contracts_a, actual_vol_a, limit_price_a, row.exchange_b, contracts_b, actual_vol_b, limit_price_b,
-            row.spread, row.structural_spread, deviation, break_even_pct);
-
-        // ── SEQUENTIAL LEG PLACEMENT ─────────────────────────────────────────
-        // Place LEG_A first. If it fails → no exposure, no loss.
-        // Only if LEG_A succeeds → place LEG_B.
-        // This eliminates the asymmetric-fill problem where one leg succeeds
-        // and the other fails, forcing an expensive emergency close.
+        let limit_price_a = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
+        let limit_price_b = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
 
         let exa = row.exchange_a.clone();
         let exb = row.exchange_b.clone();
         let pair = row.pair.clone();
 
-        // ── ENSURE LEVERAGE on both exchanges ────────────────────────────────
-        ensure_leverage(&http, &keys, &exa, &pair, settings.leverage, &settings.margin_mode).await;
-        ensure_leverage(&http, &keys, &exb, &pair, settings.leverage, &settings.margin_mode).await;
+        // Leverage: parallel, cached after first call → instant on subsequent
+        tokio::join!(
+            ensure_leverage(&http, &keys, &exa, &pair, settings.leverage, &settings.margin_mode),
+            ensure_leverage(&http, &keys, &exb, &pair, settings.leverage, &settings.margin_mode)
+        );
 
-        // ── LEG_A (Limit IOC — price protected) ──────────────────────────────
-        let oid_a = match place_order(&http, &keys, &exa, &pair, is_a_higher, contracts_a, dry_run, false, limit_price_a, settings.leverage).await {
-            Ok(id) => id,
+        let t0 = std::time::Instant::now();
+
+        info!("[real] FIRE {} A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}%",
+            pair, exa, contracts_a, limit_price_a, exb, contracts_b, limit_price_b, row.spread, break_even_pct);
+
+        // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
+        let (result_a, result_b) = tokio::join!(
+            place_order(&http, &keys, &exa, &pair, is_a_higher, contracts_a, dry_run, false, limit_price_a, settings.leverage),
+            place_order(&http, &keys, &exb, &pair, !is_a_higher, contracts_b, dry_run, false, limit_price_b, settings.leverage)
+        );
+
+        let order_ms = t0.elapsed().as_millis();
+
+        let oid_a = match result_a {
+            Ok(id) => Some(id),
             Err(e) => {
-                let err_str = e.to_string();
-                error!("[real] LEG_A failed {}/{}: {}", exa, pair, err_str);
-                if is_margin_error(&err_str) {
-                    ex_cd.insert(exa.clone(), now);
-                    deduct_cached_balance(&exa, f64::MAX); // mark as zero
-                    error!("[real] Exchange {} cooled down for 30 min (margin error)", exa);
-                }
-                pair_cd.insert(pair.clone(), now);
-                // LEG_A failed BEFORE any position opened → no trade record needed
-                continue;
+                let es = e.to_string();
+                error!("[real] LEG_A reject {}/{}: {} ({}ms)", exa, pair, es, order_ms);
+                if is_margin_error(&es) { ex_cd.insert(exa.clone(), now); deduct_cached_balance(&exa, f64::MAX); }
+                None
+            }
+        };
+        let oid_b = match result_b {
+            Ok(id) => Some(id),
+            Err(e) => {
+                let es = e.to_string();
+                error!("[real] LEG_B reject {}/{}: {} ({}ms)", exb, pair, es, order_ms);
+                if is_margin_error(&es) { ex_cd.insert(exb.clone(), now); deduct_cached_balance(&exb, f64::MAX); }
+                None
             }
         };
 
-        // LEG_A accepted! Verify fill before placing LEG_B.
-        // IOC may be accepted (HTTP 200) but NOT filled if price moved.
-        // If unfilled → no position exists, skip LEG_B (zero loss).
-        let mut leg_a_fill_price = 0.0f64;
-        for attempt in 0..3 {
-            if attempt > 0 { tokio::time::sleep(Duration::from_millis(50)).await; }
-            if let Ok((p, _)) = fetch_order(&http, &keys, &exa, &pair, &oid_a).await {
-                if p > 0.0 { leg_a_fill_price = p; break; }
-            }
+        if oid_a.is_none() && oid_b.is_none() { pair_cd.insert(pair.clone(), now); continue; }
+
+        // ── PARALLEL FILL VERIFICATION ───────────────────────────────────────
+        let mut fill_a = 0.0f64; let mut fee_a_val = 0.0f64;
+        let mut fill_b = 0.0f64; let mut fee_b_val = 0.0f64;
+        let mut got_a = oid_a.is_none() || dry_run;
+        let mut got_b = oid_b.is_none() || dry_run;
+
+        for attempt in 0..10 {
+            if got_a && got_b { break; }
+            if attempt > 0 { tokio::time::sleep(Duration::from_millis(15)).await; }
+            let (fa, fb) = tokio::join!(
+                async { if !got_a { if let Some(ref oid) = oid_a { if let Ok((p, f)) = fetch_order(&http, &keys, &exa, &pair, oid).await { if p > 0.0 { return Some((p, f.abs())); } } } } None },
+                async { if !got_b { if let Some(ref oid) = oid_b { if let Ok((p, f)) = fetch_order(&http, &keys, &exb, &pair, oid).await { if p > 0.0 { return Some((p, f.abs())); } } } } None }
+            );
+            if let Some((p, f)) = fa { fill_a = p; fee_a_val = f; got_a = true; }
+            if let Some((p, f)) = fb { fill_b = p; fee_b_val = f; got_b = true; }
         }
-        if leg_a_fill_price <= 0.0 {
-            // IOC auto-cancelled, no position, no loss!
-            error!("[real] LEG_A IOC unfilled {} {} — skipping LEG_B (no exposure, $0 loss)", exa, pair);
+
+        let total_ms = t0.elapsed().as_millis();
+        if dry_run { fill_a = entry_a; fill_b = entry_b; got_a = true; got_b = true; }
+
+        let a_filled = oid_a.is_some() && fill_a > 0.0;
+        let b_filled = oid_b.is_some() && fill_b > 0.0;
+
+        info!("[real] RESULT {} A={} B={} fill_a={:.6} fill_b={:.6} orders={}ms total={}ms",
+            pair, a_filled, b_filled, fill_a, fill_b, order_ms, total_ms);
+
+        if !a_filled && !b_filled {
+            info!("[real] Both IOC unfilled {} — no exposure ({}ms)", pair, total_ms);
             pair_cd.insert(pair.clone(), now);
-            // Don't record this as a trade — it spams history with $0 entries
             continue;
         }
 
-        // LEG_A confirmed filled! Deduct from cached balance.
-        deduct_cached_balance(&exa, actual_vol_a);
+        if a_filled && b_filled {
+            // ✅ SUCCESS
+            deduct_cached_balance(&exa, actual_vol_a);
+            deduct_cached_balance(&exb, actual_vol_b);
+            opened_this_cycle = true;
 
-        // ── LEG_B (Limit IOC — price protected) ──────────────────────────────
-        let oid_b = match place_order(&http, &keys, &exb, &pair, !is_a_higher, contracts_b, dry_run, false, limit_price_b, settings.leverage).await {
-            Ok(id) => id,
-            Err(e) => {
-                let err_str = e.to_string();
-                error!("[real] LEG_B failed {}/{}: {} — emergency close A", exb, pair, err_str);
-                if is_margin_error(&err_str) {
-                    ex_cd.insert(exb.clone(), now);
-                    deduct_cached_balance(&exb, f64::MAX); // mark as zero
-                    error!("[real] Exchange {} cooled down for 30 min (margin error)", exb);
-                }
-                pair_cd.insert(pair.clone(), now + 25 * 60 * 1000); // 30 min effective cooldown after asymmetric fail
-                let reason = format!("LEG_B_FAILED: {}", &err_str[..err_str.len().min(120)]);
-                let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
-                let (ec, pc) = (exa.clone(), pair.clone());
-                let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
-                let oid_a_c = oid_a.clone();
-                let comm_rate = settings.commission_rate;
-                let lev_close = settings.leverage;
-                tokio::spawn(async move {
-                    // 1. Fetch real entry fill price + fee
-                    let mut entry_fill = entry_a;
-                    let mut total_fee = 0.0f64;
-                    for _ in 0..10 {
-                        if let Ok((p, f)) = fetch_order(&hc, &kc, &ec, &pc, &oid_a_c).await {
-                            if p > 0.0 { entry_fill = p; total_fee += f.abs(); break; }
-                        }
-                        tokio::time::sleep(Duration::from_millis(25)).await;
-                    }
+            let vol = settings.trade_volume;
+            let dir = row.direction.clone();
+            let sp = row.spread;
+            let profile_id = settings.id.clone();
+            let api_comm = fee_a_val + fee_b_val;
+            let entry_comm = if api_comm > 1e-9 { api_comm } else { vol * 2.0 * (settings.commission_rate / 100.0) };
+            let slip_a = if fill_a > 0.0 { if is_a_higher { ((entry_a - fill_a) * (vol / entry_a)).max(0.0) } else { ((fill_a - entry_a) * (vol / entry_a)).max(0.0) } } else { 0.0 };
+            let slip_b = if fill_b > 0.0 { if !is_a_higher { ((entry_b - fill_b) * (vol / entry_b)).max(0.0) } else { ((fill_b - entry_b) * (vol / entry_b)).max(0.0) } } else { 0.0 };
+            let entry_slip = slip_a + slip_b;
+            let entry_time = now_ms();
+            let oid_a_db = oid_a.unwrap_or_default();
+            let oid_b_db = oid_b.unwrap_or_default();
 
-                    // 2. Emergency close LEG_A
-                    let mut close_oid = None;
-                    for attempt in 1u32..=5 {
-                        match close_order(&hc, &kc, &ec, &pc, is_a_higher, contracts_a, false, lev_close).await {
-                            Ok(id) => { error!("🛡️ Emergency close A ok: {}", id); close_oid = Some(id); break; }
-                            Err(err) => { let w = 200 * 2u64.pow(attempt-1); tokio::time::sleep(Duration::from_millis(w)).await; error!("Emergency close A {}/5: {}", attempt, err); }
-                        }
-                    }
+            info!("[real] ✅ OPEN {} A={:.6}(c={}) B={:.6}(c={}) fees={:.4} slip={:.4} latency={}ms",
+                pair, fill_a, contracts_a, fill_b, contracts_b, entry_comm, entry_slip, total_ms);
 
-                    // 3. Fetch real close fill price + fee
-                    let mut close_fill = entry_fill;
-                    if let Some(ref coid) = close_oid {
-                        for _ in 0..10 {
-                            if let Ok((p, f)) = fetch_order(&hc, &kc, &ec, &pc, coid).await {
-                                if p > 0.0 { close_fill = p; total_fee += f.abs(); break; }
-                            }
-                            tokio::time::sleep(Duration::from_millis(25)).await;
-                        }
-                    }
-
-                    // 4. Calculate real PnL from open→close price movement
-                    let qty = actual_vol_a / entry_fill.max(1e-12);
-                    let gross_pnl = if is_a_higher {
-                        (entry_fill - close_fill) * qty  // short: profit if price dropped
-                    } else {
-                        (close_fill - entry_fill) * qty  // long: profit if price rose
-                    };
-                    // Fallback commission if exchange didn't report fees
-                    if total_fee < 1e-9 { total_fee = actual_vol_a * 2.0 * (comm_rate / 100.0); }
-                    let net_pnl = gross_pnl - total_fee;
-                    let entry_time = now_ms();
-
-                    error!("[real] LEG_B_FAILED {} real PnL: entry={:.6} close={:.6} gross={:.4} fee={:.4} net={:.4}",
-                        pc, entry_fill, close_fill, gross_pnl, total_fee, net_pnl);
-
-                    // 5. Write to DB with real numbers
-                    let _ = db_c.call(move |conn| {
-                        conn.execute(
-                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl,exit_price_a) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            params![pc, ea_s, eb_s, d, actual_vol_a, entry_fill, 0.0f64, sp, entry_time, entry_time, sp, "CLOSED", gross_pnl, 0.0f64, pid, total_fee, 0.0f64, 0.0f64, reason, net_pnl, gross_pnl, close_fill]
-                        )?;
-                        Ok(())
-                    }).await;
-                });
-                continue;
-            }
-        };
-
-        // LEG_B also succeeded! Deduct from cached balance.
-        deduct_cached_balance(&exb, actual_vol_b);
-
-        // Mark this cycle as having opened a trade (only 1 per cycle)
-        opened_this_cycle = true;
-
-        // ── Fast-poll both fills simultaneously (max 750ms) ───────────────────
-        // We do NOT write to DB until BOTH fills are confirmed with real prices.
-        let mut fill_a = 0.0f64; let mut fee_a = 0.0f64;
-        let mut fill_b = 0.0f64; let mut fee_b = 0.0f64;
-        let mut got_a = dry_run; let mut got_b = dry_run; // skip poll for dry runs
-
-        for _ in 0..15 {
-            if !got_a {
-                if let Ok((p, f)) = fetch_order(&http, &keys, &exa, &pair, &oid_a).await {
-                    if p > 0.0 { fill_a = p; fee_a = f.abs(); got_a = true; }
-                }
-            }
-            if !got_b {
-                if let Ok((p, f)) = fetch_order(&http, &keys, &exb, &pair, &oid_b).await {
-                    if p > 0.0 { fill_b = p; fee_b = f.abs(); got_b = true; }
-                }
-            }
-            if got_a && got_b { break; }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-
-        // Use scanner entry prices as fallback for dry runs
-        if dry_run { fill_a = entry_a; fill_b = entry_b; }
-
-        if !got_a && !got_b {
-            error!("[real] Fill confirmation timeout: {} no fills at all — NOT writing to DB", pair);
-            continue; // ← DO NOT INSERT TO DB
-        }
-
-        // ── At least one leg confirmed! Write to DB with real fill prices ────────────
-        let status = if got_a && got_b { "OPEN" } else { "FAILED_ASYMMETRIC" };
-        let vol = settings.trade_volume;
-        let dir = row.direction.clone();
-        let sp  = row.spread;
-        let profile_id = settings.id.clone();
-        
-        // Use actual exchange-reported fees if available, fall back to settings-based estimate
-        let api_comm = fee_a + fee_b;
-        let entry_comm = if api_comm > 1e-9 {
-            api_comm
+            let _ = db.call(move |conn| {
+                conn.execute(
+                    "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b,contracts_a,contracts_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    params![pair, exa, exb, dir, vol, fill_a, fill_b, sp, entry_time, sp, "OPEN", 0.0f64, 0.0f64, profile_id, entry_comm, entry_slip, 0.0f64, oid_a_db, oid_b_db, contracts_a, contracts_b]
+                )?;
+                Ok(())
+            }).await;
         } else {
-            // API didn't report fees — estimate from commission_rate setting (2 legs)
-            vol * 2.0 * (settings.commission_rate / 100.0)
-        };
+            // ⚠️ ASYMMETRIC — emergency close the filled leg
+            let (fe, _fo, fs, fc, fp_price, ff, fv) = if a_filled {
+                (exa.clone(), oid_a.as_ref().unwrap().clone(), is_a_higher, contracts_a, fill_a, fee_a_val, actual_vol_a)
+            } else {
+                (exb.clone(), oid_b.as_ref().unwrap().clone(), !is_a_higher, contracts_b, fill_b, fee_b_val, actual_vol_b)
+            };
 
-        // Slippage cost: difference between expected and actual fill price.
-        // Clamped to >= 0 — price improvement is not a "cost".
-        let slip_cost_a = if fill_a > 0.0 {
-            if is_a_higher { ((entry_a - fill_a) * (vol / entry_a)).max(0.0) }
-            else           { ((fill_a - entry_a) * (vol / entry_a)).max(0.0) }
-        } else { 0.0 };
-        let slip_cost_b = if fill_b > 0.0 {
-            if !is_a_higher { ((entry_b - fill_b) * (vol / entry_b)).max(0.0) }
-            else            { ((fill_b - entry_b) * (vol / entry_b)).max(0.0) }
-        } else { 0.0 };
-        let entry_slip = slip_cost_a + slip_cost_b;
+            error!("[real] ⚠️ ASYMMETRIC {} — only {} filled @ {:.6} ({}ms)", pair, fe, fp_price, total_ms);
+            pair_cd.insert(pair.clone(), now + 25 * 60 * 1000);
 
-        let entry_time = now_ms();
-        let oid_a_db = oid_a.clone(); let oid_b_db = oid_b.clone();
+            let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
+            let fp = pair.clone();
+            let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
+            let comm_rate = settings.commission_rate;
+            let lev = settings.leverage;
 
-        info!("[real] Inserting trade: {} status={} A={:.6}(c={}) B={:.6}(c={}) fees={:.4} slip={:.4}", pair, status, fill_a, contracts_a, fill_b, contracts_b, entry_comm, entry_slip);
-
-        let res = db.call(move |conn| {
-            conn.execute(
-                "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,order_id_a,order_id_b,contracts_a,contracts_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![pair, exa, exb, dir, vol, fill_a, fill_b, sp, entry_time, sp, status, 0.0f64, 0.0f64, profile_id, entry_comm, entry_slip, 0.0f64, oid_a_db, oid_b_db, contracts_a, contracts_b]
-            )?;
-            Ok::<i64, tokio_rusqlite::Error>(conn.last_insert_rowid())
-        }).await;
-
-        match res {
-            Ok(trade_id) => {
-                if status == "FAILED_ASYMMETRIC" {
-                    let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
-                    let lev_asym = settings.leverage;
-                    let (exa_c, exb_c, pair_c) = (row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone());
-                    tokio::spawn(async move {
-                        error!("🚨 EMERGENCY CLOSE {} {} (Asymmetric fill) — trade_id={}", exa_c, pair_c, trade_id);
-                        let (mut raid, mut rbid) = (None, None);
-                        if got_a && fill_a > 0.0 { raid = close_order(&hc, &kc, &exa_c, &pair_c, is_a_higher, contracts_a, false, lev_asym).await.ok(); }
-                        if got_b && fill_b > 0.0 { rbid = close_order(&hc, &kc, &exb_c, &pair_c, !is_a_higher, contracts_b, false, lev_asym).await.ok(); }
-                        
-                        let mut fa = 0.0; let mut fb = 0.0; let mut ec = 0.0;
-                        for _ in 0..15 {
-                            if fa == 0.0 && raid.is_some() {
-                                if let Ok((p, f)) = fetch_order(&hc, &kc, &exa_c, &pair_c, raid.as_ref().unwrap()).await {
-                                    if p > 0.0 { fa = p; ec += f.abs(); }
-                                }
-                            }
-                            if fb == 0.0 && rbid.is_some() {
-                                if let Ok((p, f)) = fetch_order(&hc, &kc, &exb_c, &pair_c, rbid.as_ref().unwrap()).await {
-                                    if p > 0.0 { fb = p; ec += f.abs(); }
-                                }
-                            }
-                            if (raid.is_none() || fa > 0.0) && (rbid.is_none() || fb > 0.0) { break; }
-                            tokio::time::sleep(Duration::from_millis(25)).await;
-                        }
-                        
-                        let r_pna = if fa > 0.0 && fill_a > 0.0 { if is_a_higher { (fill_a - fa)*(vol/fill_a) } else { (fa - fill_a)*(vol/fill_a) } } else { 0.0 };
-                        let r_pnb = if fb > 0.0 && fill_b > 0.0 { if is_a_higher { (fb - fill_b)*(vol/fill_b) } else { (fill_b - fb)*(vol/fill_b) } } else { 0.0 };
-                        let np = r_pna + r_pnb - (ec + entry_comm); // rough PnL estimate
-                        
-                        let _ = db_c.call(move |conn| {
-                            conn.execute("UPDATE trades SET status='CLOSED', close_reason='Execution Failed', exit_price_a=?, exit_price_b=?, commission_cost=commission_cost+?, pnl_a=?, pnl_b=?, gross_pnl=?, pnl=?, curr_gross_pnl=? WHERE id=?",
-                                params![fa, fb, ec, r_pna, r_pnb, r_pna+r_pnb, np, r_pna+r_pnb, trade_id])?;
-                            Ok(())
-                        }).await;
-                    });
+            tokio::spawn(async move {
+                let mut close_oid = None;
+                for attempt in 1u32..=3 {
+                    match close_order(&hc, &kc, &fe, &fp, fs, fc, false, lev).await {
+                        Ok(id) => { error!("🛡️ Emergency close ok {}/{}: {}", fe, fp, id); close_oid = Some(id); break; }
+                        Err(err) => { tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await; error!("Emergency close {}/3: {}", attempt, err); }
+                    }
                 }
-            }
-            Err(e) => {
-                error!("[real] DB INSERT failed: {:?}", e);
-            }
+                let mut close_fill = fp_price;
+                let mut total_fee = ff;
+                if let Some(ref coid) = close_oid {
+                    for _ in 0..5 {
+                        if let Ok((p, f)) = fetch_order(&hc, &kc, &fe, &fp, coid).await {
+                            if p > 0.0 { close_fill = p; total_fee += f.abs(); break; }
+                        }
+                        tokio::time::sleep(Duration::from_millis(15)).await;
+                    }
+                }
+                let qty = fv / fp_price.max(1e-12);
+                let gross_pnl = if fs { (fp_price - close_fill) * qty } else { (close_fill - fp_price) * qty };
+                if total_fee < 1e-9 { total_fee = fv * 2.0 * (comm_rate / 100.0); }
+                let net_pnl = gross_pnl - total_fee;
+                let entry_time = now_ms();
+
+                error!("[real] ASYMMETRIC PnL {}: gross={:.4} fee={:.4} net={:.4}", fp, gross_pnl, total_fee, net_pnl);
+
+                let _ = db_c.call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl,exit_price_a) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        params![fp, ea_s, eb_s, d, fv, fp_price, 0.0f64, sp, entry_time, entry_time, sp, "CLOSED", gross_pnl, 0.0f64, pid, total_fee, 0.0f64, 0.0f64, "ASYMMETRIC_CLOSE", net_pnl, gross_pnl, close_fill]
+                    )?;
+                    Ok(())
+                }).await;
+            });
         }
     }
 }
