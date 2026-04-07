@@ -70,6 +70,7 @@ fn now_ms() -> i64 {
 
 static MULTIPLIERS: OnceLock<DashMap<String, f64>> = OnceLock::new();
 static LAUNCH_TIMES: OnceLock<DashMap<String, i64>> = OnceLock::new();
+static TICK_SIZES: OnceLock<DashMap<String, f64>> = OnceLock::new();
 
 pub fn get_multipliers() -> &'static DashMap<String, f64> {
     MULTIPLIERS.get_or_init(DashMap::new)
@@ -77,6 +78,26 @@ pub fn get_multipliers() -> &'static DashMap<String, f64> {
 
 pub fn get_launch_times() -> &'static DashMap<String, i64> {
     LAUNCH_TIMES.get_or_init(DashMap::new)
+}
+
+pub fn get_tick_sizes() -> &'static DashMap<String, f64> {
+    TICK_SIZES.get_or_init(DashMap::new)
+}
+
+/// Round price to the nearest valid tick size for the given exchange:pair.
+/// If tick size is unknown, rounds to 8 decimal places (safe fallback).
+fn round_to_tick(price: f64, exchange: &str, pair: &str) -> f64 {
+    let key = format!("{}:{}", exchange, pair);
+    let tick = get_tick_sizes().get(&key).map(|v| *v).unwrap_or(0.0);
+    if tick > 0.0 {
+        (price / tick).round() * tick
+    } else {
+        // Fallback: round based on price magnitude
+        if price > 1000.0 { (price * 100.0).round() / 100.0 }       // 0.01
+        else if price > 10.0 { (price * 1000.0).round() / 1000.0 }  // 0.001
+        else if price > 0.1 { (price * 10000.0).round() / 10000.0 } // 0.0001
+        else { (price * 100000.0).round() / 100000.0 }              // 0.00001
+    }
 }
 
 // ─── Balance cache ────────────────────────────────────────────────────────────
@@ -300,6 +321,7 @@ fn is_margin_error(err: &str) -> bool {
 pub fn start_multiplier_fetcher(http: Client) {
     let _ = get_multipliers();
     let _ = get_launch_times();
+    let _ = get_tick_sizes();
 
     // Gate.io
     tokio::spawn({
@@ -311,6 +333,7 @@ pub fn start_multiplier_fetcher(http: Client) {
                         if let Some(arr) = json.as_array() {
                             let map = get_multipliers();
                             let lmap = get_launch_times();
+                            let tmap = get_tick_sizes();
                             for c in arr {
                                 let name_stripped = c["name"].as_str().unwrap_or("").replace("_", "");
                                 if let Some(mult_str) = c["quanto_multiplier"].as_str() {
@@ -320,6 +343,12 @@ pub fn start_multiplier_fetcher(http: Client) {
                                 }
                                 if let Some(lt) = c["launch_time"].as_i64() {
                                     lmap.insert(format!("gate:{}", name_stripped), lt);
+                                }
+                                // Gate: order_price_round is the price tick size string
+                                if let Some(pr) = c["order_price_round"].as_str() {
+                                    if let Ok(tick) = pr.parse::<f64>() {
+                                        if tick > 0.0 { tmap.insert(format!("gate:{}", name_stripped), tick); }
+                                    }
                                 }
                             }
                         }
@@ -340,10 +369,15 @@ pub fn start_multiplier_fetcher(http: Client) {
                         if let Some(arr) = json["data"].as_array() {
                             let map = get_multipliers();
                             let lmap = get_launch_times();
+                            let tmap = get_tick_sizes();
                             for c in arr {
                                 let name_stripped = c["contract_code"].as_str().unwrap_or("").replace("-", "");
                                 if let Some(mult) = c["contract_size"].as_f64() {
                                     map.insert(format!("htx:{}", name_stripped), mult);
+                                }
+                                // HTX: price_tick is the minimum price increment
+                                if let Some(tick) = c["price_tick"].as_f64() {
+                                    if tick > 0.0 { tmap.insert(format!("htx:{}", name_stripped), tick); }
                                 }
                                 if let Some(date_str) = c["create_date"].as_str() {
                                     if let Ok(dt) = chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d") {
@@ -371,6 +405,7 @@ pub fn start_multiplier_fetcher(http: Client) {
                         if let Some(arr) = json["data"].as_array() {
                             let map = get_multipliers();
                             let lmap = get_launch_times();
+                            let tmap = get_tick_sizes();
                             for c in arr {
                                 if let Some(name) = c["symbol"].as_str() {
                                     let mut std_name = name.replace("USDTM", "USDT").replace("USDM", "USDT");
@@ -379,6 +414,10 @@ pub fn start_multiplier_fetcher(http: Client) {
                                     
                                     if let Some(mult) = c["multiplier"].as_f64() {
                                         map.insert(full_name.clone(), mult);
+                                    }
+                                    // KuCoin: tickSize is the price increment
+                                    if let Some(tick) = c["tickSize"].as_f64() {
+                                        if tick > 0.0 { tmap.insert(full_name.clone(), tick); }
                                     }
                                     if let Some(lt) = c["firstOpenDate"].as_i64() {
                                         lmap.insert(full_name, lt / 1000);
@@ -403,6 +442,7 @@ pub fn start_multiplier_fetcher(http: Client) {
                         if let Some(symbols) = json["symbols"].as_array() {
                             let map = get_multipliers();
                             let lmap = get_launch_times();
+                            let tmap = get_tick_sizes();
                             let mut count = 0u32;
                             for s in symbols {
                                 let sym = s["symbol"].as_str().unwrap_or("");
@@ -418,6 +458,14 @@ pub fn start_multiplier_fetcher(http: Client) {
                                                         map.insert(format!("binance:{}", sym), step);
                                                         count += 1;
                                                     }
+                                                }
+                                            }
+                                        }
+                                        // Binance: PRICE_FILTER.tickSize is the price step
+                                        if f["filterType"].as_str() == Some("PRICE_FILTER") {
+                                            if let Some(ts) = f["tickSize"].as_str() {
+                                                if let Ok(tick) = ts.parse::<f64>() {
+                                                    if tick > 0.0 { tmap.insert(format!("binance:{}", sym), tick); }
                                                 }
                                             }
                                         }
@@ -446,6 +494,7 @@ pub fn start_multiplier_fetcher(http: Client) {
                         if let Some(arr) = json["data"].as_array() {
                             let map = get_multipliers();
                             let lmap = get_launch_times();
+                            let tmap = get_tick_sizes();
                             let mut count = 0u32;
                             for c in arr {
                                 let sym = c["symbol"].as_str().unwrap_or("");
@@ -456,6 +505,13 @@ pub fn start_multiplier_fetcher(http: Client) {
                                             map.insert(format!("bitget:{}", sym), m);
                                             count += 1;
                                         }
+                                    }
+                                }
+                                // Bitget: pricePlace = number of decimal places
+                                if let Some(pp) = c["pricePlace"].as_str() {
+                                    if let Ok(places) = pp.parse::<i32>() {
+                                        let tick = 10f64.powi(-places);
+                                        tmap.insert(format!("bitget:{}", sym), tick);
                                     }
                                 }
                                 if let Some(lt) = c["listTime"].as_str() {
@@ -526,6 +582,8 @@ fn bitget_sign(secret: &str, ts: &str, method: &str, path: &str, body: &str) -> 
 async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, contracts: i64, dry_run: bool, is_reduce_only: bool, limit_price: f64) -> Result<String> {
     let side = if is_short { "sell" } else { "buy" };
     let use_limit = limit_price > 0.0 && !is_reduce_only; // Limit IOC only for entries
+    // Round price to exchange tick size to avoid "PRICE PARAMETER INVALID" errors
+    let limit_price = if use_limit { round_to_tick(limit_price, exchange, pair) } else { 0.0 };
     match exchange {
         "binance" => {
             let ts = now_ms();
