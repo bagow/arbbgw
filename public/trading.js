@@ -232,7 +232,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
                 if (!document.getElementById(`dash-equity-${profile.id}`)) {
                     dashWrap.innerHTML = renderDashboardHTML(profile.id);
                 }
-                renderDashboardCharts(profile.id, stats);
+                renderDashboardCharts(profile.id, stats, exchanges);
             } else if (dashWrap && !hasStats) {
                 if (document.getElementById(`dash-equity-${profile.id}`)) {
                     dashWrap.innerHTML = '<div class="text-sub" style="padding:48px;text-align:center;flex:1;">📊 No closed trades found for this profile yet.<br/><span style="font-size:0.8rem;">Stats will appear here once the first trade is completed.</span></div>';
@@ -397,7 +397,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
     if (active !== null) {
         renderActiveTable(profile.id, active);
         renderHistoryTable(profile.id, history);
-        if (stats && stats.total_trades > 0) renderDashboardCharts(profile.id, stats);
+        if (stats && stats.total_trades > 0) renderDashboardCharts(profile.id, stats, exchanges);
     }
 
     // After full re-render, re-hook scanner references if on scanner tab
@@ -507,6 +507,8 @@ function renderCexTab(profile, exchangesData) {
         let pairsList = '';
         let maxTickers = 0;
         const rawArr = exchangesData.data[exA];
+        const bal = (exchangesData.balances && exchangesData.balances[exA]) || 0;
+        const fee = (exchangesData.fees && exchangesData.fees[exA]) || 0;
         for (const exB of exNames) {
             if (exA === exB) continue;
             let matchCount = 0;
@@ -535,9 +537,13 @@ function renderCexTab(profile, exchangesData) {
                         <h3 style="margin:0;font-size:1.2rem;font-weight:600;text-transform:uppercase;">${exA}</h3>
                     </div>
                     <div style="text-align:right;">
-                        <span style="font-size:0.75rem;color:var(--text-sub);display:block;text-transform:uppercase;letter-spacing:0.5px;">Tickers</span>
-                        <span style="font-family:var(--font-mono);font-weight:600;">${maxTickers}+</span>
+                        <span style="font-size:0.75rem;color:var(--text-sub);display:block;text-transform:uppercase;letter-spacing:0.5px;">Balance</span>
+                        <span style="font-family:var(--font-mono);font-weight:600;color:${bal > 0 ? 'var(--green)' : 'var(--text-sub)'};">$${bal.toFixed(2)}</span>
                     </div>
+                </div>
+                <div style="display:flex;gap:16px;margin-bottom:12px;padding:8px 0;border-bottom:1px solid var(--border-dim);">
+                    <span style="font-size:0.8rem;color:var(--text-sub);">Tickers: <strong style="color:var(--text);">${maxTickers}+</strong></span>
+                    <span style="font-size:0.8rem;color:var(--text-sub);">Fee: <strong style="color:var(--text);">${(fee * 100).toFixed(3)}%</strong></span>
                 </div>
                 
                 <div style="flex:1;margin-bottom:20px;padding-right:8px;">
@@ -714,7 +720,7 @@ function renderDashboardHTML(profileId) {
 
 // ─── Per-profile dashboard chart rendering ────────────────────────────────────
 
-function renderDashboardCharts(profileId, stats) {
+function renderDashboardCharts(profileId, stats, exchanges) {
     const pid = profileId;
 
     // Guard: Chart.js must be loaded
@@ -735,7 +741,11 @@ function renderDashboardCharts(profileId, stats) {
         const winRate = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(1) : '0.0';
         const avgPnl = stats.avg_pnl || 0;
         const avgDuration = stats.avg_duration || 0;
+        // Calculate total balance from real exchange data
+        const realBalances = (exchanges && exchanges.balances) || {};
+        const totalBalance = Object.values(realBalances).reduce((s, v) => s + v, 0);
         kpiEl.innerHTML = [
+            ['Total Balance', `$${totalBalance.toFixed(2)}`, 'var(--text)'],
             ['Total PnL', fmtPnL(totalPnl), totalPnl >= 0 ? 'var(--green)' : 'var(--red)'],
             ['Trades', totalTrades, 'var(--text)'],
             ['Win Rate', `${winRate}%`, wins / (totalTrades || 1) >= 0.5 ? 'var(--green)' : 'var(--red)'],
@@ -779,11 +789,13 @@ function renderDashboardCharts(profileId, stats) {
         curve.forEach(p => { if(p.ex_a) exKeys.add(p.ex_a); if(p.ex_b) exKeys.add(p.ex_b); });
         if (exKeys.size === 0) exKeys.add('Capital');
 
-        const colors = ['#60a5fa', '#f43f5e', '#34d399', '#c084fc', '#fbbf24'];
+        // Use real exchange balances as starting capital (fallback to $0)
+        const realBal = (exchanges && exchanges.balances) || {};
+        const colors = ['#60a5fa', '#f43f5e', '#34d399', '#c084fc', '#fbbf24', '#fb923c'];
         let cIdx = 0;
         const colorMap = {};
         exKeys.forEach(ex => {
-            exBalances[ex] = 100; // $100 base for each exchange
+            exBalances[ex] = realBal[ex] || 0;
             colorMap[ex] = colors[cIdx % colors.length];
             cIdx++;
         });

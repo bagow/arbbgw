@@ -109,11 +109,11 @@ fn round_to_tick(price: f64, exchange: &str, pair: &str) -> f64 {
 static BALANCE_CACHE: OnceLock<DashMap<String, f64>> = OnceLock::new();
 static FEE_RATE_CACHE: OnceLock<DashMap<String, f64>> = OnceLock::new();
 
-fn get_balance_cache() -> &'static DashMap<String, f64> {
+pub fn get_balance_cache() -> &'static DashMap<String, f64> {
     BALANCE_CACHE.get_or_init(DashMap::new)
 }
 
-fn get_fee_cache() -> &'static DashMap<String, f64> {
+pub fn get_fee_cache() -> &'static DashMap<String, f64> {
     FEE_RATE_CACHE.get_or_init(DashMap::new)
 }
 

@@ -279,7 +279,19 @@ async fn main() -> Result<()> {
                     pairs_map.insert(ex_a.clone(), serde_json::Value::Object(vs));
                 }
 
-                let val = serde_json::json!({ "ts": now_ms, "data": pairs_map, "DEBUG_PROFILES": paper_debug }).to_string();
+                // Collect real balances + fee rates from engine caches
+                let bal_cache = engine::real::get_balance_cache();
+                let fee_cache = engine::real::get_fee_cache();
+                let mut balances: HashMap<String, f64> = HashMap::new();
+                let mut fees: HashMap<String, f64> = HashMap::new();
+                for entry in bal_cache.iter() {
+                    balances.insert(entry.key().clone(), *entry.value());
+                }
+                for entry in fee_cache.iter() {
+                    fees.insert(entry.key().clone(), *entry.value());
+                }
+
+                let val = serde_json::json!({ "ts": now_ms, "data": pairs_map, "balances": balances, "fees": fees, "DEBUG_PROFILES": paper_debug }).to_string();
                 let n = exchanges_list.len();
                 let _ = cache_db.call(move |conn| {
                     let _ = conn.execute_batch("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);");
