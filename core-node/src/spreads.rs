@@ -76,7 +76,7 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
                 let structural_spread = if let Some(mut entry) = ema_map.get_mut(&ema_key) {
                     let (old_ema, last_updated) = *entry;
                     let dt = (now_f64 - last_updated).max(0.0);
-                    let tau = 86400.0; // 24 hours
+                    let tau = 21600.0; // 6 hours — fast adaptation to detect structural spreads
                     let alpha = 1.0 - (-dt / tau).exp();
                     let new_ema = old_ema + alpha * (spread - old_ema);
                     *entry = (new_ema, now_f64);
@@ -108,7 +108,7 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
 /// so the engine starts with a realistic 24h baseline instead of waiting for live accumulation.
 pub fn warmup_ema_from_history(history: &[(f64, f64, String, String, String, String)]) {
     let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
-    let tau = 86400.0_f64;
+    let tau = 21600.0_f64;
 
     // Sort chronologically (history from API may be newest-first)
     let mut sorted = history.to_vec();

@@ -1090,6 +1090,18 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             continue;
         }
 
+        // ── PRE-FLIGHT: Min notional (Binance requires >= $5) ─────────────────
+        if (exa == "binance" && actual_vol_a < 5.05) || (exb == "binance" && actual_vol_b < 5.05) {
+            continue; // would be rejected by Binance min notional
+        }
+
+        // ── PRE-FLIGHT: Tick sizes must be loaded ─────────────────────────────
+        let has_tick_a = get_tick_sizes().contains_key(&format!("{}:{}", exa, pair));
+        let has_tick_b = get_tick_sizes().contains_key(&format!("{}:{}", exb, pair));
+        if !has_tick_a || !has_tick_b {
+            continue; // tick sizes not loaded yet — price rounding would be unreliable
+        }
+
         // ── COMPUTE PROTECTIVE LIMIT PRICES ──────────────────────────────────
         // Limit IOC: max price we will pay (buy) / min price we will accept (sell)
         // max_slip_frac controls how far from best bid/ask we allow execution.
@@ -1152,10 +1164,37 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             }
         };
 
-        // LEG_A succeeded! Deduct from cached balance.
+        // LEG_A accepted! Verify fill before placing LEG_B.
+        // IOC may be accepted (HTTP 200) but NOT filled if price moved.
+        // If unfilled → no position exists, skip LEG_B (zero loss).
+        let mut leg_a_fill_price = 0.0f64;
+        for attempt in 0..3 {
+            if attempt > 0 { tokio::time::sleep(Duration::from_millis(50)).await; }
+            if let Ok((p, _)) = fetch_order(&http, &keys, &exa, &pair, &oid_a).await {
+                if p > 0.0 { leg_a_fill_price = p; break; }
+            }
+        }
+        if leg_a_fill_price <= 0.0 {
+            // IOC auto-cancelled, no position, no loss!
+            error!("[real] LEG_A IOC unfilled {} {} — skipping LEG_B (no exposure, $0 loss)", exa, pair);
+            pair_cd.insert(pair.clone(), now);
+            let (db_c, ea_s, eb_s, d, sp, pid) = (db.clone(), exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
+            let pc = pair.clone();
+            tokio::spawn(async move {
+                let _ = db_c.call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        params![pc, ea_s, eb_s, d, 0.0f64, 0.0f64, 0.0f64, sp, now_ms(), now_ms(), sp, "CLOSED", 0.0f64, 0.0f64, pid, 0.0f64, 0.0f64, 0.0f64, "LEG_A_IOC_UNFILLED", 0.0f64, 0.0f64]
+                    )?;
+                    Ok(())  
+                }).await;
+            });
+            continue;
+        }
+
+        // LEG_A confirmed filled! Deduct from cached balance.
         deduct_cached_balance(&exa, actual_vol_a);
 
-        // ── LEG_B (only executed after LEG_A confirmed) ──────────────────────
         // ── LEG_B (Limit IOC — price protected) ──────────────────────────────
         let oid_b = match place_order(&http, &keys, &exb, &pair, !is_a_higher, contracts_b, dry_run, false, limit_price_b).await {
             Ok(id) => id,
@@ -1167,7 +1206,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     deduct_cached_balance(&exb, f64::MAX); // mark as zero
                     error!("[real] Exchange {} cooled down for 30 min (margin error)", exb);
                 }
-                pair_cd.insert(pair.clone(), now);
+                pair_cd.insert(pair.clone(), now + 25 * 60 * 1000); // 30 min effective cooldown after asymmetric fail
                 let reason = format!("LEG_B_FAILED: {}", &err_str[..err_str.len().min(120)]);
                 let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
                 let (ec, pc) = (exa.clone(), pair.clone());
