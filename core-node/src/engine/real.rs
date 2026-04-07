@@ -1366,7 +1366,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         // ── COMPUTE PROTECTIVE LIMIT PRICES ──────────────────────────────────
         // Limit IOC: max price we will pay (buy) / min price we will accept (sell)
         // max_slip_frac controls how far from best bid/ask we allow execution.
-        let max_slip_frac = (settings.slippage_percent / 100.0).max(0.0005); // at least 0.05%
+        // Floor at 0.3% — altcoin books can move 0.1-0.5% between WS tick and order arrival.
+        let max_slip_frac = (settings.slippage_percent / 100.0).max(0.003);
         let limit_price_a = if is_a_higher {
             // Selling on A (short) → min price = bid * (1 - slip)
             entry_a * (1.0 - max_slip_frac)
@@ -1412,19 +1413,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     error!("[real] Exchange {} cooled down for 30 min (margin error)", exa);
                 }
                 pair_cd.insert(pair.clone(), now);
-                // LEG_A failed BEFORE any position opened → record and move on (no exposure!)
-                let reason = format!("LEG_A_FAILED: {}", &err_str[..err_str.len().min(120)]);
-                let (db_c, ea_s, eb_s, d, sp, pid) = (db.clone(), exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
-                let pc = pair.clone();
-                tokio::spawn(async move {
-                    let _ = db_c.call(move |conn| {
-                        conn.execute(
-                            "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            params![pc, ea_s, eb_s, d, 0.0f64, 0.0f64, 0.0f64, sp, now_ms(), now_ms(), sp, "CLOSED", 0.0f64, 0.0f64, pid, 0.0f64, 0.0f64, 0.0f64, reason, 0.0f64, 0.0f64]
-                        )?;
-                        Ok(())
-                    }).await;
-                });
+                // LEG_A failed BEFORE any position opened → no trade record needed
                 continue;
             }
         };
@@ -1443,17 +1432,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             // IOC auto-cancelled, no position, no loss!
             error!("[real] LEG_A IOC unfilled {} {} — skipping LEG_B (no exposure, $0 loss)", exa, pair);
             pair_cd.insert(pair.clone(), now);
-            let (db_c, ea_s, eb_s, d, sp, pid) = (db.clone(), exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
-            let pc = pair.clone();
-            tokio::spawn(async move {
-                let _ = db_c.call(move |conn| {
-                    conn.execute(
-                        "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        params![pc, ea_s, eb_s, d, 0.0f64, 0.0f64, 0.0f64, sp, now_ms(), now_ms(), sp, "CLOSED", 0.0f64, 0.0f64, pid, 0.0f64, 0.0f64, 0.0f64, "LEG_A_IOC_UNFILLED", 0.0f64, 0.0f64]
-                    )?;
-                    Ok(())  
-                }).await;
-            });
+            // Don't record this as a trade — it spams history with $0 entries
             continue;
         }
 
