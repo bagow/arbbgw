@@ -47,7 +47,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                     let price: f64 = d["lastPrice"].as_f64().unwrap_or((bid+ask)/2.0);
                     let vol: f64 = d["amount24"].as_f64().unwrap_or(0.0);
                     if bid > 0.0 && ask > 0.0 {
-                        upsert(price_map, signal, sym, TickerData { bid, ask, price, vol, funding_rate: 0.0, last_updated: 0 });
+                        upsert(price_map, signal, sym, TickerData { bid, ask, price, vol, funding_rate: 0.0, bid_size: 0.0, ask_size: 0.0, last_updated: 0 });
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,

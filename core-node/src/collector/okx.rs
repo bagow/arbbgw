@@ -37,11 +37,13 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             let sym = inst.replace("-USDT-SWAP", "USDT");
             let bid: f64 = t["bidPx"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let ask: f64 = t["askPx"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let bid_qty: f64 = t["bidSz"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let ask_qty: f64 = t["askSz"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let price: f64 = t["last"].as_str().and_then(|s| s.parse().ok()).unwrap_or((bid+ask)/2.0);
             let vol: f64 = t["volCcy24h"].as_str().and_then(|s| s.parse::<f64>().ok())
                 .map(|v| v * price).unwrap_or(0.0); // volCcy24h is in contracts, * price = USD
             if bid > 0.0 && ask > 0.0 {
-                upsert(price_map, signal, sym, TickerData { bid, ask, price, vol, funding_rate: 0.0, last_updated: 0 });
+                upsert(price_map, signal, sym, TickerData { bid, ask, price, vol, funding_rate: 0.0, bid_size: bid_qty * price, ask_size: ask_qty * price, last_updated: 0 });
             }
             inst_ids.push(inst.to_string());
         }
@@ -73,10 +75,12 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                         let sym = inst.replace("-USDT-SWAP", "USDT");
                         let bid: f64 = d["bidPx"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                         let ask: f64 = d["askPx"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                        let bid_qty: f64 = d["bidSz"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                        let ask_qty: f64 = d["askSz"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                         let price: f64 = d["last"].as_str().and_then(|s| s.parse().ok()).unwrap_or((bid+ask)/2.0);
                         let ev = price_map.get("okx").and_then(|m| m.get(&sym).map(|d| d.vol)).unwrap_or(0.0);
                         if bid > 0.0 && ask > 0.0 {
-                            upsert(price_map, signal, sym, TickerData { bid, ask, price, vol: ev, funding_rate: 0.0, last_updated: 0 });
+                            upsert(price_map, signal, sym, TickerData { bid, ask, price, vol: ev, funding_rate: 0.0, bid_size: bid_qty * price, ask_size: ask_qty * price, last_updated: 0 });
                         }
                     }
                 }

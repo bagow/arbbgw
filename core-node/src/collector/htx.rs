@@ -74,7 +74,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                     let vol = tick["vol"].as_f64().unwrap_or(0.0) * close;
                     let existing = price_map.get("htx").and_then(|m| m.get(&sym).cloned());
                     if let Some(d) = existing { if d.bid > 0.0 && d.ask > 0.0 {
-                        upsert(price_map, signal, sym, TickerData { bid: d.bid, ask: d.ask, price: d.price, vol, funding_rate: 0.0, last_updated: 0 });
+                        upsert(price_map, signal, sym, TickerData { bid: d.bid, ask: d.ask, price: d.price, vol, funding_rate: 0.0, bid_size: d.bid_size, ask_size: d.ask_size, last_updated: 0 });
                     }}
                 }
             }
