@@ -56,8 +56,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             if !sym.ends_with("USDT") { continue; }
             let bid: f64 = match v["b"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
             let ask: f64 = match v["a"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
+            let bid_qty: f64 = v["B"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let ask_qty: f64 = v["A"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let vol = price_map.get("binance").and_then(|m| m.get(sym).map(|d| d.vol)).unwrap_or(0.0);
-            upsert(price_map, signal, sym.to_string(), TickerData { bid, ask, price: (bid+ask)/2.0, vol, funding_rate: 0.0, last_updated: 0 });
+            let mid = (bid + ask) / 2.0;
+            upsert(price_map, signal, sym.to_string(), TickerData { bid, ask, price: mid, vol, funding_rate: 0.0, bid_size: bid_qty * mid, ask_size: ask_qty * mid, last_updated: 0 });
         }
     }
     Ok(())

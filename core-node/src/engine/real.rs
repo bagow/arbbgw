@@ -519,20 +519,28 @@ fn bitget_sign(secret: &str, ts: &str, method: &str, path: &str, body: &str) -> 
     hmac_sha256_b64(secret.as_bytes(), &format!("{}{}{}{}", ts, method, path, body))
 }
 
-// ─── Order placement ──────────────────────────────────────────────────────────
 
-async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, contracts: i64, dry_run: bool, is_reduce_only: bool) -> Result<String> {
+/// Place an order on an exchange.
+/// `limit_price` > 0 → Limit IOC (price-protected, no slippage beyond this).
+/// `limit_price` == 0 → Market order (used for closes where execution is critical).
+async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, contracts: i64, dry_run: bool, is_reduce_only: bool, limit_price: f64) -> Result<String> {
     let side = if is_short { "sell" } else { "buy" };
+    let use_limit = limit_price > 0.0 && !is_reduce_only; // Limit IOC only for entries
     match exchange {
         "binance" => {
             let ts = now_ms();
             let path = "/fapi/v1/order";
-            let mut qs = format!("symbol={}&side={}&type=MARKET&quantity={}&timestamp={}", pair, side.to_uppercase(), contracts, ts);
+            let mut qs = if use_limit {
+                // Binance price precision: 
+                format!("symbol={}&side={}&type=LIMIT&timeInForce=IOC&quantity={}&price={:.8}&timestamp={}", pair, side.to_uppercase(), contracts, limit_price, ts)
+            } else {
+                format!("symbol={}&side={}&type=MARKET&quantity={}&timestamp={}", pair, side.to_uppercase(), contracts, ts)
+            };
             if is_reduce_only { qs.push_str("&reduceOnly=true"); }
             let sig = binance_sign(&keys.binance_secret, &qs);
             let full_url = format!("https://fapi.binance.com{}?{}&signature={}", path, qs, sig);
             
-            if dry_run { info!("[DRY] binance order {} size={}", pair, contracts); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            if dry_run { info!("[DRY] binance order {} size={} limit={:.6}", pair, contracts, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
             let resp = http.post(full_url).header("X-MBX-APIKEY", &keys.binance_key)
                 .timeout(Duration::from_secs(10)).send().await?;
             let status = resp.status();
@@ -544,19 +552,34 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let ts = now_ms().to_string();
             let path = "/api/v2/mix/order/place-order";
             let trade_side = if is_reduce_only { "close" } else { "open" };
-            let body = json!({
-                "symbol": pair,
-                "productType": "USDT-FUMAX",
-                "marginMode": "crossed",
-                "marginCoin": "USDT",
-                "size": contracts.to_string(), // Bitget often requires string values
-                "side": side,
-                "tradeSide": trade_side,
-                "orderType": "market"
-            });
+            let body = if use_limit {
+                json!({
+                    "symbol": pair,
+                    "productType": "USDT-FUTURES",
+                    "marginMode": "crossed",
+                    "marginCoin": "USDT",
+                    "size": contracts.to_string(),
+                    "side": side,
+                    "tradeSide": trade_side,
+                    "orderType": "limit",
+                    "force": "ioc",
+                    "price": format!("{:.8}", limit_price)
+                })
+            } else {
+                json!({
+                    "symbol": pair,
+                    "productType": "USDT-FUTURES",
+                    "marginMode": "crossed",
+                    "marginCoin": "USDT",
+                    "size": contracts.to_string(),
+                    "side": side,
+                    "tradeSide": trade_side,
+                    "orderType": "market"
+                })
+            };
             let body_str = body.to_string();
             let sig = bitget_sign(&keys.bitget_secret, &ts, "POST", path, &body_str);
-            if dry_run { info!("[DRY] bitget order {} size={}", pair, contracts); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            if dry_run { info!("[DRY] bitget order {} size={} limit={:.6}", pair, contracts, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
             let resp = http.post(format!("https://api.bitget.com{}", path))
                 .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig)
                 .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
@@ -571,9 +594,10 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let contract = pair.replace("USDT", "_USDT");
             let size = if is_short { -contracts } else { contracts };
             let path = "/api/v4/futures/usdt/orders";
-            let body = json!({"contract":contract,"size":size,"price":"0","tif":"ioc","reduce_only":is_reduce_only,"close":false,"text":"t-corenode"});
+            let price_str = if use_limit { format!("{:.8}", limit_price) } else { "0".to_string() };
+            let body = json!({"contract":contract,"size":size,"price":price_str,"tif":"ioc","reduce_only":is_reduce_only,"close":false,"text":"t-corenode"});
             let body_str = body.to_string();
-            if dry_run { info!("[DRY] gate order {} size={}", contract, size); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            if dry_run { info!("[DRY] gate order {} size={} limit={:.6}", contract, size, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
             let resp = http.post(format!("https://api.gateio.ws{}", path)).headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &body_str)).body(body_str).timeout(Duration::from_secs(10)).send().await?;
             let status = resp.status();
             let v: Value = resp.json().await?;
@@ -584,8 +608,14 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let cc = format!("{}-{}", &pair[..pair.len()-4], &pair[pair.len()-4..]);
             let host = "api.hbdm.com"; let path = "/linear-swap-api/v1/swap_order";
             let offset = if is_reduce_only { "close" } else { "open" };
-            let body = json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":offset,"lever_rate":1,"order_price_type":"optimal_20"});
-            if dry_run { info!("[DRY] htx order {} {}", cc, side); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            // HTX: use "opponent_ioc" for controlled market-like execution (fills at best available, cancels remainder)
+            // For limit: use price + ioc
+            let body = if use_limit {
+                json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":offset,"lever_rate":1,"order_price_type":"ioc","price":format!("{:.8}", limit_price)})
+            } else {
+                json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":offset,"lever_rate":1,"order_price_type":"opponent_ioc"})
+            };
+            if dry_run { info!("[DRY] htx order {} {} limit={:.6}", cc, side, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
             let resp = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path))).json(&body).timeout(Duration::from_secs(10)).send().await?;
             let status = resp.status();
             let v: Value = resp.json().await?;
@@ -595,14 +625,18 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
         "kucoin" => {
             let sym = format!("{}M", pair);
             let ts = now_ms().to_string(); let path = "/api/v1/orders";
-            let body = if is_reduce_only {
+            let body = if use_limit {
+                let mut b = json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"limit","timeInForce":"IOC","price":format!("{:.8}", limit_price),"size":contracts,"leverage":"1","marginMode":"CROSS"});
+                if is_reduce_only { b["reduceOnly"] = json!(true); }
+                b
+            } else if is_reduce_only {
                 json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"market","size":contracts,"leverage":"1","marginMode":"CROSS","reduceOnly":true})
             } else {
                 json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"market","size":contracts,"leverage":"1","marginMode":"CROSS"})
             };
             let body_str = body.to_string();
             let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "POST", path, &body_str);
-            if dry_run { info!("[DRY] kucoin order {} {}", sym, side); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            if dry_run { info!("[DRY] kucoin order {} {} limit={:.6}", sym, side, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
             let resp = http.post(format!("https://api-futures.kucoin.com{}", path))
                 .header("KC-API-KEY", &keys.kucoin_key).header("KC-API-SIGN", sig)
                 .header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig)
@@ -618,7 +652,9 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
 }
 
 async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, was_short: bool, contracts: i64, dry_run: bool) -> Result<String> {
-    place_order(http, keys, exchange, pair, !was_short, contracts, dry_run, true).await
+    // Closes use market orders (limit_price=0) for guaranteed execution — 
+    // orphaned positions are worse than slippage on exit.
+    place_order(http, keys, exchange, pair, !was_short, contracts, dry_run, true, 0.0).await
 }
 
 // ─── Engine cycle ─────────────────────────────────────────────────────────────
@@ -779,7 +815,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                         } else { got_b = true; }
                     }
                     if got_a && got_b { break; }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
                 }
 
                 // Recalculate PnL with real exit prices
@@ -890,8 +926,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let slippage_frac = settings.slippage_percent / 100.0;
         // 4 legs total: open_A(fee_a) + open_B(fee_b) + close_A(fee_a) + close_B(fee_b) + 4*slippage
         let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
-        if row.spread < break_even_pct * 1.2 {
-            continue; // spread too small to cover real costs
+        if row.spread < break_even_pct * 1.5 {
+            continue; // spread too small to cover real costs (1.5x safety margin)
         }
 
         // Smart structural filter: deviation above baseline must ALSO cover costs
@@ -922,6 +958,32 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if price_ratio > 1.10 {
             info!("[SKIP] {} price sanity: A={:.6} B={:.6} ratio={:.3}", row.pair, entry_a, entry_b, price_ratio);
             continue;
+        }
+
+        // ── LIQUIDITY DEPTH FILTER ────────────────────────────────────────────
+        // Check that the best bid/ask level has enough volume for our trade.
+        // bid_size/ask_size are in USD, populated by WS collectors.
+        let data_a = prices.get(&row.exchange_a).and_then(|m| m.get(&row.pair).cloned());
+        let data_b = prices.get(&row.exchange_b).and_then(|m| m.get(&row.pair).cloned());
+        let min_depth_usd = settings.trade_volume * 2.0;
+        if let (Some(ref da), Some(ref db)) = (&data_a, &data_b) {
+            // For the selling side (is_a_higher=true → sell A, buy B), check bid_size on A and ask_size on B
+            let depth_sell = if is_a_higher { da.bid_size } else { db.bid_size };
+            let depth_buy  = if is_a_higher { db.ask_size } else { da.ask_size };
+            if depth_sell > 0.0 && depth_sell < min_depth_usd {
+                continue; // not enough depth on the sell side
+            }
+            if depth_buy > 0.0 && depth_buy < min_depth_usd {
+                continue; // not enough depth on the buy side
+            }
+
+            // ── INTRA-SPREAD FILTER ───────────────────────────────────────────
+            // If bid-ask spread on either exchange is too wide, the pair is illiquid NOW
+            let intra_a = (da.ask - da.bid) / da.bid.max(1e-12) * 100.0;
+            let intra_b = (db.ask - db.bid) / db.bid.max(1e-12) * 100.0;
+            if intra_a > 0.5 || intra_b > 0.5 {
+                continue; // > 0.5% bid-ask spread = too illiquid
+            }
         }
 
         let map = get_multipliers();
@@ -970,8 +1032,27 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             continue;
         }
 
-        info!("[real] Placing orders: {} A={} c={} vol=${:.3} | B={} c={} vol=${:.3} spread={:.4}% (struct={:.4}% dev={:.4}% be={:.4}%)",
-            row.pair, row.exchange_a, contracts_a, actual_vol_a, row.exchange_b, contracts_b, actual_vol_b,
+        // ── COMPUTE PROTECTIVE LIMIT PRICES ──────────────────────────────────
+        // Limit IOC: max price we will pay (buy) / min price we will accept (sell)
+        // max_slip_frac controls how far from best bid/ask we allow execution.
+        let max_slip_frac = (settings.slippage_percent / 100.0).max(0.0005); // at least 0.05%
+        let limit_price_a = if is_a_higher {
+            // Selling on A (short) → min price = bid * (1 - slip)
+            entry_a * (1.0 - max_slip_frac)
+        } else {
+            // Buying on A (long) → max price = ask * (1 + slip)
+            entry_a * (1.0 + max_slip_frac)
+        };
+        let limit_price_b = if is_a_higher {
+            // Buying on B (long) → max price = ask * (1 + slip)
+            entry_b * (1.0 + max_slip_frac)
+        } else {
+            // Selling on B (short) → min price = bid * (1 - slip)
+            entry_b * (1.0 - max_slip_frac)
+        };
+
+        info!("[real] Placing orders: {} A={} c={} vol=${:.3} lim={:.6} | B={} c={} vol=${:.3} lim={:.6} spread={:.4}% (struct={:.4}% dev={:.4}% be={:.4}%)",
+            row.pair, row.exchange_a, contracts_a, actual_vol_a, limit_price_a, row.exchange_b, contracts_b, actual_vol_b, limit_price_b,
             row.spread, row.structural_spread, deviation, break_even_pct);
 
         // ── SEQUENTIAL LEG PLACEMENT ─────────────────────────────────────────
@@ -984,8 +1065,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let exb = row.exchange_b.clone();
         let pair = row.pair.clone();
 
-        // ── LEG_A ────────────────────────────────────────────────────────────
-        let oid_a = match place_order(&http, &keys, &exa, &pair, is_a_higher, contracts_a, dry_run, false).await {
+        // ── LEG_A (Limit IOC — price protected) ──────────────────────────────
+        let oid_a = match place_order(&http, &keys, &exa, &pair, is_a_higher, contracts_a, dry_run, false, limit_price_a).await {
             Ok(id) => id,
             Err(e) => {
                 let err_str = e.to_string();
@@ -1017,7 +1098,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         deduct_cached_balance(&exa, actual_vol_a);
 
         // ── LEG_B (only executed after LEG_A confirmed) ──────────────────────
-        let oid_b = match place_order(&http, &keys, &exb, &pair, !is_a_higher, contracts_b, dry_run, false).await {
+        // ── LEG_B (Limit IOC — price protected) ──────────────────────────────
+        let oid_b = match place_order(&http, &keys, &exb, &pair, !is_a_higher, contracts_b, dry_run, false, limit_price_b).await {
             Ok(id) => id,
             Err(e) => {
                 let err_str = e.to_string();
@@ -1042,7 +1124,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                         if let Ok((p, f)) = fetch_order(&hc, &kc, &ec, &pc, &oid_a_c).await {
                             if p > 0.0 { entry_fill = p; total_fee += f.abs(); break; }
                         }
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tokio::time::sleep(Duration::from_millis(25)).await;
                     }
 
                     // 2. Emergency close LEG_A
@@ -1061,7 +1143,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                             if let Ok((p, f)) = fetch_order(&hc, &kc, &ec, &pc, coid).await {
                                 if p > 0.0 { close_fill = p; total_fee += f.abs(); break; }
                             }
-                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            tokio::time::sleep(Duration::from_millis(25)).await;
                         }
                     }
 
@@ -1117,7 +1199,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 }
             }
             if got_a && got_b { break; }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
 
         // Use scanner entry prices as fallback for dry runs
@@ -1193,7 +1275,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                                 }
                             }
                             if (raid.is_none() || fa > 0.0) && (rbid.is_none() || fb > 0.0) { break; }
-                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            tokio::time::sleep(Duration::from_millis(25)).await;
                         }
                         
                         let r_pna = if fa > 0.0 && fill_a > 0.0 { if is_a_higher { (fill_a - fa)*(vol/fill_a) } else { (fa - fill_a)*(vol/fill_a) } } else { 0.0 };

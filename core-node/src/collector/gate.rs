@@ -101,8 +101,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                         
                         let bid: f64 = match item["b"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
                         let ask: f64 = match item["a"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
+                        let bid_size: f64 = item["B"].as_i64().unwrap_or(0) as f64;
+                        let ask_size: f64 = item["A"].as_i64().unwrap_or(0) as f64;
+                        let mid = (bid + ask) / 2.0;
                         
-                        upsert_book(price_map, signal, sym, bid, ask);
+                        upsert_book(price_map, signal, sym, bid, ask, bid_size * mid, ask_size * mid);
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
@@ -131,13 +134,15 @@ fn upsert_tickers(price_map: &PriceMap, signal: &UpdateSignal, sym: String, pric
     signal.notify_one();
 }
 
-fn upsert_book(price_map: &PriceMap, signal: &UpdateSignal, sym: String, bid: f64, ask: f64) {
+fn upsert_book(price_map: &PriceMap, signal: &UpdateSignal, sym: String, bid: f64, ask: f64, bid_size_usd: f64, ask_size_usd: f64) {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     {
         let mut gate_map = price_map.entry("gate".to_string()).or_default();
         let entry = gate_map.entry(sym).or_default();
         entry.bid = bid;
         entry.ask = ask;
+        entry.bid_size = bid_size_usd;
+        entry.ask_size = ask_size_usd;
         if entry.price == 0.0 { entry.price = (bid + ask) / 2.0; }
         entry.last_updated = ts;
     }

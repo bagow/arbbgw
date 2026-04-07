@@ -74,9 +74,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                     
                     let bid: f64 = match parse_f64(&d["bestBidPrice"]) { Some(v) if v > 0.0 => v, _ => continue };
                     let ask: f64 = match parse_f64(&d["bestAskPrice"]) { Some(v) if v > 0.0 => v, _ => continue };
+                    let bid_qty: f64 = parse_f64(&d["bestBidSize"]).unwrap_or(0.0);
+                    let ask_qty: f64 = parse_f64(&d["bestAskSize"]).unwrap_or(0.0);
                     let price = parse_f64(&d["price"]).unwrap_or((bid+ask)/2.0);
                     let ev = price_map.get("kucoin").and_then(|m| m.get(&sym).map(|d| d.vol)).unwrap_or(0.0);
-                    upsert(price_map, signal, sym, TickerData { bid, ask, price, vol: ev, funding_rate: 0.0, last_updated: 0 });
+                    upsert(price_map, signal, sym, TickerData { bid, ask, price, vol: ev, funding_rate: 0.0, bid_size: bid_qty * price, ask_size: ask_qty * price, last_updated: 0 });
                 }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Err(e)) => return Err(e.into()),

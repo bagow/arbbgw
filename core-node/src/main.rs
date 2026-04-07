@@ -59,6 +59,10 @@ async fn main() -> Result<()> {
     let http = Client::builder()
         .user_agent("core-node/1.0")
         .timeout(Duration::from_secs(15))
+        .pool_max_idle_per_host(10)       // Keep connections alive to exchanges
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(30))
+        .tcp_nodelay(true)                // Disable Nagle's for lower latency
         .build()?;
 
     engine::real::start_multiplier_fetcher(http.clone());

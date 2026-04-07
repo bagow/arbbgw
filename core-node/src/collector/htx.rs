@@ -63,8 +63,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                 if parts[2] == "bbo" {
                     let bid: f64 = match tick["bid"][0].as_f64() { Some(v) if v > 0.0 => v, _ => continue };
                     let ask: f64 = match tick["ask"][0].as_f64() { Some(v) if v > 0.0 => v, _ => continue };
+                    let bid_qty: f64 = tick["bid"][1].as_f64().unwrap_or(0.0);
+                    let ask_qty: f64 = tick["ask"][1].as_f64().unwrap_or(0.0);
+                    let mid = (bid + ask) / 2.0;
                     let ev = price_map.get("htx").and_then(|m| m.get(&sym).map(|d| d.vol)).unwrap_or(0.0);
-                    upsert(price_map, signal, sym, TickerData { bid, ask, price: (bid+ask)/2.0, vol: ev, funding_rate: 0.0, last_updated: 0 });
+                    upsert(price_map, signal, sym, TickerData { bid, ask, price: mid, vol: ev, funding_rate: 0.0, bid_size: bid_qty * mid, ask_size: ask_qty * mid, last_updated: 0 });
                 } else if parts[2] == "detail" {
                     let close = tick["close"].as_f64().unwrap_or(0.0);
                     if close <= 0.0 { continue; }

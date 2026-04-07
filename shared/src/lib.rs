@@ -20,6 +20,12 @@ pub struct TickerData {
     pub vol: f64,
     #[serde(rename = "fundingRate", default)]
     pub funding_rate: f64,
+    /// Volume (in base asset units) available at the best bid level.
+    #[serde(skip)]
+    pub bid_size: f64,
+    /// Volume (in base asset units) available at the best ask level.
+    #[serde(skip)]
+    pub ask_size: f64,
     /// Unix seconds of last WebSocket update (set by collector, not serialised).
     #[serde(skip)]
     pub last_updated: u64,
