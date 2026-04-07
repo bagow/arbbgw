@@ -129,7 +129,7 @@ pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>) {
         loop {
             let bal_cache = get_balance_cache();
             let fee_cache = get_fee_cache();
-            let exchanges = ["binance", "gate", "htx", "kucoin", "bitget"];
+            let exchanges = ["binance", "gate", "htx", "kucoin", "bitget", "bybit"];
             for ex in &exchanges {
                 if !keys.supports(ex) { continue; }
                 match fetch_available_balance(&http, &keys, ex).await {
@@ -215,6 +215,25 @@ async fn fetch_available_balance(http: &Client, keys: &ExchangeKeys, exchange: &
                 .or_else(|| resp["data"]["available"].as_f64()).unwrap_or(0.0);
             Ok(bal)
         }
+        "bybit" => {
+            let ts = now_ms().to_string();
+            let recv = "5000";
+            let qs = "accountType=UNIFIED&coin=USDT";
+            let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs);
+            let resp: Value = http.get(format!("https://api.bybit.com/v5/account/wallet-balance?{}", qs))
+                .header("X-BAPI-API-KEY", &keys.bybit_key)
+                .header("X-BAPI-SIGN", &sig)
+                .header("X-BAPI-TIMESTAMP", &ts)
+                .header("X-BAPI-RECV-WINDOW", recv)
+                .timeout(Duration::from_secs(10)).send().await?.json().await?;
+            let bal = resp["result"]["list"].as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|a| a["coin"].as_array())
+                .and_then(|coins| coins.iter().find(|c| c["coin"].as_str() == Some("USDT")))
+                .and_then(|c| c["availableToWithdraw"].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0.0);
+            Ok(bal)
+        }
         _ => Err(anyhow::anyhow!("Unknown exchange: {}", exchange)),
     }
 }
@@ -278,6 +297,23 @@ async fn fetch_taker_fee(http: &Client, keys: &ExchangeKeys, exchange: &str) -> 
                 .and_then(|s| s.parse().ok())
                 .or_else(|| resp["data"]["takerFeeRate"].as_f64())
                 .unwrap_or(0.0006);
+            Ok(taker)
+        }
+        "bybit" => {
+            let ts = now_ms().to_string();
+            let recv = "5000";
+            let qs = "category=linear&symbol=BTCUSDT";
+            let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs);
+            let resp: Value = http.get(format!("https://api.bybit.com/v5/account/fee-rate?{}", qs))
+                .header("X-BAPI-API-KEY", &keys.bybit_key)
+                .header("X-BAPI-SIGN", &sig)
+                .header("X-BAPI-TIMESTAMP", &ts)
+                .header("X-BAPI-RECV-WINDOW", recv)
+                .timeout(Duration::from_secs(10)).send().await?.json().await?;
+            let taker = resp["result"]["list"].as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|a| a["takerFeeRate"].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0.00055);
             Ok(taker)
         }
         _ => Ok(0.0005),
