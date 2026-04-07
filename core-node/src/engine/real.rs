@@ -31,6 +31,7 @@ pub struct ExchangeKeys {
     pub kucoin_key:  String, pub kucoin_secret:  String, pub kucoin_passphrase: String,
     pub binance_key: String, pub binance_secret: String,
     pub bitget_key:  String, pub bitget_secret:  String, pub bitget_passphrase: String,
+    pub bybit_key:   String, pub bybit_secret:   String,
 }
 
 impl ExchangeKeys {
@@ -48,6 +49,8 @@ impl ExchangeKeys {
             bitget_key:         std::env::var("BITGET_KEY").unwrap_or_default(),
             bitget_secret:      std::env::var("BITGET_SECRET").unwrap_or_default(),
             bitget_passphrase:  std::env::var("BITGET_PASSPHRASE").unwrap_or_default(),
+            bybit_key:          std::env::var("BYBIT_KEY").unwrap_or_default(),
+            bybit_secret:       std::env::var("BYBIT_SECRET").unwrap_or_default(),
         }
     }
     pub fn supports(&self, ex: &str) -> bool {
@@ -57,6 +60,7 @@ impl ExchangeKeys {
             "kucoin"  => !self.kucoin_key.is_empty(),
             "binance" => !self.binance_key.is_empty(),
             "bitget"  => !self.bitget_key.is_empty(),
+            "bybit"   => !self.bybit_key.is_empty(),
             _ => false,
         }
     }
@@ -528,6 +532,52 @@ pub fn start_multiplier_fetcher(http: Client) {
             }
         }
     });
+
+    // Bybit USDT-M Linear Futures
+    tokio::spawn({
+        let http = http.clone();
+        async move {
+            loop {
+                if let Ok(resp) = http.get("https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000").send().await {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(arr) = json["result"]["list"].as_array() {
+                            let map = get_multipliers();
+                            let lmap = get_launch_times();
+                            let tmap = get_tick_sizes();
+                            let mut count = 0u32;
+                            for c in arr {
+                                let sym = c["symbol"].as_str().unwrap_or("");
+                                if !sym.ends_with("USDT") { continue; }
+                                // qtyStep = minimum order quantity step (lot size)
+                                if let Some(qs) = c["lotSizeFilter"]["qtyStep"].as_str() {
+                                    if let Ok(step) = qs.parse::<f64>() {
+                                        if step > 0.0 {
+                                            map.insert(format!("bybit:{}", sym), step);
+                                            count += 1;
+                                        }
+                                    }
+                                }
+                                // tickSize = price precision
+                                if let Some(ts_str) = c["priceFilter"]["tickSize"].as_str() {
+                                    if let Ok(tick) = ts_str.parse::<f64>() {
+                                        if tick > 0.0 { tmap.insert(format!("bybit:{}", sym), tick); }
+                                    }
+                                }
+                                // launchTime
+                                if let Some(lt) = c["launchTime"].as_str() {
+                                    if let Ok(ts) = lt.parse::<i64>() {
+                                        lmap.insert(format!("bybit:{}", sym), ts / 1000);
+                                    }
+                                }
+                            }
+                            info!("[multipliers] Bybit: loaded {} symbols", count);
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        }
+    });
 }
 
 
@@ -573,6 +623,9 @@ fn binance_sign(secret: &str, qs: &str) -> String {
 }
 fn bitget_sign(secret: &str, ts: &str, method: &str, path: &str, body: &str) -> String {
     hmac_sha256_b64(secret.as_bytes(), &format!("{}{}{}{}", ts, method, path, body))
+}
+fn bybit_sign(secret: &str, ts: &str, api_key: &str, recv_window: &str, body: &str) -> String {
+    hmac_sha256_hex(secret.as_bytes(), &format!("{}{}{}{}", ts, api_key, recv_window, body))
 }
 
 
@@ -704,6 +757,45 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let v: Value = resp.json().await?;
             if !status.is_success() || v["code"].as_str() != Some("200000") { return Err(anyhow::anyhow!("Kucoin error: {}", v)); }
             Ok(v["data"]["orderId"].as_str().unwrap_or("unknown").to_string())
+        }
+        "bybit" => {
+            let ts = now_ms().to_string();
+            let recv = "5000";
+            let side_str = if is_short { "Sell" } else { "Buy" };
+            let body = if use_limit {
+                json!({
+                    "category": "linear",
+                    "symbol": pair,
+                    "side": side_str,
+                    "orderType": "Limit",
+                    "qty": contracts.to_string(),
+                    "price": format!("{:.8}", limit_price),
+                    "timeInForce": "IOC",
+                    "reduceOnly": is_reduce_only
+                })
+            } else {
+                json!({
+                    "category": "linear",
+                    "symbol": pair,
+                    "side": side_str,
+                    "orderType": "Market",
+                    "qty": contracts.to_string(),
+                    "reduceOnly": is_reduce_only
+                })
+            };
+            let body_str = body.to_string();
+            let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &body_str);
+            if dry_run { return Ok(format!("dry_bybit_{}", Uuid::new_v4())); }
+            let resp = http.post("https://api.bybit.com/v5/order/create")
+                .header("X-BAPI-API-KEY", &keys.bybit_key)
+                .header("X-BAPI-SIGN", &sig)
+                .header("X-BAPI-TIMESTAMP", &ts)
+                .header("X-BAPI-RECV-WINDOW", recv)
+                .header("Content-Type", "application/json")
+                .body(body_str).timeout(Duration::from_secs(10)).send().await?;
+            let v: Value = resp.json().await?;
+            if v["retCode"].as_i64() != Some(0) { return Err(anyhow::anyhow!("Bybit error: {}", v)); }
+            Ok(v["result"]["orderId"].as_str().unwrap_or("unknown").to_string())
         }
         _ => Err(anyhow::anyhow!("Unknown exchange: {}", exchange)),
     }
@@ -1458,6 +1550,23 @@ async fn fetch_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             
             let price = if size > 0.0 && mult > 0.0 { val / (size * mult) } else { 0.0 };
             Ok((price, fee))
+        }
+        "bybit" => {
+            let ts = now_ms().to_string();
+            let recv = "5000";
+            let qs = format!("category=linear&orderId={}", order_id);
+            let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
+            let resp = http.get(format!("https://api.bybit.com/v5/order/realtime?{}", qs))
+                .header("X-BAPI-API-KEY", &keys.bybit_key)
+                .header("X-BAPI-SIGN", &sig)
+                .header("X-BAPI-TIMESTAMP", &ts)
+                .header("X-BAPI-RECV-WINDOW", recv)
+                .timeout(Duration::from_secs(10)).send().await?;
+            let v: Value = resp.json().await?;
+            let order = &v["result"]["list"][0];
+            let price = order["avgPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let fee = order["cumExecFee"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            Ok((price, fee.abs()))
         }
         _ => Err(anyhow::anyhow!("Unknown exchange: {}", exchange)),
     }
