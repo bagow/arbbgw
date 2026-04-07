@@ -1244,12 +1244,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let slippage_frac = settings.slippage_percent / 100.0;
         let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
 
-        // Dynamic safety margin: stricter for high-fee exchanges
-        let max_fee = fee_a.max(fee_b);
-        let safety = if max_fee >= 0.0008 { 2.0 }       // >=0.08% fee (Bybit etc)
-                     else if max_fee >= 0.0006 { 1.5 }   // 0.06-0.08%
-                     else { 1.3 };                        // <0.06%
-
+        // Basic safety margin: 1.2x break-even to ensure minimum profitability
+        let safety = 1.2;
         if row.spread < break_even_pct * safety { continue; }
 
         let deviation = row.spread - row.structural_spread;
@@ -1274,19 +1270,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let price_ratio = if entry_a > entry_b { entry_a / entry_b } else { entry_b / entry_a };
         if price_ratio > 1.10 { continue; }
 
-        // ── LIQUIDITY DEPTH FILTER ────────────────────────────────────────────
-        let data_a = prices.get(&row.exchange_a).and_then(|m| m.get(&row.pair).cloned());
-        let data_b = prices.get(&row.exchange_b).and_then(|m| m.get(&row.pair).cloned());
-        let min_depth_usd = settings.trade_volume * 2.0;
-        if let (Some(ref da), Some(ref db)) = (&data_a, &data_b) {
-            let depth_sell = if is_a_higher { da.bid_size } else { db.bid_size };
-            let depth_buy  = if is_a_higher { db.ask_size } else { da.ask_size };
-            if depth_sell > 0.0 && depth_sell < min_depth_usd { continue; }
-            if depth_buy > 0.0 && depth_buy < min_depth_usd { continue; }
-            let intra_a = (da.ask - da.bid) / da.bid.max(1e-12) * 100.0;
-            let intra_b = (db.ask - db.bid) / db.bid.max(1e-12) * 100.0;
-            if intra_a > 0.5 || intra_b > 0.5 { continue; }
-        }
+        // (Liquidity depth filter removed to allow fast fills on volatile spikes)
 
         let map = get_multipliers();
         let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) { Some(v) => *v, None => continue };
@@ -1320,10 +1304,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let has_tick_b = get_tick_sizes().contains_key(&format!("{}:{}", row.exchange_b, row.pair));
         if !has_tick_a || !has_tick_b { continue; }
 
-        // ── LIMIT PRICES ─────────────────────────────────────────────────────
-        let max_slip_frac = (settings.slippage_percent / 100.0).max(0.003);
-        let limit_price_a = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
-        let limit_price_b = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
+        // ── LIMIT PRICES (Disabled for entries to guarantee simultaneous market execution)
+        let limit_price_a = 0.0;
+        let limit_price_b = 0.0;
 
         let exa = row.exchange_a.clone();
         let exb = row.exchange_b.clone();
