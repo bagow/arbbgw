@@ -636,12 +636,18 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     // Only new trade entries are gated by is_active.
 
     // ── Close qualifying trades ────────────────────────────────────────────────
+    if !trades.is_empty() {
+        info!("[real] Processing {} open trades for profile {}", trades.len(), settings.id);
+    }
     let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64)> = Vec::new();
     for trade in &trades {
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
         let elapsed_ms = now_ms() - trade.entry_time;
 
         let manual_close = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
+        if manual_close {
+            info!("[real] MANUAL_CLOSE detected for trade {} {} on {}/{}", trade.id, trade.pair, trade.exchange_a, trade.exchange_b);
+        }
 
         // CRITICAL: skip trades where entry prices aren't confirmed yet (fast-poll pending)
         // Bypass this check if the user is forcing a manual close.
