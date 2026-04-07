@@ -31,7 +31,9 @@ const PROFILE_SELECT: &str = "
         min_volume_millions,
         collector_interval_secs,
         pending_commands,
-        disabled_exchanges
+        disabled_exchanges,
+        leverage,
+        margin_mode
     FROM trading_profiles
 ";
 
@@ -101,6 +103,8 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
         collector_interval_secs: get_i64(row, 14).unwrap_or(5),
         pending_commands:        row.get(15).ok().flatten(),
         disabled_exchanges,
+        leverage:                get_i64(row, 17).unwrap_or(10),
+        margin_mode:             row.get::<_, Option<String>>(18).ok().flatten().unwrap_or_else(|| "cross".to_string()),
     }
 }
 

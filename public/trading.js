@@ -485,7 +485,7 @@ function renderCexTab(profile, exchangesData) {
     }
 
     // Real trading: only Gate/HTX/KuCoin have API keys
-    const REAL_EXCHANGES = new Set(['binance', 'bitget', 'gate', 'htx', 'kucoin']);
+    const REAL_EXCHANGES = new Set(['binance', 'bitget', 'bybit', 'gate', 'htx', 'kucoin']);
     const isReal = profile.mode === 'real';
     const KNOWN_EXCHANGES = ['binance', 'bitget', 'bybit', 'gate', 'htx', 'kucoin', 'mexc', 'okx'];
     const exNames = KNOWN_EXCHANGES
@@ -597,6 +597,17 @@ function renderSettingsForm(profile) {
                 <div class="form-group">
                     <label>Min Volume (M$)</label>
                     <input type="number" id="sf-minvol-${p.id}" step="0.1" value="${p.min_volume_millions??10}" />
+                </div>
+                <div class="form-group">
+                    <label>Leverage (x)</label>
+                    <input type="number" id="sf-leverage-${p.id}" step="1" min="1" max="125" value="${p.leverage??10}" />
+                </div>
+                <div class="form-group">
+                    <label>Margin Mode</label>
+                    <select id="sf-margin-${p.id}" style="background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:.95rem;">
+                        <option value="cross" ${(p.margin_mode??'cross')==='cross'?'selected':''}>Cross</option>
+                        <option value="isolated" ${p.margin_mode==='isolated'?'selected':''}>Isolated</option>
+                    </select>
                 </div>
                 <div class="form-group">
                     <label>Collector Update (s)</label>
@@ -1243,6 +1254,8 @@ window.saveSettings = async function (profileId) {
 
         min_volume_millions:   parseFloat(g(`sf-minvol-${profileId}`)),
         collector_interval_secs: parseInt(g(`sf-interval-${profileId}`)),
+        leverage:              parseInt(g(`sf-leverage-${profileId}`)) || 10,
+        margin_mode:           document.getElementById(`sf-margin-${profileId}`)?.value || 'cross',
     };
     const btn = document.getElementById(`sf-save-${profileId}`);
     try {

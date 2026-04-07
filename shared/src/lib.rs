@@ -94,6 +94,8 @@ pub struct TradingSettings {
     pub collector_interval_secs: i64,
     pub pending_commands: Option<String>,
     pub disabled_exchanges: Vec<String>,
+    pub leverage: i64,
+    pub margin_mode: String,
 }
 
 impl Default for TradingSettings {
@@ -114,6 +116,8 @@ impl Default for TradingSettings {
             collector_interval_secs: 5,
             pending_commands: None,
             disabled_exchanges: vec![],
+            leverage: 10,
+            margin_mode: "cross".to_string(),
         }
     }
 }

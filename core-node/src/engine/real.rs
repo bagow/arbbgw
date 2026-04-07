@@ -665,10 +665,136 @@ fn bybit_sign(secret: &str, ts: &str, api_key: &str, recv_window: &str, body: &s
 }
 
 
+// ─── Leverage / Margin-mode cache ─────────────────────────────────────────────
+
+/// Cache key: "exchange:symbol:leverage:margin_mode" → true once set.
+fn get_leverage_cache() -> &'static DashMap<String, bool> {
+    static CACHE: OnceLock<DashMap<String, bool>> = OnceLock::new();
+    CACHE.get_or_init(DashMap::new)
+}
+
+/// Ensure leverage and margin mode are set on the exchange for the given symbol.
+/// Only calls the exchange API once per unique (exchange, symbol, leverage, margin_mode) combo.
+async fn ensure_leverage(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, leverage: i64, margin_mode: &str) {
+    let cache_key = format!("{}:{}:{}:{}", exchange, pair, leverage, margin_mode);
+    if get_leverage_cache().contains_key(&cache_key) { return; }
+
+    let lev = leverage.max(1);
+    let is_cross = margin_mode != "isolated";
+
+    let result: Result<()> = async {
+        match exchange {
+            "binance" => {
+                let ts = now_ms();
+                // Set margin type
+                let margin_type = if is_cross { "CROSSED" } else { "ISOLATED" };
+                let qs = format!("symbol={}&marginType={}&timestamp={}", pair, margin_type, ts);
+                let sig = binance_sign(&keys.binance_secret, &qs);
+                let _ = http.post(format!("https://fapi.binance.com/fapi/v1/marginType?{}&signature={}", qs, sig))
+                    .header("X-MBX-APIKEY", &keys.binance_key)
+                    .timeout(Duration::from_secs(5)).send().await;
+                // Set leverage
+                let ts2 = now_ms();
+                let qs2 = format!("symbol={}&leverage={}&timestamp={}", pair, lev, ts2);
+                let sig2 = binance_sign(&keys.binance_secret, &qs2);
+                let resp = http.post(format!("https://fapi.binance.com/fapi/v1/leverage?{}&signature={}", qs2, sig2))
+                    .header("X-MBX-APIKEY", &keys.binance_key)
+                    .timeout(Duration::from_secs(5)).send().await?.json::<Value>().await?;
+                info!("[leverage] binance:{} set to {}x {} → {:?}", pair, lev, margin_mode, resp.get("leverage"));
+            }
+            "bybit" => {
+                let ts = now_ms().to_string();
+                let recv = "5000";
+                // Switch isolated / cross
+                let trade_mode = if is_cross { 0 } else { 1 };
+                let body = json!({"category":"linear","symbol":pair,"tradeMode":trade_mode,"buyLeverage":lev.to_string(),"sellLeverage":lev.to_string()});
+                let body_str = body.to_string();
+                let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &body_str);
+                let _ = http.post("https://api.bybit.com/v5/position/switch-isolated")
+                    .header("X-BAPI-API-KEY", &keys.bybit_key).header("X-BAPI-SIGN", &sig)
+                    .header("X-BAPI-TIMESTAMP", &ts).header("X-BAPI-RECV-WINDOW", recv)
+                    .header("Content-Type", "application/json")
+                    .body(body_str).timeout(Duration::from_secs(5)).send().await;
+                // Set leverage
+                let ts2 = now_ms().to_string();
+                let body2 = json!({"category":"linear","symbol":pair,"buyLeverage":lev.to_string(),"sellLeverage":lev.to_string()});
+                let body_str2 = body2.to_string();
+                let sig2 = bybit_sign(&keys.bybit_secret, &ts2, &keys.bybit_key, recv, &body_str2);
+                let resp = http.post("https://api.bybit.com/v5/position/set-leverage")
+                    .header("X-BAPI-API-KEY", &keys.bybit_key).header("X-BAPI-SIGN", &sig2)
+                    .header("X-BAPI-TIMESTAMP", &ts2).header("X-BAPI-RECV-WINDOW", recv)
+                    .header("Content-Type", "application/json")
+                    .body(body_str2).timeout(Duration::from_secs(5)).send().await?.json::<Value>().await?;
+                info!("[leverage] bybit:{} set to {}x {} → retCode={}", pair, lev, margin_mode, resp["retCode"]);
+            }
+            "gate" => {
+                let contract = pair.replace("USDT", "_USDT");
+                // Gate: leverage=0 + cross_leverage_limit=N for cross, leverage=N for isolated
+                let path = format!("/api/v4/futures/usdt/positions/{}/leverage", contract);
+                let body = if is_cross {
+                    json!({"leverage": 0, "cross_leverage_limit": lev})
+                } else {
+                    json!({"leverage": lev})
+                };
+                let body_str = body.to_string();
+                let resp = http.post(format!("https://api.gateio.ws{}", path))
+                    .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", &path, &body_str))
+                    .body(body_str).timeout(Duration::from_secs(5)).send().await?.json::<Value>().await?;
+                info!("[leverage] gate:{} set to {}x {} → {:?}", pair, lev, margin_mode, resp.get("leverage"));
+            }
+            "htx" => {
+                let cc = format!("{}-{}", &pair[..pair.len()-4], &pair[pair.len()-4..]);
+                let host = "api.hbdm.com";
+                let path = "/linear-swap-api/v1/swap_switch_lever_rate";
+                let body = json!({"contract_code": cc, "lever_rate": lev});
+                let resp = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path)))
+                    .json(&body).timeout(Duration::from_secs(5)).send().await?.json::<Value>().await?;
+                info!("[leverage] htx:{} set to {}x → status={}", cc, lev, resp["status"]);
+            }
+            "bitget" => {
+                let ts = now_ms().to_string();
+                // Set margin mode
+                let mode_val = if is_cross { "crossed" } else { "isolated" };
+                let body_mm = json!({"symbol": pair, "productType": "USDT-FUTURES", "marginCoin": "USDT", "marginMode": mode_val});
+                let body_mm_str = body_mm.to_string();
+                let sig_mm = bitget_sign(&keys.bitget_secret, &ts, "POST", "/api/v2/mix/account/set-margin-mode", &body_mm_str);
+                let _ = http.post("https://api.bitget.com/api/v2/mix/account/set-margin-mode")
+                    .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig_mm)
+                    .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
+                    .header("Content-Type", "application/json")
+                    .body(body_mm_str).timeout(Duration::from_secs(5)).send().await;
+                // Set leverage
+                let ts2 = now_ms().to_string();
+                let body_lev = json!({"symbol": pair, "productType": "USDT-FUTURES", "marginCoin": "USDT", "leverage": lev.to_string()});
+                let body_lev_str = body_lev.to_string();
+                let sig_lev = bitget_sign(&keys.bitget_secret, &ts2, "POST", "/api/v2/mix/account/set-leverage", &body_lev_str);
+                let resp = http.post("https://api.bitget.com/api/v2/mix/account/set-leverage")
+                    .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig_lev)
+                    .header("ACCESS-TIMESTAMP", &ts2).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
+                    .header("Content-Type", "application/json")
+                    .body(body_lev_str).timeout(Duration::from_secs(5)).send().await?.json::<Value>().await?;
+                info!("[leverage] bitget:{} set to {}x {} → code={}", pair, lev, margin_mode, resp["code"]);
+            }
+            "kucoin" => {
+                // KuCoin: leverage is passed in the order body, no separate endpoint needed.
+                // Just log for consistency.
+                info!("[leverage] kucoin:{} will use {}x {} (in-order)", pair, lev, margin_mode);
+            }
+            _ => {}
+        }
+        Ok(())
+    }.await;
+
+    if let Err(e) = result {
+        error!("[leverage] {}:{} error: {}", exchange, pair, e);
+    }
+    get_leverage_cache().insert(cache_key, true);
+}
+
 /// Place an order on an exchange.
 /// `limit_price` > 0 → Limit IOC (price-protected, no slippage beyond this).
 /// `limit_price` == 0 → Market order (used for closes where execution is critical).
-async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, contracts: i64, dry_run: bool, is_reduce_only: bool, limit_price: f64) -> Result<String> {
+async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, contracts: i64, dry_run: bool, is_reduce_only: bool, limit_price: f64, leverage: i64) -> Result<String> {
     let side = if is_short { "sell" } else { "buy" };
     let use_limit = limit_price > 0.0 && !is_reduce_only; // Limit IOC only for entries
     // Round price to exchange tick size to avoid "PRICE PARAMETER INVALID" errors
@@ -758,9 +884,9 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             // HTX: use "opponent_ioc" for controlled market-like execution (fills at best available, cancels remainder)
             // For limit: use price + ioc
             let body = if use_limit {
-                json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":offset,"lever_rate":1,"order_price_type":"ioc","price":format!("{:.8}", limit_price)})
+                json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":offset,"lever_rate":leverage,"order_price_type":"ioc","price":format!("{:.8}", limit_price)})
             } else {
-                json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":offset,"lever_rate":1,"order_price_type":"opponent_ioc"})
+                json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":offset,"lever_rate":leverage,"order_price_type":"opponent_ioc"})
             };
             if dry_run { info!("[DRY] htx order {} {} limit={:.6}", cc, side, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
             let resp = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path))).json(&body).timeout(Duration::from_secs(10)).send().await?;
@@ -772,14 +898,15 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
         "kucoin" => {
             let sym = format!("{}M", pair);
             let ts = now_ms().to_string(); let path = "/api/v1/orders";
+            let lev_str = leverage.to_string();
             let body = if use_limit {
-                let mut b = json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"limit","timeInForce":"IOC","price":format!("{:.8}", limit_price),"size":contracts,"leverage":"1","marginMode":"CROSS"});
+                let mut b = json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"limit","timeInForce":"IOC","price":format!("{:.8}", limit_price),"size":contracts,"leverage":lev_str,"marginMode":"CROSS"});
                 if is_reduce_only { b["reduceOnly"] = json!(true); }
                 b
             } else if is_reduce_only {
-                json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"market","size":contracts,"leverage":"1","marginMode":"CROSS","reduceOnly":true})
+                json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"market","size":contracts,"leverage":leverage.to_string(),"marginMode":"CROSS","reduceOnly":true})
             } else {
-                json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"market","size":contracts,"leverage":"1","marginMode":"CROSS"})
+                json!({"clientOid":Uuid::new_v4().to_string(),"symbol":sym,"side":side,"type":"market","size":contracts,"leverage":leverage.to_string(),"marginMode":"CROSS"})
             };
             let body_str = body.to_string();
             let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "POST", path, &body_str);
@@ -837,10 +964,10 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
     }
 }
 
-async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, was_short: bool, contracts: i64, dry_run: bool) -> Result<String> {
+async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, was_short: bool, contracts: i64, dry_run: bool, leverage: i64) -> Result<String> {
     // Closes use market orders (limit_price=0) for guaranteed execution — 
     // orphaned positions are worse than slippage on exit.
-    place_order(http, keys, exchange, pair, !was_short, contracts, dry_run, true, 0.0).await
+    place_order(http, keys, exchange, pair, !was_short, contracts, dry_run, true, 0.0, leverage).await
 }
 
 // ─── Engine cycle ─────────────────────────────────────────────────────────────
@@ -953,12 +1080,13 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let h = http.clone(); let k = Arc::clone(&keys); let db_c = db.clone();
             let r = reason.to_string();
             let settings_comm = settings.commission_rate;
+            let lev = settings.leverage;
 
             tokio::spawn(async move {
                 // Place close orders in parallel
                 let (ra, rb) = tokio::join!(
-                    close_order(&h, &k, &exa, &pair, is_a_higher, c_a, dry_run),
-                    close_order(&h, &k, &exb, &pair, !is_a_higher, c_b, dry_run)
+                    close_order(&h, &k, &exa, &pair, is_a_higher, c_a, dry_run, lev),
+                    close_order(&h, &k, &exb, &pair, !is_a_higher, c_b, dry_run, lev)
                 );
                 let oid_close_a = ra.ok();
                 let oid_close_b = rb.ok();
@@ -1263,8 +1391,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let exb = row.exchange_b.clone();
         let pair = row.pair.clone();
 
+        // ── ENSURE LEVERAGE on both exchanges ────────────────────────────────
+        ensure_leverage(&http, &keys, &exa, &pair, settings.leverage, &settings.margin_mode).await;
+        ensure_leverage(&http, &keys, &exb, &pair, settings.leverage, &settings.margin_mode).await;
+
         // ── LEG_A (Limit IOC — price protected) ──────────────────────────────
-        let oid_a = match place_order(&http, &keys, &exa, &pair, is_a_higher, contracts_a, dry_run, false, limit_price_a).await {
+        let oid_a = match place_order(&http, &keys, &exa, &pair, is_a_higher, contracts_a, dry_run, false, limit_price_a, settings.leverage).await {
             Ok(id) => id,
             Err(e) => {
                 let err_str = e.to_string();
@@ -1324,7 +1456,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         deduct_cached_balance(&exa, actual_vol_a);
 
         // ── LEG_B (Limit IOC — price protected) ──────────────────────────────
-        let oid_b = match place_order(&http, &keys, &exb, &pair, !is_a_higher, contracts_b, dry_run, false, limit_price_b).await {
+        let oid_b = match place_order(&http, &keys, &exb, &pair, !is_a_higher, contracts_b, dry_run, false, limit_price_b, settings.leverage).await {
             Ok(id) => id,
             Err(e) => {
                 let err_str = e.to_string();
@@ -1341,6 +1473,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
                 let oid_a_c = oid_a.clone();
                 let comm_rate = settings.commission_rate;
+                let lev_close = settings.leverage;
                 tokio::spawn(async move {
                     // 1. Fetch real entry fill price + fee
                     let mut entry_fill = entry_a;
@@ -1355,7 +1488,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     // 2. Emergency close LEG_A
                     let mut close_oid = None;
                     for attempt in 1u32..=5 {
-                        match close_order(&hc, &kc, &ec, &pc, is_a_higher, contracts_a, false).await {
+                        match close_order(&hc, &kc, &ec, &pc, is_a_higher, contracts_a, false, lev_close).await {
                             Ok(id) => { error!("🛡️ Emergency close A ok: {}", id); close_oid = Some(id); break; }
                             Err(err) => { let w = 200 * 2u64.pow(attempt-1); tokio::time::sleep(Duration::from_millis(w)).await; error!("Emergency close A {}/5: {}", attempt, err); }
                         }
@@ -1480,12 +1613,13 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             Ok(trade_id) => {
                 if status == "FAILED_ASYMMETRIC" {
                     let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
+                    let lev_asym = settings.leverage;
                     let (exa_c, exb_c, pair_c) = (row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone());
                     tokio::spawn(async move {
                         error!("🚨 EMERGENCY CLOSE {} {} (Asymmetric fill) — trade_id={}", exa_c, pair_c, trade_id);
                         let (mut raid, mut rbid) = (None, None);
-                        if got_a && fill_a > 0.0 { raid = close_order(&hc, &kc, &exa_c, &pair_c, is_a_higher, contracts_a, false).await.ok(); }
-                        if got_b && fill_b > 0.0 { rbid = close_order(&hc, &kc, &exb_c, &pair_c, !is_a_higher, contracts_b, false).await.ok(); }
+                        if got_a && fill_a > 0.0 { raid = close_order(&hc, &kc, &exa_c, &pair_c, is_a_higher, contracts_a, false, lev_asym).await.ok(); }
+                        if got_b && fill_b > 0.0 { rbid = close_order(&hc, &kc, &exb_c, &pair_c, !is_a_higher, contracts_b, false, lev_asym).await.ok(); }
                         
                         let mut fa = 0.0; let mut fb = 0.0; let mut ec = 0.0;
                         for _ in 0..15 {
