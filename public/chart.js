@@ -466,8 +466,8 @@ window.openModal = async function(row) {
     updateModalSub();
     updateTVLink(row);
     updateVolumeInfo(row);
-    wsLabelA.textContent = row.exchangeA;
-    wsLabelB.textContent = row.exchangeB;
+    if (wsLabelA) wsLabelA.textContent = row.exchangeA;
+    if (wsLabelB) wsLabelB.textContent = row.exchangeB;
 
     modalBackdrop.classList.remove('hidden');
     renderTable();
@@ -1099,9 +1099,9 @@ function connectWS(row) {
     const exTarget = scannerState.wsTarget === 'a' ? row.exchangeA : row.exchangeB;
     const cfg = wsConfig(exTarget, row.pair);
     let ws;
-    try { ws = new WebSocket(cfg.url); } catch { wsStatus.className = 'ws-indicator ws-indicator--err'; return; }
+    try { ws = new WebSocket(cfg.url); } catch { if(wsStatus) wsStatus.className = 'ws-indicator ws-indicator--err'; return; }
 
-    ws.onopen = () => { wsStatus.className = 'ws-indicator ws-indicator--on'; if (cfg.onOpen) cfg.onOpen(ws); };
+    ws.onopen = () => { if(wsStatus) wsStatus.className = 'ws-indicator ws-indicator--on'; if (cfg.onOpen) cfg.onOpen(ws); };
     ws.onmessage = e => {
         let price;
         try { price = cfg.extract(e); } catch { return; }
@@ -1112,16 +1112,16 @@ function connectWS(row) {
         scannerState.liveTicks[exTarget] = scannerState.liveTicks[exTarget].filter(p => p.ts >= cutoff);
         drawCharts();
     };
-    ws.onerror = () => { wsStatus.className = 'ws-indicator ws-indicator--err'; };
+    ws.onerror = () => { if(wsStatus) wsStatus.className = 'ws-indicator ws-indicator--err'; };
     ws.onclose = () => {
-        wsStatus.className = 'ws-indicator ws-indicator--off';
+        if(wsStatus) wsStatus.className = 'ws-indicator ws-indicator--off';
         setTimeout(() => { if (scannerState.activeRow && scannerState.ws === ws) connectWS(scannerState.activeRow); }, 5_000);
     };
     scannerState.ws = ws;
 }
 
 function disconnectWS() {
-    wsStatus.className = 'ws-indicator ws-indicator--off';
+    if(wsStatus) wsStatus.className = 'ws-indicator ws-indicator--off';
     if (scannerState.ws) { scannerState.ws.onclose = null; scannerState.ws.close(); scannerState.ws = null; }
 }
 
