@@ -659,25 +659,32 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             }
             // For NEW/EXPIRED: Binance API may respond BEFORE matching engine.
             // Wait briefly then re-check to see if the IOC was actually filled.
-            if order_status == "NEW" || order_status == "EXPIRED" {
-                tokio::time::sleep(Duration::from_millis(150)).await;
-                let ts2 = now_ms();
-                let qs2 = format!("symbol={}&orderId={}&timestamp={}", pair, oid, ts2);
-                let sig2 = binance_sign(&keys.binance_secret, &qs2);
-                let url2 = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs2, sig2);
-                if let Ok(resp2) = http.get(&url2).header("X-MBX-APIKEY", &keys.binance_key)
-                    .timeout(Duration::from_secs(5)).send().await {
-                    if let Ok(v2) = resp2.json::<Value>().await {
-                        let s2 = v2["status"].as_str().unwrap_or("");
-                        let filled_qty = v2["executedQty"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                        info!("[binance] {} re-check: status={} executedQty={}", pair, s2, filled_qty);
-                        if s2 == "FILLED" || (s2 == "PARTIALLY_FILLED" && filled_qty > 0.0) {
-                            let ap = v2["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                            return Ok((oid, ap, 0.0));
+            let mut current_status = order_status.to_string();
+            if current_status == "NEW" || current_status == "EXPIRED" {
+                for i in 1..=10 {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let ts2 = now_ms();
+                    let qs2 = format!("symbol={}&orderId={}&timestamp={}", pair, oid, ts2);
+                    let sig2 = binance_sign(&keys.binance_secret, &qs2);
+                    let url2 = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs2, sig2);
+                    if let Ok(resp2) = http.get(&url2).header("X-MBX-APIKEY", &keys.binance_key)
+                        .timeout(Duration::from_secs(5)).send().await {
+                        if let Ok(v2) = resp2.json::<Value>().await {
+                            let s2 = v2["status"].as_str().unwrap_or("");
+                            let filled_qty = v2["executedQty"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            info!("[binance] {} re-check attempt {}: status={} executedQty={}", pair, i, s2, filled_qty);
+                            if s2 == "FILLED" || (s2 == "PARTIALLY_FILLED" && filled_qty > 0.0) {
+                                let ap = v2["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                                return Ok((oid, ap, 0.0));
+                            }
+                            current_status = s2.to_string();
+                            if current_status != "NEW" {
+                                break; // EXPIRED, CANCELED, REJECTED
+                            }
                         }
                     }
                 }
-                return Err(anyhow::anyhow!("Binance IOC {} status={} after re-check", pair, order_status));
+                return Err(anyhow::anyhow!("Binance IOC {} unresolved/failed. Final status={}", pair, current_status));
             }
             // Any other status — return with orderId, no fill data
             Ok((oid, 0.0, 0.0))
