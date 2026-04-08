@@ -51,7 +51,7 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
 
                 if data_a.funding_rate != 0.0 && data_b.funding_rate != 0.0 {
                     if (data_a.funding_rate - data_b.funding_rate).abs() > ts.max_funding_diff {
-                        log::info!("[spreads] SKIP {}: funding_diff {:.4} > max {:.4}", sym, (data_a.funding_rate - data_b.funding_rate).abs(), ts.max_funding_diff);
+                        tracing::info!("[spreads] SKIP {}: funding_diff {:.4} > max {:.4}", sym, (data_a.funding_rate - data_b.funding_rate).abs(), ts.max_funding_diff);
                         continue;
                     }
                 }
