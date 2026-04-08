@@ -266,6 +266,8 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS idx_trades_status   ON trades(status);
             CREATE INDEX IF NOT EXISTS idx_trades_profile  ON trades(profile_id);
             CREATE INDEX IF NOT EXISTS idx_trades_exit     ON trades(exit_time);
+            CREATE INDEX IF NOT EXISTS idx_trades_profile_status ON trades(profile_id, status);
+            CREATE INDEX IF NOT EXISTS idx_trades_status_profile_exit ON trades(status, profile_id, exit_time);
             ",
         )?;
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN slippage_cost REAL", []);

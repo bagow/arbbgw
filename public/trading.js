@@ -338,17 +338,17 @@ function renderPanel(profile, active, history, stats, exchanges) {
                         </tr>
                     </tfoot>
                 </table>
-                ${profile.mode === 'real' ? `
-                <div style="display:flex;justify-content:flex-end;padding:16px 0 0;">
-                    <button type="button"
-                        onclick="marketCloseAll('${profile.id}')"
-                        class="trading-save-btn outline-btn"
-                        style="margin:0;width:auto;padding:10px 28px;font-size:.9rem;background:transparent;color:var(--red);border:1px solid var(--red);border-radius:8px;cursor:pointer;">
-                        ⚠️ Market Close All Now
-                    </button>
-                </div>
-                ` : ''}
             </div>
+            ${profile.mode === 'real' ? `
+            <div style="display:flex;justify-content:flex-end;padding:16px 24px 8px;">
+                <button type="button"
+                    onclick="marketCloseAll('${profile.id}')"
+                    class="trading-save-btn outline-btn"
+                    style="margin:0;width:auto;padding:10px 28px;font-size:.9rem;background:transparent;color:var(--red);border:1px solid var(--red);border-radius:8px;cursor:pointer;">
+                    ⚠️ Market Close All Now
+                </button>
+            </div>
+            ` : ''}
         </div>
 
         <!-- History sub-panel -->
