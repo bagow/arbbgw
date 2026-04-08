@@ -1172,7 +1172,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 // Fallback: if exchange didn't report fees, estimate with standard 0.05% taker rate
                 if exit_fee < 1e-9 {
                     exit_fee = vol * 2.0 * 0.0005; // 0.05% per leg
-                    tracing::warn!("[real] No API exit fee for {} id={} — using estimate {:.4}", fp, id, exit_fee);
+                    tracing::warn!("[real] No API exit fee for {} id={} — using estimate {:.4}", pair, id, exit_fee);
                 }
 
                 info!("[real] PnL raw id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", id, real_pna, real_pnb, real_gp, exit_fee, exit_slip);
