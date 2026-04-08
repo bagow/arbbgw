@@ -25,7 +25,6 @@ mod collector {
     pub mod kucoin;
     pub mod binance;
     pub mod bybit;
-    pub mod okx;
 }
 
 mod engine {
@@ -88,7 +87,6 @@ async fn main() -> Result<()> {
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::kucoin::run(p, s).await }); }
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::binance::run(p, s).await }); }
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::bybit::run(p, s).await }); }
-    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::okx::run(p, s).await }); }
 
     // ── EMA Warmup: pre-seed structural spread norms from 24h candle history ──
     {
