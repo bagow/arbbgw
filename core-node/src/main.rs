@@ -164,6 +164,27 @@ async fn main() -> Result<()> {
     // ── Balance fetcher — refreshes available margin every 30s ────────────────
     engine::real::start_balance_fetcher(http.clone(), exchange_keys.clone());
 
+    // ── Pre-warm HTTP connections to exchange APIs ────────────────────────────
+    // Establishes DNS + TCP + TLS ahead of time so the first trade doesn't
+    // pay a 200-500ms cold-start penalty for handshake.
+    {
+        let h = http.clone();
+        tokio::spawn(async move {
+            let endpoints = [
+                "https://fapi.binance.com/fapi/v1/time",
+                "https://api.bybit.com/v5/market/time",
+                "https://api.bitget.com/api/v2/public/time",
+                "https://api.gateio.ws/api/v4/futures/usdt/contracts",
+                "https://api.hbdm.com/api/v1/timestamp",
+                "https://api-futures.kucoin.com/api/v1/timestamp",
+            ];
+            for url in endpoints {
+                let _ = h.get(url).timeout(Duration::from_secs(5)).send().await;
+            }
+            info!("HTTP connections pre-warmed to {} exchanges", endpoints.len());
+        });
+    }
+
     // ── Engine loop (wakes on every WS tick) ─────────────────────────────────
     {
         let prices      = prices.clone();
