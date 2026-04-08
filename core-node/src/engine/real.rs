@@ -1133,10 +1133,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let has_tick_b = get_tick_sizes().contains_key(&format!("{}:{}", row.exchange_b, row.pair));
         if !has_tick_a || !has_tick_b { info!("[real] SKIP {}: tick size missing", row.pair); continue; }
 
-        // ── ENTRY ORDER TYPE: market vs IOC ─────────────────────────────────
         let use_ioc = ts.entry_order_type == "ioc";
         let (mut limit_price_a, mut limit_price_b) = if use_ioc {
-            let max_slip_frac = (settings.slippage_percent / 100.0).max(ts.min_ioc_tolerance_pct / 100.0);
+            let user_slip_frac = settings.slippage_percent / 100.0;
+            let ioc_min_frac = ts.min_ioc_tolerance_pct / 100.0;
+            let max_slip_frac = user_slip_frac.max(ioc_min_frac);
+            if max_slip_frac > user_slip_frac {
+                info!("[real] WARN {}: Slippage overridden from {:.2}% to {:.2}% for IOC", row.pair, settings.slippage_percent, ts.min_ioc_tolerance_pct);
+            }
             let lpa = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
             let lpb = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
             (lpa, lpb)
