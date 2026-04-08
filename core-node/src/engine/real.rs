@@ -668,7 +668,11 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             // For NEW/EXPIRED: Binance API may respond BEFORE matching engine.
             // Wait briefly then re-check to see if the IOC was actually filled.
             let mut current_status = order_status.to_string();
-            if current_status == "NEW" || current_status == "EXPIRED" {
+            // Immediate reject if it's EXPIRED right away, saving 400ms for ASYMMETRIC drops
+            if current_status == "EXPIRED" {
+                return Err(anyhow::anyhow!("Binance IOC {} unresolved/failed. Final status={}", pair, current_status));
+            }
+            if current_status == "NEW" {
                 for i in 1..=10 {
                     tokio::time::sleep(Duration::from_millis(150)).await;
                     let ts2 = now_ms();
