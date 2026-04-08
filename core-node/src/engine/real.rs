@@ -1066,12 +1066,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let slippage_frac = settings.slippage_percent / 100.0;
         let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
 
-        // FIX: flat safety margin (configurable via Technical Settings)
-        if row.spread < break_even_pct * ts.safety_margin { continue; }
-
-        // FIX: softer deviation check with separate multiplier
-        let deviation = row.spread - row.structural_spread;
-        if deviation < break_even_pct * ts.deviation_safety { continue; }
+        // Safety margin and deviation checks have been removed as per user request.
 
         if open_pairs.contains(&row.pair) { continue; }
 
@@ -1173,7 +1168,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             } else {
                 (fb.bid - fa.ask) / fa.ask.max(1e-12) * 100.0
             };
-            if fresh_spread < break_even_pct * ts.safety_margin {
+            if fresh_spread < settings.min_entry_spread {
                 info!("[real] PRE-EXEC ABORT {} — spread collapsed {:.4}% → {:.4}% (be={:.4}%)",
                     pair, row.spread, fresh_spread, break_even_pct);
                 continue;
