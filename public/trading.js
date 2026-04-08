@@ -338,6 +338,16 @@ function renderPanel(profile, active, history, stats, exchanges) {
                         </tr>
                     </tfoot>
                 </table>
+                ${profile.mode === 'real' ? `
+                <div style="display:flex;justify-content:flex-end;padding:16px 0 0;">
+                    <button type="button"
+                        onclick="marketCloseAll('${profile.id}')"
+                        class="trading-save-btn outline-btn"
+                        style="margin:0;width:auto;padding:10px 28px;font-size:.9rem;background:transparent;color:var(--red);border:1px solid var(--red);border-radius:8px;cursor:pointer;">
+                        ⚠️ Market Close All Now
+                    </button>
+                </div>
+                ` : ''}
             </div>
         </div>
 
@@ -639,14 +649,7 @@ function renderSettingsForm(profile) {
                         style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);">
                         Save Settings
                     </button>
-                    ${p.mode === 'real' ? `
-                        <button type="button"
-                            onclick="marketCloseAll('${p.id}')"
-                            class="trading-save-btn outline-btn"
-                            style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:transparent;color:var(--red);border:1px solid var(--red);">
-                            Market Close All Now
-                        </button>
-                    ` : ''}
+
                     <button type="button"
                         onclick="clearTrades('${p.id}', '${p.mode}')"
                         class="trading-save-btn outline-btn"
