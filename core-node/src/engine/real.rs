@@ -1089,6 +1089,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let lev = settings.leverage;
             let exit_sanity = ts.exit_sanity_pct;
             let close_verify_delay = ts.close_verify_delay_ms as u64;
+            let close_verify_retries = ts.close_verify_retries;
 
             tokio::spawn(async move {
                 // Place close orders in parallel
@@ -1112,7 +1113,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let mut real_exit_a = exit_price_a; let mut real_exit_b = exit_price_b;
                 let mut exit_fee = 0.0; let mut got_a = false; let mut got_b = false;
 
-                for _ in 0..ts.close_verify_retries {
+                for _ in 0..close_verify_retries {
                     if !got_a {
                         if let Some(ref oid) = oid_close_a {
                             if let Ok((p, f)) = fetch_order(&h, &k, &exa, &pair, oid).await {
