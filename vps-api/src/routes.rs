@@ -640,12 +640,12 @@ pub async fn handle_market_close_all(
     let id2 = id.clone();
     let r1 = state.real_db.call(move |conn| {
         conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status='OPEN'", params![id])?;
-        Ok::<(), rusqlite::Error>(())
+        Ok(())
     }).await;
     
     let r2 = state.paper_db.call(move |conn| {
         conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status='OPEN'", params![id2])?;
-        Ok::<(), rusqlite::Error>(())
+        Ok(())
     }).await;
 
     if let Err(e) = r1 { tracing::error!("Failed to close all on real DB: {:?}", e); }
@@ -666,12 +666,12 @@ pub async fn handle_market_close_trade(
 
     let r1 = state.real_db.call(move |conn| {
         conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status='OPEN'", params![trade_id])?;
-        Ok::<(), rusqlite::Error>(())
+        Ok(())
     }).await;
     
     let r2 = state.paper_db.call(move |conn| {
         conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status='OPEN'", params![trade_id])?;
-        Ok::<(), rusqlite::Error>(())
+        Ok(())
     }).await;
 
     if let Err(e) = r1 { tracing::error!("Failed to close trade {} on real DB: {:?}", trade_id, e); }
