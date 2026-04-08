@@ -236,12 +236,16 @@ async fn main() -> Result<()> {
 
                 if spreads.is_empty() { continue; }
 
-                // Run paper engine for each paper profile
-                for paper_s in paper_profiles {
-                    engine::paper::run_cycle(spreads.clone(), prices.clone(), paper_s, http.clone(), paper_db.clone()).await;
-                }
+                // Run REAL engine first — real money needs freshest prices
                 for real_s in real_profiles {
                     engine::real::run_cycle(spreads.clone(), prices.clone(), real_s, http.clone(), real_db.clone(), keys.clone(), &ts).await;
+                }
+                // Run paper engine in background — don't block next tick
+                for paper_s in paper_profiles {
+                    let (sp, pr, h, pdb) = (spreads.clone(), prices.clone(), http.clone(), paper_db.clone());
+                    tokio::spawn(async move {
+                        engine::paper::run_cycle(sp, pr, paper_s, h, pdb).await;
+                    });
                 }
             }
         });
