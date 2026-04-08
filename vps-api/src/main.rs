@@ -113,3 +113,4 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 // Trigger vps-api rebuild
+// redeploy all
