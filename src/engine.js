@@ -1,8 +1,8 @@
 /**
  * engine.js – Spread calculation engine
  *
- * Supported exchanges (11):
- *   binance, bybit, okx, gate, bitget, mexc, htx, bingx, kucoin, xt, coinex
+ * Supported exchanges:
+ *   binance, bybit, okx, gate, bingx, kucoin, xt, coinex
  *
  * All tickers are normalised to the bare USDT pair (e.g. BTCUSDT).
  * buildSnapshot() generates every exchange combination automatically.
@@ -30,11 +30,7 @@ export function normalizePrices(exchange, rawTickers, rawFunding = [], rawBooks 
     for (const b of rawBooks) {
       if (b.symbol) bMap.set(b.symbol, { bid: parseFloat(b.bidPrice), ask: parseFloat(b.askPrice) });
     }
-  } else if (exchange === 'htx') {
-    for (const f of rawFunding) {
-      const sym = (f.contract_code || '').replace(/-/g, '');
-      if (sym) fMap.set(sym, parseFloat(f.funding_rate || 0));
-    }
+
   } else if (exchange === 'bingx') {
     for (const f of rawFunding) {
       const sym = (f.symbol || '').replace('-', '');
@@ -91,42 +87,7 @@ export function normalizePrices(exchange, rawTickers, rawFunding = [], rawBooks 
         map.set(sym, { price, vol, fundingRate, bid, ask });
     }
 
-  } else if (exchange === 'bitget') {
-    for (const t of rawTickers) {
-      const sym = t.symbol || '';
-      const price = parseFloat(t.lastPr);
-      const vol = parseFloat(t.usdtVolume || t.quoteVolume || 0);
-      const fundingRate = parseFloat(t.fundingRate || 0);
-      const bid = parseFloat(t.bidPr || price);
-      const ask = parseFloat(t.askPr || price);
-      if (sym && sym.endsWith('USDT') && !isNaN(price) && price > 0)
-        map.set(sym, { price, vol, fundingRate, bid, ask });
-    }
 
-  } else if (exchange === 'mexc') {
-    for (const t of rawTickers) {
-      const sym = (t.symbol || '').replace('_', '');
-      const price = parseFloat(t.lastPrice);
-      const vol = parseFloat(t.amount24 || 0);
-      const fundingRate = parseFloat(t.fundingRate || 0);
-      const bid = parseFloat(t.bid1 || t.bidPrice || price);
-      const ask = parseFloat(t.ask1 || t.askPrice || price);
-      if (sym && sym.endsWith('USDT') && !isNaN(price) && price > 0)
-        map.set(sym, { price, vol, fundingRate, bid, ask });
-    }
-
-  } else if (exchange === 'htx') {
-    for (const t of rawTickers) {
-      const raw = t.contract_code || t.symbol || '';
-      const sym = raw.replace(/-/g, '');
-      const price = parseFloat(t.close ?? t.last ?? t.lastPrice);
-      const vol = parseFloat(t.trade_turnover ?? 0);
-      const fundingRate = fMap.get(sym) || 0;
-      const bid = (t.bid && t.bid[0]) ? parseFloat(t.bid[0]) : price;
-      const ask = (t.ask && t.ask[0]) ? parseFloat(t.ask[0]) : price;
-      if (sym && sym.endsWith('USDT') && !isNaN(price) && price > 0)
-        map.set(sym, { price, vol, fundingRate, bid, ask });
-    }
 
   } else if (exchange === 'bingx') {
     for (const t of rawTickers) {

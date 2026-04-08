@@ -22,13 +22,10 @@ use state::{PriceMap, UpdateSignal};
 
 mod collector {
     pub mod gate;
-    pub mod htx;
     pub mod kucoin;
     pub mod binance;
     pub mod bybit;
-    pub mod mexc;
     pub mod okx;
-    pub mod bitget;
 }
 
 mod engine {
@@ -88,13 +85,10 @@ async fn main() -> Result<()> {
 
     // ── Spawn collectors ─────────────────────────────────────────────────────
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::gate::run(p, s).await }); }
-    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::htx::run(p, s).await }); }
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::kucoin::run(p, s).await }); }
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::binance::run(p, s).await }); }
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::bybit::run(p, s).await }); }
-    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::mexc::run(p, s).await }); }
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::okx::run(p, s).await }); }
-    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::bitget::run(p, s).await }); }
 
     // ── EMA Warmup: pre-seed structural spread norms from 24h candle history ──
     {
@@ -156,10 +150,10 @@ async fn main() -> Result<()> {
 
     // ── Exchange keys — loaded once at startup ───────────────────────────────
     let exchange_keys = Arc::new(engine::real::ExchangeKeys::from_env());
-    info!("Exchange keys loaded: gate={} htx={} kucoin={} binance={} bitget={}",
-        exchange_keys.supports("gate"), exchange_keys.supports("htx"),
+    info!("Exchange keys loaded: gate={} kucoin={} binance={} bybit={}",
+        exchange_keys.supports("gate"),
         exchange_keys.supports("kucoin"), exchange_keys.supports("binance"),
-        exchange_keys.supports("bitget"));
+        exchange_keys.supports("bybit"));
 
     // ── Balance fetcher — refreshes available margin every 30s ────────────────
     engine::real::start_balance_fetcher(http.clone(), exchange_keys.clone());
@@ -173,9 +167,7 @@ async fn main() -> Result<()> {
             let endpoints = [
                 "https://fapi.binance.com/fapi/v1/time",
                 "https://api.bybit.com/v5/market/time",
-                "https://api.bitget.com/api/v2/public/time",
                 "https://api.gateio.ws/api/v4/futures/usdt/contracts",
-                "https://api.hbdm.com/api/v1/timestamp",
                 "https://api-futures.kucoin.com/api/v1/timestamp",
             ];
             for url in endpoints {

@@ -23,16 +23,13 @@ async function authFetch(url, options = {}) {
 }
 
 // ─── Exchange config ───────────────────────────────────────────────────────────
-const KNOWN_EXCHANGES = ['binance', 'bybit', 'okx', 'gate', 'bitget', 'mexc', 'htx', 'bingx', 'kucoin', 'xt', 'coinex'];
+const KNOWN_EXCHANGES = ['binance', 'bybit', 'okx', 'gate', 'bingx', 'kucoin', 'xt', 'coinex'];
 
 const EXCHANGE_COLORS = {
     binance: '#f97316',  // orange
     bybit: '#60a5fa',  // blue
     okx: '#34d399',  // green
     gate: '#a78bfa',  // violet
-    bitget: '#f43f5e',  // rose
-    mexc: '#22d3ee',  // cyan
-    htx: '#fb923c',  // amber
     bingx: '#86efac',  // light green
     kucoin: '#0ea5e9', // sky blue
     xt: '#eab308',   // yellow
@@ -158,9 +155,6 @@ const TV_EXCHANGES = {
     bybit: 'BYBIT',
     okx: 'OKX',
     gate: 'GATEIO',
-    mexc: 'MEXC',
-    bitget: 'BITGET',
-    htx: 'HTX',
     bingx: 'BINGX',
     kucoin: 'KUCOIN',
     xt: 'XT',

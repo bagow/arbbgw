@@ -27,10 +27,8 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Clone)]
 pub struct ExchangeKeys {
     pub gate_key:    String, pub gate_secret:    String,
-    pub htx_key:     String, pub htx_secret:     String,
     pub kucoin_key:  String, pub kucoin_secret:  String, pub kucoin_passphrase: String,
     pub binance_key: String, pub binance_secret: String,
-    pub bitget_key:  String, pub bitget_secret:  String, pub bitget_passphrase: String,
     pub bybit_key:   String, pub bybit_secret:   String,
 }
 
@@ -39,16 +37,11 @@ impl ExchangeKeys {
         Self {
             gate_key:    std::env::var("GATE_KEY").unwrap_or_default(),
             gate_secret: std::env::var("GATE_SECRET").unwrap_or_default(),
-            htx_key:     std::env::var("HTX_KEY").unwrap_or_default(),
-            htx_secret:  std::env::var("HTX_SECRET").unwrap_or_default(),
             kucoin_key:         std::env::var("KUCOIN_KEY").unwrap_or_default(),
             kucoin_secret:      std::env::var("KUCOIN_SECRET").unwrap_or_default(),
             kucoin_passphrase:  std::env::var("KUCOIN_PASSPHRASE").unwrap_or_default(),
             binance_key:        std::env::var("BINANCE_KEY").unwrap_or_default(),
             binance_secret:     std::env::var("BINANCE_SECRET").unwrap_or_default(),
-            bitget_key:         std::env::var("BITGET_KEY").unwrap_or_default(),
-            bitget_secret:      std::env::var("BITGET_SECRET").unwrap_or_default(),
-            bitget_passphrase:  std::env::var("BITGET_PASSPHRASE").unwrap_or_default(),
             bybit_key:          std::env::var("BYBIT_KEY").unwrap_or_default(),
             bybit_secret:       std::env::var("BYBIT_SECRET").unwrap_or_default(),
         }
@@ -56,10 +49,8 @@ impl ExchangeKeys {
     pub fn supports(&self, ex: &str) -> bool {
         match ex {
             "gate"    => !self.gate_key.is_empty(),
-            "htx"     => !self.htx_key.is_empty(),
             "kucoin"  => !self.kucoin_key.is_empty(),
             "binance" => !self.binance_key.is_empty(),
-            "bitget"  => !self.bitget_key.is_empty(),
             "bybit"   => !self.bybit_key.is_empty(),
             _ => false,
         }
@@ -128,7 +119,7 @@ pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>) {
         loop {
             let bal_cache = get_balance_cache();
             let fee_cache = get_fee_cache();
-            let exchanges = ["binance", "gate", "htx", "kucoin", "bitget", "bybit"];
+            let exchanges = ["binance", "gate", "kucoin", "bybit"];
             for ex in &exchanges {
                 if !keys.supports(ex) { continue; }
                 match fetch_available_balance(&http, &keys, ex).await {
@@ -176,18 +167,6 @@ async fn fetch_available_balance(http: &Client, keys: &ExchangeKeys, exchange: &
                 .or_else(|| resp["available"].as_f64()).unwrap_or(0.0);
             Ok(bal)
         }
-        "htx" => {
-            let host = "api.hbdm.com";
-            let path = "/linear-swap-api/v1/swap_account_info";
-            let body = json!({"margin_account": "USDT"});
-            let resp: Value = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path)))
-                .json(&body).timeout(Duration::from_secs(10)).send().await?.json().await?;
-            let bal = resp["data"].as_array()
-                .and_then(|arr| arr.first())
-                .and_then(|a| a["withdraw_available"].as_f64())
-                .unwrap_or(0.0);
-            Ok(bal)
-        }
         "kucoin" => {
             let ts = now_ms().to_string();
             let path = "/api/v1/account-overview?currency=USDT";
@@ -199,22 +178,6 @@ async fn fetch_available_balance(http: &Client, keys: &ExchangeKeys, exchange: &
                 .timeout(Duration::from_secs(10)).send().await?.json().await?;
             let bal = resp["data"]["availableBalance"].as_f64()
                 .or_else(|| resp["data"]["availableBalance"].as_str().and_then(|s| s.parse().ok()))
-                .unwrap_or(0.0);
-            Ok(bal)
-        }
-        "bitget" => {
-            let ts = now_ms().to_string();
-            let path = "/api/v2/mix/account/accounts?productType=USDT-FUTURES";
-            let sig = bitget_sign(&keys.bitget_secret, &ts, "GET", path, "");
-            let resp: Value = http.get(format!("https://api.bitget.com{}", path))
-                .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig)
-                .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
-                .timeout(Duration::from_secs(10)).send().await?.json().await?;
-            // data is array of accounts, find USDT marginCoin
-            let bal = resp["data"].as_array()
-                .and_then(|arr| arr.iter().find(|a| a["marginCoin"].as_str() == Some("USDT")))
-                .and_then(|a| a["available"].as_str().and_then(|s| s.parse().ok())
-                    .or_else(|| a["accountEquity"].as_str().and_then(|s| s.parse().ok())))
                 .unwrap_or(0.0);
             Ok(bal)
         }
@@ -270,10 +233,6 @@ async fn fetch_taker_fee(http: &Client, keys: &ExchangeKeys, exchange: &str) -> 
                 .unwrap_or(0.0005);
             Ok(taker.abs()) // ensure positive
         }
-        "htx" => {
-            // HTX uses a fee field in the account response
-            Ok(0.0004) // HTX typical futures taker — no simple endpoint
-        }
         "kucoin" => {
             let ts = now_ms().to_string();
             let path = "/api/v1/trade-fees?symbol=XBTUSDTM";
@@ -282,20 +241,6 @@ async fn fetch_taker_fee(http: &Client, keys: &ExchangeKeys, exchange: &str) -> 
                 .header("KC-API-KEY", &keys.kucoin_key).header("KC-API-SIGN", sig)
                 .header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig)
                 .header("KC-API-KEY-VERSION", "2")
-                .timeout(Duration::from_secs(10)).send().await?.json().await?;
-            let taker = resp["data"]["takerFeeRate"].as_str()
-                .and_then(|s| s.parse().ok())
-                .or_else(|| resp["data"]["takerFeeRate"].as_f64())
-                .unwrap_or(0.0006);
-            Ok(taker)
-        }
-        "bitget" => {
-            let ts = now_ms().to_string();
-            let path = "/api/v2/mix/market/query-position-lever?symbol=BTCUSDT&productType=USDT-FUTURES";
-            let sig = bitget_sign(&keys.bitget_secret, &ts, "GET", path, "");
-            let resp: Value = http.get(format!("https://api.bitget.com{}", path))
-                .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig)
-                .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
                 .timeout(Duration::from_secs(10)).send().await?.json().await?;
             let taker = resp["data"]["takerFeeRate"].as_str()
                 .and_then(|s| s.parse().ok())
@@ -403,42 +348,6 @@ pub fn start_multiplier_fetcher(http: Client) {
         }
     });
 
-    // HTX
-    tokio::spawn({
-        let http = http.clone();
-        async move {
-            loop {
-                if let Ok(resp) = http.get("https://api.hbdm.com/linear-swap-api/v1/swap_contract_info").send().await {
-                    if let Ok(json) = resp.json::<Value>().await {
-                        if let Some(arr) = json["data"].as_array() {
-                            let map = get_multipliers();
-                            let lmap = get_launch_times();
-                            let tmap = get_tick_sizes();
-                            for c in arr {
-                                let name_stripped = c["contract_code"].as_str().unwrap_or("").replace("-", "");
-                                if let Some(mult) = c["contract_size"].as_f64() {
-                                    map.insert(format!("htx:{}", name_stripped), mult);
-                                }
-                                // HTX: price_tick is the minimum price increment
-                                if let Some(tick) = c["price_tick"].as_f64() {
-                                    if tick > 0.0 { tmap.insert(format!("htx:{}", name_stripped), tick); }
-                                }
-                                if let Some(date_str) = c["create_date"].as_str() {
-                                    if let Ok(dt) = chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d") {
-                                        if let Some(dti) = dt.and_hms_opt(0, 0, 0) {
-                                            lmap.insert(format!("htx:{}", name_stripped), dti.timestamp());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-            }
-        }
-    });
-
     // KuCoin
     tokio::spawn({
         let http = http.clone();
@@ -528,50 +437,6 @@ pub fn start_multiplier_fetcher(http: Client) {
         }
     });
 
-    // Bitget USDT-M Futures
-    tokio::spawn({
-        let http = http.clone();
-        async move {
-            loop {
-                if let Ok(resp) = http.get("https://api.bitget.com/api/v2/mix/market/contracts?productType=USDT-FUTURES").send().await {
-                    if let Ok(json) = resp.json::<Value>().await {
-                        if let Some(arr) = json["data"].as_array() {
-                            let map = get_multipliers();
-                            let lmap = get_launch_times();
-                            let tmap = get_tick_sizes();
-                            let mut count = 0u32;
-                            for c in arr {
-                                let sym = c["symbol"].as_str().unwrap_or("");
-                                // Bitget uses e.g. "BTCUSDT" symbol names
-                                if let Some(sm) = c["sizeMultiplier"].as_str() {
-                                    if let Ok(m) = sm.parse::<f64>() {
-                                        if m > 0.0 {
-                                            map.insert(format!("bitget:{}", sym), m);
-                                            count += 1;
-                                        }
-                                    }
-                                }
-                                // Bitget: pricePlace = number of decimal places
-                                if let Some(pp) = c["pricePlace"].as_str() {
-                                    if let Ok(places) = pp.parse::<i32>() {
-                                        let tick = 10f64.powi(-places);
-                                        tmap.insert(format!("bitget:{}", sym), tick);
-                                    }
-                                }
-                                if let Some(lt) = c["listTime"].as_str() {
-                                    if let Ok(ts) = lt.parse::<i64>() {
-                                        lmap.insert(format!("bitget:{}", sym), ts / 1000);
-                                    }
-                                }
-                            }
-                            info!("[multipliers] Bitget: loaded {} symbols", count);
-                        }
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-            }
-        }
-    });
 
     // Bybit USDT-M Linear Futures
     tokio::spawn({
@@ -633,16 +498,6 @@ fn hmac_sha256_b64(secret: &[u8], data: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC any key");
     mac.update(data.as_bytes()); base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
 }
-fn htx_ts() -> String { chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string() }
-fn url_enc(s: &str) -> String {
-    s.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D").replace(':', "%3A")
-}
-fn htx_sign(key: &str, secret: &str, method: &str, host: &str, path: &str) -> String {
-    let ts = htx_ts();
-    let params = format!("AccessKeyId={}&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp={}", key, url_enc(&ts));
-    let sig = hmac_sha256_b64(secret.as_bytes(), &format!("{}\n{}\n{}\n{}", method, host, path, params));
-    format!("{}?{}&Signature={}", path, params, url_enc(&sig))
-}
 fn kucoin_sign(secret: &str, passphrase: &str, ts: &str, method: &str, path: &str, body: &str) -> (String, String) {
     (hmac_sha256_b64(secret.as_bytes(), &format!("{}{}{}{}", ts, method, path, body)),
      hmac_sha256_b64(secret.as_bytes(), passphrase))
@@ -660,9 +515,6 @@ fn gate_sign(key: &str, secret: &str, method: &str, path: &str, body: &str) -> r
 }
 fn binance_sign(secret: &str, qs: &str) -> String {
     hmac_sha256_hex(secret.as_bytes(), qs)
-}
-fn bitget_sign(secret: &str, ts: &str, method: &str, path: &str, body: &str) -> String {
-    hmac_sha256_b64(secret.as_bytes(), &format!("{}{}{}{}", ts, method, path, body))
 }
 fn bybit_sign(secret: &str, ts: &str, api_key: &str, recv_window: &str, body: &str) -> String {
     hmac_sha256_hex(secret.as_bytes(), &format!("{}{}{}{}", ts, api_key, recv_window, body))
@@ -745,39 +597,6 @@ async fn ensure_leverage(http: &Client, keys: &ExchangeKeys, exchange: &str, pai
                     .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", &path, &body_str))
                     .body(body_str).timeout(Duration::from_secs(5)).send().await?.json::<Value>().await?;
                 info!("[leverage] gate:{} set to {}x {} → {:?}", pair, lev, margin_mode, resp.get("leverage"));
-            }
-            "htx" => {
-                let cc = format!("{}-{}", &pair[..pair.len()-4], &pair[pair.len()-4..]);
-                let host = "api.hbdm.com";
-                let path = "/linear-swap-api/v1/swap_switch_lever_rate";
-                let body = json!({"contract_code": cc, "lever_rate": lev});
-                let resp = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path)))
-                    .json(&body).timeout(Duration::from_secs(5)).send().await?.json::<Value>().await?;
-                info!("[leverage] htx:{} set to {}x → status={}", cc, lev, resp["status"]);
-            }
-            "bitget" => {
-                let ts = now_ms().to_string();
-                // Set margin mode
-                let mode_val = if is_cross { "crossed" } else { "isolated" };
-                let body_mm = json!({"symbol": pair, "productType": "USDT-FUTURES", "marginCoin": "USDT", "marginMode": mode_val});
-                let body_mm_str = body_mm.to_string();
-                let sig_mm = bitget_sign(&keys.bitget_secret, &ts, "POST", "/api/v2/mix/account/set-margin-mode", &body_mm_str);
-                let _ = http.post("https://api.bitget.com/api/v2/mix/account/set-margin-mode")
-                    .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig_mm)
-                    .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
-                    .header("Content-Type", "application/json")
-                    .body(body_mm_str).timeout(Duration::from_secs(5)).send().await;
-                // Set leverage
-                let ts2 = now_ms().to_string();
-                let body_lev = json!({"symbol": pair, "productType": "USDT-FUTURES", "marginCoin": "USDT", "leverage": lev.to_string()});
-                let body_lev_str = body_lev.to_string();
-                let sig_lev = bitget_sign(&keys.bitget_secret, &ts2, "POST", "/api/v2/mix/account/set-leverage", &body_lev_str);
-                let resp = http.post("https://api.bitget.com/api/v2/mix/account/set-leverage")
-                    .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig_lev)
-                    .header("ACCESS-TIMESTAMP", &ts2).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
-                    .header("Content-Type", "application/json")
-                    .body(body_lev_str).timeout(Duration::from_secs(5)).send().await?.json::<Value>().await?;
-                info!("[leverage] bitget:{} set to {}x {} → code={}", pair, lev, margin_mode, resp["code"]);
             }
             "kucoin" => {
                 // KuCoin: leverage is passed in the order body, no separate endpoint needed.
@@ -863,48 +682,7 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             // Any other status — return with orderId, no fill data
             Ok((oid, 0.0, 0.0))
         }
-        "bitget" => {
-            let ts = now_ms().to_string();
-            let path = "/api/v2/mix/order/place-order";
-            let trade_side = if is_reduce_only { "close" } else { "open" };
-            let body = if use_limit {
-                json!({
-                    "symbol": pair,
-                    "productType": "USDT-FUTURES",
-                    "marginMode": "crossed",
-                    "marginCoin": "USDT",
-                    "size": contracts.to_string(),
-                    "side": side,
-                    "tradeSide": trade_side,
-                    "orderType": "limit",
-                    "force": "ioc",
-                    "price": format!("{:.8}", limit_price)
-                })
-            } else {
-                json!({
-                    "symbol": pair,
-                    "productType": "USDT-FUTURES",
-                    "marginMode": "crossed",
-                    "marginCoin": "USDT",
-                    "size": contracts.to_string(),
-                    "side": side,
-                    "tradeSide": trade_side,
-                    "orderType": "market"
-                })
-            };
-            let body_str = body.to_string();
-            let sig = bitget_sign(&keys.bitget_secret, &ts, "POST", path, &body_str);
-            if dry_run { info!("[DRY] bitget order {} size={} limit={:.6}", pair, contracts, limit_price); return Ok((format!("dry_{}", Uuid::new_v4()), 0.0, 0.0)); }
-            let resp = http.post(format!("https://api.bitget.com{}", path))
-                .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig)
-                .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
-                .header("Content-Type", "application/json")
-                .body(body_str).timeout(Duration::from_secs(10)).send().await?;
-            let status = resp.status();
-            let v: Value = resp.json().await?;
-            if !status.is_success() || v["code"].as_str() != Some("00000") { return Err(anyhow::anyhow!("Bitget error: {}", v)); }
-            Ok((v["data"]["orderId"].as_str().unwrap_or_else(|| "unknown").to_string(), 0.0, 0.0))
-        }
+
         "gate" => {
             let contract = pair.replace("USDT", "_USDT");
             let size = if is_short { -contracts } else { contracts };
@@ -921,24 +699,7 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             if !status.is_success() { return Err(anyhow::anyhow!("Gate error: {}", v)); }
             Ok((v["id"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| v["id"].as_str().unwrap_or("unknown").to_string()), 0.0, 0.0))
         }
-        "htx" => {
-            let cc = format!("{}-{}", &pair[..pair.len()-4], &pair[pair.len()-4..]);
-            let host = "api.hbdm.com"; let path = "/linear-swap-api/v1/swap_order";
-            let offset = if is_reduce_only { "close" } else { "open" };
-            // HTX: use "opponent_ioc" for controlled market-like execution (fills at best available, cancels remainder)
-            // For limit: use price + ioc
-            let body = if use_limit {
-                json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":offset,"lever_rate":leverage,"order_price_type":"ioc","price":format!("{:.8}", limit_price)})
-            } else {
-                json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":offset,"lever_rate":leverage,"order_price_type":"opponent_ioc"})
-            };
-            if dry_run { info!("[DRY] htx order {} {} limit={:.6}", cc, side, limit_price); return Ok((format!("dry_{}", Uuid::new_v4()), 0.0, 0.0)); }
-            let resp = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path))).json(&body).timeout(Duration::from_secs(10)).send().await?;
-            let status = resp.status();
-            let v: Value = resp.json().await?;
-            if !status.is_success() || v["status"].as_str() == Some("error") { return Err(anyhow::anyhow!("HTX error: {}", v)); }
-            Ok((v["data"]["order_id"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "unknown".to_string()), 0.0, 0.0))
-        }
+
         "kucoin" => {
             let sym = format!("{}M", pair);
             let ts = now_ms().to_string(); let path = "/api/v1/orders";
@@ -1645,19 +1406,6 @@ async fn fetch_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let fee = v["commission"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
             Ok((price, fee))
         }
-        "bitget" => {
-            let ts = now_ms().to_string();
-            let path = format!("/api/v2/mix/order/detail?symbol={}&orderId={}&productType=USDT-FUTURES", pair, order_id);
-            let sig = bitget_sign(&keys.bitget_secret, &ts, "GET", &path, "");
-            let resp = http.get(format!("https://api.bitget.com{}", path))
-                .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig)
-                .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
-                .timeout(Duration::from_secs(10)).send().await?;
-            let v: Value = resp.json().await?;
-            let price = v["data"]["priceAvg"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let fee = v["data"]["fee"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-            Ok((price, fee.abs()))
-        }
         "gate" => {
             let path = format!("/api/v4/futures/usdt/orders/{}", order_id);
             let resp = http.get(format!("https://api.gateio.ws{}", path)).headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, "")).timeout(Duration::from_secs(10)).send().await?;
@@ -1666,16 +1414,7 @@ async fn fetch_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let fee = v["fee"].as_f64().or_else(|| v["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
             Ok((price, fee))
         }
-        "htx" => {
-            let cc = format!("{}-{}", &pair[..pair.len()-4], &pair[pair.len()-4..]);
-            let host = "api.hbdm.com"; let path = "/linear-swap-api/v1/swap_order_info";
-            let body = json!({"contract_code":cc,"order_id":order_id});
-            let resp = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path))).json(&body).timeout(Duration::from_secs(10)).send().await?;
-            let v: Value = resp.json().await?;
-            let price = v["data"][0]["trade_avg_price"].as_f64().or_else(|| v["data"][0]["trade_avg_price"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
-            let fee = v["data"][0]["fee"].as_f64().or_else(|| v["data"][0]["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
-            Ok((price, fee))
-        }
+
         "kucoin" => {
             let ts = now_ms().to_string(); let path = format!("/api/v1/orders/{}", order_id);
             let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", &path, "");
@@ -1802,14 +1541,7 @@ async fn fetch_funding_rate_api(http: &Client, exchange: &str, pair: &str) -> Op
             let next = resp["nextFundingTime"].as_i64()?;
             Some((rate, next))
         }
-        "bitget" => {
-            let url = format!("https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol={}&productType=USDT-FUTURES", pair);
-            let resp = http.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-            let rate = resp["data"].as_array()?.first()?["fundingRate"].as_str()?.parse::<f64>().ok()?;
-            let next_str = resp["data"].as_array()?.first()?["nextUpdate"].as_str()?;
-            let next = next_str.parse::<i64>().ok()?;
-            Some((rate, next))
-        }
+
         _ => None,
     }
 }

@@ -96,10 +96,10 @@ function requireAuthUser(request, env) {
 // ─── Exchange kline endpoints ─────────────────────────────────────────────────
 function klinesUrl(exchange, symbol, interval, limit, endTimeMs) {
     const ivMap = {
-        '1m':  { binance: '1m',   bybit: '1',   okx: '1m',  gate: '1m',  bitget: '1m',  mexc: 'Min1',  htx: '1min',  bingx: '1m',  kucoin: '1min',  xt: '1m',  coinex: '1min' },
-        '3m':  { binance: '3m',   bybit: '3',   okx: '3m',  gate: '3m',  bitget: '3m',  mexc: 'Min3',  htx: '3min',  bingx: '3m',  kucoin: '3min',  xt: '3m',  coinex: '3min' },
-        '5m':  { binance: '5m',   bybit: '5',   okx: '5m',  gate: '5m',  bitget: '5m',  mexc: 'Min5',  htx: '5min',  bingx: '5m',  kucoin: '5min',  xt: '5m',  coinex: '5min' },
-        '15m': { binance: '15m',  bybit: '15',  okx: '15m', gate: '15m', bitget: '15m', mexc: 'Min15', htx: '15min', bingx: '15m', kucoin: '15min', xt: '15m', coinex: '15min' },
+        '1m':  { binance: '1m',   bybit: '1',   okx: '1m',  gate: '1m',  bingx: '1m',  kucoin: '1min',  xt: '1m',  coinex: '1min' },
+        '3m':  { binance: '3m',   bybit: '3',   okx: '3m',  gate: '3m',  bingx: '3m',  kucoin: '3min',  xt: '3m',  coinex: '3min' },
+        '5m':  { binance: '5m',   bybit: '5',   okx: '5m',  gate: '5m',  bingx: '5m',  kucoin: '5min',  xt: '5m',  coinex: '5min' },
+        '15m': { binance: '15m',  bybit: '15',  okx: '15m', gate: '15m', bingx: '15m', kucoin: '15min', xt: '15m', coinex: '15min' },
     };
     const iv = (ivMap[interval] || ivMap['1m'])[exchange] || interval;
     const sym = symbol;
@@ -117,16 +117,7 @@ function klinesUrl(exchange, symbol, interval, limit, endTimeMs) {
             const contract = sym.replace('USDT', '_USDT');
             return `https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=${iv}&limit=${limit}${endTimeMs ? `&to=${Math.floor(endTimeMs/1000)}` : ''}`;
         }
-        case 'bitget':
-            return `https://api.bitget.com/api/v2/mix/market/candles?symbol=${sym}&productType=USDT-FUTURES&granularity=${iv}&limit=${Math.min(limit, 1000)}${endTimeMs ? `&endTime=${endTimeMs}` : ''}`;
-        case 'mexc': {
-            const contract = sym.replace('USDT', '_USDT');
-            return `https://futures.mexc.com/api/v1/contract/kline/${contract}?interval=${iv}&limit=${limit}${endTimeMs ? `&end=${endTimeMs}` : ''}`;
-        }
-        case 'htx': {
-            const code = sym.replace('USDT', '-USDT');
-            return `https://api.hbdm.com/linear-swap-ex/market/history/kline?contract_code=${code}&period=${iv}&size=${limit}`;
-        }
+
         case 'bingx': {
             const s = sym.replace('USDT', '-USDT');
             return `https://open-api.bingx.com/openApi/swap/v3/quote/klines?symbol=${s}&interval=${iv}&limit=${limit}${endTimeMs ? `&endTime=${endTimeMs}` : ''}`;
@@ -158,18 +149,7 @@ function parseKlines(exchange, raw) {
             return (raw?.data ?? []).map(c => ({ ts: parseInt(c[0]), close: parseFloat(c[4]) })).reverse();
         case 'gate':
             return (Array.isArray(raw) ? raw : []).map(c => ({ ts: parseInt(c.t) * 1000, close: parseFloat(c.c) }));
-        case 'bitget': {
-            const list = raw?.data || raw || [];
-            if (!Array.isArray(list)) return [];
-            return list.map(c => ({ ts: parseInt(c[0]), close: parseFloat(c[4]) })).reverse();
-        }
-        case 'mexc': {
-            const list = raw?.data || raw || [];
-            if (!Array.isArray(list)) return [];
-            return list.map(c => ({ ts: parseInt(c[0]) * 1000, close: parseFloat(c[2]) }));
-        }
-        case 'htx':
-            return (raw?.data ?? []).map(c => ({ ts: c.id * 1000, close: parseFloat(c.close) })).reverse();
+
         case 'bingx':
             return (raw?.data ?? []).map(c => ({ ts: c.time ?? parseInt(c[0]), close: parseFloat(c.close ?? c[4]) }));
         case 'kucoin':
