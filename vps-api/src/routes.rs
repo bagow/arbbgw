@@ -638,14 +638,18 @@ pub async fn handle_market_close_all(
     }
 
     let id2 = id.clone();
-    let _ = state.real_db.call(move |conn| {
+    let r1 = state.real_db.call(move |conn| {
         conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status='OPEN'", params![id])?;
-        Ok(())
+        Ok::<(), rusqlite::Error>(())
     }).await;
-    let _ = state.paper_db.call(move |conn| {
+    
+    let r2 = state.paper_db.call(move |conn| {
         conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status='OPEN'", params![id2])?;
-        Ok(())
+        Ok::<(), rusqlite::Error>(())
     }).await;
+
+    if let Err(e) = r1 { tracing::error!("Failed to close all on real DB: {:?}", e); }
+    if let Err(e) = r2 { tracing::error!("Failed to close all on paper DB: {:?}", e); }
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
@@ -660,14 +664,18 @@ pub async fn handle_market_close_trade(
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
     }
 
-    let _ = state.real_db.call(move |conn| {
+    let r1 = state.real_db.call(move |conn| {
         conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status='OPEN'", params![trade_id])?;
-        Ok(())
+        Ok::<(), rusqlite::Error>(())
     }).await;
-    let _ = state.paper_db.call(move |conn| {
+    
+    let r2 = state.paper_db.call(move |conn| {
         conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status='OPEN'", params![trade_id])?;
-        Ok(())
+        Ok::<(), rusqlite::Error>(())
     }).await;
+
+    if let Err(e) = r1 { tracing::error!("Failed to close trade {} on real DB: {:?}", trade_id, e); }
+    if let Err(e) = r2 { tracing::error!("Failed to close trade {} on paper DB: {:?}", trade_id, e); }
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }

@@ -12,6 +12,7 @@ pub async fn init_db(db: &Connection) -> Result<()> {
             "
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
 
             CREATE TABLE IF NOT EXISTS server_cache (
                 key TEXT PRIMARY KEY,
@@ -227,6 +228,7 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
             "
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
 
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
