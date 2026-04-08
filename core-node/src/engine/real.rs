@@ -1267,8 +1267,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if now - cd_pair < ts.pair_cooldown_ms { continue; }
 
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
-        let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
-        let entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
+        let mut entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
+        let mut entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
 
         let price_ratio = if entry_a > entry_b { entry_a / entry_b } else { entry_b / entry_a };
         if price_ratio > ts.max_price_ratio { continue; }
@@ -1322,7 +1322,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         // ── ENTRY ORDER TYPE: market vs IOC ─────────────────────────────────
         let use_ioc = ts.entry_order_type == "ioc";
-        let (limit_price_a, limit_price_b) = if use_ioc {
+        let (mut limit_price_a, mut limit_price_b) = if use_ioc {
             let max_slip_frac = (settings.slippage_percent / 100.0).max(ts.min_ioc_tolerance_pct / 100.0);
             let lpa = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
             let lpb = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
@@ -1340,6 +1340,36 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             ensure_leverage(&http, &keys, &exa, &pair, settings.leverage, &settings.margin_mode),
             ensure_leverage(&http, &keys, &exb, &pair, settings.leverage, &settings.margin_mode)
         );
+
+        // ── PRE-EXECUTION SPREAD RE-CHECK ───────────────────────────────────
+        // After leverage setup (which may take 200-500ms on first call per pair),
+        // re-read FRESH bid/ask from in-memory PriceMap and verify spread hasn't collapsed.
+        // This prevents entering on stale prices that moved during the leverage API call.
+        let fresh_a = prices.get(&exa).and_then(|m| m.get(&pair).cloned());
+        let fresh_b = prices.get(&exb).and_then(|m| m.get(&pair).cloned());
+        if let (Some(fa), Some(fb)) = (&fresh_a, &fresh_b) {
+            let fresh_entry_a = if is_a_higher { fa.bid } else { fa.ask };
+            let fresh_entry_b = if is_a_higher { fb.ask } else { fb.bid };
+            let fresh_spread = if is_a_higher {
+                (fa.bid - fb.ask) / fb.ask.max(1e-12) * 100.0
+            } else {
+                (fb.bid - fa.ask) / fa.ask.max(1e-12) * 100.0
+            };
+            if fresh_spread < break_even_pct * ts.safety_margin {
+                info!("[real] PRE-EXEC ABORT {} — spread collapsed {:.4}% → {:.4}% (be={:.4}%)",
+                    pair, row.spread, fresh_spread, break_even_pct);
+                continue;
+            }
+            // Use the fresh prices for the actual order
+            entry_a = fresh_entry_a;
+            entry_b = fresh_entry_b;
+            // Re-calc limit prices if IOC mode
+            if use_ioc {
+                let max_slip_frac = (settings.slippage_percent / 100.0).max(ts.min_ioc_tolerance_pct / 100.0);
+                limit_price_a = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
+                limit_price_b = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
+            }
+        }
 
         let t0 = std::time::Instant::now();
 
