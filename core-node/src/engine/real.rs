@@ -795,10 +795,9 @@ async fn ensure_leverage(http: &Client, keys: &ExchangeKeys, exchange: &str, pai
     get_leverage_cache().insert(cache_key, true);
 }
 
-/// Place an order on an exchange.
-/// `limit_price` > 0 → Limit IOC (price-protected, no slippage beyond this).
-/// `limit_price` == 0 → Market order (used for closes where execution is critical).
-async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, contracts: i64, dry_run: bool, is_reduce_only: bool, limit_price: f64, leverage: i64) -> Result<String> {
+/// Returns (order_id, fill_price, fill_fee). fill_price>0 means data is available
+/// from the exchange response itself (e.g. Binance), skipping separate verification.
+async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, is_short: bool, contracts: i64, dry_run: bool, is_reduce_only: bool, limit_price: f64, leverage: i64) -> Result<(String, f64, f64)> {
     let side = if is_short { "sell" } else { "buy" };
     let use_limit = limit_price > 0.0 && !is_reduce_only; // Limit IOC only for entries
     // Round price to exchange tick size to avoid "PRICE PARAMETER INVALID" errors
@@ -817,20 +816,25 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let sig = binance_sign(&keys.binance_secret, &qs);
             let full_url = format!("https://fapi.binance.com{}?{}&signature={}", path, qs, sig);
             
-            if dry_run { info!("[DRY] binance order {} size={} limit={:.6}", pair, contracts, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            if dry_run { info!("[DRY] binance order {} size={} limit={:.6}", pair, contracts, limit_price); return Ok((format!("dry_{}", Uuid::new_v4()), 0.0, 0.0)); }
             let resp = http.post(full_url).header("X-MBX-APIKEY", &keys.binance_key)
                 .timeout(Duration::from_secs(10)).send().await?;
             let status = resp.status();
             let v: Value = resp.json().await?;
             if !status.is_success() { return Err(anyhow::anyhow!("Binance error: {}", v)); }
             // CRITICAL: Binance returns HTTP 200 + orderId even for IOC orders that
-            // immediately EXPIRED. We must check the order status field to avoid
-            // wasting 4+ seconds in fill verification and causing asymmetric trades.
+            // immediately EXPIRED. Check status field to fail fast.
             let order_status = v["status"].as_str().unwrap_or("");
             if order_status == "EXPIRED" || order_status == "CANCELED" || order_status == "REJECTED" {
                 return Err(anyhow::anyhow!("Binance IOC {} status={} executedQty={}", pair, order_status, v["executedQty"]));
             }
-            Ok(v["orderId"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "unknown".to_string()))
+            let oid = v["orderId"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "unknown".to_string());
+            // Binance includes fill data in the order response — extract to skip verification
+            let avg_price = v["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let cum_fee: f64 = v["fills"].as_array().map(|fills| {
+                fills.iter().map(|f| f["commission"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)).sum()
+            }).unwrap_or(0.0);
+            Ok((oid, avg_price, cum_fee))
         }
         "bitget" => {
             let ts = now_ms().to_string();
@@ -863,7 +867,7 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             };
             let body_str = body.to_string();
             let sig = bitget_sign(&keys.bitget_secret, &ts, "POST", path, &body_str);
-            if dry_run { info!("[DRY] bitget order {} size={} limit={:.6}", pair, contracts, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            if dry_run { info!("[DRY] bitget order {} size={} limit={:.6}", pair, contracts, limit_price); return Ok((format!("dry_{}", Uuid::new_v4()), 0.0, 0.0)); }
             let resp = http.post(format!("https://api.bitget.com{}", path))
                 .header("ACCESS-KEY", &keys.bitget_key).header("ACCESS-SIGN", sig)
                 .header("ACCESS-TIMESTAMP", &ts).header("ACCESS-PASSPHRASE", &keys.bitget_passphrase)
@@ -872,7 +876,7 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let status = resp.status();
             let v: Value = resp.json().await?;
             if !status.is_success() || v["code"].as_str() != Some("00000") { return Err(anyhow::anyhow!("Bitget error: {}", v)); }
-            Ok(v["data"]["orderId"].as_str().unwrap_or_else(|| "unknown").to_string())
+            Ok((v["data"]["orderId"].as_str().unwrap_or_else(|| "unknown").to_string(), 0.0, 0.0))
         }
         "gate" => {
             let contract = pair.replace("USDT", "_USDT");
@@ -883,12 +887,12 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let tif = if use_limit { "ioc" } else { "gtc" };
             let body = json!({"contract":contract,"size":size,"price":price_str,"tif":tif,"reduce_only":is_reduce_only,"close":false,"text":"t-corenode"});
             let body_str = body.to_string();
-            if dry_run { info!("[DRY] gate order {} size={} limit={:.6}", contract, size, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            if dry_run { info!("[DRY] gate order {} size={} limit={:.6}", contract, size, limit_price); return Ok((format!("dry_{}", Uuid::new_v4()), 0.0, 0.0)); }
             let resp = http.post(format!("https://api.gateio.ws{}", path)).headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &body_str)).body(body_str).timeout(Duration::from_secs(10)).send().await?;
             let status = resp.status();
             let v: Value = resp.json().await?;
             if !status.is_success() { return Err(anyhow::anyhow!("Gate error: {}", v)); }
-            Ok(v["id"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| v["id"].as_str().unwrap_or("unknown").to_string()))
+            Ok((v["id"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| v["id"].as_str().unwrap_or("unknown").to_string()), 0.0, 0.0))
         }
         "htx" => {
             let cc = format!("{}-{}", &pair[..pair.len()-4], &pair[pair.len()-4..]);
@@ -901,12 +905,12 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             } else {
                 json!({"contract_code":cc,"client_order_id":now_ms(),"volume":contracts,"direction":side,"offset":offset,"lever_rate":leverage,"order_price_type":"opponent_ioc"})
             };
-            if dry_run { info!("[DRY] htx order {} {} limit={:.6}", cc, side, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            if dry_run { info!("[DRY] htx order {} {} limit={:.6}", cc, side, limit_price); return Ok((format!("dry_{}", Uuid::new_v4()), 0.0, 0.0)); }
             let resp = http.post(format!("https://{}{}", host, htx_sign(&keys.htx_key, &keys.htx_secret, "POST", host, path))).json(&body).timeout(Duration::from_secs(10)).send().await?;
             let status = resp.status();
             let v: Value = resp.json().await?;
             if !status.is_success() || v["status"].as_str() == Some("error") { return Err(anyhow::anyhow!("HTX error: {}", v)); }
-            Ok(v["data"]["order_id"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "unknown".to_string()))
+            Ok((v["data"]["order_id"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "unknown".to_string()), 0.0, 0.0))
         }
         "kucoin" => {
             let sym = format!("{}M", pair);
@@ -923,7 +927,7 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             };
             let body_str = body.to_string();
             let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "POST", path, &body_str);
-            if dry_run { info!("[DRY] kucoin order {} {} limit={:.6}", sym, side, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
+            if dry_run { return Ok((format!("dry_kucoin_{}", Uuid::new_v4()), 0.0, 0.0)); }
             let resp = http.post(format!("https://api-futures.kucoin.com{}", path))
                 .header("KC-API-KEY", &keys.kucoin_key).header("KC-API-SIGN", sig)
                 .header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig)
@@ -932,7 +936,7 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let status = resp.status();
             let v: Value = resp.json().await?;
             if !status.is_success() || v["code"].as_str() != Some("200000") { return Err(anyhow::anyhow!("Kucoin error: {}", v)); }
-            Ok(v["data"]["orderId"].as_str().unwrap_or("unknown").to_string())
+            Ok((v["data"]["orderId"].as_str().unwrap_or("unknown").to_string(), 0.0, 0.0))
         }
         "bybit" => {
             let ts = now_ms().to_string();
@@ -961,7 +965,7 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             };
             let body_str = body.to_string();
             let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &body_str);
-            if dry_run { return Ok(format!("dry_bybit_{}", Uuid::new_v4())); }
+            if dry_run { return Ok((format!("dry_bybit_{}", Uuid::new_v4()), 0.0, 0.0)); }
             let resp = http.post("https://api.bybit.com/v5/order/create")
                 .header("X-BAPI-API-KEY", &keys.bybit_key)
                 .header("X-BAPI-SIGN", &sig)
@@ -971,7 +975,7 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
                 .body(body_str).timeout(Duration::from_secs(10)).send().await?;
             let v: Value = resp.json().await?;
             if v["retCode"].as_i64() != Some(0) { return Err(anyhow::anyhow!("Bybit error: {}", v)); }
-            Ok(v["result"]["orderId"].as_str().unwrap_or("unknown").to_string())
+            Ok((v["result"]["orderId"].as_str().unwrap_or("unknown").to_string(), 0.0, 0.0))
         }
         _ => Err(anyhow::anyhow!("Unknown exchange: {}", exchange)),
     }
@@ -980,7 +984,8 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
 async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &str, was_short: bool, contracts: i64, dry_run: bool, leverage: i64) -> Result<String> {
     // Closes use market orders (limit_price=0) for guaranteed execution — 
     // orphaned positions are worse than slippage on exit.
-    place_order(http, keys, exchange, pair, !was_short, contracts, dry_run, true, 0.0, leverage).await
+    let (oid, _, _) = place_order(http, keys, exchange, pair, !was_short, contracts, dry_run, true, 0.0, leverage).await?;
+    Ok(oid)
 }
 
 // ─── Engine cycle ─────────────────────────────────────────────────────────────
@@ -1392,32 +1397,34 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         let order_ms = t0.elapsed().as_millis();
 
-        let oid_a = match result_a {
-            Ok(id) => Some(id),
+        // Destructure (order_id, inline_fill_price, inline_fill_fee)
+        let (oid_a, inline_fill_a, inline_fee_a) = match result_a {
+            Ok(t) => (Some(t.0), t.1, t.2),
             Err(e) => {
                 let es = e.to_string();
                 error!("[real] LEG_A reject {}/{}: {} ({}ms)", exa, pair, es, order_ms);
                 if is_margin_error(&es) { ex_cd.insert(exa.clone(), now); deduct_cached_balance(&exa, f64::MAX); }
-                None
+                (None, 0.0, 0.0)
             }
         };
-        let oid_b = match result_b {
-            Ok(id) => Some(id),
+        let (oid_b, inline_fill_b, inline_fee_b) = match result_b {
+            Ok(t) => (Some(t.0), t.1, t.2),
             Err(e) => {
                 let es = e.to_string();
                 error!("[real] LEG_B reject {}/{}: {} ({}ms)", exb, pair, es, order_ms);
                 if is_margin_error(&es) { ex_cd.insert(exb.clone(), now); deduct_cached_balance(&exb, f64::MAX); }
-                None
+                (None, 0.0, 0.0)
             }
         };
 
         if oid_a.is_none() && oid_b.is_none() { pair_cd.insert(pair.clone(), now); continue; }
 
         // ── PARALLEL FILL VERIFICATION ───────────────────────────────────────
-        let mut fill_a = 0.0f64; let mut fee_a_val = 0.0f64;
-        let mut fill_b = 0.0f64; let mut fee_b_val = 0.0f64;
-        let mut got_a = oid_a.is_none() || dry_run;
-        let mut got_b = oid_b.is_none() || dry_run;
+        // Pre-seed with inline fill data (Binance provides avgPrice in order response)
+        let mut fill_a = inline_fill_a; let mut fee_a_val = inline_fee_a;
+        let mut fill_b = inline_fill_b; let mut fee_b_val = inline_fee_b;
+        let mut got_a = oid_a.is_none() || dry_run || fill_a > 0.0;
+        let mut got_b = oid_b.is_none() || dry_run || fill_b > 0.0;
 
         for attempt in 0..ts.fill_verify_retries {
             if got_a && got_b { break; }
