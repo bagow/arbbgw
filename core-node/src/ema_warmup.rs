@@ -178,7 +178,7 @@ pub async fn run(http: Client, prices: PriceMap) {
                     history.push((*ts, spread, direction, pair.to_string(), ex_a.to_string(), ex_b.to_string()));
                 }
 
-                warmup_ema_from_history(&history);
+                warmup_ema_from_history(&history, &shared::TechnicalSettings::default());
                 warmed += 1;
             }
         }

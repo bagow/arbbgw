@@ -144,6 +144,16 @@ async fn main() -> Result<()> {
     settings::spawn_all_settings_refresher(profiles_db.clone(), "paper", paper_settings_cache.clone(), 2);
     settings::spawn_all_settings_refresher(profiles_db.clone(), "real", real_settings_cache.clone(), 2);
 
+    // ── Global technical settings (refreshed every 10s) ──────────────────────
+    let tech_settings_cache: Arc<RwLock<settings::TechnicalSettings>> = Arc::new(RwLock::new(
+        settings::load_technical_settings(&profiles_db).await
+    ));
+    settings::spawn_technical_settings_refresher(profiles_db.clone(), tech_settings_cache.clone(), 10);
+    info!("Technical settings loaded: safety={} tau={}s deviation={}",
+        tech_settings_cache.read().await.safety_margin,
+        tech_settings_cache.read().await.ema_tau_secs,
+        tech_settings_cache.read().await.deviation_safety);
+
     // ── Exchange keys — loaded once at startup ───────────────────────────────
     let exchange_keys = Arc::new(engine::real::ExchangeKeys::from_env());
     info!("Exchange keys loaded: gate={} htx={} kucoin={} binance={} bitget={}",
@@ -164,6 +174,7 @@ async fn main() -> Result<()> {
         let paper_cache = paper_settings_cache.clone();
         let real_cache  = real_settings_cache.clone();
         let keys        = exchange_keys.clone();
+        let ts_cache    = tech_settings_cache.clone();
 
         tokio::spawn(async move {
             let mut last_run = std::time::Instant::now();
@@ -198,7 +209,9 @@ async fn main() -> Result<()> {
                     .fold(f64::MAX, f64::min);
                 let min_vol = if min_vol == f64::MAX { 1.0 } else { min_vol };
 
-                let spreads = compute_spreads(&prices, min_vol);
+                let ts = ts_cache.read().await.clone();
+
+                let spreads = compute_spreads(&prices, min_vol, &ts);
                 
                 // Publish snapshot to UI frontend (throttle to 1000ms)
                 // Writes to paper_db (server_cache) to avoid locking profiles_db
@@ -227,9 +240,8 @@ async fn main() -> Result<()> {
                 for paper_s in paper_profiles {
                     engine::paper::run_cycle(spreads.clone(), prices.clone(), paper_s, http.clone(), paper_db.clone()).await;
                 }
-                // Run real engine for each real profile
                 for real_s in real_profiles {
-                    engine::real::run_cycle(spreads.clone(), prices.clone(), real_s, http.clone(), real_db.clone(), keys.clone()).await;
+                    engine::real::run_cycle(spreads.clone(), prices.clone(), real_s, http.clone(), real_db.clone(), keys.clone(), &ts).await;
                 }
             }
         });

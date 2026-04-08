@@ -51,6 +51,65 @@ pub async fn init_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN leverage INTEGER DEFAULT 10", []);
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN margin_mode TEXT DEFAULT 'cross'", []);
 
+        // ── Technical settings table (global engine params) ──
+        conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS technical_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                description TEXT,
+                category TEXT DEFAULT 'general'
+            );
+        ")?;
+
+        // Seed defaults — INSERT OR IGNORE preserves user changes
+        let tech_defaults: &[(&str, &str, &str, &str)] = &[
+            // Spread computation
+            ("spread_threshold",       "-1.0",     "Min spread % to include in scanner (negative = show losing)", "spreads"),
+            ("spread_max",             "50.0",     "Max spread % — above is anomaly, ignored", "spreads"),
+            ("stale_secs",             "30",       "Seconds before ticker data is considered stale", "spreads"),
+            ("intra_spread_limit",     "1.02",     "Max ask/bid ratio per exchange (1.02 = 2% internal spread)", "spreads"),
+            ("max_funding_diff",       "0.005",    "Max funding rate difference between exchanges (0.5% per 8h)", "spreads"),
+            ("ema_tau_secs",           "86400",    "EMA time constant for structural spread (86400 = 24h)", "spreads"),
+            ("blacklist",              "USOILUSDT,XMRUSDT,TRUMPUSDT,LUNAUSDT,BTTUSDT,BTCSTUSDT", "Comma-separated pairs to exclude from trading", "spreads"),
+            // Entry filters
+            ("safety_margin",          "1.2",      "Multiplier above break-even required to enter (1.2 = 20% margin)", "entry"),
+            ("deviation_safety",       "1.0",      "Multiplier for deviation check (spread - structural vs break-even)", "entry"),
+            ("max_price_ratio",        "1.10",     "Max allowed price difference ratio between exchanges", "entry"),
+            ("intra_spread_max_pct",   "1.0",      "Max intra-exchange spread % to allow entry (bid-ask width)", "entry"),
+            ("depth_multiplier",       "2.0",      "Required order book depth as multiplier of trade volume", "entry"),
+            ("vol_diff_max_pct",       "5.0",      "Max volume difference % between two legs", "entry"),
+            ("vol_tolerance_pct",      "15.0",     "Max deviation from target volume ±% (15 = ±15%)", "entry"),
+            ("min_listing_age_days",   "30",       "Min days since contract listing to trade", "entry"),
+            ("min_ioc_tolerance_pct",  "0.5",      "Min IOC limit price tolerance % (0.5 = 0.5% from best price)", "entry"),
+            ("binance_min_notional",   "5.05",     "Binance minimum order notional in USD", "entry"),
+            ("margin_check_multiplier","1.5",      "Required balance as multiplier of notional (1.5 = 50% reserve)", "entry"),
+            ("max_spreads_per_cycle",  "200",      "Max spread opportunities to evaluate per engine cycle", "entry"),
+            ("default_fee_rate",       "0.0005",   "Default taker fee rate if exchange API unavailable (0.05%)", "entry"),
+            // Cooldowns
+            ("exchange_cooldown_ms",   "1800000",  "Exchange cooldown after margin error (ms, 1800000 = 30min)", "cooldowns"),
+            ("pair_cooldown_ms",       "300000",   "Pair cooldown after unfilled order (ms, 300000 = 5min)", "cooldowns"),
+            ("asymmetric_cooldown_ms", "1500000",  "Pair cooldown after asymmetric fill (ms, 1500000 = 25min)", "cooldowns"),
+            // Order execution
+            ("fill_verify_retries",    "10",       "Number of retries to verify order fill", "execution"),
+            ("fill_verify_delay_ms",   "15",       "Delay between fill verification retries (ms)", "execution"),
+            ("close_verify_retries",   "20",       "Number of retries to verify close fill", "execution"),
+            ("close_verify_delay_ms",  "25",       "Delay between close verification retries (ms)", "execution"),
+            ("emergency_close_retries","3",        "Number of retries for emergency close on asymmetric fill", "execution"),
+            ("exit_sanity_pct",        "0.20",     "Max allowed exit price deviation from entry (0.20 = 20%)", "execution"),
+            // Intervals
+            ("balance_refresh_secs",   "60",       "Balance and fee rate refresh interval (seconds)", "intervals"),
+            ("multiplier_refresh_secs","3600",     "Contract multiplier/tick size refresh interval (seconds)", "intervals"),
+            ("funding_cache_secs",     "300",      "Funding rate cache duration (seconds)", "intervals"),
+            ("diag_log_interval",      "100",      "Diagnostic logging frequency (every N engine cycles)", "intervals"),
+            ("live_update_throttle_ms","1000",      "Min interval between live PnL DB updates (ms)", "intervals"),
+        ];
+        for (key, value, desc, cat) in tech_defaults {
+            conn.execute(
+                "INSERT OR IGNORE INTO technical_settings (key, value, description, category) VALUES (?, ?, ?, ?)",
+                params![key, value, desc, cat],
+            )?;
+        }
+
         // Restore activity for the shared default profiles.
         // After a DB path migration (e.g. env var change), the new DB file may have
         // is_active=0 for paper-default because saveSettings previously sent is_active=0.

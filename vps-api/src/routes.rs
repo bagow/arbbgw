@@ -655,3 +655,67 @@ pub async fn handle_market_close_trade(
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
+
+// ─── GET /api/technical-settings ───
+pub async fn handle_get_technical_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if check_basic_auth(&headers, &state).is_none() {
+        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
+    }
+
+    let settings = state.db.call(|conn| {
+        let mut stmt = conn.prepare("SELECT key, value, description, category FROM technical_settings ORDER BY category, key")?;
+        let rows: Vec<Value> = stmt.query_map([], |row| {
+            Ok(json!({
+                "key": row.get::<_, String>(0)?,
+                "value": row.get::<_, String>(1)?,
+                "description": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                "category": row.get::<_, Option<String>>(3)?.unwrap_or_else(|| "general".into()),
+            }))
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(rows)
+    }).await.unwrap_or_default();
+
+    (StatusCode::OK, Json(json!(settings))).into_response()
+}
+
+// ─── PATCH /api/technical-settings ───
+pub async fn handle_patch_technical_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    if check_basic_auth(&headers, &state).is_none() {
+        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
+    }
+
+    let obj = match payload.as_object() {
+        Some(o) => o.clone(),
+        None => return json_err(StatusCode::BAD_REQUEST, "Expected JSON object { key: value, ... }"),
+    };
+
+    let result = state.db.call(move |conn| {
+        let tx = conn.transaction()?;
+        for (key, value) in &obj {
+            let val_str = match value {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                _ => value.to_string(),
+            };
+            tx.execute(
+                "UPDATE technical_settings SET value = ? WHERE key = ?",
+                params![val_str, key],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }).await;
+
+    match result {
+        Ok(_) => (StatusCode::OK, Json(json!({ "success": true }))).into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}

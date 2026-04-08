@@ -135,6 +135,154 @@ impl TradingSettings {
     }
 }
 
+// ─── Technical settings (global engine params) ───────────────────────────────
+
+/// Global engine parameters — previously hardcoded across spreads.rs and real.rs.
+/// Stored in `technical_settings` table (key-value) and loaded by core-node on startup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TechnicalSettings {
+    // ── Spread computation (spreads.rs) ──
+    pub spread_threshold: f64,
+    pub spread_max: f64,
+    pub stale_secs: u64,
+    pub intra_spread_limit: f64,
+    pub max_funding_diff: f64,
+    pub ema_tau_secs: f64,
+    pub blacklist: String,
+
+    // ── Entry filters (real.rs) ──
+    pub safety_margin: f64,
+    pub deviation_safety: f64,
+    pub max_price_ratio: f64,
+    pub intra_spread_max_pct: f64,
+    pub depth_multiplier: f64,
+    pub vol_diff_max_pct: f64,
+    pub vol_tolerance_pct: f64,
+    pub min_listing_age_days: i64,
+    pub min_ioc_tolerance_pct: f64,
+    pub binance_min_notional: f64,
+    pub margin_check_multiplier: f64,
+    pub max_spreads_per_cycle: i64,
+    pub default_fee_rate: f64,
+
+    // ── Cooldowns ──
+    pub exchange_cooldown_ms: i64,
+    pub pair_cooldown_ms: i64,
+    pub asymmetric_cooldown_ms: i64,
+
+    // ── Order execution ──
+    pub fill_verify_retries: i64,
+    pub fill_verify_delay_ms: i64,
+    pub close_verify_retries: i64,
+    pub close_verify_delay_ms: i64,
+    pub emergency_close_retries: i64,
+    pub exit_sanity_pct: f64,
+
+    // ── Refresh intervals ──
+    pub balance_refresh_secs: i64,
+    pub multiplier_refresh_secs: i64,
+    pub funding_cache_secs: i64,
+    pub diag_log_interval: i64,
+    pub live_update_throttle_ms: i64,
+}
+
+impl Default for TechnicalSettings {
+    fn default() -> Self {
+        Self {
+            spread_threshold: -1.0,
+            spread_max: 50.0,
+            stale_secs: 30,
+            intra_spread_limit: 1.02,
+            max_funding_diff: 0.005,
+            ema_tau_secs: 86400.0,
+            blacklist: "USOILUSDT,XMRUSDT,TRUMPUSDT,LUNAUSDT,BTTUSDT,BTCSTUSDT".to_string(),
+
+            safety_margin: 1.2,
+            deviation_safety: 1.0,
+            max_price_ratio: 1.10,
+            intra_spread_max_pct: 1.0,
+            depth_multiplier: 2.0,
+            vol_diff_max_pct: 5.0,
+            vol_tolerance_pct: 15.0,
+            min_listing_age_days: 30,
+            min_ioc_tolerance_pct: 0.5,
+            binance_min_notional: 5.05,
+            margin_check_multiplier: 1.5,
+            max_spreads_per_cycle: 200,
+            default_fee_rate: 0.0005,
+
+            exchange_cooldown_ms: 1_800_000,
+            pair_cooldown_ms: 300_000,
+            asymmetric_cooldown_ms: 1_500_000,
+
+            fill_verify_retries: 10,
+            fill_verify_delay_ms: 15,
+            close_verify_retries: 20,
+            close_verify_delay_ms: 25,
+            emergency_close_retries: 3,
+            exit_sanity_pct: 0.20,
+
+            balance_refresh_secs: 60,
+            multiplier_refresh_secs: 3600,
+            funding_cache_secs: 300,
+            diag_log_interval: 100,
+            live_update_throttle_ms: 1000,
+        }
+    }
+}
+
+impl TechnicalSettings {
+    /// Parse from DB rows (key, value) into struct. Unknown keys are ignored.
+    pub fn from_db_rows(rows: &[(String, String)]) -> Self {
+        let mut ts = Self::default();
+        for (k, v) in rows {
+            match k.as_str() {
+                "spread_threshold"         => { if let Ok(x) = v.parse() { ts.spread_threshold = x; } }
+                "spread_max"               => { if let Ok(x) = v.parse() { ts.spread_max = x; } }
+                "stale_secs"               => { if let Ok(x) = v.parse() { ts.stale_secs = x; } }
+                "intra_spread_limit"       => { if let Ok(x) = v.parse() { ts.intra_spread_limit = x; } }
+                "max_funding_diff"         => { if let Ok(x) = v.parse() { ts.max_funding_diff = x; } }
+                "ema_tau_secs"             => { if let Ok(x) = v.parse() { ts.ema_tau_secs = x; } }
+                "blacklist"                => { ts.blacklist = v.clone(); }
+                "safety_margin"            => { if let Ok(x) = v.parse() { ts.safety_margin = x; } }
+                "deviation_safety"         => { if let Ok(x) = v.parse() { ts.deviation_safety = x; } }
+                "max_price_ratio"          => { if let Ok(x) = v.parse() { ts.max_price_ratio = x; } }
+                "intra_spread_max_pct"     => { if let Ok(x) = v.parse() { ts.intra_spread_max_pct = x; } }
+                "depth_multiplier"         => { if let Ok(x) = v.parse() { ts.depth_multiplier = x; } }
+                "vol_diff_max_pct"         => { if let Ok(x) = v.parse() { ts.vol_diff_max_pct = x; } }
+                "vol_tolerance_pct"        => { if let Ok(x) = v.parse() { ts.vol_tolerance_pct = x; } }
+                "min_listing_age_days"     => { if let Ok(x) = v.parse() { ts.min_listing_age_days = x; } }
+                "min_ioc_tolerance_pct"    => { if let Ok(x) = v.parse() { ts.min_ioc_tolerance_pct = x; } }
+                "binance_min_notional"     => { if let Ok(x) = v.parse() { ts.binance_min_notional = x; } }
+                "margin_check_multiplier"  => { if let Ok(x) = v.parse() { ts.margin_check_multiplier = x; } }
+                "max_spreads_per_cycle"    => { if let Ok(x) = v.parse() { ts.max_spreads_per_cycle = x; } }
+                "default_fee_rate"         => { if let Ok(x) = v.parse() { ts.default_fee_rate = x; } }
+                "exchange_cooldown_ms"     => { if let Ok(x) = v.parse() { ts.exchange_cooldown_ms = x; } }
+                "pair_cooldown_ms"         => { if let Ok(x) = v.parse() { ts.pair_cooldown_ms = x; } }
+                "asymmetric_cooldown_ms"   => { if let Ok(x) = v.parse() { ts.asymmetric_cooldown_ms = x; } }
+                "fill_verify_retries"      => { if let Ok(x) = v.parse() { ts.fill_verify_retries = x; } }
+                "fill_verify_delay_ms"     => { if let Ok(x) = v.parse() { ts.fill_verify_delay_ms = x; } }
+                "close_verify_retries"     => { if let Ok(x) = v.parse() { ts.close_verify_retries = x; } }
+                "close_verify_delay_ms"    => { if let Ok(x) = v.parse() { ts.close_verify_delay_ms = x; } }
+                "emergency_close_retries"  => { if let Ok(x) = v.parse() { ts.emergency_close_retries = x; } }
+                "exit_sanity_pct"          => { if let Ok(x) = v.parse() { ts.exit_sanity_pct = x; } }
+                "balance_refresh_secs"     => { if let Ok(x) = v.parse() { ts.balance_refresh_secs = x; } }
+                "multiplier_refresh_secs"  => { if let Ok(x) = v.parse() { ts.multiplier_refresh_secs = x; } }
+                "funding_cache_secs"       => { if let Ok(x) = v.parse() { ts.funding_cache_secs = x; } }
+                "diag_log_interval"        => { if let Ok(x) = v.parse() { ts.diag_log_interval = x; } }
+                "live_update_throttle_ms"  => { if let Ok(x) = v.parse() { ts.live_update_throttle_ms = x; } }
+                _ => {}
+            }
+        }
+        ts
+    }
+
+    /// Get blacklist as a Vec of uppercase strings
+    pub fn blacklist_vec(&self) -> Vec<String> {
+        self.blacklist.split(',').map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty()).collect()
+    }
+}
+
 // ─── Order result ─────────────────────────────────────────────────────────────
 
 /// Result of placing one order leg on an exchange.

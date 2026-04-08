@@ -80,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/profiles/:id/trades",     delete(routes::handle_clear_trades))
         .route("/api/profiles/:id/market-close-all", post(routes::handle_market_close_all))
         .route("/api/trades/:id/close",        post(routes::handle_market_close_trade))
+        .route("/api/technical-settings",       get(routes::handle_get_technical_settings).patch(routes::handle_patch_technical_settings))
         .route("/api/debug_ps", get({
             let db_clone = state.db.clone();
             || async move {

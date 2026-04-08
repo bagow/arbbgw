@@ -4,6 +4,7 @@
 //! This module only handles SQLite ↔ struct mapping.
 
 pub use shared::TradingSettings;
+pub use shared::TechnicalSettings;
 
 use tokio_rusqlite::Connection;
 
@@ -121,6 +122,33 @@ pub fn spawn_all_settings_refresher(
             tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
             let fresh = load_all_settings(&db, &m).await;
             *settings.write().await = fresh;
+        }
+    });
+}
+
+/// Load global technical settings from DB.
+pub async fn load_technical_settings(db: &Connection) -> TechnicalSettings {
+    let rows = db.call(|conn| {
+        let mut stmt = conn.prepare("SELECT key, value FROM technical_settings")?;
+        let rows: Vec<(String, String)> = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(rows)
+    }).await.unwrap_or_default();
+    TechnicalSettings::from_db_rows(&rows)
+}
+
+/// Spawn background task refreshing technical settings from DB.
+pub fn spawn_technical_settings_refresher(
+    db: Connection,
+    ts: std::sync::Arc<tokio::sync::RwLock<TechnicalSettings>>,
+    interval_secs: u64,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+            let fresh = load_technical_settings(&db).await;
+            *ts.write().await = fresh;
         }
     });
 }

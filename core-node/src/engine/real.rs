@@ -18,7 +18,7 @@ use uuid::Uuid;
 use dashmap::DashMap;
 use std::sync::OnceLock;
 
-use shared::{TradingSettings, SpreadRow};
+use shared::{TradingSettings, TechnicalSettings, SpreadRow};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -118,9 +118,8 @@ pub fn get_fee_cache() -> &'static DashMap<String, f64> {
 }
 
 /// Get cached taker fee rate for an exchange (as fraction, e.g. 0.0005 = 0.05%).
-/// Falls back to 0.05% if not yet fetched.
-pub fn get_exchange_fee(exchange: &str) -> f64 {
-    get_fee_cache().get(exchange).map(|v| *v).unwrap_or(0.0005) // default 0.05%
+pub fn get_exchange_fee(exchange: &str, default_fee: f64) -> f64 {
+    get_fee_cache().get(exchange).map(|v| *v).unwrap_or(default_fee)
 }
 
 /// Spawn background task that refreshes balances and fee rates every 30s.
@@ -873,7 +872,9 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let size = if is_short { -contracts } else { contracts };
             let path = "/api/v4/futures/usdt/orders";
             let price_str = if use_limit { format!("{:.8}", limit_price) } else { "0".to_string() };
-            let body = json!({"contract":contract,"size":size,"price":price_str,"tif":"ioc","reduce_only":is_reduce_only,"close":false,"text":"t-corenode"});
+            // FIX: use IOC only for limit orders; market orders (price=0) use gtc
+            let tif = if use_limit { "ioc" } else { "gtc" };
+            let body = json!({"contract":contract,"size":size,"price":price_str,"tif":tif,"reduce_only":is_reduce_only,"close":false,"text":"t-corenode"});
             let body_str = body.to_string();
             if dry_run { info!("[DRY] gate order {} size={} limit={:.6}", contract, size, limit_price); return Ok(format!("dry_{}", Uuid::new_v4())); }
             let resp = http.post(format!("https://api.gateio.ws{}", path)).headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &body_str)).body(body_str).timeout(Duration::from_secs(10)).send().await?;
@@ -978,7 +979,7 @@ async fn close_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
 // ─── Engine cycle ─────────────────────────────────────────────────────────────
 
 /// Called on every WS tick. Manages real trades in the DB.
-pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection, keys: Arc<ExchangeKeys>) {
+pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection, keys: Arc<ExchangeKeys>, ts: &TechnicalSettings) {
     let dry_run = false;
 
     let trades = load_open_trades(&db, &settings.id).await;
@@ -1086,6 +1087,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let r = reason.to_string();
             let settings_comm = settings.commission_rate;
             let lev = settings.leverage;
+            let exit_sanity = ts.exit_sanity_pct;
+            let close_verify_delay = ts.close_verify_delay_ms as u64;
 
             tokio::spawn(async move {
                 // Place close orders in parallel
@@ -1109,13 +1112,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let mut real_exit_a = exit_price_a; let mut real_exit_b = exit_price_b;
                 let mut exit_fee = 0.0; let mut got_a = false; let mut got_b = false;
 
-                for _ in 0..20 {
+                for _ in 0..ts.close_verify_retries {
                     if !got_a {
                         if let Some(ref oid) = oid_close_a {
                             if let Ok((p, f)) = fetch_order(&h, &k, &exa, &pair, oid).await {
                                 if p > 0.0 {
-                                    // Sanity: exit can't differ from entry by more than 20%
-                                    if (p - entry_a).abs() / entry_a < 0.20 { real_exit_a = p; }
+                                    if (p - entry_a).abs() / entry_a < exit_sanity { real_exit_a = p; }
                                     else { tracing::warn!("Exit price A sanity fail: entry={} exit={}", entry_a, p); }
                                     exit_fee += f.abs(); got_a = true;
                                 }
@@ -1126,7 +1128,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                         if let Some(ref oid) = oid_close_b {
                             if let Ok((p, f)) = fetch_order(&h, &k, &exb, &pair, oid).await {
                                 if p > 0.0 {
-                                    if (p - entry_b).abs() / entry_b < 0.20 { real_exit_b = p; }
+                                    if (p - entry_b).abs() / entry_b < exit_sanity { real_exit_b = p; }
                                     else { tracing::warn!("Exit price B sanity fail: entry={} exit={}", entry_b, p); }
                                     exit_fee += f.abs(); got_b = true;
                                 }
@@ -1134,7 +1136,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                         } else { got_b = true; }
                     }
                     if got_a && got_b { break; }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(close_verify_delay)).await;
                 }
 
                 // Recalculate PnL with real exit prices
@@ -1187,7 +1189,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     static LAST_LIVE_FLUSH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let current_ms = now_ms() as u64;
     let elapsed = current_ms.saturating_sub(LAST_LIVE_FLUSH.load(std::sync::atomic::Ordering::Relaxed));
-    if elapsed > 1000 && !live_updates.is_empty() {
+    if elapsed > ts.live_update_throttle_ms as u64 && !live_updates.is_empty() {
         LAST_LIVE_FLUSH.store(current_ms, std::sync::atomic::Ordering::Relaxed);
         let db_clone = db.clone();
         tokio::spawn(async move {
@@ -1222,11 +1224,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     // Diagnostic logging (throttled)
     static DIAG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dtick = DIAG_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if dtick % 100 == 0 {
+    if dtick % ts.diag_log_interval as u64 == 0 {
         let fees: Vec<_> = get_fee_cache().iter().map(|e| format!("{}={:.3}%", e.key(), e.value() * 100.0)).collect();
         let in_range = spreads.iter().filter(|r| r.spread >= settings.min_entry_spread && r.spread <= settings.max_entry_spread).count();
         let supported = spreads.iter().filter(|r| keys.supports(&r.exchange_a) && keys.supports(&r.exchange_b)).count();
-        let cooled_ex: Vec<_> = ex_cd.iter().filter(|e| now - *e.value() < 1_800_000).map(|e| e.key().clone()).collect();
+        let cooled_ex: Vec<_> = ex_cd.iter().filter(|e| now - *e.value() < ts.exchange_cooldown_ms).map(|e| e.key().clone()).collect();
         info!("[diag] spreads={} in_range={} supported={} active={}/{} cooled={:?} fees={:?}",
             spreads.len(), in_range, supported, num_active, settings.max_active_trades, cooled_ex, fees);
     }
@@ -1234,22 +1236,22 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     // Only open ONE trade per engine cycle to prevent burst-opening
     let mut opened_this_cycle = false;
 
-    for row in spreads.iter().take(200) {
+    for row in spreads.iter().take(ts.max_spreads_per_cycle as usize) {
         if opened_this_cycle { break; }
         if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
 
         // Absolute floor: spread must exceed round-trip costs from REAL exchange fee rates
-        let fee_a = get_exchange_fee(&row.exchange_a);
-        let fee_b = get_exchange_fee(&row.exchange_b);
+        let fee_a = get_exchange_fee(&row.exchange_a, ts.default_fee_rate);
+        let fee_b = get_exchange_fee(&row.exchange_b, ts.default_fee_rate);
         let slippage_frac = settings.slippage_percent / 100.0;
         let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
 
-        // Basic safety margin: 1.2x break-even to ensure minimum profitability
-        let safety = 1.2;
-        if row.spread < break_even_pct * safety { continue; }
+        // FIX: flat safety margin (configurable via Technical Settings)
+        if row.spread < break_even_pct * ts.safety_margin { continue; }
 
+        // FIX: softer deviation check with separate multiplier
         let deviation = row.spread - row.structural_spread;
-        if deviation < break_even_pct * safety { continue; }
+        if deviation < break_even_pct * ts.deviation_safety { continue; }
 
         if open_pairs.contains(&row.pair) { continue; }
 
@@ -1258,19 +1260,32 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         let cd_a = ex_cd.get(&row.exchange_a).map(|v| *v).unwrap_or(0);
         let cd_b = ex_cd.get(&row.exchange_b).map(|v| *v).unwrap_or(0);
-        if now - cd_a < 1_800_000 || now - cd_b < 1_800_000 { continue; }
+        if now - cd_a < ts.exchange_cooldown_ms || now - cd_b < ts.exchange_cooldown_ms { continue; }
 
         let cd_pair = pair_cd.get(&row.pair).map(|v| *v).unwrap_or(0);
-        if now - cd_pair < 300_000 { continue; }
+        if now - cd_pair < ts.pair_cooldown_ms { continue; }
 
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
         let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
         let entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
 
         let price_ratio = if entry_a > entry_b { entry_a / entry_b } else { entry_b / entry_a };
-        if price_ratio > 1.10 { continue; }
+        if price_ratio > ts.max_price_ratio { continue; }
 
-        // (Liquidity depth filter removed to allow fast fills on volatile spikes)
+        // ── LIQUIDITY DEPTH FILTER ────────────────────────────────────────────
+        let data_a = prices.get(&row.exchange_a).and_then(|m| m.get(&row.pair).cloned());
+        let data_b = prices.get(&row.exchange_b).and_then(|m| m.get(&row.pair).cloned());
+        let min_depth_usd = settings.trade_volume * ts.depth_multiplier;
+        if let (Some(ref da), Some(ref db)) = (&data_a, &data_b) {
+            let depth_sell = if is_a_higher { da.bid_size } else { db.bid_size };
+            let depth_buy  = if is_a_higher { db.ask_size } else { da.ask_size };
+            if depth_sell > 0.0 && depth_sell < min_depth_usd { continue; }
+            if depth_buy > 0.0 && depth_buy < min_depth_usd { continue; }
+            let intra_a = (da.ask - da.bid) / da.bid.max(1e-12) * 100.0;
+            let intra_b = (db.ask - db.bid) / db.bid.max(1e-12) * 100.0;
+            // FIX: configurable intra-spread max (was hardcoded 0.5%)
+            if intra_a > ts.intra_spread_max_pct || intra_b > ts.intra_spread_max_pct { continue; }
+        }
 
         let map = get_multipliers();
         let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) { Some(v) => *v, None => continue };
@@ -1283,30 +1298,31 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if contracts_b < 1 { continue; }
         let actual_vol_b = contracts_b as f64 * mult_b * entry_b;
         let vol_diff_pct = (actual_vol_a - actual_vol_b).abs() / actual_vol_a * 100.0;
-        if vol_diff_pct > 5.0 { continue; }
+        if vol_diff_pct > ts.vol_diff_max_pct { continue; }
 
-        let max_v = settings.trade_volume * 1.15;
-        let min_v = settings.trade_volume * 0.85;
+        let max_v = settings.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
+        let min_v = settings.trade_volume * (1.0 - ts.vol_tolerance_pct / 100.0);
         if actual_vol_a > max_v || actual_vol_a < min_v { continue; }
 
         let lmap = get_launch_times();
         let now_s = now_secs();
-        let thirty_days = 30 * 24 * 3600;
+        let min_age_secs = ts.min_listing_age_days * 24 * 3600;
         let age_a = lmap.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|r| *r).unwrap_or(0);
         let age_b = lmap.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|r| *r).unwrap_or(0);
-        if (age_a > 0 && now_s - age_a < thirty_days) || (age_b > 0 && now_s - age_b < thirty_days) { continue; }
+        if (age_a > 0 && now_s - age_a < min_age_secs) || (age_b > 0 && now_s - age_b < min_age_secs) { continue; }
 
         if !has_sufficient_margin(&row.exchange_a, actual_vol_a) { continue; }
         if !has_sufficient_margin(&row.exchange_b, actual_vol_b) { continue; }
-        if (row.exchange_a == "binance" && actual_vol_a < 5.05) || (row.exchange_b == "binance" && actual_vol_b < 5.05) { continue; }
+        if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional) || (row.exchange_b == "binance" && actual_vol_b < ts.binance_min_notional) { continue; }
 
         let has_tick_a = get_tick_sizes().contains_key(&format!("{}:{}", row.exchange_a, row.pair));
         let has_tick_b = get_tick_sizes().contains_key(&format!("{}:{}", row.exchange_b, row.pair));
         if !has_tick_a || !has_tick_b { continue; }
 
-        // ── LIMIT PRICES (Disabled for entries to guarantee simultaneous market execution)
-        let limit_price_a = 0.0;
-        let limit_price_b = 0.0;
+        // ── LIMIT PRICES (IOC tolerance from Technical Settings) ──────────────
+        let max_slip_frac = (settings.slippage_percent / 100.0).max(ts.min_ioc_tolerance_pct / 100.0);
+        let limit_price_a = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
+        let limit_price_b = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
 
         let exa = row.exchange_a.clone();
         let exb = row.exchange_b.clone();
@@ -1358,9 +1374,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let mut got_a = oid_a.is_none() || dry_run;
         let mut got_b = oid_b.is_none() || dry_run;
 
-        for attempt in 0..10 {
+        for attempt in 0..ts.fill_verify_retries {
             if got_a && got_b { break; }
-            if attempt > 0 { tokio::time::sleep(Duration::from_millis(15)).await; }
+            if attempt > 0 { tokio::time::sleep(Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
             let (fa, fb) = tokio::join!(
                 async { if !got_a { if let Some(ref oid) = oid_a { if let Ok((p, f)) = fetch_order(&http, &keys, &exa, &pair, oid).await { if p > 0.0 { return Some((p, f.abs())); } } } } None },
                 async { if !got_b { if let Some(ref oid) = oid_b { if let Ok((p, f)) = fetch_order(&http, &keys, &exb, &pair, oid).await { if p > 0.0 { return Some((p, f.abs())); } } } } None }
@@ -1422,20 +1438,21 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             };
 
             error!("[real] ⚠️ ASYMMETRIC {} — only {} filled @ {:.6} ({}ms)", pair, fe, fp_price, total_ms);
-            pair_cd.insert(pair.clone(), now + 25 * 60 * 1000);
+            pair_cd.insert(pair.clone(), now + ts.asymmetric_cooldown_ms);
 
             let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
             let fp = pair.clone();
             let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
             let comm_rate = settings.commission_rate;
             let lev = settings.leverage;
+            let emergency_retries = ts.emergency_close_retries;
 
             tokio::spawn(async move {
                 let mut close_oid = None;
-                for attempt in 1u32..=3 {
+                for attempt in 1u32..=emergency_retries as u32 {
                     match close_order(&hc, &kc, &fe, &fp, fs, fc, false, lev).await {
                         Ok(id) => { error!("🛡️ Emergency close ok {}/{}: {}", fe, fp, id); close_oid = Some(id); break; }
-                        Err(err) => { tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await; error!("Emergency close {}/3: {}", attempt, err); }
+                        Err(err) => { tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await; error!("Emergency close {}/{}: {}", attempt, emergency_retries, err); }
                     }
                 }
                 let mut close_fill = fp_price;

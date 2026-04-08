@@ -567,7 +567,15 @@ function renderCexTab(profile, exchangesData) {
 function renderSettingsForm(profile) {
     const p = profile;
     return `
-        <section class="trading-settings-section" style="padding:0;background:transparent;border:none;">
+        <div style="margin-bottom:20px;display:flex;gap:0;background:var(--bg-row);border-radius:8px;padding:3px;">
+            <button class="mt-nav-btn mt-nav-btn--active" id="stab-profile-btn" onclick="switchSettingsTab('profile')"
+                style="flex:1;margin:0;border-radius:6px;padding:10px 0;font-size:.9rem;">Profile Settings</button>
+            <button class="mt-nav-btn" id="stab-tech-btn" onclick="switchSettingsTab('technical')"
+                style="flex:1;margin:0;border-radius:6px;padding:10px 0;font-size:.9rem;">Technical Settings</button>
+        </div>
+
+        <!-- Profile Settings (per-profile) -->
+        <section id="stab-profile" class="trading-settings-section" style="padding:0;background:transparent;border:none;">
             <form id="settings-form-${p.id}" class="settings-grid" onsubmit="return false;">
                 <div class="form-group">
                     <label>Min Entry Spread (%)</label>
@@ -631,14 +639,14 @@ function renderSettingsForm(profile) {
                         style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);">
                         Save Settings
                     </button>
-                    ${p.mode === 'real' ? `
+                    ${p.mode === 'real' ? \`
                         <button type="button"
                             onclick="marketCloseAll('${p.id}')"
                             class="trading-save-btn outline-btn"
                             style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:transparent;color:var(--red);border:1px solid var(--red);">
                             Market Close All Now
                         </button>
-                    ` : ''}
+                    \` : ''}
                     <button type="button"
                         onclick="clearTrades('${p.id}', '${p.mode}')"
                         class="trading-save-btn outline-btn"
@@ -648,8 +656,142 @@ function renderSettingsForm(profile) {
                 </div>
             </form>
         </section>
+
+        <!-- Technical Settings (global engine params) -->
+        <section id="stab-technical" style="display:none;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <div>
+                    <h3 style="margin:0 0 4px 0;font-size:1.1rem;">Engine Technical Settings</h3>
+                    <span style="color:var(--text-sub);font-size:.8rem;">Global parameters — affect all profiles</span>
+                </div>
+                <button class="trading-save-btn" id="tech-save-btn" onclick="saveTechnicalSettings()"
+                    style="margin:0;width:auto;padding:10px 28px;font-size:.9rem;">Save Technical</button>
+            </div>
+            <div id="tech-settings-table" style="color:var(--text-sub);text-align:center;padding:32px;">Loading...</div>
+        </section>
     `;
 }
+
+// ── Settings sub-tab switching ───────────────────────────────────────────────
+
+window.switchSettingsTab = function(tab) {
+    const profEl = document.getElementById('stab-profile');
+    const techEl = document.getElementById('stab-technical');
+    const profBtn = document.getElementById('stab-profile-btn');
+    const techBtn = document.getElementById('stab-tech-btn');
+    if (!profEl || !techEl) return;
+    if (tab === 'technical') {
+        profEl.style.display = 'none';
+        techEl.style.display = 'block';
+        profBtn.classList.remove('mt-nav-btn--active');
+        techBtn.classList.add('mt-nav-btn--active');
+        loadTechnicalSettings();
+    } else {
+        profEl.style.display = 'block';
+        techEl.style.display = 'none';
+        profBtn.classList.add('mt-nav-btn--active');
+        techBtn.classList.remove('mt-nav-btn--active');
+    }
+};
+
+let _techSettingsData = null;
+
+async function loadTechnicalSettings() {
+    const wrap = document.getElementById('tech-settings-table');
+    if (!wrap) return;
+    try {
+        _techSettingsData = await apiFetch('/api/technical-settings');
+        renderTechSettingsTable(wrap, _techSettingsData);
+    } catch (e) {
+        wrap.innerHTML = '<div style="color:var(--red);padding:24px;">Failed to load: ' + e.message + '</div>';
+    }
+}
+
+function renderTechSettingsTable(wrap, data) {
+    const CATEGORY_LABELS = {
+        spreads: '📊 Spread Computation',
+        entry: '🎯 Entry Filters',
+        cooldowns: '⏱️ Cooldowns',
+        execution: '⚡ Order Execution',
+        intervals: '🔄 Refresh Intervals',
+        general: '⚙️ General',
+    };
+    // Group by category
+    const groups = {};
+    for (const item of data) {
+        const cat = item.category || 'general';
+        if (!groups[cat]) groups[cat] = [];
+        groups[cat].push(item);
+    }
+    const catOrder = ['spreads', 'entry', 'cooldowns', 'execution', 'intervals', 'general'];
+    let html = '';
+    for (const cat of catOrder) {
+        const items = groups[cat];
+        if (!items || items.length === 0) continue;
+        html += \`<div style="margin-bottom:24px;">
+            <div style="font-weight:600;font-size:1rem;color:var(--text);padding:10px 0 8px;border-bottom:2px solid var(--border-dim);margin-bottom:2px;">
+                \${CATEGORY_LABELS[cat] || cat}
+            </div>
+            <table style="width:100%;border-collapse:collapse;">
+                <thead><tr>
+                    <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);">Parameter</th>
+                    <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);width:160px;">Value</th>
+                    <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);">Description</th>
+                </tr></thead>
+                <tbody>\`;
+        for (const item of items) {
+            html += \`<tr style="border-bottom:1px solid var(--border-dim);">
+                <td style="padding:8px 12px;font-family:var(--font-mono);font-size:.85rem;color:var(--text);white-space:nowrap;">\${item.key}</td>
+                <td style="padding:8px 12px;">
+                    <input type="text" id="ts-\${item.key}" value="\${escHtml(item.value)}"
+                        style="width:100%;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-family:var(--font-mono);font-size:.85rem;box-sizing:border-box;" />
+                </td>
+                <td style="padding:8px 12px;font-size:.8rem;color:var(--text-sub);">\${item.description || ''}</td>
+            </tr>\`;
+        }
+        html += '</tbody></table></div>';
+    }
+    wrap.innerHTML = html;
+}
+
+window.saveTechnicalSettings = async function() {
+    if (!_techSettingsData) return;
+    const btn = document.getElementById('tech-save-btn');
+    const changes = {};
+    let count = 0;
+    for (const item of _techSettingsData) {
+        const el = document.getElementById('ts-' + item.key);
+        if (el && el.value !== item.value) {
+            changes[item.key] = el.value;
+            count++;
+        }
+    }
+    if (count === 0) {
+        showToast('No changes detected', 'info');
+        return;
+    }
+    try {
+        if (btn) { btn.textContent = 'Saving...'; btn.disabled = true; }
+        await apiFetch('/api/technical-settings', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(changes),
+        });
+        // Update local cache
+        for (const item of _techSettingsData) {
+            if (changes[item.key] !== undefined) item.value = changes[item.key];
+        }
+        if (btn) { btn.textContent = 'Saved!'; btn.style.background = 'var(--green)'; }
+        showToast(\`\${count} setting(s) saved — engine will pick up in ~10s\`, 'success');
+    } catch (e) {
+        if (btn) { btn.textContent = 'Error!'; btn.style.background = 'var(--red)'; }
+        showToast('Save failed: ' + e.message, 'error');
+    }
+    setTimeout(() => {
+        if (btn) { btn.textContent = 'Save Technical'; btn.style.background = ''; btn.disabled = false; }
+    }, 2000);
+};
+
 
 // ─── Per-profile dashboard HTML scaffold ─────────────────────────────────────
 
