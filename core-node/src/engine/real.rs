@@ -822,21 +822,46 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let status = resp.status();
             let v: Value = resp.json().await?;
             if !status.is_success() { return Err(anyhow::anyhow!("Binance error: {}", v)); }
-            // CRITICAL: Binance returns HTTP 200 + orderId even for IOC orders that
-            // immediately EXPIRED. Check status field to fail fast.
             let order_status = v["status"].as_str().unwrap_or("UNKNOWN");
             info!("[binance] {} order response: status={} avgPrice={} executedQty={} origQty={}",
                 pair, order_status, v["avgPrice"], v["executedQty"], v["origQty"]);
-            if order_status == "EXPIRED" || order_status == "CANCELED" || order_status == "REJECTED" || order_status == "NEW" {
-                return Err(anyhow::anyhow!("Binance IOC {} status={} executedQty={}", pair, order_status, v["executedQty"]));
+            // Immediate reject for clearly failed orders
+            if order_status == "CANCELED" || order_status == "REJECTED" {
+                return Err(anyhow::anyhow!("Binance IOC {} status={}", pair, order_status));
             }
             let oid = v["orderId"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "unknown".to_string());
-            // Binance includes fill data in the order response — extract to skip verification
-            let avg_price = v["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-            let cum_fee: f64 = v["fills"].as_array().map(|fills| {
-                fills.iter().map(|f| f["commission"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)).sum()
-            }).unwrap_or(0.0);
-            Ok((oid, avg_price, cum_fee))
+            // For FILLED/PARTIALLY_FILLED: extract inline fill data
+            if order_status == "FILLED" || order_status == "PARTIALLY_FILLED" {
+                let avg_price = v["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let cum_fee: f64 = v["fills"].as_array().map(|fills| {
+                    fills.iter().map(|f| f["commission"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)).sum()
+                }).unwrap_or(0.0);
+                return Ok((oid, avg_price, cum_fee));
+            }
+            // For NEW/EXPIRED: Binance API may respond BEFORE matching engine.
+            // Wait briefly then re-check to see if the IOC was actually filled.
+            if order_status == "NEW" || order_status == "EXPIRED" {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let ts2 = now_ms();
+                let qs2 = format!("symbol={}&orderId={}&timestamp={}", pair, oid, ts2);
+                let sig2 = binance_sign(&keys.binance_secret, &qs2);
+                let url2 = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs2, sig2);
+                if let Ok(resp2) = http.get(&url2).header("X-MBX-APIKEY", &keys.binance_key)
+                    .timeout(Duration::from_secs(5)).send().await {
+                    if let Ok(v2) = resp2.json::<Value>().await {
+                        let s2 = v2["status"].as_str().unwrap_or("");
+                        let filled_qty = v2["executedQty"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                        info!("[binance] {} re-check: status={} executedQty={}", pair, s2, filled_qty);
+                        if s2 == "FILLED" || (s2 == "PARTIALLY_FILLED" && filled_qty > 0.0) {
+                            let ap = v2["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            return Ok((oid, ap, 0.0));
+                        }
+                    }
+                }
+                return Err(anyhow::anyhow!("Binance IOC {} status={} after re-check", pair, order_status));
+            }
+            // Any other status — return with orderId, no fill data
+            Ok((oid, 0.0, 0.0))
         }
         "bitget" => {
             let ts = now_ms().to_string();
