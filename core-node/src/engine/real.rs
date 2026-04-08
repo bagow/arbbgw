@@ -1393,10 +1393,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
                 error!("[real] ASYMMETRIC PnL {}: gross={:.4} fee={:.4} net={:.4}", fp, gross_pnl, total_fee, net_pnl);
 
+                let (ent_a, ent_b) = if a_filled { (fp_price, 0.0f64) } else { (0.0f64, fp_price) };
+                let (ext_a, ext_b) = if a_filled { (close_fill, 0.0f64) } else { (0.0f64, close_fill) };
+                let (pnl_a_val, pnl_b_val) = if a_filled { (gross_pnl, 0.0f64) } else { (0.0f64, gross_pnl) };
+
                 let _ = db_c.call(move |conn| {
                     conn.execute(
-                        "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl,exit_price_a) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        params![fp, ea_s, eb_s, d, fv, fp_price, 0.0f64, sp, entry_time, entry_time, sp, "CLOSED", gross_pnl, 0.0f64, pid, total_fee, 0.0f64, 0.0f64, "ASYMMETRIC_CLOSE", net_pnl, gross_pnl, close_fill]
+                        "INSERT INTO trades (pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,exit_time,highest_spread_reached,status,pnl_a,pnl_b,profile_id,commission_cost,slippage_cost,funding_cost,close_reason,pnl,gross_pnl,exit_price_a,exit_price_b) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        params![fp, ea_s, eb_s, d, fv, ent_a, ent_b, sp, entry_time, entry_time, sp, "CLOSED", pnl_a_val, pnl_b_val, pid, total_fee, 0.0f64, 0.0f64, "ASYMMETRIC_CLOSE", net_pnl, gross_pnl, ext_a, ext_b]
                     )?;
                     Ok(())
                 }).await;
