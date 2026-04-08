@@ -824,8 +824,10 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             if !status.is_success() { return Err(anyhow::anyhow!("Binance error: {}", v)); }
             // CRITICAL: Binance returns HTTP 200 + orderId even for IOC orders that
             // immediately EXPIRED. Check status field to fail fast.
-            let order_status = v["status"].as_str().unwrap_or("");
-            if order_status == "EXPIRED" || order_status == "CANCELED" || order_status == "REJECTED" {
+            let order_status = v["status"].as_str().unwrap_or("UNKNOWN");
+            info!("[binance] {} order response: status={} avgPrice={} executedQty={} origQty={}",
+                pair, order_status, v["avgPrice"], v["executedQty"], v["origQty"]);
+            if order_status == "EXPIRED" || order_status == "CANCELED" || order_status == "REJECTED" || order_status == "NEW" {
                 return Err(anyhow::anyhow!("Binance IOC {} status={} executedQty={}", pair, order_status, v["executedQty"]));
             }
             let oid = v["orderId"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "unknown".to_string());
