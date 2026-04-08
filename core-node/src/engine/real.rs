@@ -1121,8 +1121,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if vol_diff_pct > ts.vol_diff_max_pct { continue; }
 
         let max_v = settings.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
-        let min_v = settings.trade_volume * (1.0 - ts.vol_tolerance_pct / 100.0);
-        if actual_vol_a > max_v || actual_vol_a < min_v { continue; }
+        if actual_vol_a > max_v { continue; }
 
         let lmap = get_launch_times();
         let now_s = now_secs();
