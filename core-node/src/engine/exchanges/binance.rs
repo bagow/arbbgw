@@ -1,0 +1,162 @@
+use std::sync::Arc;
+use reqwest::Client;
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::Value; // We will replace these with strict DTOs
+use std::time::Duration;
+
+use crate::engine::real::{ExchangeKeys, now_ms};
+use super::traits::ExchangeConnector;
+use crate::engine::real::binance_sign;
+
+pub struct BinanceConnector;
+
+#[derive(Deserialize, Debug)]
+#[allow(non_snake_case)]
+struct BinanceBalanceAccountResponse {
+    availableBalance: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[allow(non_snake_case)]
+struct BinanceFeeResponse {
+    takerCommissionRate: String,
+}
+
+#[async_trait]
+impl ExchangeConnector for BinanceConnector {
+    fn name(&self) -> &'static str {
+        "binance"
+    }
+
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: i64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
+        let side = if is_buy { "BUY" } else { "SELL" };
+        if dry_run {
+            return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), price));
+        }
+
+        let ts = now_ms();
+        let time_in_force = if use_ioc { "IOC" } else { "GTC" };
+        let qs = format!("symbol={}&side={}&type=LIMIT&timeInForce={}&quantity={}&price={}&timestamp={}", 
+            pair, side, time_in_force, contracts, price, ts);
+        let sig = binance_sign(&keys.binance_secret, &qs);
+        let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
+        let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+
+        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if let Some(msg) = v["msg"].as_str() {
+            return Err(format!("Binance API Error: {}", msg));
+        }
+
+        let order_id = v["orderId"].as_i64().map(|id| id.to_string());
+        if order_id.is_some() {
+            Ok((order_id, price))
+        } else {
+            Err("Binance failed to return orderId".to_string())
+        }
+    }
+
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: i64, dry_run: bool, leverage: f64) -> Result<String, String> {
+        let side = if is_buy { "BUY" } else { "SELL" };
+        if dry_run { return Ok(format!("dry_close_{}_{}", self.name(), now_ms())); }
+
+        let ts = now_ms();
+        let qs = format!("symbol={}&side={}&type=MARKET&quantity={}&reduceOnly=true&timestamp={}", pair, side, contracts, ts);
+        let sig = binance_sign(&keys.binance_secret, &qs);
+        let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
+        
+        // Ensure leverage before closing on Binance (sometimes needed if leverage drifted)
+        let _ = self.ensure_leverage(http, keys, pair, leverage).await;
+
+        let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+        
+        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if let Some(msg) = v["msg"].as_str() {
+            return Err(format!("Binance API Close Error: {}", msg));
+        }
+
+        v["orderId"].as_i64().map(|id| id.to_string())
+            .ok_or_else(|| "Binance failed to return orderId on close".to_string())
+    }
+
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str) -> Result<(f64, f64), String> {
+        if order_id.starts_with("dry_") { return Ok((0.0, 0.0)); }
+        let ts = now_ms();
+        let qs = format!("symbol={}&orderId={}&timestamp={}", pair, order_id, ts);
+        let sig = binance_sign(&keys.binance_secret, &qs);
+        let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
+        let resp = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+            
+        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let price = v["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        
+        // Hack: Binance get order does not return accurate commissions directly in one field sometimes,
+        // For simplicity, we just return 0.0 fee here and let the engine use the fallback, 
+        // or we'd have to ping /fapi/v1/userTrades which is heavily rate-limited.
+        // I noticed core-node/src/engine/real.rs just returned 0.0 for Binance fetch_order.
+        let fee = 0.0; 
+        Ok((price, fee))
+    }
+
+    async fn fetch_available_balance(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+        let ts = now_ms();
+        let qs = format!("timestamp={}", ts);
+        let sig = binance_sign(&keys.binance_secret, &qs);
+        let url = format!("https://fapi.binance.com/fapi/v2/account?{}&signature={}", qs, sig);
+        let resp = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+
+        let data: BinanceBalanceAccountResponse = resp.json().await.map_err(|e| format!("Binance balance json parse err: {}", e))?;
+        data.availableBalance.parse::<f64>().map_err(|_| "Failed to parse Binance balance as f64".to_string())
+    }
+
+    async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+        let ts = now_ms();
+        let qs = format!("symbol=BTCUSDT&timestamp={}", ts);
+        let sig = binance_sign(&keys.binance_secret, &qs);
+        let url = format!("https://fapi.binance.com/fapi/v1/commissionRate?{}&signature={}", qs, sig);
+        let resp = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+
+        let data: BinanceFeeResponse = resp.json().await.map_err(|e| format!("Binance fee json parse err: {}", e))?;
+        data.takerCommissionRate.parse::<f64>().map_err(|_| "Failed to parse Binance fee as f64".to_string())
+    }
+
+    async fn ensure_leverage(&self, http: &Client, keys: &ExchangeKeys, pair: &str, leverage: f64) -> Result<(), String> {
+        // Implement cache locally or via shared cache to avoid spamming
+        // Since the interface signature doesn't take EngineContext, we'll keep it simple for now
+        let ts = now_ms();
+        let qs = format!("symbol={}&leverage={}&timestamp={}", pair, leverage as i64, ts);
+        let sig = binance_sign(&keys.binance_secret, &qs);
+        let url = format!("https://fapi.binance.com/fapi/v1/leverage?{}&signature={}", qs, sig);
+        let _ = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(10)).send().await;
+        
+        let ts = now_ms();
+        let qs = format!("symbol={}&marginType=ISOLATED&timestamp={}", pair, ts);
+        let sig = binance_sign(&keys.binance_secret, &qs);
+        let url = format!("https://fapi.binance.com/fapi/v1/marginType?{}&signature={}", qs, sig);
+        let _ = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(10)).send().await;
+            
+        Ok(())
+    }
+
+    async fn get_funding_rate(&self, http: &Client, pair: &str) -> Result<(f64, i64), String> {
+        let url = format!("https://fapi.binance.com/fapi/v1/premiumIndex?symbol={}", pair);
+        if let Ok(resp) = http.get(&url).timeout(Duration::from_secs(5)).send().await {
+            if let Ok(json) = resp.json::<Value>().await {
+                if let Some(rate_str) = json["lastFundingRate"].as_str() {
+                    if let Ok(rate) = rate_str.parse::<f64>() {
+                        let next_ts = json["nextFundingTime"].as_i64().unwrap_or(0);
+                        return Ok((rate, next_ts));
+                    }
+                }
+            }
+        }
+        Err("Binance funding rate fetch failed".to_string())
+    }
+}

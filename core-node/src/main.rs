@@ -27,10 +27,10 @@ mod collector {
     pub mod bybit;
 }
 
-mod engine {
+mod engine; /*
     pub mod real;
-    pub mod paper;
-}
+    pub mod paper; */
+ 
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -61,7 +61,9 @@ async fn main() -> Result<()> {
         .tcp_nodelay(true)                // Disable Nagle's for lower latency
         .build()?;
 
-    engine::real::start_multiplier_fetcher(http.clone());
+    let engine_ctx = Arc::new(crate::state::EngineContext::default());
+
+    engine::real::start_multiplier_fetcher(http.clone(), engine_ctx.clone());
 
     // ── Profiles DB (settings) — open and ensure schema is current ───────────
     let profiles_db = Connection::open(&profiles_db_path).await
@@ -154,7 +156,7 @@ async fn main() -> Result<()> {
         exchange_keys.supports("bybit"));
 
     // ── Balance fetcher — refreshes available margin every 30s ────────────────
-    engine::real::start_balance_fetcher(http.clone(), exchange_keys.clone());
+    engine::real::start_balance_fetcher(http.clone(), exchange_keys.clone(), engine_ctx.clone());
 
     // ── Pre-warm HTTP connections to exchange APIs ────────────────────────────
     // Establishes DNS + TCP + TLS ahead of time so the first trade doesn't
@@ -186,6 +188,7 @@ async fn main() -> Result<()> {
         let real_cache  = real_settings_cache.clone();
         let keys        = exchange_keys.clone();
         let ts_cache    = tech_settings_cache.clone();
+        let e_ctx       = engine_ctx.clone();
 
         tokio::spawn(async move {
             let mut last_run = std::time::Instant::now();
@@ -249,7 +252,7 @@ async fn main() -> Result<()> {
 
                 // Run REAL engine first — real money needs freshest prices
                 for real_s in real_profiles {
-                    engine::real::run_cycle(spreads.clone(), prices.clone(), real_s, http.clone(), real_db.clone(), keys.clone(), &ts).await;
+                    engine::cycle::run_cycle(spreads.clone(), prices.clone(), real_s, http.clone(), real_db.clone(), keys.clone(), &ts, e_ctx.clone()).await;
                 }
                 // Run paper engine in background — don't block next tick
                 for paper_s in paper_profiles {
@@ -262,11 +265,11 @@ async fn main() -> Result<()> {
         });
     }
 
-    // ── Publish exchange_maps to server_cache every 30s (feeds CEX tab) ──────
     {
         let prices_snap  = prices.clone();
         let cache_db     = paper_db.clone();  // write to paper-trader.db, not profiles
         let paper_cache  = paper_settings_cache.clone();
+        let e_ctx        = engine_ctx.clone();
         tokio::spawn(async move {
             // Wait just 5s for collectors to connect, then publish immediately
             // Subsequent updates every 30s
@@ -307,14 +310,12 @@ async fn main() -> Result<()> {
                 }
 
                 // Collect real balances + fee rates from engine caches
-                let bal_cache = engine::real::get_balance_cache();
-                let fee_cache = engine::real::get_fee_cache();
                 let mut balances: HashMap<String, f64> = HashMap::new();
                 let mut fees: HashMap<String, f64> = HashMap::new();
-                for entry in bal_cache.iter() {
+                for entry in e_ctx.balances.iter() {
                     balances.insert(entry.key().clone(), *entry.value());
                 }
-                for entry in fee_cache.iter() {
+                for entry in e_ctx.fee_rates.iter() {
                     fees.insert(entry.key().clone(), *entry.value());
                 }
 
