@@ -732,10 +732,15 @@ function renderTechSettingsTable(wrap, data) {
             <div style="font-weight:600;font-size:1rem;color:var(--text);padding:10px 0 8px;border-bottom:2px solid var(--border-dim);margin-bottom:2px;">
                 ${CATEGORY_LABELS[cat] || cat}
             </div>
-            <table style="width:100%;border-collapse:collapse;">
+            <table style="width:100%;border-collapse:collapse;table-layout:fixed;">
+                <colgroup>
+                    <col style="width:200px;" />
+                    <col style="width:180px;" />
+                    <col />
+                </colgroup>
                 <thead><tr>
                     <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);">Parameter</th>
-                    <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);width:160px;">Value</th>
+                    <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);">Value</th>
                     <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);">Description</th>
                 </tr></thead>
                 <tbody>`;
@@ -758,9 +763,9 @@ function renderTechSettingsTable(wrap, data) {
                 valueCell = `<input type="text" id="ts-${item.key}" value="${escHtml(item.value)}" style="${inputStyle}" />`;
             }
             html += `<tr style="border-bottom:1px solid var(--border-dim);">
-                <td style="padding:8px 12px;font-family:var(--font-mono);font-size:.85rem;color:var(--text);white-space:nowrap;">${item.key}</td>
+                <td style="padding:8px 12px;font-family:var(--font-mono);font-size:.85rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${item.key}</td>
                 <td style="padding:8px 12px;">${valueCell}</td>
-                <td style="padding:8px 12px;font-size:.78rem;color:var(--text-sub);line-height:1.4;max-width:500px;">${item.description || ''}</td>
+                <td style="padding:8px 12px;font-size:.78rem;color:var(--text-sub);line-height:1.5;word-wrap:break-word;overflow-wrap:break-word;white-space:normal;">${item.description || ''}</td>
             </tr>`;
         }
         html += '</tbody></table></div>';
