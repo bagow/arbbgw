@@ -1481,6 +1481,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             // Clone before move into DB closure for async verify
             let oid_a_for_verify = oid_a_db.clone();
             let oid_b_for_verify = oid_b_db.clone();
+            let exa_for_verify = exa.clone();
+            let exb_for_verify = exb.clone();
+            let pair_for_verify = pair.clone();
 
             info!("[real] ✅ OPEN {} A={:.6}(c={}) B={:.6}(c={}) fees={:.4} slip={:.4} latency={}ms",
                 pair, fill_a, contracts_a, fill_b, contracts_b, entry_comm, entry_slip, total_ms);
@@ -1498,7 +1501,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             // background task to fetch the real fill price and update the DB.
             if !use_ioc && (inline_fill_a <= 0.0 || inline_fill_b <= 0.0) {
                 let (h2, k2, db2) = (http.clone(), Arc::clone(&keys), db.clone());
-                let (ex_a2, ex_b2, pair2) = (exa.clone(), exb.clone(), pair.clone());
+                let (ex_a2, ex_b2, pair2) = (exa_for_verify, exb_for_verify, pair_for_verify);
                 let oid_a2 = oid_a_for_verify; let oid_b2 = oid_b_for_verify;
                 let verify_retries = ts.fill_verify_retries;
                 let verify_delay = ts.fill_verify_delay_ms as u64;
