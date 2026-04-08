@@ -9,7 +9,8 @@ use axum::{
 use rusqlite::params;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH, Instant};
 
 use crate::AppState;
 
@@ -261,8 +262,20 @@ pub async fn handle_get_unified(
         v
     }).collect();
 
-    // 4. Compute aggregate stats from FULL history
-    let stats = trade_db.call({
+    // 4. Compute aggregate stats — cached for 30s to avoid 131K+ row scans every poll
+    static STATS_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Value)>>> = OnceLock::new();
+    let cache = STATS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache_key = pid.clone();
+    let cached = {
+        let lock = cache.lock().unwrap();
+        lock.get(&cache_key).and_then(|(ts, v)| {
+            if ts.elapsed().as_secs() < 30 { Some(v.clone()) } else { None }
+        })
+    };
+    let stats = if let Some(v) = cached {
+        v
+    } else {
+        let fresh = trade_db.call({
         let p = pid.clone();
         move |conn| {
             // Aggregate totals
@@ -356,6 +369,9 @@ pub async fn handle_get_unified(
             "top_exchange_pairs": Vec::<serde_json::Value>::new()
         })
     });
+        cache.lock().unwrap().insert(cache_key, (Instant::now(), fresh.clone()));
+        fresh
+    };
 
     // Return payload matching frontend expectations
     (StatusCode::OK, Json(json!({
