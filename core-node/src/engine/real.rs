@@ -453,19 +453,13 @@ pub fn start_multiplier_fetcher(http: Client) {
                             for c in arr {
                                 let sym = c["symbol"].as_str().unwrap_or("");
                                 if !sym.ends_with("USDT") { continue; }
-                                // qtyStep = minimum order quantity step (lot size)
-                                if let Some(qs) = c["lotSizeFilter"]["qtyStep"].as_str() {
-                                    if let Ok(step) = qs.parse::<f64>() {
-                                        if step > 0.0 {
-                                            map.insert(format!("bybit:{}", sym), step);
-                                            count += 1;
-                                        }
-                                    }
-                                }
                                 // tickSize = price precision
                                 if let Some(ts_str) = c["priceFilter"]["tickSize"].as_str() {
                                     if let Ok(tick) = ts_str.parse::<f64>() {
-                                        if tick > 0.0 { tmap.insert(format!("bybit:{}", sym), tick); }
+                                        if tick > 0.0 { 
+                                            tmap.insert(format!("bybit:{}", sym), tick); 
+                                            count += 1;
+                                        }
                                     }
                                 }
                                 // launchTime
