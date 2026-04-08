@@ -1099,7 +1099,6 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let entry_a = trade.entry_price_a; let entry_b = trade.entry_price_b;
             let h = http.clone(); let k = Arc::clone(&keys); let db_c = db.clone();
             let r = reason.to_string();
-            let settings_comm = settings.commission_rate;
             let lev = settings.leverage;
             let exit_sanity = ts.exit_sanity_pct;
             let close_verify_delay = ts.close_verify_delay_ms as u64;
@@ -1170,9 +1169,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 } else { 0.0 };
                 let exit_slip = slip_cost_exit_a + slip_cost_exit_b;
 
-                // Fallback: if exchange didn't report fees, estimate from commission_rate (2 exit legs)
+                // Fallback: if exchange didn't report fees, estimate with standard 0.05% taker rate
                 if exit_fee < 1e-9 {
-                    exit_fee = vol * 2.0 * (settings_comm / 100.0);
+                    exit_fee = vol * 2.0 * 0.0005; // 0.05% per leg
+                    tracing::warn!("[real] No API exit fee for {} id={} — using estimate {:.4}", fp, id, exit_fee);
                 }
 
                 info!("[real] PnL raw id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", id, real_pna, real_pnb, real_gp, exit_fee, exit_slip);
@@ -1473,7 +1473,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let sp = row.spread;
             let profile_id = settings.id.clone();
             let api_comm = fee_a_val + fee_b_val;
-            let entry_comm = if api_comm > 1e-9 { api_comm } else { vol * 2.0 * (settings.commission_rate / 100.0) };
+            // Use exchange API fees. If API returned 0, estimate with standard 0.05% taker rate per leg
+            let entry_comm = if api_comm > 1e-9 { api_comm } else {
+                let est = vol * 2.0 * 0.0005; // 0.05% per leg (industry standard max)
+                tracing::warn!("[real] No API fee for {} — using estimate {:.4}", pair, est);
+                est
+            };
             let slip_a = if fill_a > 0.0 { if is_a_higher { ((entry_a - fill_a) * (vol / entry_a)).max(0.0) } else { ((fill_a - entry_a) * (vol / entry_a)).max(0.0) } } else { 0.0 };
             let slip_b = if fill_b > 0.0 { if !is_a_higher { ((entry_b - fill_b) * (vol / entry_b)).max(0.0) } else { ((fill_b - entry_b) * (vol / entry_b)).max(0.0) } } else { 0.0 };
             let entry_slip = slip_a + slip_b;
@@ -1554,7 +1559,6 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
             let fp = pair.clone();
             let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
-            let comm_rate = settings.commission_rate;
             let lev = settings.leverage;
             let emergency_retries = ts.emergency_close_retries;
 
@@ -1578,7 +1582,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 }
                 let qty = fv / fp_price.max(1e-12);
                 let gross_pnl = if fs { (fp_price - close_fill) * qty } else { (close_fill - fp_price) * qty };
-                if total_fee < 1e-9 { total_fee = fv * 2.0 * (comm_rate / 100.0); }
+                // Use exchange API fees. If API returned 0, estimate with 0.05% taker rate per leg
+                if total_fee < 1e-9 {
+                    total_fee = fv * 2.0 * 0.0005; // 0.05% per leg
+                    tracing::warn!("[real] No API fee for ASYMMETRIC {} — using estimate {:.4}", fp, total_fee);
+                }
                 let net_pnl = gross_pnl - total_fee;
                 let entry_time = now_ms();
 
