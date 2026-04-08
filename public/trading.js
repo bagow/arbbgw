@@ -639,14 +639,14 @@ function renderSettingsForm(profile) {
                         style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);">
                         Save Settings
                     </button>
-                    ${p.mode === 'real' ? \`
+                    ${p.mode === 'real' ? `
                         <button type="button"
                             onclick="marketCloseAll('${p.id}')"
                             class="trading-save-btn outline-btn"
                             style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:transparent;color:var(--red);border:1px solid var(--red);">
                             Market Close All Now
                         </button>
-                    \` : ''}
+                    ` : ''}
                     <button type="button"
                         onclick="clearTrades('${p.id}', '${p.mode}')"
                         class="trading-save-btn outline-btn"
@@ -728,9 +728,9 @@ function renderTechSettingsTable(wrap, data) {
     for (const cat of catOrder) {
         const items = groups[cat];
         if (!items || items.length === 0) continue;
-        html += \`<div style="margin-bottom:24px;">
+        html += `<div style="margin-bottom:24px;">
             <div style="font-weight:600;font-size:1rem;color:var(--text);padding:10px 0 8px;border-bottom:2px solid var(--border-dim);margin-bottom:2px;">
-                \${CATEGORY_LABELS[cat] || cat}
+                ${CATEGORY_LABELS[cat] || cat}
             </div>
             <table style="width:100%;border-collapse:collapse;">
                 <thead><tr>
@@ -738,16 +738,16 @@ function renderTechSettingsTable(wrap, data) {
                     <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);width:160px;">Value</th>
                     <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);">Description</th>
                 </tr></thead>
-                <tbody>\`;
+                <tbody>`;
         for (const item of items) {
-            html += \`<tr style="border-bottom:1px solid var(--border-dim);">
-                <td style="padding:8px 12px;font-family:var(--font-mono);font-size:.85rem;color:var(--text);white-space:nowrap;">\${item.key}</td>
+            html += `<tr style="border-bottom:1px solid var(--border-dim);">
+                <td style="padding:8px 12px;font-family:var(--font-mono);font-size:.85rem;color:var(--text);white-space:nowrap;">${item.key}</td>
                 <td style="padding:8px 12px;">
-                    <input type="text" id="ts-\${item.key}" value="\${escHtml(item.value)}"
+                    <input type="text" id="ts-${item.key}" value="${escHtml(item.value)}"
                         style="width:100%;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-family:var(--font-mono);font-size:.85rem;box-sizing:border-box;" />
                 </td>
-                <td style="padding:8px 12px;font-size:.8rem;color:var(--text-sub);">\${item.description || ''}</td>
-            </tr>\`;
+                <td style="padding:8px 12px;font-size:.8rem;color:var(--text-sub);">${item.description || ''}</td>
+            </tr>`;
         }
         html += '</tbody></table></div>';
     }
@@ -782,7 +782,7 @@ window.saveTechnicalSettings = async function() {
             if (changes[item.key] !== undefined) item.value = changes[item.key];
         }
         if (btn) { btn.textContent = 'Saved!'; btn.style.background = 'var(--green)'; }
-        showToast(\`\${count} setting(s) saved — engine will pick up in ~10s\`, 'success');
+        showToast(`${count} setting(s) saved — engine will pick up in ~10s`, 'success');
     } catch (e) {
         if (btn) { btn.textContent = 'Error!'; btn.style.background = 'var(--red)'; }
         showToast('Save failed: ' + e.message, 'error');
