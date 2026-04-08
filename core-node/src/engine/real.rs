@@ -823,6 +823,13 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             let status = resp.status();
             let v: Value = resp.json().await?;
             if !status.is_success() { return Err(anyhow::anyhow!("Binance error: {}", v)); }
+            // CRITICAL: Binance returns HTTP 200 + orderId even for IOC orders that
+            // immediately EXPIRED. We must check the order status field to avoid
+            // wasting 4+ seconds in fill verification and causing asymmetric trades.
+            let order_status = v["status"].as_str().unwrap_or("");
+            if order_status == "EXPIRED" || order_status == "CANCELED" || order_status == "REJECTED" {
+                return Err(anyhow::anyhow!("Binance IOC {} status={} executedQty={}", pair, order_status, v["executedQty"]));
+            }
             Ok(v["orderId"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "unknown".to_string()))
         }
         "bitget" => {
