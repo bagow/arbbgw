@@ -184,6 +184,9 @@ pub struct TechnicalSettings {
     pub funding_cache_secs: i64,
     pub diag_log_interval: i64,
     pub live_update_throttle_ms: i64,
+
+    // ── Order type ──
+    pub entry_order_type: String, // "market" or "ioc"
 }
 
 impl Default for TechnicalSettings {
@@ -227,6 +230,8 @@ impl Default for TechnicalSettings {
             funding_cache_secs: 300,
             diag_log_interval: 100,
             live_update_throttle_ms: 1000,
+
+            entry_order_type: "market".to_string(),
         }
     }
 }
@@ -271,6 +276,7 @@ impl TechnicalSettings {
                 "funding_cache_secs"       => { if let Ok(x) = v.parse() { ts.funding_cache_secs = x; } }
                 "diag_log_interval"        => { if let Ok(x) = v.parse() { ts.diag_log_interval = x; } }
                 "live_update_throttle_ms"  => { if let Ok(x) = v.parse() { ts.live_update_throttle_ms = x; } }
+                "entry_order_type"         => { ts.entry_order_type = v.clone(); }
                 _ => {}
             }
         }

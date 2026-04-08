@@ -1320,10 +1320,16 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let has_tick_b = get_tick_sizes().contains_key(&format!("{}:{}", row.exchange_b, row.pair));
         if !has_tick_a || !has_tick_b { continue; }
 
-        // ── LIMIT PRICES (IOC tolerance from Technical Settings) ──────────────
-        let max_slip_frac = (settings.slippage_percent / 100.0).max(ts.min_ioc_tolerance_pct / 100.0);
-        let limit_price_a = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
-        let limit_price_b = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
+        // ── ENTRY ORDER TYPE: market vs IOC ─────────────────────────────────
+        let use_ioc = ts.entry_order_type == "ioc";
+        let (limit_price_a, limit_price_b) = if use_ioc {
+            let max_slip_frac = (settings.slippage_percent / 100.0).max(ts.min_ioc_tolerance_pct / 100.0);
+            let lpa = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
+            let lpb = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
+            (lpa, lpb)
+        } else {
+            (0.0, 0.0) // market order — price=0 means no limit
+        };
 
         let exa = row.exchange_a.clone();
         let exb = row.exchange_b.clone();
@@ -1337,8 +1343,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         let t0 = std::time::Instant::now();
 
-        info!("[real] FIRE {} A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}%",
-            pair, exa, contracts_a, limit_price_a, exb, contracts_b, limit_price_b, row.spread, break_even_pct);
+        let order_type_label = if use_ioc { "IOC" } else { "MKT" };
+        info!("[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}%",
+            pair, order_type_label, exa, contracts_a, limit_price_a, exb, contracts_b, limit_price_b, row.spread, break_even_pct);
 
         // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
         let (result_a, result_b) = tokio::join!(

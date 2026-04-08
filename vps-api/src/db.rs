@@ -102,6 +102,8 @@ pub async fn init_db(db: &Connection) -> Result<()> {
             ("funding_cache_secs",     "300",      "Funding rate cache duration (seconds)", "intervals"),
             ("diag_log_interval",      "100",      "Diagnostic logging frequency (every N engine cycles)", "intervals"),
             ("live_update_throttle_ms","1000",      "Min interval between live PnL DB updates (ms)", "intervals"),
+            // Order type
+            ("entry_order_type",       "market",    "Entry order type: 'market' for guaranteed fill, 'ioc' for limit IOC with slippage protection", "execution"),
         ];
         for (key, value, desc, cat) in tech_defaults {
             conn.execute(
