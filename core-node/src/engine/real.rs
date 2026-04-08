@@ -1070,22 +1070,22 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         if open_pairs.contains(&row.pair) { continue; }
 
-        if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) { continue; }
-        if settings.disabled_exchanges.contains(&row.exchange_a) || settings.disabled_exchanges.contains(&row.exchange_b) { continue; }
+        if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) { info!("[real] SKIP {}: missing exchange keys", row.pair); continue; }
+        if settings.disabled_exchanges.contains(&row.exchange_a) || settings.disabled_exchanges.contains(&row.exchange_b) { info!("[real] SKIP {}: disabled exchange", row.pair); continue; }
 
         let cd_a = ex_cd.get(&row.exchange_a).map(|v| *v).unwrap_or(0);
         let cd_b = ex_cd.get(&row.exchange_b).map(|v| *v).unwrap_or(0);
-        if now - cd_a < ts.exchange_cooldown_ms || now - cd_b < ts.exchange_cooldown_ms { continue; }
+        if now - cd_a < ts.exchange_cooldown_ms || now - cd_b < ts.exchange_cooldown_ms { info!("[real] SKIP {}: exchange on cooldown", row.pair); continue; }
 
         let cd_pair = pair_cd.get(&row.pair).map(|v| *v).unwrap_or(0);
-        if now - cd_pair < ts.pair_cooldown_ms { continue; }
+        if now - cd_pair < ts.pair_cooldown_ms { info!("[real] SKIP {}: pair on cooldown", row.pair); continue; }
 
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
         let mut entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
         let mut entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
 
         let price_ratio = if entry_a > entry_b { entry_a / entry_b } else { entry_b / entry_a };
-        if price_ratio > ts.max_price_ratio { continue; }
+        if price_ratio > ts.max_price_ratio { info!("[real] SKIP {}: price_ratio {:.3} > max", row.pair, price_ratio); continue; }
 
         // ── LIQUIDITY DEPTH FILTER ────────────────────────────────────────────
         let data_a = prices.get(&row.exchange_a).and_then(|m| m.get(&row.pair).cloned());
@@ -1094,44 +1094,44 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if let (Some(ref da), Some(ref db)) = (&data_a, &data_b) {
             let depth_sell = if is_a_higher { da.bid_size } else { db.bid_size };
             let depth_buy  = if is_a_higher { db.ask_size } else { da.ask_size };
-            if depth_sell > 0.0 && depth_sell < min_depth_usd { continue; }
-            if depth_buy > 0.0 && depth_buy < min_depth_usd { continue; }
+            if depth_sell > 0.0 && depth_sell < min_depth_usd { info!("[real] SKIP {}: depth_sell {:.1} < min {:.1}", row.pair, depth_sell, min_depth_usd); continue; }
+            if depth_buy > 0.0 && depth_buy < min_depth_usd { info!("[real] SKIP {}: depth_buy {:.1} < min {:.1}", row.pair, depth_buy, min_depth_usd); continue; }
             let intra_a = (da.ask - da.bid) / da.bid.max(1e-12) * 100.0;
             let intra_b = (db.ask - db.bid) / db.bid.max(1e-12) * 100.0;
             // FIX: configurable intra-spread max (was hardcoded 0.5%)
-            if intra_a > ts.intra_spread_max_pct || intra_b > ts.intra_spread_max_pct { continue; }
+            if intra_a > ts.intra_spread_max_pct || intra_b > ts.intra_spread_max_pct { info!("[real] SKIP {}: intra_spread a={:.2} b={:.2} > max {:.2}", row.pair, intra_a, intra_b, ts.intra_spread_max_pct); continue; }
         }
 
         let map = get_multipliers();
-        let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) { Some(v) => *v, None => continue };
-        let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) { Some(v) => *v, None => continue };
+        let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) { Some(v) => *v, None => { info!("[real] SKIP {}: no mult_a", row.pair); continue } };
+        let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) { Some(v) => *v, None => { info!("[real] SKIP {}: no mult_b", row.pair); continue } };
 
         let contracts_a = ((settings.trade_volume / entry_a.max(1e-12)) / mult_a).round() as i64;
-        if contracts_a < 1 { continue; }
+        if contracts_a < 1 { info!("[real] SKIP {}: contracts_a < 1", row.pair); continue; }
         let actual_vol_a = contracts_a as f64 * mult_a * entry_a;
         let contracts_b = ((actual_vol_a / entry_b.max(1e-12)) / mult_b).round() as i64;
-        if contracts_b < 1 { continue; }
+        if contracts_b < 1 { info!("[real] SKIP {}: contracts_b < 1", row.pair); continue; }
         let actual_vol_b = contracts_b as f64 * mult_b * entry_b;
         let vol_diff_pct = (actual_vol_a - actual_vol_b).abs() / actual_vol_a * 100.0;
-        if vol_diff_pct > ts.vol_diff_max_pct { continue; }
+        if vol_diff_pct > ts.vol_diff_max_pct { info!("[real] SKIP {}: vol_diff {:.2} > max {:.2}", row.pair, vol_diff_pct, ts.vol_diff_max_pct); continue; }
 
         let max_v = settings.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
-        if actual_vol_a > max_v { continue; }
+        if actual_vol_a > max_v { info!("[real] SKIP {}: actual_vol {:.2} > max_v {:.2}", row.pair, actual_vol_a, max_v); continue; }
 
         let lmap = get_launch_times();
         let now_s = now_secs();
         let min_age_secs = ts.min_listing_age_days * 24 * 3600;
         let age_a = lmap.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|r| *r).unwrap_or(0);
         let age_b = lmap.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|r| *r).unwrap_or(0);
-        if (age_a > 0 && now_s - age_a < min_age_secs) || (age_b > 0 && now_s - age_b < min_age_secs) { continue; }
+        if (age_a > 0 && now_s - age_a < min_age_secs) || (age_b > 0 && now_s - age_b < min_age_secs) { info!("[real] SKIP {}: new coin listing", row.pair); continue; }
 
-        if !has_sufficient_margin(&row.exchange_a, actual_vol_a) { continue; }
-        if !has_sufficient_margin(&row.exchange_b, actual_vol_b) { continue; }
-        if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional) || (row.exchange_b == "binance" && actual_vol_b < ts.binance_min_notional) { continue; }
+        if !has_sufficient_margin(&row.exchange_a, actual_vol_a) { info!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_a); continue; }
+        if !has_sufficient_margin(&row.exchange_b, actual_vol_b) { info!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_b); continue; }
+        if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional) || (row.exchange_b == "binance" && actual_vol_b < ts.binance_min_notional) { info!("[real] SKIP {}: binance min notional", row.pair); continue; }
 
         let has_tick_a = get_tick_sizes().contains_key(&format!("{}:{}", row.exchange_a, row.pair));
         let has_tick_b = get_tick_sizes().contains_key(&format!("{}:{}", row.exchange_b, row.pair));
-        if !has_tick_a || !has_tick_b { continue; }
+        if !has_tick_a || !has_tick_b { info!("[real] SKIP {}: tick size missing", row.pair); continue; }
 
         // ── ENTRY ORDER TYPE: market vs IOC ─────────────────────────────────
         let use_ioc = ts.entry_order_type == "ioc";
