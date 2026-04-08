@@ -740,13 +740,27 @@ function renderTechSettingsTable(wrap, data) {
                 </tr></thead>
                 <tbody>`;
         for (const item of items) {
+            // Enum-type settings get a dropdown instead of text input
+            const ENUMS = {
+                entry_order_type: [
+                    { value: 'market', label: 'Market — guaranteed fill, no asymmetric risk' },
+                    { value: 'ioc', label: 'IOC — limit with slippage protection, risk of partial fill' },
+                ],
+            };
+            const inputStyle = 'width:100%;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-family:var(--font-mono);font-size:.85rem;box-sizing:border-box;';
+            let valueCell;
+            if (ENUMS[item.key]) {
+                const opts = ENUMS[item.key].map(o =>
+                    `<option value="${o.value}" ${item.value === o.value ? 'selected' : ''}>${o.label}</option>`
+                ).join('');
+                valueCell = `<select id="ts-${item.key}" style="${inputStyle}">${opts}</select>`;
+            } else {
+                valueCell = `<input type="text" id="ts-${item.key}" value="${escHtml(item.value)}" style="${inputStyle}" />`;
+            }
             html += `<tr style="border-bottom:1px solid var(--border-dim);">
                 <td style="padding:8px 12px;font-family:var(--font-mono);font-size:.85rem;color:var(--text);white-space:nowrap;">${item.key}</td>
-                <td style="padding:8px 12px;">
-                    <input type="text" id="ts-${item.key}" value="${escHtml(item.value)}"
-                        style="width:100%;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-family:var(--font-mono);font-size:.85rem;box-sizing:border-box;" />
-                </td>
-                <td style="padding:8px 12px;font-size:.8rem;color:var(--text-sub);">${item.description || ''}</td>
+                <td style="padding:8px 12px;">${valueCell}</td>
+                <td style="padding:8px 12px;font-size:.78rem;color:var(--text-sub);line-height:1.4;max-width:500px;">${item.description || ''}</td>
             </tr>`;
         }
         html += '</tbody></table></div>';
