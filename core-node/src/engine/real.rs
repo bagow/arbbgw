@@ -653,7 +653,15 @@ async fn place_order(http: &Client, keys: &ExchangeKeys, exchange: &str, pair: &
             if order_status == "FILLED" || order_status == "PARTIALLY_FILLED" {
                 let avg_price = v["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 let cum_fee: f64 = v["fills"].as_array().map(|fills| {
-                    fills.iter().map(|f| f["commission"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)).sum()
+                    fills.iter().map(|f| {
+                        let comm = f["commission"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                        let asset = f["commissionAsset"].as_str().unwrap_or("USDT");
+                        match asset {
+                            "USDT" => comm,
+                            "BNB" => comm * 600.0, // rough static estimate for BNB to prevent microscopic/huge fees
+                            _ => comm * avg_price, // assume base asset (e.g. ENJ), convert to USDT via fill price
+                        }
+                    }).sum()
                 }).unwrap_or(0.0);
                 return Ok((oid, avg_price, cum_fee));
             }
