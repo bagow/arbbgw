@@ -1428,6 +1428,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         for attempt in 0..ts.fill_verify_retries {
             if got_a && got_b { break; }
+            // For MARKET orders, skip verification — fill is guaranteed, use WS prices
+            if !use_ioc { break; }
             if attempt > 0 { tokio::time::sleep(Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
             let (fa, fb) = tokio::join!(
                 async { if !got_a { if let Some(ref oid) = oid_a { if let Ok((p, f)) = fetch_order(&http, &keys, &exa, &pair, oid).await { if p > 0.0 { return Some((p, f.abs())); } } } } None },
@@ -1437,8 +1439,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             if let Some((p, f)) = fb { fill_b = p; fee_b_val = f; got_b = true; }
         }
 
+        // For MARKET orders: fill is guaranteed, use WS bid/ask as fill price if not yet known
+        if !use_ioc {
+            if oid_a.is_some() && fill_a <= 0.0 { fill_a = entry_a; }
+            if oid_b.is_some() && fill_b <= 0.0 { fill_b = entry_b; }
+        }
+
         let total_ms = t0.elapsed().as_millis();
-        if dry_run { fill_a = entry_a; fill_b = entry_b; got_a = true; got_b = true; }
+        if dry_run { fill_a = entry_a; fill_b = entry_b; }
 
         let a_filled = oid_a.is_some() && fill_a > 0.0;
         let b_filled = oid_b.is_some() && fill_b > 0.0;
@@ -1470,6 +1478,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let entry_time = now_ms();
             let oid_a_db = oid_a.unwrap_or_default();
             let oid_b_db = oid_b.unwrap_or_default();
+            // Clone before move into DB closure for async verify
+            let oid_a_for_verify = oid_a_db.clone();
+            let oid_b_for_verify = oid_b_db.clone();
 
             info!("[real] ✅ OPEN {} A={:.6}(c={}) B={:.6}(c={}) fees={:.4} slip={:.4} latency={}ms",
                 pair, fill_a, contracts_a, fill_b, contracts_b, entry_comm, entry_slip, total_ms);
@@ -1481,6 +1492,49 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 )?;
                 Ok(())
             }).await;
+
+            // ── ASYNC FILL PRICE CORRECTION (market orders) ──────────────────
+            // For market orders where we used WS bid/ask as fill price, spawn a
+            // background task to fetch the real fill price and update the DB.
+            if !use_ioc && (inline_fill_a <= 0.0 || inline_fill_b <= 0.0) {
+                let (h2, k2, db2) = (http.clone(), Arc::clone(&keys), db.clone());
+                let (ex_a2, ex_b2, pair2) = (exa.clone(), exb.clone(), pair.clone());
+                let oid_a2 = oid_a_for_verify; let oid_b2 = oid_b_for_verify;
+                let verify_retries = ts.fill_verify_retries;
+                let verify_delay = ts.fill_verify_delay_ms as u64;
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(200)).await; // let exchange settle
+                    let mut real_a = 0.0f64; let mut real_b = 0.0f64;
+                    let mut fee_a = 0.0f64; let mut fee_b = 0.0f64;
+                    let mut ga = inline_fill_a > 0.0; let mut gb = inline_fill_b > 0.0;
+                    if ga { real_a = inline_fill_a; fee_a = inline_fee_a; }
+                    if gb { real_b = inline_fill_b; fee_b = inline_fee_b; }
+                    for _ in 0..verify_retries {
+                        if ga && gb { break; }
+                        if !ga && !oid_a2.is_empty() {
+                            if let Ok((p, f)) = fetch_order(&h2, &k2, &ex_a2, &pair2, &oid_a2).await {
+                                if p > 0.0 { real_a = p; fee_a = f.abs(); ga = true; }
+                            }
+                        }
+                        if !gb && !oid_b2.is_empty() {
+                            if let Ok((p, f)) = fetch_order(&h2, &k2, &ex_b2, &pair2, &oid_b2).await {
+                                if p > 0.0 { real_b = p; fee_b = f.abs(); gb = true; }
+                            }
+                        }
+                        if !ga || !gb { tokio::time::sleep(Duration::from_millis(verify_delay.max(100))).await; }
+                    }
+                    if ga || gb {
+                        let total_fee = fee_a + fee_b;
+                        let _ = db2.call(move |conn| {
+                            if real_a > 0.0 { let _ = conn.execute("UPDATE trades SET entry_price_a=? WHERE order_id_a=? AND status='OPEN'", params![real_a, oid_a2]); }
+                            if real_b > 0.0 { let _ = conn.execute("UPDATE trades SET entry_price_b=? WHERE order_id_b=? AND status='OPEN'", params![real_b, oid_b2]); }
+                            if total_fee > 1e-9 { let _ = conn.execute("UPDATE trades SET commission_cost=? WHERE order_id_a=? AND status='OPEN'", params![total_fee, oid_a2]); }
+                            Ok(())
+                        }).await;
+                        info!("[real] ASYNC_VERIFY {} fill_a={:.6} fill_b={:.6} fee={:.4}", pair2, real_a, real_b, total_fee);
+                    }
+                });
+            }
         } else {
             // ⚠️ ASYMMETRIC — emergency close the filled leg
             let (fe, _fo, fs, fc, fp_price, ff, fv) = if a_filled {
