@@ -1092,10 +1092,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let data_b = prices.get(&row.exchange_b).and_then(|m| m.get(&row.pair).cloned());
         let min_depth_usd = settings.trade_volume * ts.depth_multiplier;
         if let (Some(ref da), Some(ref db)) = (&data_a, &data_b) {
-            let depth_sell_usd = if is_a_higher { da.bid_size * da.bid } else { db.bid_size * db.bid };
-            let depth_buy_usd  = if is_a_higher { db.ask_size * db.ask } else { da.ask_size * da.ask };
-            if depth_sell_usd > 0.0 && depth_sell_usd < min_depth_usd { info!("[real] SKIP {}: depth_sell {:.1} < min {:.1}", row.pair, depth_sell_usd, min_depth_usd); continue; }
-            if depth_buy_usd > 0.0 && depth_buy_usd < min_depth_usd { info!("[real] SKIP {}: depth_buy {:.1} < min {:.1}", row.pair, depth_buy_usd, min_depth_usd); continue; }
+            let depth_sell = if is_a_higher { da.bid_size } else { db.bid_size };
+            let depth_buy  = if is_a_higher { db.ask_size } else { da.ask_size };
+            if depth_sell > 0.0 && depth_sell < min_depth_usd { info!("[real] SKIP {}: depth_sell {:.1} < min {:.1}", row.pair, depth_sell, min_depth_usd); continue; }
+            if depth_buy > 0.0 && depth_buy < min_depth_usd { info!("[real] SKIP {}: depth_buy {:.1} < min {:.1}", row.pair, depth_buy, min_depth_usd); continue; }
             let intra_a = (da.ask - da.bid) / da.bid.max(1e-12) * 100.0;
             let intra_b = (db.ask - db.bid) / db.bid.max(1e-12) * 100.0;
             // FIX: configurable intra-spread max (was hardcoded 0.5%)
