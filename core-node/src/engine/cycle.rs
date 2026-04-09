@@ -378,12 +378,21 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if let (Some(ref da), Some(ref db)) = (&data_a, &data_b) {
             let depth_sell = if is_a_higher { da.bid_size } else { db.bid_size };
             let depth_buy  = if is_a_higher { db.ask_size } else { da.ask_size };
-            if depth_sell > 0.0 && depth_sell < min_depth_usd { info!("[real] SKIP {}: depth_sell {:.1} < min {:.1}", row.pair, depth_sell, min_depth_usd); continue; }
-            if depth_buy > 0.0 && depth_buy < min_depth_usd { info!("[real] SKIP {}: depth_buy {:.1} < min {:.1}", row.pair, depth_buy, min_depth_usd); continue; }
+            if depth_sell > 0.0 && depth_sell < min_depth_usd { 
+                if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: depth_sell {:.1} < min {:.1}", row.pair, depth_sell, min_depth_usd); }
+                continue; 
+            }
+            if depth_buy > 0.0 && depth_buy < min_depth_usd { 
+                if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: depth_buy {:.1} < min {:.1}", row.pair, depth_buy, min_depth_usd); }
+                continue; 
+            }
             let intra_a = (da.ask - da.bid) / da.bid.max(1e-12) * 100.0;
             let intra_b = (db.ask - db.bid) / db.bid.max(1e-12) * 100.0;
             // FIX: configurable intra-spread max (was hardcoded 0.5%)
-            if intra_a > ts.intra_spread_max_pct || intra_b > ts.intra_spread_max_pct { info!("[real] SKIP {}: intra_spread a={:.2} b={:.2} > max {:.2}", row.pair, intra_a, intra_b, ts.intra_spread_max_pct); continue; }
+            if intra_a > ts.intra_spread_max_pct || intra_b > ts.intra_spread_max_pct { 
+                if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: intra_spread a={:.2} b={:.2} > max {:.2}", row.pair, intra_a, intra_b, ts.intra_spread_max_pct); }
+                continue; 
+            }
         }
 
         let map = &e_ctx.multipliers;
@@ -391,13 +400,22 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) { Some(v) => *v, None => { info!("[real] SKIP {}: no mult_b", row.pair); continue } };
 
         let contracts_a = ((settings.trade_volume / entry_a.max(1e-12)) / mult_a).round();
-        if contracts_a < 1.0 { info!("[real] SKIP {}: contracts_a < 1", row.pair); continue; }
+        if contracts_a < 1.0 { 
+            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: contracts_a < 1", row.pair); }
+            continue; 
+        }
         let actual_vol_a = contracts_a * mult_a * entry_a;
         let contracts_b = ((actual_vol_a / entry_b.max(1e-12)) / mult_b).round();
-        if contracts_b < 1.0 { info!("[real] SKIP {}: contracts_b < 1", row.pair); continue; }
+        if contracts_b < 1.0 { 
+            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: contracts_b < 1", row.pair); }
+            continue; 
+        }
         let actual_vol_b = contracts_b * mult_b * entry_b;
         let vol_diff_pct = (actual_vol_a - actual_vol_b).abs() / actual_vol_a * 100.0;
-        if vol_diff_pct > ts.vol_diff_max_pct { info!("[real] SKIP {}: vol_diff {:.2} > max {:.2}", row.pair, vol_diff_pct, ts.vol_diff_max_pct); continue; }
+        if vol_diff_pct > ts.vol_diff_max_pct { 
+            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: vol_diff {:.2} > max {:.2}", row.pair, vol_diff_pct, ts.vol_diff_max_pct); }
+            continue; 
+        }
 
         let max_v = settings.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
         if actual_vol_a > max_v { info!("[real] SKIP {}: actual_vol {:.2} > max_v {:.2}", row.pair, actual_vol_a, max_v); continue; }
