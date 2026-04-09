@@ -302,12 +302,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) { Some(v) => *v, None => { info!("[real] SKIP {}: no mult_a", row.pair); continue } };
         let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) { Some(v) => *v, None => { info!("[real] SKIP {}: no mult_b", row.pair); continue } };
 
-        let contracts_a = ((settings.trade_volume / entry_a.max(1e-12)) / mult_a).round() as i64;
-        if contracts_a < 1 { info!("[real] SKIP {}: contracts_a < 1", row.pair); continue; }
-        let actual_vol_a = contracts_a as f64 * mult_a * entry_a;
-        let contracts_b = ((actual_vol_a / entry_b.max(1e-12)) / mult_b).round() as i64;
-        if contracts_b < 1 { info!("[real] SKIP {}: contracts_b < 1", row.pair); continue; }
-        let actual_vol_b = contracts_b as f64 * mult_b * entry_b;
+        let contracts_a = ((settings.trade_volume / entry_a.max(1e-12)) / mult_a).round();
+        if contracts_a < 1.0 { info!("[real] SKIP {}: contracts_a < 1", row.pair); continue; }
+        let actual_vol_a = contracts_a * mult_a * entry_a;
+        let contracts_b = ((actual_vol_a / entry_b.max(1e-12)) / mult_b).round();
+        if contracts_b < 1.0 { info!("[real] SKIP {}: contracts_b < 1", row.pair); continue; }
+        let actual_vol_b = contracts_b * mult_b * entry_b;
         let vol_diff_pct = (actual_vol_a - actual_vol_b).abs() / actual_vol_a * 100.0;
         if vol_diff_pct > ts.vol_diff_max_pct { info!("[real] SKIP {}: vol_diff {:.2} > max {:.2}", row.pair, vol_diff_pct, ts.vol_diff_max_pct); continue; }
 
@@ -397,9 +397,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
         let conn_place_a = crate::engine::exchanges::get_connector(&exa).unwrap();
         let conn_place_b = crate::engine::exchanges::get_connector(&exb).unwrap();
+        let is_qty_based_a = exa == "binance" || exa == "bybit";
+        let is_qty_based_b = exb == "binance" || exb == "bybit";
+        let qty_a = if is_qty_based_a { contracts_a * mult_a } else { contracts_a };
+        let qty_b = if is_qty_based_b { contracts_b * mult_b } else { contracts_b };
+
         let (result_a, result_b) = tokio::join!(
-            conn_place_a.place_order(&http, &keys, &pair, !is_a_higher, contracts_a, dry_run, limit_price_a, limit_price_a > 0.0),
-            conn_place_b.place_order(&http, &keys, &pair, is_a_higher, contracts_b, dry_run, limit_price_b, limit_price_b > 0.0)
+            conn_place_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0),
+            conn_place_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0)
         );
 
         let order_ms = t0.elapsed().as_millis();

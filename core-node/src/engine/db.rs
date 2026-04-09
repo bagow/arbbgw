@@ -78,8 +78,8 @@ impl TradeRepository {
         entry_slip: f64,
         oid_a_db: String,
         oid_b_db: String,
-        contracts_a: i64,
-        contracts_b: i64,
+        contracts_a: f64,
+        contracts_b: f64,
     ) {
         let _ = self.db.call(move |conn| {
             conn.execute(

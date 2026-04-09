@@ -421,6 +421,14 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                                     if let Ok(tick) = ts_str.parse::<f64>() {
                                         if tick > 0.0 { 
                                             tmap.insert(format!("bybit:{}", sym), tick); 
+                                        }
+                                    }
+                                }
+                                // lotSizeFilter / qtyStep as multiplier/stepSize
+                                if let Some(qs_str) = c["lotSizeFilter"]["qtyStep"].as_str() {
+                                    if let Ok(qty) = qs_str.parse::<f64>() {
+                                        if qty > 0.0 {
+                                            map.insert(format!("bybit:{}", sym), qty);
                                             count += 1;
                                         }
                                     }
@@ -826,7 +834,7 @@ pub struct Trade {
     pub id: i64, pub pair: String, pub exchange_a: String, pub exchange_b: String, pub direction: String,
     pub volume: f64, pub entry_price_a: f64, pub entry_price_b: f64, pub entry_spread: f64,
     pub entry_time: i64, pub highest_spread: f64, pub pnl_a: f64, pub pnl_b: f64,
-    pub close_reason: Option<String>, pub contracts_a: i64, pub contracts_b: i64,
+    pub close_reason: Option<String>, pub contracts_a: f64, pub contracts_b: f64,
     pub commission_cost: f64, pub slippage_cost: f64,
 }
 
@@ -839,8 +847,8 @@ pub async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
             direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?,
             entry_spread: row.get(8)?, entry_time: row.get(9)?, highest_spread: row.get(10)?,
             pnl_a: row.get(11)?, pnl_b: row.get(12)?, close_reason: row.get(13)?,
-            contracts_a: row.get::<_, Option<i64>>(14)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(6)?.max(1e-12)).round() as i64),
-            contracts_b: row.get::<_, Option<i64>>(15)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(7)?.max(1e-12)).round() as i64),
+            contracts_a: row.get::<_, Option<f64>>(14)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(6)?.max(1e-12)).round()),
+            contracts_b: row.get::<_, Option<f64>>(15)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(7)?.max(1e-12)).round()),
             commission_cost: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
             slippage_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
         }))?.filter_map(|t| t.ok()).collect::<Vec<_>>();

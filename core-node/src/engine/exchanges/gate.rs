@@ -29,9 +29,9 @@ impl ExchangeConnector for GateConnector {
         "gate"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: i64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
         let contract = pair.replace("USDT", "_USDT");
-        let size = if is_buy { contracts } else { -contracts };
+        let size = if is_buy { contracts.round() as i64 } else { -(contracts.round() as i64) };
         let path = "/api/v4/futures/usdt/orders";
         
         let price_str = if use_ioc && price > 0.0 { format!("{:.8}", price) } else { "0".to_string() };
@@ -70,9 +70,9 @@ impl ExchangeConnector for GateConnector {
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: i64, dry_run: bool, leverage: f64) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64) -> Result<String, String> {
         let contract = pair.replace("USDT", "_USDT");
-        let size = if is_buy { contracts } else { -contracts };
+        let size = if is_buy { contracts.round() as i64 } else { -(contracts.round() as i64) };
         let path = "/api/v4/futures/usdt/orders";
         
         let body = json!({

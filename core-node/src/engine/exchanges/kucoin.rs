@@ -19,7 +19,7 @@ impl ExchangeConnector for KucoinConnector {
         "kucoin"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: i64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
         let sym = format!("{}M", pair);
         let ts = now_ms().to_string(); 
         let path = "/api/v1/orders";
@@ -35,7 +35,7 @@ impl ExchangeConnector for KucoinConnector {
                 "type": "limit",
                 "timeInForce": "IOC",
                 "price": format!("{:.8}", price),
-                "size": contracts,
+                "size": contracts.round() as i64,
                 "leverage": lev_str,
                 "marginMode": "CROSS",
                 "reduceOnly": false
@@ -46,7 +46,7 @@ impl ExchangeConnector for KucoinConnector {
                 "symbol": sym,
                 "side": side,
                 "type": "market",
-                "size": contracts,
+                "size": contracts.round() as i64,
                 "leverage": lev_str,
                 "marginMode": "CROSS",
                 "reduceOnly": false
@@ -85,7 +85,7 @@ impl ExchangeConnector for KucoinConnector {
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: i64, dry_run: bool, leverage: f64) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64) -> Result<String, String> {
         let sym = format!("{}M", pair);
         let ts = now_ms().to_string(); 
         let path = "/api/v1/orders";
@@ -97,7 +97,7 @@ impl ExchangeConnector for KucoinConnector {
             "symbol": sym,
             "side": side,
             "type": "market",
-            "size": contracts,
+            "size": contracts.round() as i64,
             "leverage": lev_str,
             "marginMode": "CROSS",
             "reduceOnly": true

@@ -29,7 +29,7 @@ impl ExchangeConnector for BinanceConnector {
         "binance"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: i64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run {
             return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), price));
@@ -37,8 +37,12 @@ impl ExchangeConnector for BinanceConnector {
 
         let ts = now_ms();
         let time_in_force = if use_ioc { "IOC" } else { "GTC" };
+        let mut qty_str = format!("{:.8}", contracts).trim_end_matches('0').to_string();
+        if qty_str.ends_with('.') { qty_str.pop(); }
+        if qty_str.is_empty() { qty_str = "0".to_string(); }
+        
         let qs = format!("symbol={}&side={}&type=LIMIT&timeInForce={}&quantity={}&price={}&timestamp={}", 
-            pair, side, time_in_force, contracts, price, ts);
+            pair, side, time_in_force, qty_str, price, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
         let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
         let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
@@ -57,12 +61,16 @@ impl ExchangeConnector for BinanceConnector {
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: i64, dry_run: bool, leverage: f64) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64) -> Result<String, String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run { return Ok(format!("dry_close_{}_{}", self.name(), now_ms())); }
 
         let ts = now_ms();
-        let qs = format!("symbol={}&side={}&type=MARKET&quantity={}&reduceOnly=true&timestamp={}", pair, side, contracts, ts);
+        let mut qty_str = format!("{:.8}", contracts).trim_end_matches('0').to_string();
+        if qty_str.ends_with('.') { qty_str.pop(); }
+        if qty_str.is_empty() { qty_str = "0".to_string(); }
+        
+        let qs = format!("symbol={}&side={}&type=MARKET&quantity={}&reduceOnly=true&timestamp={}", pair, side, qty_str, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
         let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
         

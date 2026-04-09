@@ -18,10 +18,14 @@ impl ExchangeConnector for BybitConnector {
         "bybit"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: i64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let side_str = if is_buy { "Buy" } else { "Sell" };
+
+        let mut qty_str = format!("{:.8}", contracts).trim_end_matches('0').to_string();
+        if qty_str.ends_with('.') { qty_str.pop(); }
+        if qty_str.is_empty() { qty_str = "0".to_string(); }
 
         let body = if use_ioc && price > 0.0 {
             json!({
@@ -29,7 +33,7 @@ impl ExchangeConnector for BybitConnector {
                 "symbol": pair,
                 "side": side_str,
                 "orderType": "Limit",
-                "qty": contracts.to_string(),
+                "qty": qty_str,
                 "price": format!("{:.8}", price),
                 "timeInForce": "IOC",
                 "reduceOnly": false
@@ -40,7 +44,7 @@ impl ExchangeConnector for BybitConnector {
                 "symbol": pair,
                 "side": side_str,
                 "orderType": "Market",
-                "qty": contracts.to_string(),
+                "qty": qty_str,
                 "reduceOnly": false
             })
         };
@@ -74,17 +78,21 @@ impl ExchangeConnector for BybitConnector {
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: i64, dry_run: bool, leverage: f64) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64) -> Result<String, String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let side_str = if is_buy { "Buy" } else { "Sell" };
+
+        let mut qty_str = format!("{:.8}", contracts).trim_end_matches('0').to_string();
+        if qty_str.ends_with('.') { qty_str.pop(); }
+        if qty_str.is_empty() { qty_str = "0".to_string(); }
 
         let body = json!({
             "category": "linear",
             "symbol": pair,
             "side": side_str,
             "orderType": "Market",
-            "qty": contracts.to_string(),
+            "qty": qty_str,
             "reduceOnly": true
         });
         
