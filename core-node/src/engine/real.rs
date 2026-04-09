@@ -13,7 +13,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use tokio_rusqlite::Connection;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 use dashmap::DashMap;
 use std::sync::OnceLock;
