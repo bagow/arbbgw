@@ -143,10 +143,8 @@ async fn main() -> Result<()> {
         settings::load_technical_settings(&profiles_db).await
     ));
     settings::spawn_technical_settings_refresher(profiles_db.clone(), tech_settings_cache.clone(), 10);
-    info!("Technical settings loaded: safety={} tau={}s deviation={}",
-        tech_settings_cache.read().await.safety_margin,
-        tech_settings_cache.read().await.ema_tau_secs,
-        tech_settings_cache.read().await.deviation_safety);
+    info!("Technical settings loaded: tau={}s",
+        tech_settings_cache.read().await.ema_tau_secs);
 
     // ── Exchange keys — loaded once at startup ───────────────────────────────
     let exchange_keys = Arc::new(engine::real::ExchangeKeys::from_env());
