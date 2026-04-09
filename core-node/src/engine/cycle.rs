@@ -328,6 +328,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let has_tick_a = e_ctx.tick_sizes.contains_key(&format!("{}:{}", row.exchange_a, row.pair));
         let has_tick_b = e_ctx.tick_sizes.contains_key(&format!("{}:{}", row.exchange_b, row.pair));
         if !has_tick_a || !has_tick_b { info!("[real] SKIP {}: tick size missing", row.pair); continue; }
+        let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|v| *v).unwrap_or(0.000001);
+        let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|v| *v).unwrap_or(0.000001);
 
         let use_ioc = ts.entry_order_type == "ioc";
         let (mut limit_price_a, mut limit_price_b) = if use_ioc {
@@ -339,7 +341,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             }
             let lpa = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
             let lpb = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
-            (lpa, lpb)
+            
+            let lpa_rounded = (lpa / tick_a).round() * tick_a;
+            let lpb_rounded = (lpb / tick_b).round() * tick_b;
+            (lpa_rounded, lpb_rounded)
         } else {
             (0.0, 0.0) // market order — price=0 means no limit
         };

@@ -41,8 +41,12 @@ impl ExchangeConnector for BinanceConnector {
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
         
+        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        if price_str.ends_with('.') { price_str.pop(); }
+        if price_str.is_empty() { price_str = "0".to_string(); }
+        
         let qs = format!("symbol={}&side={}&type=LIMIT&timeInForce={}&quantity={}&price={}&timestamp={}", 
-            pair, side, time_in_force, qty_str, price, ts);
+            pair, side, time_in_force, qty_str, price_str, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
         let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
         let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)

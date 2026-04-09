@@ -27,6 +27,10 @@ impl ExchangeConnector for BybitConnector {
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
 
+        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        if price_str.ends_with('.') { price_str.pop(); }
+        if price_str.is_empty() { price_str = "0".to_string(); }
+
         let body = if use_ioc && price > 0.0 {
             json!({
                 "category": "linear",
@@ -34,7 +38,7 @@ impl ExchangeConnector for BybitConnector {
                 "side": side_str,
                 "orderType": "Limit",
                 "qty": qty_str,
-                "price": format!("{:.8}", price),
+                "price": price_str,
                 "timeInForce": "IOC",
                 "reduceOnly": false
             })
