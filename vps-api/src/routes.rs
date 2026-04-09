@@ -235,6 +235,7 @@ pub async fn handle_get_unified(
                 obj.insert("current_price_a".into(), json!(c_price_a));
                 obj.insert("current_price_b".into(), json!(c_price_b));
                 obj.insert("current_spread".into(), json!(c_spread));
+                obj.insert("gross_pnl".into(), json!(pnl_a + pnl_b));
                 obj.insert("current_pnl".into(), json!(current_net_pnl));
                 obj.insert("pnl_a".into(), json!(pnl_a));
                 obj.insert("pnl_b".into(), json!(pnl_b));
