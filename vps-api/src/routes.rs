@@ -207,20 +207,27 @@ pub async fn handle_get_unified(
 
     // Enrich active trades with live PnL from columns written by core-node each cycle.
     // IMPORTANT: We trust curr_gross_pnl (= net PnL after commission + real funding) stored
-    // by core-node. We do NOT recalculate PnL here — that would cause discrepancies.
+    // by core-node. We do NOT recalculate total PnL here — that would cause discrepancies.
     // Entry slippage is already embedded in entry_price (actual fill price from exchange).
     let active_enriched: Vec<serde_json::Value> = active_trades.iter().map(|t| {
         let mut v = serde_json::to_value(t).unwrap_or_default();
         if let (Some(c_price_a), Some(c_price_b), Some(c_spread)) = (t.last_price_a, t.last_price_b, t.last_spread) {
-            // Primary: use net PnL written by core-node (gross - commission - real_funding).
-            // Fallback: on the very first cycle before core-node updates curr_gross_pnl,
-            // compute an estimate from prices minus stored commission.
+            let is_a_higher = t.direction.starts_with(&t.exchange_a);
+            let coins_a = t.volume / t.entry_price_a;
+            let coins_b = t.volume / t.entry_price_b;
+
+            // Per-leg GROSS PnL (price movement only, no costs).
+            // Always computed from live prices — the DB columns pnl_a/pnl_b are 0.0
+            // for open real trades (engine writes them only on close).
+            let pnl_a = if is_a_higher { (t.entry_price_a - c_price_a) * coins_a }
+                        else            { (c_price_a - t.entry_price_a) * coins_a };
+            let pnl_b = if is_a_higher { (c_price_b - t.entry_price_b) * coins_b }
+                        else            { (t.entry_price_b - c_price_b) * coins_b };
+
+            // Total NET PnL: trust curr_gross_pnl written by core-node
+            // (= gross - commission - real_funding from exchange API).
+            // Fallback on first cycle before core-node writes the value.
             let current_net_pnl = t.curr_gross_pnl.unwrap_or_else(|| {
-                let is_a_higher = t.direction.starts_with(&t.exchange_a);
-                let coins_a = t.volume / t.entry_price_a;
-                let coins_b = t.volume / t.entry_price_b;
-                let pnl_a = if is_a_higher { (t.entry_price_a - c_price_a) * coins_a } else { (c_price_a - t.entry_price_a) * coins_a };
-                let pnl_b = if is_a_higher { (c_price_b - t.entry_price_b) * coins_b } else { (t.entry_price_b - c_price_b) * coins_b };
                 pnl_a + pnl_b - t.commission_cost.unwrap_or(0.0) - t.funding_cost.unwrap_or(0.0)
             });
 
@@ -229,14 +236,11 @@ pub async fn handle_get_unified(
                 obj.insert("current_price_b".into(), json!(c_price_b));
                 obj.insert("current_spread".into(), json!(c_spread));
                 obj.insert("current_pnl".into(), json!(current_net_pnl));
+                obj.insert("pnl_a".into(), json!(pnl_a));
+                obj.insert("pnl_b".into(), json!(pnl_b));
                 obj.insert("commission_cost".into(), json!(t.commission_cost.unwrap_or(0.0)));
                 obj.insert("slippage_cost".into(), json!(t.slippage_cost.unwrap_or(0.0)));
                 obj.insert("funding_cost".into(), json!(t.funding_cost.unwrap_or(0.0)));
-                // pnl_a / pnl_b are written by core-node live updates — trust them from DB
-                if let (Some(pa), Some(pb)) = (t.pnl_a, t.pnl_b) {
-                    obj.insert("pnl_a".into(), json!(pa));
-                    obj.insert("pnl_b".into(), json!(pb));
-                }
             }
         }
         v
