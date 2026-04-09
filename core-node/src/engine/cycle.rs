@@ -292,7 +292,20 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let slippage_frac = settings.slippage_percent / 100.0;
         let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
 
-        // Safety margin and deviation checks have been removed as per user request.
+        // Structural deviation filter: the current spread must have deviated from its
+        // long-term EMA mean by at least min_entry_spread. This rejects "structural"
+        // spreads (permanently present, e.g. kimchi premium) and only allows genuine
+        // temporary divergences that are likely to converge.
+        let structural_deviation = row.spread - row.structural_spread;
+        if structural_deviation < settings.min_entry_spread {
+            // Log only occasionally to avoid spam (piggybacking on diag_log_interval)
+            if dtick % (ts.diag_log_interval as u64 * 10) == 0 {
+                info!("[real] SKIP {}: structural_dev={:.4} < min_entry_spread={:.4} (ema={:.4} max={:.4} min={:.4})",
+                    row.pair, structural_deviation, settings.min_entry_spread,
+                    row.structural_spread, row.structural_max, row.structural_min);
+            }
+            continue;
+        }
 
         if open_pairs.contains(&row.pair) { continue; }
 

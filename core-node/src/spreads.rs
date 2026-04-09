@@ -7,7 +7,8 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-static STRUCTURAL_EMA: OnceLock<DashMap<String, (f64, f64)>> = OnceLock::new();
+/// (ema_value, last_ts_secs, max_spread_ever, min_spread_ever)
+static STRUCTURAL_EMA: OnceLock<DashMap<String, (f64, f64, f64, f64)>> = OnceLock::new();
 
 /// Compute spread opportunities from PriceMap.
 /// Called directly by the engine loop — zero serialization/HTTP overhead.
@@ -67,23 +68,28 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
                 if spread < ts.spread_threshold || spread > ts.spread_max { continue; }
 
                 let ema_key = format!("{}|{}|{}|{}", sym, name_a, name_b, direction);
-                let structural_spread = if let Some(mut entry) = ema_map.get_mut(&ema_key) {
-                    let (old_ema, last_updated) = *entry;
-                    let dt = (now_f64 - last_updated).max(0.0);
-                    let alpha = 1.0 - (-dt / ts.ema_tau_secs).exp();
-                    let new_ema = old_ema + alpha * (spread - old_ema);
-                    *entry = (new_ema, now_f64);
-                    new_ema
-                } else {
-                    ema_map.insert(ema_key, (spread, now_f64));
-                    spread
-                };
+                let (structural_spread, structural_max, structural_min) =
+                    if let Some(mut entry) = ema_map.get_mut(&ema_key) {
+                        let (old_ema, last_updated, old_max, old_min) = *entry;
+                        let dt = (now_f64 - last_updated).max(0.0);
+                        let alpha = 1.0 - (-dt / ts.ema_tau_secs).exp();
+                        let new_ema = old_ema + alpha * (spread - old_ema);
+                        let new_max = old_max.max(spread);
+                        let new_min = old_min.min(spread);
+                        *entry = (new_ema, now_f64, new_max, new_min);
+                        (new_ema, new_max, new_min)
+                    } else {
+                        ema_map.insert(ema_key, (spread, now_f64, spread, spread));
+                        (spread, spread, spread)
+                    };
 
                 rows.push(SpreadRow {
                     pair: sym.clone(), exchange_a: name_a.clone(), exchange_b: name_b.clone(),
                     price_a: data_a.price, price_b: data_b.price, bid_a: data_a.bid, ask_a: data_a.ask, bid_b: data_b.bid, ask_b: data_b.ask,
                     vol_a: data_a.vol, vol_b: data_b.vol, funding_a: data_a.funding_rate, funding_b: data_b.funding_rate,
                     structural_spread,
+                    structural_max,
+                    structural_min,
                     spread: (spread * 10000.0).round() / 10000.0,
                     direction,
                 });
@@ -106,11 +112,13 @@ pub fn warmup_ema_from_history(history: &[(f64, f64, String, String, String, Str
 
     for (ts_val, spread, direction, pair, ex_a, ex_b) in &sorted {
         let key = format!("{}|{}|{}|{}", pair, ex_a, ex_b, direction);
-        let mut entry = ema_map.entry(key).or_insert((*spread, *ts_val));
-        let (old_ema, last_ts) = *entry;
+        let mut entry = ema_map.entry(key).or_insert((*spread, *ts_val, *spread, *spread));
+        let (old_ema, last_ts, old_max, old_min) = *entry;
         let dt = (ts_val - last_ts).max(0.0);
         let alpha = 1.0 - (-dt / tau).exp();
         let new_ema = old_ema + alpha * (spread - old_ema);
-        *entry = (new_ema, *ts_val);
+        let new_max = old_max.max(*spread);
+        let new_min = old_min.min(*spread);
+        *entry = (new_ema, *ts_val, new_max, new_min);
     }
 }

@@ -50,6 +50,10 @@ pub struct SpreadRow {
     #[serde(rename = "fundingB", default)] pub funding_b: f64,
     /// Structural mean spread over the last 24h (Time-decay EMA).
     pub structural_spread: f64,
+    /// Maximum observed spread since tracking began (all-time high for this pair/direction).
+    pub structural_max: f64,
+    /// Minimum observed spread since tracking began (all-time low for this pair/direction).
+    pub structural_min: f64,
     /// Spread in percent (positive = buy B / sell A is profitable before costs).
     pub spread: f64,
     /// E.g. "gate>kucoin" — the exchange with the higher bid comes first.
