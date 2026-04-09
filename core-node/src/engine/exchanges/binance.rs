@@ -104,20 +104,57 @@ impl ExchangeConnector for BinanceConnector {
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64), String> {
         if order_id.starts_with("dry_") { return Ok((0.0, 0.0)); }
         let ts = now_ms();
+        // Step 1: Get average fill price from the order endpoint
         let qs = format!("symbol={}&orderId={}&timestamp={}", pair, order_id, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
         let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
         let resp = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
             .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
-            
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         let price = v["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        
-        // Hack: Binance get order does not return accurate commissions directly in one field sometimes,
-        // For simplicity, we just return 0.0 fee here and let the engine use the fallback, 
-        // or we'd have to ping /fapi/v1/userTrades which is heavily rate-limited.
-        // I noticed core-node/src/engine/real.rs just returned 0.0 for Binance fetch_order.
-        let fee = 0.0; 
+
+        // Step 2: Fetch real commission from userTrades endpoint.
+        // This is the ONLY way to get accurate commission for Binance futures.
+        // Weight: 5 — acceptable for post-trade verification (called once per leg per close).
+        let ts2 = now_ms();
+        let qs2 = format!("symbol={}&orderId={}&timestamp={}", pair, order_id, ts2);
+        let sig2 = binance_sign(&keys.binance_secret, &qs2);
+        let url2 = format!("https://fapi.binance.com/fapi/v1/userTrades?{}&signature={}", qs2, sig2);
+        let fee = match http
+            .get(&url2)
+            .header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(resp2) => match resp2.json::<Value>().await {
+                Ok(v2) => v2.as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter(|t| {
+                                // Match only fills for this exact order
+                                t["orderId"].as_i64().map(|id| id.to_string()).as_deref()
+                                    == Some(order_id)
+                            })
+                            .fold(0.0_f64, |acc, t| {
+                                let comm = t["commission"]
+                                    .as_str()
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0);
+                                let asset = t["commissionAsset"].as_str().unwrap_or("USDT");
+                                // Normalise all commission assets to USDT
+                                acc + match asset {
+                                    "USDT" => comm,
+                                    // If paid in BNB or base asset, convert via fill price
+                                    _ => if price > 0.0 { comm * price } else { comm },
+                                }
+                            })
+                    })
+                    .unwrap_or(0.0),
+                Err(_) => 0.0,
+            },
+            Err(_) => 0.0,
+        };
         Ok((price, fee))
     }
 

@@ -127,13 +127,22 @@ impl TradeRepository {
         }).await;
     }
 
-    pub async fn flush_live_updates(&self, live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64)>) {
+    /// Update open trade live state in a single batched transaction.
+    /// Persists real-time prices, net PnL, real funding rates, and the accumulated
+    /// funding cost (computed from live exchange API rates + hours since entry).
+    pub async fn flush_live_updates(&self, live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64)>) {
         let _ = self.db.call(move |conn| {
             let tx = conn.transaction()?;
             {
-                let mut stmt = tx.prepare_cached("UPDATE trades SET last_price_a=?, last_price_b=?, last_spread=?, curr_gross_pnl=?, funding_rate_a=?, funding_rate_b=?, funding_next_ts=? WHERE id=?")?;
-                for (id, pa, pb, cs, pnl, fra, frb, fnt) in live_updates {
-                    stmt.execute(params![pa, pb, cs, pnl, fra, frb, fnt, id])?;
+                let mut stmt = tx.prepare_cached(
+                    "UPDATE trades SET \
+                     last_price_a=?, last_price_b=?, last_spread=?, curr_gross_pnl=?, \
+                     funding_rate_a=?, funding_rate_b=?, funding_next_ts=?, \
+                     funding_cost=? \
+                     WHERE id=?"
+                )?;
+                for (id, pa, pb, cs, pnl, fra, frb, fnt, fund_cost) in live_updates {
+                    stmt.execute(params![pa, pb, cs, pnl, fra, frb, fnt, fund_cost, id])?;
                 }
             }
             tx.commit()?;

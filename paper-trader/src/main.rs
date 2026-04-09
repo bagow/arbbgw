@@ -753,25 +753,26 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
         Ok(mut t) => {
             for tr in t.iter_mut() {
                 if let (Some(c_price_a), Some(c_price_b), Some(c_spread)) = (tr.last_price_a, tr.last_price_b, tr.last_spread) {
-                    let is_a_higher = tr.direction.starts_with(&tr.exchange_a);
-                    let slippage = 0.001;
-                    let ep_a = if is_a_higher { c_price_a * (1.0 + slippage) } else { c_price_a * (1.0 - slippage) };
-                    let ep_b = if is_a_higher { c_price_b * (1.0 - slippage) } else { c_price_b * (1.0 + slippage) };
-                    let coins_a = tr.volume / tr.entry_price_a;
-                    let coins_b = tr.volume / tr.entry_price_b;
-                    let pnl_a = if is_a_higher { (tr.entry_price_a - ep_a) * coins_a } else { (ep_a - tr.entry_price_a) * coins_a };
-                    let pnl_b = if is_a_higher { (ep_b - tr.entry_price_b) * coins_b } else { (tr.entry_price_b - ep_b) * coins_b };
-                    let gross = pnl_a + pnl_b;
-                    // curr_gross_pnl now stores NET pnl (after comm+funding) written by engine loop.
-                    // For the worker-push branch, fall back to gross - commission_cost.
                     let comm = tr.commission_cost.unwrap_or(0.0);
+                    let fund = tr.funding_cost.unwrap_or(0.0);
+                    // Trust the net PnL stored by the engine loop above:
+                    // net_pnl = gross - commission - funding (all based on real bid/ask fills + settings.slippage_percent)
+                    // DO NOT re-introduce a separate hardcoded slippage here — it's already priced in.
+                    let net_pnl = tr.curr_gross_pnl.unwrap_or_else(|| {
+                        // Fallback for first cycle only (before engine writes curr_gross_pnl)
+                        let is_a_higher = tr.direction.starts_with(&tr.exchange_a);
+                        let qa = tr.volume / tr.entry_price_a;
+                        let qb = tr.volume / tr.entry_price_b;
+                        let pa = if is_a_higher { (tr.entry_price_a - c_price_a) * qa } else { (c_price_a - tr.entry_price_a) * qa };
+                        let pb = if is_a_higher { (c_price_b - tr.entry_price_b) * qb } else { (tr.entry_price_b - c_price_b) * qb };
+                        pa + pb - comm - fund
+                    });
                     tr.current_price_a = Some(c_price_a);
                     tr.current_price_b = Some(c_price_b);
                     tr.current_spread = Some(c_spread);
-                    tr.gross_pnl = Some(gross);
-                    tr.current_pnl = Some(tr.curr_gross_pnl.unwrap_or(gross - comm));
-                    tr.pnl_a = Some(pnl_a);
-                    tr.pnl_b = Some(pnl_b);
+                    tr.current_pnl = Some(net_pnl);
+                    tr.gross_pnl = Some(net_pnl + comm + fund);
+                    // pnl_a, pnl_b are already loaded from DB (written by engine loop above)
                 }
             }
             t

@@ -10,7 +10,7 @@ use crate::state::{EngineContext, PriceMap};
 use crate::engine::real::{ExchangeKeys, Trade, load_open_trades, now_ms, now_secs, has_sufficient_margin, binance_sign}; // added signatures if needed
 use std::collections::{HashMap, HashSet};
 
-static LAST_LIVE_FLUSH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// NOTE: LAST_LIVE_FLUSH is declared as a function-local static inside run_cycle below.
 
 pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection, keys: Arc<ExchangeKeys>, ts: &TechnicalSettings, e_ctx: Arc<crate::state::EngineContext>) {
     let dry_run = false;
@@ -18,7 +18,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
     let trades = repo.load_open_trades(&settings.id).await;
     let num_active = trades.len() as i64;
-    let funding = settings.funding_rate_8h / 100.0;
+    // funding_rate_8h setting is INTENTIONALLY not used here.
+    // Real accumulated funding is read from trade.funding_cost (DB column updated from exchange API).
 
     // NOTE: We process closes ALWAYS (even when is_active=false)
     // so that MANUAL_CLOSE from the UI works even when the bot is stopped.
@@ -28,7 +29,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     if !trades.is_empty() {
         info!("[real] Processing {} open trades for profile {}", trades.len(), settings.id);
     }
-    let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64)> = Vec::new();
+    // Tuple: (trade_id, price_a, price_b, spread, net_pnl, funding_rate_a, funding_rate_b, funding_next_ts, accumulated_funding_cost)
+    let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64)> = Vec::new();
     for trade in &trades {
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
         let elapsed_ms = now_ms() - trade.entry_time;
@@ -89,7 +91,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let live_pnl_b = if is_a_higher { (c_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) }
                     else { (trade.entry_price_b - c_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) };
         let live_gross_pnl = live_pnl_a + live_pnl_b;
-        let fund_cost = funding * trade.volume;
+
+        // Use the accumulated real funding cost from DB (column updated every live-update cycle
+        // using real rates fetched from exchange API — NOT from the settings constant).
+        let fund_cost = trade.funding_cost;
         let live_net_pnl = live_gross_pnl - trade.commission_cost - fund_cost;
 
         // PnL for CLOSE TRIGGERS (using bid/ask — pessimistic, for safe execution)
@@ -165,7 +170,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                             if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
                                 if p > 0.0 {
                                     real_exit_a = p;
-                                    let rate_a = e_ctx_c.fee_rates.get(&exa).map(|v| *v).unwrap_or(0.0005);
+                                    let rate_a = e_ctx_c.fee_rates.get(&exa).map(|v| *v).unwrap_or(0.0);
                                     let actual_f = if f > 1e-9 { f.abs() } else { p * (vol / entry_a) * rate_a };
                                     exit_fee += actual_f; got_a = true;
                                 }
@@ -177,7 +182,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                             if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid, mult_b).await {
                                 if p > 0.0 {
                                     real_exit_b = p;
-                                    let rate_b = e_ctx_c.fee_rates.get(&exb).map(|v| *v).unwrap_or(0.0005);
+                                    let rate_b = e_ctx_c.fee_rates.get(&exb).map(|v| *v).unwrap_or(0.0);
                                     let actual_f = if f > 1e-9 { f.abs() } else { p * (vol / entry_b) * rate_b };
                                     exit_fee += actual_f; got_b = true;
                                 }
@@ -214,7 +219,20 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let (fr_a, next_a) = crate::engine::exchanges::get_connector(&trade.exchange_a).unwrap().get_funding_rate(&http, &trade.pair).await.unwrap_or((0.0, 0));
             let (fr_b, next_b) = crate::engine::exchanges::get_connector(&trade.exchange_b).unwrap().get_funding_rate(&http, &trade.pair).await.unwrap_or((0.0, 0));
             let fund_next = next_a.min(next_b); // nearest funding event
-            live_updates.push((trade.id, c_price_a, c_price_b, current_spread, live_net_pnl, fr_a, fr_b, fund_next));
+
+            // Compute total accumulated funding cost from entry using REAL exchange rates.
+            // Delta-neutral: we're long one exchange, short the other.
+            // Net cost per 8h = (fr_long - fr_short) * volume  [positive = we net-pay]
+            // fr_long and fr_short follow the actual direction of the trade.
+            let hours_open = (now_ms() - trade.entry_time) as f64 / 3_600_000.0_f64;
+            let (fr_long, fr_short) = if is_a_higher { (fr_b, fr_a) } else { (fr_a, fr_b) };
+            let acc_fund_cost = (fr_long - fr_short) * trade.volume * (hours_open / 8.0);
+
+            // Recompute net PnL with the freshly-fetched real funding cost so curr_gross_pnl
+            // in the DB reflects the true net position (gross - commission - real_funding).
+            let real_live_net_pnl = live_gross_pnl - trade.commission_cost - acc_fund_cost;
+
+            live_updates.push((trade.id, c_price_a, c_price_b, current_spread, real_live_net_pnl, fr_a, fr_b, fund_next, acc_fund_cost));
             if top_spread > trade.highest_spread {
                 let id = trade.id;
                 // Wait, need await here, earlier it was synchronous?
@@ -463,8 +481,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             if !use_ioc { break; }
             if attempt > 0 { tokio::time::sleep(Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
             let (fa, fb) = tokio::join!(
-                async { if !got_a { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { if p > 0.0 { let rate = e_ctx.fee_rates.get(&exa).map(|v| *v).unwrap_or(0.0005); let af = if f > 1e-9 { f.abs() } else { p * qty_a * rate }; return Some((p, af)); } } } } None },
-                async { if !got_b { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { if p > 0.0 { let rate = e_ctx.fee_rates.get(&exb).map(|v| *v).unwrap_or(0.0005); let af = if f > 1e-9 { f.abs() } else { p * qty_b * rate }; return Some((p, af)); } } } } None }
+                async { if !got_a { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { if p > 0.0 { let rate = e_ctx.fee_rates.get(&exa).map(|v| *v).unwrap_or(0.0); let af = if f > 1e-9 { f.abs() } else { p * qty_a * rate }; return Some((p, af)); } } } } None },
+                async { if !got_b { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { if p > 0.0 { let rate = e_ctx.fee_rates.get(&exb).map(|v| *v).unwrap_or(0.0); let af = if f > 1e-9 { f.abs() } else { p * qty_b * rate }; return Some((p, af)); } } } } None }
             );
             if let Some((p, f)) = fa { fill_a = p; fee_a_val = f; got_a = true; }
             if let Some((p, f)) = fb { fill_b = p; fee_b_val = f; got_b = true; }
@@ -502,10 +520,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let sp = row.spread;
             let profile_id = settings.id.clone();
             let api_comm = fee_a_val + fee_b_val;
-            // Use exchange API fees. If API returned 0, estimate with standard 0.05% taker rate per leg
             let entry_comm = if api_comm > 1e-9 { api_comm } else {
-                let est = vol * 2.0 * 0.0005; // 0.05% per leg (industry standard max)
-                tracing::warn!("[real] No API fee for {} — using estimate {:.4}", pair, est);
+                let rate_a = e_ctx.fee_rates.get(&exa).map(|v| *v).unwrap_or(0.0);
+                let rate_b = e_ctx.fee_rates.get(&exb).map(|v| *v).unwrap_or(0.0);
+                let est = (vol * rate_a) + (vol * rate_b);
+                if est < 1e-9 { tracing::warn!("[real] STRICT PNL: API fee unresolved and real rate missing for {}. Logging 0.0", pair); }
                 est
             };
             let slip_a = if fill_a > 0.0 { if is_a_higher { ((entry_a - fill_a) * (vol / entry_a)).max(0.0) } else { ((fill_a - entry_a) * (vol / entry_a)).max(0.0) } } else { 0.0 };
@@ -536,8 +555,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let verify_retries = ts.fill_verify_retries;
                 let verify_delay = ts.fill_verify_delay_ms as u64;
                 let q_a = qty_a; let q_b = qty_b;
-                let rate_a = e_ctx.fee_rates.get(&ex_a2).map(|v| *v).unwrap_or(0.0005);
-                let rate_b = e_ctx.fee_rates.get(&ex_b2).map(|v| *v).unwrap_or(0.0005);
+                let rate_a = e_ctx.fee_rates.get(&ex_a2).map(|v| *v).unwrap_or(0.0);
+                let rate_b = e_ctx.fee_rates.get(&ex_b2).map(|v| *v).unwrap_or(0.0);
                 let e_a = entry_a; let e_b = entry_b;
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(200)).await; // let exchange settle
@@ -597,7 +616,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let mut close_fill = fp_price;
                 let mut total_fee = ff;
                 let m = e_ctx_em.multipliers.get(&format!("{}:{}", fe, fp)).map(|v| *v).unwrap_or(1.0);
-                let rate = e_ctx_em.fee_rates.get(&fe).map(|v| *v).unwrap_or(0.0005);
+                let rate = e_ctx_em.fee_rates.get(&fe).map(|v| *v).unwrap_or(0.0);
                 let q = if fc > 0.0 { fc } else { fv / fp_price };
                 
                 if let Some(ref coid) = close_oid {

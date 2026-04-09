@@ -187,7 +187,7 @@ async fn fetch_taker_fee(http: &Client, keys: &ExchangeKeys, exchange: &str) -> 
             let taker = resp["takerCommissionRate"].as_str()
                 .and_then(|s| s.parse().ok())
                 .or_else(|| resp["takerCommissionRate"].as_f64())
-                .unwrap_or(0.0004);
+                .ok_or_else(|| anyhow::anyhow!("missing taker rate in binance response"))?;
             Ok(taker)
         }
         "gate" => {
@@ -199,7 +199,7 @@ async fn fetch_taker_fee(http: &Client, keys: &ExchangeKeys, exchange: &str) -> 
             // Gate returns fee in "point_fee" or tier info; use tier taker fee
             let taker = resp["fee_rate"].as_str().and_then(|s| s.parse().ok())
                 .or_else(|| resp["fee_rate"].as_f64())
-                .unwrap_or(0.0005);
+                .ok_or_else(|| anyhow::anyhow!("missing fee_rate in gate response"))?;
             Ok(taker.abs()) // ensure positive
         }
         "kucoin" => {
@@ -214,7 +214,7 @@ async fn fetch_taker_fee(http: &Client, keys: &ExchangeKeys, exchange: &str) -> 
             let taker = resp["data"]["takerFeeRate"].as_str()
                 .and_then(|s| s.parse().ok())
                 .or_else(|| resp["data"]["takerFeeRate"].as_f64())
-                .unwrap_or(0.0006);
+                .ok_or_else(|| anyhow::anyhow!("missing takerFeeRate in kucoin response"))?;
             Ok(taker)
         }
         "bybit" => {
@@ -231,10 +231,10 @@ async fn fetch_taker_fee(http: &Client, keys: &ExchangeKeys, exchange: &str) -> 
             let taker = resp["result"]["list"].as_array()
                 .and_then(|arr| arr.first())
                 .and_then(|a| a["takerFeeRate"].as_str().and_then(|s| s.parse().ok()))
-                .unwrap_or(0.00055);
+                .ok_or_else(|| anyhow::anyhow!("missing takerFeeRate in bybit response"))?;
             Ok(taker)
         }
-        _ => Ok(0.0005),
+        _ => Err(anyhow::anyhow!("fetch_taker_fee unsupported for this exchange")),
     }
 }
 
@@ -836,12 +836,21 @@ pub struct Trade {
     pub entry_time: i64, pub highest_spread: f64, pub pnl_a: f64, pub pnl_b: f64,
     pub close_reason: Option<String>, pub contracts_a: f64, pub contracts_b: f64,
     pub commission_cost: f64, pub slippage_cost: f64,
+    /// Accumulated real funding cost since entry (updated every live-update cycle from exchange API).
+    /// Positive = we net-paid funding; negative = we net-received funding.
+    pub funding_cost: f64,
 }
 
 pub async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
     let p_id_clone = p_id.to_string();
     db.call(move |conn| {
-        let mut stmt = conn.prepare("SELECT id, pair, exchange_a, exchange_b, direction, volume, entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, pnl_a, pnl_b, close_reason, contracts_a, contracts_b, commission_cost, slippage_cost FROM trades WHERE status='OPEN' AND profile_id=?")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, pair, exchange_a, exchange_b, direction, volume, \
+             entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, \
+             pnl_a, pnl_b, close_reason, contracts_a, contracts_b, commission_cost, slippage_cost, \
+             COALESCE(funding_cost, 0.0) \
+             FROM trades WHERE status='OPEN' AND profile_id=?"
+        )?;
         let trades = stmt.query_map([p_id_clone], |row| Ok(Trade {
             id: row.get(0)?, pair: row.get(1)?, exchange_a: row.get(2)?, exchange_b: row.get(3)?,
             direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?,
@@ -851,6 +860,7 @@ pub async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
             contracts_b: row.get::<_, Option<f64>>(15)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(7)?.max(1e-12)).round()),
             commission_cost: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
             slippage_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
+            funding_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
         }))?.filter_map(|t| t.ok()).collect::<Vec<_>>();
         Ok(trades)
     }).await.unwrap_or_default()
