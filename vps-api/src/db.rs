@@ -112,9 +112,6 @@ pub async fn init_db(db: &Connection) -> Result<()> {
             ("min_listing_age_days",   "30",
              "Minimum number of days since a contract was listed on an exchange to allow trading. New listings often have extreme volatility, poor liquidity, and unreliable funding. Formula: age = now - listing_date. Entry blocked if age < min_listing_age_days × 86400 seconds. 30 = skip contracts less than 30 days old.",
              "entry"),
-            ("min_ioc_tolerance_pct",  "0.5",
-             "Minimum IOC limit price tolerance in %. Only used when entry_order_type=ioc. Sets the worst acceptable fill price relative to the current best price. Formula: limit = best_price × (1 ± max(slippage_percent, min_ioc_tolerance_pct) / 100). 0.5 = the IOC limit is set 0.5% worse than current price. Higher = more likely to fill but more slippage. Ignored when entry_order_type=market.",
-             "entry"),
             ("binance_min_notional",   "5.05",
              "Binance futures minimum order value in USD. Orders below this are rejected by Binance API with 'MIN_NOTIONAL' error. Formula: entry blocked if exchange=binance and actual_vol < binance_min_notional. Set slightly above $5 to account for rounding. 5.05 is the safe minimum.",
              "entry"),
@@ -141,7 +138,7 @@ pub async fn init_db(db: &Connection) -> Result<()> {
 
             // ── Order execution ──
             ("entry_order_type",       "market",
-             "How entry orders are placed. 'market' = Market orders with guaranteed fill on both legs (no asymmetric risk, but possible slippage). 'ioc' = IOC Limit orders with price tolerance from min_ioc_tolerance_pct (slippage-protected, but risk of one leg not filling → emergency close at loss). Recommendation: use 'market' unless slippage is consistently > 0.5%.",
+             "How entry orders are placed. 'market' = Market orders with guaranteed fill on both legs (no asymmetric risk, but possible slippage). 'ioc' = IOC Limit orders with price tolerance from slippage_percent settings (slippage-protected, but risk of one leg not filling → emergency close at loss).",
              "execution"),
             ("fill_verify_retries",    "10",
              "Number of API polling attempts to verify an entry order was filled and get the actual fill price. After placing both legs simultaneously, the engine polls each exchange for fill confirmation. Formula: for attempt in 0..fill_verify_retries { poll; sleep(fill_verify_delay_ms) }. 10 retries × 15ms = 150ms max verification window.",

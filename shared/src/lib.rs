@@ -163,7 +163,6 @@ pub struct TechnicalSettings {
     pub vol_diff_max_pct: f64,
     pub vol_tolerance_pct: f64,
     pub min_listing_age_days: i64,
-    pub min_ioc_tolerance_pct: f64,
     pub binance_min_notional: f64,
     pub margin_check_multiplier: f64,
     pub max_spreads_per_cycle: i64,
@@ -212,7 +211,6 @@ impl Default for TechnicalSettings {
             vol_diff_max_pct: 5.0,
             vol_tolerance_pct: 15.0,
             min_listing_age_days: 30,
-            min_ioc_tolerance_pct: 0.5,
             binance_min_notional: 5.05,
             margin_check_multiplier: 1.5,
             max_spreads_per_cycle: 200,
@@ -261,7 +259,6 @@ impl TechnicalSettings {
                 "vol_diff_max_pct"         => { if let Ok(x) = v.parse() { ts.vol_diff_max_pct = x; } }
                 "vol_tolerance_pct"        => { if let Ok(x) = v.parse() { ts.vol_tolerance_pct = x; } }
                 "min_listing_age_days"     => { if let Ok(x) = v.parse() { ts.min_listing_age_days = x; } }
-                "min_ioc_tolerance_pct"    => { if let Ok(x) = v.parse() { ts.min_ioc_tolerance_pct = x; } }
                 "binance_min_notional"     => { if let Ok(x) = v.parse() { ts.binance_min_notional = x; } }
                 "margin_check_multiplier"  => { if let Ok(x) = v.parse() { ts.margin_check_multiplier = x; } }
                 "max_spreads_per_cycle"    => { if let Ok(x) = v.parse() { ts.max_spreads_per_cycle = x; } }

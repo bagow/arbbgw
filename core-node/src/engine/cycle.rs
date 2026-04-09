@@ -130,7 +130,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let close_verify_retries = ts.close_verify_retries;
 
             let use_ioc = ts.entry_order_type == "ioc";
-            let max_slip_frac = (settings.slippage_percent / 100.0).max(ts.min_ioc_tolerance_pct / 100.0);
+            let max_slip_frac = settings.slippage_percent / 100.0;
             let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
             let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
             let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
@@ -434,12 +434,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         let use_ioc = ts.entry_order_type == "ioc";
         let (mut limit_price_a, mut limit_price_b) = if use_ioc {
-            let user_slip_frac = settings.slippage_percent / 100.0;
-            let ioc_min_frac = ts.min_ioc_tolerance_pct / 100.0;
-            let max_slip_frac = user_slip_frac.max(ioc_min_frac);
-            if max_slip_frac > user_slip_frac {
-                info!("[real] WARN {}: Slippage overridden from {:.2}% to {:.2}% for IOC", row.pair, settings.slippage_percent, ts.min_ioc_tolerance_pct);
-            }
+            let max_slip_frac = settings.slippage_percent / 100.0;
             let lpa = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
             let lpb = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
             
@@ -488,7 +483,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             entry_b = fresh_entry_b;
             // Re-calc limit prices if IOC mode
             if use_ioc {
-                let max_slip_frac = (settings.slippage_percent / 100.0).max(ts.min_ioc_tolerance_pct / 100.0);
+                let max_slip_frac = settings.slippage_percent / 100.0;
                 let raw_lpa = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
                 let raw_lpb = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
                 limit_price_a = (raw_lpa / tick_a).round() * tick_a;
