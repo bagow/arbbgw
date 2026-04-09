@@ -7,7 +7,7 @@ use crate::engine::db::TradeRepository;
 
 use shared::{TradingSettings, TechnicalSettings, SpreadRow};
 use crate::state::{EngineContext, PriceMap};
-use crate::engine::real::{ExchangeKeys, Trade, load_open_trades, now_ms, now_secs, has_sufficient_margin, binance_sign}; // added signatures if needed
+use crate::engine::real::{ExchangeKeys, Trade, load_open_trades, now_ms, now_secs, has_sufficient_margin, binance_sign, mark_balance_low};
 use std::collections::{HashMap, HashSet};
 
 // NOTE: LAST_LIVE_FLUSH is declared as a function-local static inside run_cycle below.
@@ -351,6 +351,18 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let age_b = lmap.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|r| *r).unwrap_or(0);
         if (age_a > 0 && now_s - age_a < min_age_secs) || (age_b > 0 && now_s - age_b < min_age_secs) { info!("[real] SKIP {}: new coin listing", row.pair); continue; }
 
+        // ── BALANCE LOW GUARD (zero-latency) ─────────────────────────────────
+        // background balance monitor marks this flag when an exchange rejects an
+        // order for insufficient margin. Cleared automatically once balance > $1.
+        if e_ctx.balance_low.get(&row.exchange_a).map(|v| *v).unwrap_or(false) {
+            info!("[real] SKIP {}: {} balance_low — waiting for balance recovery", row.pair, row.exchange_a);
+            continue;
+        }
+        if e_ctx.balance_low.get(&row.exchange_b).map(|v| *v).unwrap_or(false) {
+            info!("[real] SKIP {}: {} balance_low — waiting for balance recovery", row.pair, row.exchange_b);
+            continue;
+        }
+
         if !has_sufficient_margin(&row.exchange_a, actual_vol_a, &e_ctx) { info!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_a); continue; }
         if !has_sufficient_margin(&row.exchange_b, actual_vol_b, &e_ctx) { info!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_b); continue; }
         if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional) || (row.exchange_b == "binance" && actual_vol_b < ts.binance_min_notional) { info!("[real] SKIP {}: binance min notional", row.pair); continue; }
@@ -452,7 +464,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             Err(e) => {
                 let es = e.to_string();
                 error!("[real] LEG_A reject {}/{}: {} ({}ms)", exa, pair, es, order_ms);
-                
+                // Detect balance/margin rejections and flag immediately.
+                // background balance fetcher will clear flag once funds recover.
+                let esl = es.to_lowercase();
+                if esl.contains("insufficient") || esl.contains("balance") ||
+                   esl.contains("margin") || esl.contains("exceed") ||
+                   esl.contains("not enough") {
+                    mark_balance_low(&exa, &e_ctx);
+                }
                 (None, 0.0, 0.0)
             }
         };
@@ -461,7 +480,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             Err(e) => {
                 let es = e.to_string();
                 error!("[real] LEG_B reject {}/{}: {} ({}ms)", exb, pair, es, order_ms);
-                
+                let esl = es.to_lowercase();
+                if esl.contains("insufficient") || esl.contains("balance") ||
+                   esl.contains("margin") || esl.contains("exceed") ||
+                   esl.contains("not enough") {
+                    mark_balance_low(&exb, &e_ctx);
+                }
                 (None, 0.0, 0.0)
             }
         };

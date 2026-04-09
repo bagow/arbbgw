@@ -38,6 +38,10 @@ pub struct EngineContext {
     pub exchange_cooldown: Arc<DashMap<String, i64>>,
     pub pair_cooldown: Arc<DashMap<String, i64>>,
     pub funding_rates: Arc<DashMap<String, FundingInfo>>,
+    /// Live flag: true = exchange recently rejected an order due to insufficient balance/margin.
+    /// Set immediately on API rejection. Cleared by start_balance_fetcher when balance recovers.
+    /// Prevents entering trades on an exchange that has no margin, avoiding asymmetric fills.
+    pub balance_low: Arc<DashMap<String, bool>>,
 }
 
 impl Default for EngineContext {
@@ -52,6 +56,7 @@ impl Default for EngineContext {
             exchange_cooldown: Arc::new(DashMap::new()),
             pair_cooldown: Arc::new(DashMap::new()),
             funding_rates: Arc::new(DashMap::new()),
+            balance_low: Arc::new(DashMap::new()),
         }
     }
 }

@@ -84,29 +84,74 @@ pub fn get_exchange_fee(exchange: &str, default_fee: f64, e_ctx: &crate::state::
     e_ctx.fee_rates.get(exchange).map(|v| *v).unwrap_or(default_fee)
 }
 
-/// Spawn background task that refreshes balances and fee rates every 30s.
+/// Immediately mark an exchange as balance-low.
+/// Called from cycle.rs when an order is rejected with an insufficient-margin API error.
+/// The start_balance_fetcher loop will clear this flag once it sees balance has recovered.
+pub fn mark_balance_low(exchange: &str, e_ctx: &crate::state::EngineContext) {
+    if !e_ctx.balance_low.get(exchange).map(|v| *v).unwrap_or(false) {
+        warn!("[balance] {} marked balance_low — new trades on this exchange are blocked until balance recovers", exchange);
+        e_ctx.balance_low.insert(exchange.to_string(), true);
+    }
+}
+
+/// Spawn background task that refreshes balances and fee rates.
+/// Adaptive intervals:
+///   - Normal mode : every 60s — full refresh (balance + fee rates) for all exchanges
+///   - Recovery mode: every 2s  — balance ONLY for the exchange(s) with balance_low=true
+///     Fee rates are NOT re-fetched in recovery mode to avoid rate limits.
 pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<crate::state::EngineContext>) {
     tokio::spawn(async move {
+        let fast_interval_ms  = 2_000u64;  // Poll interval when any balance_low is active
+        let normal_interval_s = 60u64;     // Full refresh cadence (balance + fees)
+        let all_exchanges = ["binance", "gate", "kucoin", "bybit"];
+
         loop {
-            let exchanges = ["binance", "gate", "kucoin", "bybit"];
-            for ex in &exchanges {
-                if !keys.supports(ex) { continue; }
-                match fetch_available_balance(&http, &keys, ex).await {
-                    Ok(bal) => {
-                        e_ctx.balances.insert(ex.to_string(), bal);
-                        info!("[balance] {} = ${:.2}", ex, bal);
+            // Determine which exchanges have balance_low set
+            let low_exchanges: Vec<&str> = all_exchanges.iter()
+                .copied()
+                .filter(|ex| keys.supports(ex) && e_ctx.balance_low.get(*ex).map(|v| *v).unwrap_or(false))
+                .collect();
+
+            if !low_exchanges.is_empty() {
+                // ── FAST RECOVERY MODE ─────────────────────────────────────────
+                // Only check balance on affected exchanges (no fee refresh → no rate limit)
+                for ex in &low_exchanges {
+                    match fetch_available_balance(&http, &keys, ex).await {
+                        Ok(bal) => {
+                            e_ctx.balances.insert(ex.to_string(), bal);
+                            if bal > 1.0 {
+                                info!("[balance] {} recovered (${:.2}) — clearing balance_low flag, trades unblocked", ex, bal);
+                                e_ctx.balance_low.insert(ex.to_string(), false);
+                            } else {
+                                warn!("[balance] {} still balance_low (${:.2}) — retry in {}ms", ex, bal, fast_interval_ms);
+                            }
+                        }
+                        Err(e) => error!("[balance] {} fetch error (recovery mode): {}", ex, e),
                     }
-                    Err(e) => error!("[balance] {} fetch error: {}", ex, e),
                 }
-                match fetch_taker_fee(&http, &keys, ex).await {
-                    Ok(fee) => {
-                        e_ctx.fee_rates.insert(ex.to_string(), fee);
-                        info!("[fee] {} taker = {:.4}%", ex, fee * 100.0);
+                tokio::time::sleep(Duration::from_millis(fast_interval_ms)).await;
+            } else {
+                // ── NORMAL MODE ────────────────────────────────────────────────
+                // Full refresh: balance + fee rates for all supported exchanges
+                for ex in &all_exchanges {
+                    if !keys.supports(ex) { continue; }
+                    match fetch_available_balance(&http, &keys, ex).await {
+                        Ok(bal) => {
+                            e_ctx.balances.insert(ex.to_string(), bal);
+                            info!("[balance] {} = ${:.2}", ex, bal);
+                        }
+                        Err(e) => error!("[balance] {} fetch error: {}", ex, e),
                     }
-                    Err(e) => error!("[fee] {} fetch error: {}", ex, e),
+                    match fetch_taker_fee(&http, &keys, ex).await {
+                        Ok(fee) => {
+                            e_ctx.fee_rates.insert(ex.to_string(), fee);
+                            info!("[fee] {} taker = {:.4}%", ex, fee * 100.0);
+                        }
+                        Err(e) => error!("[fee] {} fetch error: {}", ex, e),
+                    }
                 }
+                tokio::time::sleep(Duration::from_secs(normal_interval_s)).await;
             }
-            tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
 }
