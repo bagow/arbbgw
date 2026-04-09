@@ -1,4 +1,4 @@
-use std::sync::Arc;
+
 use reqwest::Client;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::engine::real::{ExchangeKeys, now_ms, round_to_tick, gate_sign};
+use crate::engine::real::{ExchangeKeys, gate_sign};
 use super::traits::ExchangeConnector;
 
 pub struct GateConnector;

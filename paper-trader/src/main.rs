@@ -793,14 +793,14 @@ async fn run_trading_engine(state: &AppState, payload: &SpreadPayload) {
     }
 
     let http = state.http.clone();
-    let worker_url = state.worker_url.clone();
-    let token = state.collector_token.clone();
+    let _worker_url = state.worker_url.clone();
+    let _token = state.collector_token.clone();
     
-    let mut should_push = false;
+    let mut _should_push = false;
     {
         let mut last_push = state.last_push_time.lock().await;
         if last_push.elapsed() > Duration::from_secs(15) || true {
-            should_push = true;
+            _should_push = true;
             *last_push = std::time::Instant::now();
         }
     }
@@ -988,7 +988,7 @@ async fn main() -> Result<()> {
         collector_token: cfg.collector_token,
         internal_token: cfg.internal_token,
         engine_lock: Arc::new(Mutex::new(())),
-        settings_cache: Arc::new(Mutex::new((None, std::time::Instant::now()))),
+        _settings_cache: Arc::new(Mutex::new((None, std::time::Instant::now()))),
         last_push_time: Arc::new(Mutex::new(std::time::Instant::now())),
     };
 
