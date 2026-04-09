@@ -124,13 +124,28 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let close_verify_delay = ts.close_verify_delay_ms as u64;
             let close_verify_retries = ts.close_verify_retries;
 
+            let use_ioc = ts.entry_order_type == "ioc";
+            let max_slip_frac = (settings.slippage_percent / 100.0).max(ts.min_ioc_tolerance_pct / 100.0);
+            let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
+            let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
+            let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
+            let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
+
+            let (limit_close_a, limit_close_b) = if use_ioc {
+                let lpa = if is_a_higher { exit_price_a * (1.0 + max_slip_frac) } else { exit_price_a * (1.0 - max_slip_frac) };
+                let lpb = if !is_a_higher { exit_price_b * (1.0 + max_slip_frac) } else { exit_price_b * (1.0 - max_slip_frac) };
+                ((lpa / tick_a).round() * tick_a, (lpb / tick_b).round() * tick_b)
+            } else {
+                (0.0, 0.0)
+            };
+
             tokio::spawn(async move {
                 let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
                 // Place close orders in parallel
                 let (ra, rb) = tokio::join!(
-                    conn_a.close_order(&h, &k, &pair, is_a_higher, c_a, dry_run, lev as f64),
-                    conn_b.close_order(&h, &k, &pair, !is_a_higher, c_b, dry_run, lev as f64)
+                    conn_a.close_order(&h, &k, &pair, is_a_higher, c_a, dry_run, lev as f64, limit_close_a, use_ioc),
+                    conn_b.close_order(&h, &k, &pair, !is_a_higher, c_b, dry_run, lev as f64, limit_close_b, use_ioc)
                 );
                 let oid_close_a = ra.ok();
                 let oid_close_b = rb.ok();
@@ -146,10 +161,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 for _ in 0..close_verify_retries {
                     if !got_a {
                         if let Some(ref oid) = oid_close_a {
-                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid).await {
+                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
                                 if p > 0.0 {
-                                    if (p - entry_a).abs() / entry_a < exit_sanity { real_exit_a = p; }
-                                    else { tracing::warn!("Exit price A sanity fail: entry={} exit={}", entry_a, p); }
+                                    real_exit_a = p;
                                     exit_fee += f.abs(); got_a = true;
                                 }
                             }
@@ -157,10 +171,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     }
                     if !got_b {
                         if let Some(ref oid) = oid_close_b {
-                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid).await {
+                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid, mult_b).await {
                                 if p > 0.0 {
-                                    if (p - entry_b).abs() / entry_b < exit_sanity { real_exit_b = p; }
-                                    else { tracing::warn!("Exit price B sanity fail: entry={} exit={}", entry_b, p); }
+                                    real_exit_b = p;
                                     exit_fee += f.abs(); got_b = true;
                                 }
                             }
@@ -451,8 +464,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             if !use_ioc { break; }
             if attempt > 0 { tokio::time::sleep(Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
             let (fa, fb) = tokio::join!(
-                async { if !got_a { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str()).await { if p > 0.0 { return Some((p, f.abs())); } } } } None },
-                async { if !got_b { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str()).await { if p > 0.0 { return Some((p, f.abs())); } } } } None }
+                async { if !got_a { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { if p > 0.0 { return Some((p, f.abs())); } } } } None },
+                async { if !got_b { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { if p > 0.0 { return Some((p, f.abs())); } } } } None }
             );
             if let Some((p, f)) = fa { fill_a = p; fee_a_val = f; got_a = true; }
             if let Some((p, f)) = fb { fill_b = p; fee_b_val = f; got_b = true; }
@@ -530,15 +543,16 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     let mut ga = inline_fill_a > 0.0; let mut gb = inline_fill_b > 0.0;
                     if ga { real_a = inline_fill_a; fee_a = inline_fee_a; }
                     if gb { real_b = inline_fill_b; fee_b = inline_fee_b; }
+                    let ex_a2_c = ex_a2.clone(); let pair2_a = pair2.clone(); let pair2_b = pair2.clone();
                     for _ in 0..verify_retries {
                         if ga && gb { break; }
                         if !ga && !oid_a2.is_empty() {
-                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&ex_a2).unwrap().fetch_order(&h2, &k2, &pair2, oid_a2.as_str()).await {
+                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&ex_a2).unwrap().fetch_order(&h2, &k2, &pair2_a, oid_a2.as_str(), mult_a).await {
                                 if p > 0.0 { real_a = p; fee_a = f.abs(); ga = true; }
                             }
                         }
                         if !gb && !oid_b2.is_empty() {
-                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&ex_b2).unwrap().fetch_order(&h2, &k2, &pair2, oid_b2.as_str()).await {
+                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&ex_b2).unwrap().fetch_order(&h2, &k2, &pair2_b, oid_b2.as_str(), mult_b).await {
                                 if p > 0.0 { real_b = p; fee_b = f.abs(); gb = true; }
                             }
                         }
@@ -572,16 +586,17 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             tokio::spawn(async move {
                 let mut close_oid = None;
                 for attempt in 1u32..=emergency_retries as u32 {
-                    match crate::engine::exchanges::get_connector(&fe).unwrap().close_order(&hc, &kc, &fp, fs, fc, false, lev as f64).await {
+                    match crate::engine::exchanges::get_connector(&fe).unwrap().close_order(&hc, &kc, &fp, fs, fc, false, lev as f64, 0.0, false).await {
                         Ok(id) => { error!("🛡️ Emergency close ok {}/{}: {}", fe, fp, id); close_oid = Some(id); break; }
                         Err(err) => { tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await; error!("Emergency close {}/{}: {}", attempt, emergency_retries, err); }
                     }
                 }
                 let mut close_fill = fp_price;
                 let mut total_fee = ff;
+                let m = e_ctx.multipliers.get(&format!("{}:{}", fe, fp)).map(|v| *v).unwrap_or(1.0);
                 if let Some(ref coid) = close_oid {
                     for _ in 0..5 {
-                        if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&fe).unwrap().fetch_order(&hc, &kc, &fp, coid.as_str()).await {
+                        if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&fe).unwrap().fetch_order(&hc, &kc, &fp, coid.as_str(), m).await {
                             if p > 0.0 { close_fill = p; total_fee += f.abs(); break; }
                         }
                         tokio::time::sleep(Duration::from_millis(15)).await;

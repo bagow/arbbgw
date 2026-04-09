@@ -83,29 +83,48 @@ impl ExchangeConnector for KucoinConnector {
 
         let order_id = v["data"]["orderId"].as_str().map(|s| s.to_string());
         if order_id.is_some() {
-            Ok((order_id, price))
+            Ok((order_id, 0.0))
         } else {
             Err("KuCoin failed to return orderId".to_string())
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool) -> Result<String, String> {
         let sym = format!("{}M", pair);
         let ts = now_ms().to_string(); 
         let path = "/api/v1/orders";
         let side = if is_buy { "buy" } else { "sell" };
 
         let lev_str = "10";
-        let body_json = json!({
-            "clientOid": Uuid::new_v4().to_string(),
-            "symbol": sym,
-            "side": side,
-            "type": "market",
-            "size": contracts.round() as i64,
-            "leverage": lev_str,
-            "marginMode": "CROSS",
-            "reduceOnly": true
-        });
+        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        if price_str.ends_with('.') { price_str.pop(); }
+        if price_str.is_empty() { price_str = "0".to_string(); }
+
+        let body_json = if use_ioc && price > 0.0 {
+            json!({
+                "clientOid": Uuid::new_v4().to_string(),
+                "symbol": sym,
+                "side": side,
+                "type": "limit",
+                "timeInForce": "IOC",
+                "price": price_str,
+                "size": contracts.round() as i64,
+                "leverage": lev_str,
+                "marginMode": "CROSS",
+                "reduceOnly": true
+            })
+        } else {
+            json!({
+                "clientOid": Uuid::new_v4().to_string(),
+                "symbol": sym,
+                "side": side,
+                "type": "market",
+                "size": contracts.round() as i64,
+                "leverage": lev_str,
+                "marginMode": "CROSS",
+                "reduceOnly": true
+            })
+        };
 
         let body_str = body_json.to_string();
 
@@ -134,7 +153,7 @@ impl ExchangeConnector for KucoinConnector {
             .ok_or_else(|| "KuCoin failed to return orderId on close".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str) -> Result<(f64, f64), String> {
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64), String> {
         let ts = now_ms().to_string();
         let path = format!("/api/v1/orders/{}", order_id);
         let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", &path, "");
@@ -154,8 +173,8 @@ impl ExchangeConnector for KucoinConnector {
         let val  = v["data"]["dealValue"].as_f64().or_else(|| v["data"]["filledValue"].as_f64()).or_else(|| v["data"]["dealValue"].as_str().and_then(|s| s.parse().ok())).or_else(|| v["data"]["filledValue"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
         let fee  = v["data"]["fee"].as_f64().or_else(|| v["data"]["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
         
-        // Note: KuCoin multiplier is usually fetched dynamically, assuming 1.0 here for simple port
-        let mult = 1.0; 
+        // Note: KuCoin multiplier is dynamically passed to correctly compute price
+        let mult = if multiplier > 0.0 { multiplier } else { 1.0 }; 
         
         let price = if size > 0.0 && mult > 0.0 { val / (size * mult) } else { 0.0 };
         Ok((price, fee))

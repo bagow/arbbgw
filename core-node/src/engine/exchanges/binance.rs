@@ -59,13 +59,13 @@ impl ExchangeConnector for BinanceConnector {
 
         let order_id = v["orderId"].as_i64().map(|id| id.to_string());
         if order_id.is_some() {
-            Ok((order_id, price))
+            Ok((order_id, 0.0))
         } else {
             Err("Binance failed to return orderId".to_string())
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool) -> Result<String, String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run { return Ok(format!("dry_close_{}_{}", self.name(), now_ms())); }
 
@@ -74,7 +74,15 @@ impl ExchangeConnector for BinanceConnector {
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
         
-        let qs = format!("symbol={}&side={}&type=MARKET&quantity={}&reduceOnly=true&timestamp={}", pair, side, qty_str, ts);
+        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        if price_str.ends_with('.') { price_str.pop(); }
+        if price_str.is_empty() { price_str = "0".to_string(); }
+        
+        let type_str = if use_ioc && price > 0.0 { "LIMIT" } else { "MARKET" };
+        let tif_str = if use_ioc && price > 0.0 { "&timeInForce=IOC" } else { "" };
+        let price_param = if use_ioc && price > 0.0 { format!("&price={}", price_str) } else { "".to_string() };
+
+        let qs = format!("symbol={}&side={}&type={}&quantity={}&reduceOnly=true{}{}&timestamp={}", pair, side, type_str, qty_str, tif_str, price_param, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
         let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
         
@@ -93,7 +101,7 @@ impl ExchangeConnector for BinanceConnector {
             .ok_or_else(|| "Binance failed to return orderId on close".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str) -> Result<(f64, f64), String> {
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64), String> {
         if order_id.starts_with("dry_") { return Ok((0.0, 0.0)); }
         let ts = now_ms();
         let qs = format!("symbol={}&orderId={}&timestamp={}", pair, order_id, ts);

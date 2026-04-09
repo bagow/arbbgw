@@ -76,13 +76,13 @@ impl ExchangeConnector for BybitConnector {
 
         let order_id = v["result"]["orderId"].as_str().map(|s| s.to_string());
         if order_id.is_some() {
-            Ok((order_id, price)) // Note: limit price returned, actual fill price requires fetch
+            Ok((order_id, 0.0)) // Note: limit price returned, actual fill price requires fetch
         } else {
             Err("Bybit failed to return orderId".to_string())
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool) -> Result<String, String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let side_str = if is_buy { "Buy" } else { "Sell" };
@@ -91,14 +91,31 @@ impl ExchangeConnector for BybitConnector {
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
 
-        let body = json!({
-            "category": "linear",
-            "symbol": pair,
-            "side": side_str,
-            "orderType": "Market",
-            "qty": qty_str,
-            "reduceOnly": true
-        });
+        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        if price_str.ends_with('.') { price_str.pop(); }
+        if price_str.is_empty() { price_str = "0".to_string(); }
+
+        let body = if use_ioc && price > 0.0 {
+            json!({
+                "category": "linear",
+                "symbol": pair,
+                "side": side_str,
+                "orderType": "Limit",
+                "qty": qty_str,
+                "price": price_str,
+                "timeInForce": "IOC",
+                "reduceOnly": true
+            })
+        } else {
+            json!({
+                "category": "linear",
+                "symbol": pair,
+                "side": side_str,
+                "orderType": "Market",
+                "qty": qty_str,
+                "reduceOnly": true
+            })
+        };
         
         let body_str = body.to_string();
 
@@ -127,7 +144,7 @@ impl ExchangeConnector for BybitConnector {
             .ok_or_else(|| "Bybit return no orderId on close".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str) -> Result<(f64, f64), String> {
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64), String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let qs = format!("category=linear&orderId={}", order_id);

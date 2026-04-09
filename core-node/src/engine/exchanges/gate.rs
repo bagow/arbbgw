@@ -73,16 +73,22 @@ impl ExchangeConnector for GateConnector {
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool) -> Result<String, String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if is_buy { contracts.round() as i64 } else { -(contracts.round() as i64) };
         let path = "/api/v4/futures/usdt/orders";
         
+        let mut raw_price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        if raw_price_str.ends_with('.') { raw_price_str.pop(); }
+        if raw_price_str.is_empty() { raw_price_str = "0".to_string(); }
+        let price_str = if use_ioc && price > 0.0 { raw_price_str } else { "0".to_string() };
+        let tif = if use_ioc && price > 0.0 { "ioc" } else { "gtc" };
+        
         let body = json!({
             "contract": contract,
             "size": size,
-            "price": "0",
-            "tif": "gtc",
+            "price": price_str,
+            "tif": tif,
             "reduce_only": true,
             "close": false,
             "text": "t-corenode-close"
@@ -109,7 +115,7 @@ impl ExchangeConnector for GateConnector {
             .ok_or_else(|| "Gate failed to return order ID on close".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str) -> Result<(f64, f64), String> {
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64), String> {
         let path = format!("/api/v4/futures/usdt/orders/{}", order_id);
         let resp = http.get(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, ""))
