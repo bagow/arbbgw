@@ -156,15 +156,19 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let oid_close_a = ra.ok();
                 let oid_close_b = rb.ok();
 
-                // Mark CLOSED immediately with current prices and estimated PnL
-                let repo_close = TradeRepository::new(db_c.clone());
-                repo_close.mark_trade_closed(id, exit_price_a, exit_price_b, exit_spread, exec_net_pnl, exec_gross_pnl, exec_pnl_a, exec_pnl_b, &r, fund_cost).await;
-
-                // Fast-poll real exit prices and recalculate PnL
-                let mut real_exit_a = exit_price_a; let mut real_exit_b = exit_price_b;
-                let mut exit_fee = 0.0; let mut got_a = false; let mut got_b = false;
+                // ── VERIFY FILLS BEFORE MARKING CLOSED ───────────────────────
+                // For market orders: fill is guaranteed, skip slow polling.
+                // For IOC: must confirm fill — if not filled, revert trade to OPEN.
+                let mut real_exit_a = exit_price_a;
+                let mut real_exit_b = exit_price_b;
+                let mut exit_fee = 0.0;
+                // If no order ID returned (leg skipped/failed), treat that leg as "confirmed"
+                // only for market orders where we know it either filled or never executed.
+                let mut got_a = oid_close_a.is_none() || !use_ioc;
+                let mut got_b = oid_close_b.is_none() || !use_ioc;
 
                 for _ in 0..close_verify_retries {
+                    if got_a && got_b { break; }
                     if !got_a {
                         if let Some(ref oid) = oid_close_a {
                             if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
@@ -175,7 +179,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                                     exit_fee += actual_f; got_a = true;
                                 }
                             }
-                        } else { got_a = true; }
+                        }
                     }
                     if !got_b {
                         if let Some(ref oid) = oid_close_b {
@@ -187,18 +191,56 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                                     exit_fee += actual_f; got_b = true;
                                 }
                             }
-                        } else { got_b = true; }
+                        }
                     }
                     if got_a && got_b { break; }
                     tokio::time::sleep(tokio::time::Duration::from_millis(close_verify_delay)).await;
                 }
 
-                // Recalculate PnL with real exit prices
+                // For market orders without order ID, use WebSocket exit price as fill
+                if !use_ioc {
+                    if oid_close_a.is_some() && real_exit_a <= 0.0 { real_exit_a = exit_price_a; }
+                    if oid_close_b.is_some() && real_exit_b <= 0.0 { real_exit_b = exit_price_b; }
+                    got_a = true; got_b = true;
+                }
+
+                let repo_close = TradeRepository::new(db_c.clone());
+
+                if !got_a || !got_b {
+                    // ❌ Close fill NOT confirmed — do NOT mark as closed.
+                    // Revert close_reason so the next cycle can re-attempt.
+                    error!("[real] ⚠️ CLOSE UNCONFIRMED id={} {} got_a={} got_b={} — keeping OPEN, will retry",
+                        id, pair, got_a, got_b);
+                    repo_close.revert_to_open(id).await;
+
+                    // Fallback: fire a market close to ensure position is actually closed
+                    error!("[real] 🔄 FALLBACK MARKET CLOSE id={} {}", id, pair);
+                    let conn_a2 = crate::engine::exchanges::get_connector(&exa).unwrap();
+                    let conn_b2 = crate::engine::exchanges::get_connector(&exb).unwrap();
+                    let (fa, fb) = tokio::join!(
+                        conn_a2.close_order(&h, &k, &pair, is_a_higher, c_a, false, lev as f64, 0.0, false),
+                        conn_b2.close_order(&h, &k, &pair, !is_a_higher, c_b, false, lev as f64, 0.0, false)
+                    );
+                    if fa.is_ok() && fb.is_ok() {
+                        // Market close fired successfully — mark closed with estimated PnL
+                        // (no fill verification here, market orders fill immediately)
+                        error!("[real] ✅ FALLBACK MARKET CLOSE fired id={} {}", id, pair);
+                        repo_close.mark_trade_closed_confirmed(
+                            id, exit_price_a, exit_price_b, exit_spread,
+                            exec_gross_pnl, exec_pnl_a, exec_pnl_b,
+                            &format!("{}_FALLBACK", r), fund_cost, exit_fee, 0.0
+                        ).await;
+                    } else {
+                        error!("[real] 🚨 FALLBACK MARKET CLOSE ALSO FAILED id={} {} — MANUAL INTERVENTION REQUIRED", id, pair);
+                    }
+                    return;
+                }
+
+                // ✅ Fill confirmed — compute real PnL and mark CLOSED
                 let real_pna = if is_a_higher { (entry_a - real_exit_a) * (vol / entry_a) } else { (real_exit_a - entry_a) * (vol / entry_a) };
                 let real_pnb = if is_a_higher { (real_exit_b - entry_b) * (vol / entry_b) } else { (entry_b - real_exit_b) * (vol / entry_b) };
-                let real_gp = real_pna + real_pnb;
-                
-                // Exit slippage cost — clamped to >= 0 (price improvement is not cost)
+                let real_gp  = real_pna + real_pnb;
+
                 let slip_cost_exit_a = if real_exit_a > 0.0 {
                     if is_a_higher { ((real_exit_a - exit_price_a) * (vol / entry_a)).max(0.0) }
                     else           { ((exit_price_a - real_exit_a) * (vol / entry_a)).max(0.0) }
@@ -211,9 +253,13 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
                 info!("[real] PnL raw id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", id, real_pna, real_pnb, real_gp, exit_fee, exit_slip);
 
-                let repo_close = TradeRepository::new(db_c.clone());
-                repo_close.update_trade_real_exit(id, real_exit_a, real_exit_b, real_pna, real_pnb, real_gp, exit_fee, exit_slip).await;
+                repo_close.mark_trade_closed_confirmed(
+                    id, real_exit_a, real_exit_b, exit_spread,
+                    real_gp, real_pna, real_pnb,
+                    &r, fund_cost, exit_fee, exit_slip
+                ).await;
             });
+
         } else {
             // Fetch real funding rates from exchange APIs (cached 5 min)
             let (fr_a, next_a) = crate::engine::exchanges::get_connector(&trade.exchange_a).unwrap().get_funding_rate(&http, &trade.pair).await.unwrap_or((0.0, 0));

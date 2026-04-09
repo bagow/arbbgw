@@ -165,4 +165,56 @@ impl TradeRepository {
             Ok(())
         }).await;
     }
+
+    /// Revert a trade back to OPEN state when a close order fails to fill.
+    /// Clears close_reason so the engine can re-trigger on the next cycle.
+    pub async fn revert_to_open(&self, id: i64) {
+        let _ = self.db.call(move |conn| {
+            conn.execute(
+                "UPDATE trades SET close_reason=NULL WHERE id=? AND status='OPEN'",
+                params![id]
+            )?;
+            Ok(())
+        }).await;
+    }
+
+    /// Atomically mark trade as CLOSED with real fill prices.
+    /// Called ONLY after fill verification succeeds — never speculatively.
+    pub async fn mark_trade_closed_confirmed(
+        &self,
+        id: i64,
+        exit_price_a: f64,
+        exit_price_b: f64,
+        exit_spread: f64,
+        gross_pnl: f64,
+        pnl_a: f64,
+        pnl_b: f64,
+        reason: &str,
+        fund_cost: f64,
+        exit_fee: f64,
+        exit_slip: f64,
+    ) {
+        let r = reason.to_string();
+        let current_ms = now_ms();
+        let _ = self.db.call(move |conn| {
+            conn.execute(
+                "UPDATE trades SET \
+                 status='CLOSED', exit_price_a=?, exit_price_b=?, exit_spread=?, exit_time=?, \
+                 pnl_a=?, pnl_b=?, gross_pnl=?, curr_gross_pnl=?, close_reason=?, \
+                 funding_cost=?, commission_cost=commission_cost+?, slippage_cost=slippage_cost+?, \
+                 pnl=(gross_pnl - funding_cost - (commission_cost+?) - ?) \
+                 WHERE id=?",
+                params![
+                    exit_price_a, exit_price_b, exit_spread, current_ms,
+                    pnl_a, pnl_b, gross_pnl, gross_pnl, r,
+                    fund_cost, exit_fee, exit_slip, exit_fee, exit_slip,
+                    id
+                ]
+            )?;
+            Ok(())
+        }).await;
+        info!("[db] CLOSED CONFIRMED id={} reason={} gross={:.4} fee={:.4} slip={:.4} fund={:.4}",
+            id, r, gross_pnl, exit_fee, exit_slip, fund_cost);
+    }
 }
+
