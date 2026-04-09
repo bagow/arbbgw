@@ -174,7 +174,7 @@ struct AppState {
     internal_token: String,
     engine_lock: Arc<Mutex<()>>,
     /// Cached settings to reduce Worker load (Array of profiles)
-    settings_cache: Arc<Mutex<(Option<Vec<TradingSettings>>, std::time::Instant)>>,
+    _settings_cache: Arc<Mutex<(Option<Vec<TradingSettings>>, std::time::Instant)>>,
     /// Throttling for active trades push
     last_push_time: Arc<Mutex<std::time::Instant>>,
 }

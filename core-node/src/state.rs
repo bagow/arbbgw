@@ -13,7 +13,6 @@ use tokio::sync::Notify;
 // Re-export canonical types from shared crate —
 // single source of truth, no local duplicates.
 pub use shared::TickerData;
-pub use shared::SpreadRow;
 
 /// exchange_id → symbol → TickerData (e.g. "gate" → "BTCUSDT" → {...})
 pub type PriceMap = Arc<DashMap<String, HashMap<String, TickerData>>>;

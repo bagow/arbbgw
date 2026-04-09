@@ -9,7 +9,7 @@ use anyhow::Result;
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
-use rusqlite::params;
+
 use serde_json::{json, Value};
 use sha2::Sha256;
 use tokio_rusqlite::Connection;
@@ -18,7 +18,7 @@ use uuid::Uuid;
 use dashmap::DashMap;
 use std::sync::OnceLock;
 
-use shared::{TradingSettings, TechnicalSettings, SpreadRow};
+
 
 type HmacSha256 = Hmac<Sha256>;
 

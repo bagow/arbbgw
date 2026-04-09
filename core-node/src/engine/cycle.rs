@@ -80,8 +80,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             }
         }
 
-        let contracts_a = trade.contracts_a as f64;
-        let contracts_b = trade.contracts_b as f64;
+        let _contracts_a = trade.contracts_a as f64;
+        let _contracts_b = trade.contracts_b as f64;
 
         // PnL for DISPLAY (using mark/mid prices — matches exchange PnL)
         let live_pnl_a = if is_a_higher { (trade.entry_price_a - c_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) }
@@ -120,7 +120,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let h = http.clone(); let k = Arc::clone(&keys); let db_c = db.clone();
             let r = reason.to_string();
             let lev = settings.leverage;
-            let exit_sanity = ts.exit_sanity_pct;
+            let _exit_sanity = ts.exit_sanity_pct;
             let close_verify_delay = ts.close_verify_delay_ms as u64;
             let close_verify_retries = ts.close_verify_retries;
 
@@ -139,6 +139,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 (0.0, 0.0)
             };
 
+            let e_ctx_c = Arc::clone(&e_ctx);
             tokio::spawn(async move {
                 let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
@@ -164,7 +165,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                             if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
                                 if p > 0.0 {
                                     real_exit_a = p;
-                                    let rate_a = e_ctx.fee_rates.get(&exa).map(|v| *v).unwrap_or(0.0005);
+                                    let rate_a = e_ctx_c.fee_rates.get(&exa).map(|v| *v).unwrap_or(0.0005);
                                     let actual_f = if f > 1e-9 { f.abs() } else { p * (vol / entry_a) * rate_a };
                                     exit_fee += actual_f; got_a = true;
                                 }
@@ -176,7 +177,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                             if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid, mult_b).await {
                                 if p > 0.0 {
                                     real_exit_b = p;
-                                    let rate_b = e_ctx.fee_rates.get(&exb).map(|v| *v).unwrap_or(0.0005);
+                                    let rate_b = e_ctx_c.fee_rates.get(&exb).map(|v| *v).unwrap_or(0.0005);
                                     let actual_f = if f > 1e-9 { f.abs() } else { p * (vol / entry_b) * rate_b };
                                     exit_fee += actual_f; got_b = true;
                                 }
@@ -584,6 +585,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let lev = settings.leverage;
             let emergency_retries = ts.emergency_close_retries;
 
+            let e_ctx_em = Arc::clone(&e_ctx);
             tokio::spawn(async move {
                 let mut close_oid = None;
                 for attempt in 1u32..=emergency_retries as u32 {
@@ -594,8 +596,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 }
                 let mut close_fill = fp_price;
                 let mut total_fee = ff;
-                let m = e_ctx.multipliers.get(&format!("{}:{}", fe, fp)).map(|v| *v).unwrap_or(1.0);
-                let rate = e_ctx.fee_rates.get(&fe).map(|v| *v).unwrap_or(0.0005);
+                let m = e_ctx_em.multipliers.get(&format!("{}:{}", fe, fp)).map(|v| *v).unwrap_or(1.0);
+                let rate = e_ctx_em.fee_rates.get(&fe).map(|v| *v).unwrap_or(0.0005);
                 let q = if fc > 0.0 { fc } else { fv / fp_price };
                 
                 if let Some(ref coid) = close_oid {
