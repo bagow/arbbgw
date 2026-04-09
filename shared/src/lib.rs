@@ -150,14 +150,10 @@ pub struct TechnicalSettings {
     pub spread_max: f64,
     pub stale_secs: u64,
     pub intra_spread_limit: f64,
-    pub max_funding_diff: f64,
     pub ema_tau_secs: f64,
     pub blacklist: String,
 
     // ── Entry filters (real.rs) ──
-    pub safety_margin: f64,
-    pub deviation_safety: f64,
-    pub max_price_ratio: f64,
     pub intra_spread_max_pct: f64,
     pub depth_multiplier: f64,
     pub vol_diff_max_pct: f64,
@@ -199,13 +195,8 @@ impl Default for TechnicalSettings {
             spread_max: 50.0,
             stale_secs: 30,
             intra_spread_limit: 1.02,
-            max_funding_diff: 0.005,
             ema_tau_secs: 86400.0,
             blacklist: "USOILUSDT,XMRUSDT,TRUMPUSDT,LUNAUSDT,BTTUSDT,BTCSTUSDT".to_string(),
-
-            safety_margin: 1.2,
-            deviation_safety: 1.0,
-            max_price_ratio: 1.10,
             intra_spread_max_pct: 1.0,
             depth_multiplier: 2.0,
             vol_diff_max_pct: 5.0,
@@ -248,12 +239,8 @@ impl TechnicalSettings {
                 "spread_max"               => { if let Ok(x) = v.parse() { ts.spread_max = x; } }
                 "stale_secs"               => { if let Ok(x) = v.parse() { ts.stale_secs = x; } }
                 "intra_spread_limit"       => { if let Ok(x) = v.parse() { ts.intra_spread_limit = x; } }
-                "max_funding_diff"         => { if let Ok(x) = v.parse() { ts.max_funding_diff = x; } }
                 "ema_tau_secs"             => { if let Ok(x) = v.parse() { ts.ema_tau_secs = x; } }
                 "blacklist"                => { ts.blacklist = v.clone(); }
-                "safety_margin"            => { if let Ok(x) = v.parse() { ts.safety_margin = x; } }
-                "deviation_safety"         => { if let Ok(x) = v.parse() { ts.deviation_safety = x; } }
-                "max_price_ratio"          => { if let Ok(x) = v.parse() { ts.max_price_ratio = x; } }
                 "intra_spread_max_pct"     => { if let Ok(x) = v.parse() { ts.intra_spread_max_pct = x; } }
                 "depth_multiplier"         => { if let Ok(x) = v.parse() { ts.depth_multiplier = x; } }
                 "vol_diff_max_pct"         => { if let Ok(x) = v.parse() { ts.vol_diff_max_pct = x; } }

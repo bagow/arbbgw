@@ -369,8 +369,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         let mut entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
         let mut entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
 
-        let price_ratio = if entry_a > entry_b { entry_a / entry_b } else { entry_b / entry_a };
-        if price_ratio > ts.max_price_ratio { info!("[real] SKIP {}: price_ratio {:.3} > max", row.pair, price_ratio); continue; }
+        // Removed max_price_ratio check per user request
 
         // ── LIQUIDITY DEPTH FILTER ────────────────────────────────────────────
         let data_a = prices.get(&row.exchange_a).and_then(|m| m.get(&row.pair).cloned());
