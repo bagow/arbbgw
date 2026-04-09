@@ -27,6 +27,10 @@ impl ExchangeConnector for KucoinConnector {
         
         let lev_str = "10"; // Default static, KuCoin requires leverage in order payload
 
+        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        if price_str.ends_with('.') { price_str.pop(); }
+        if price_str.is_empty() { price_str = "0".to_string(); }
+
         let mut body_json = if use_ioc && price > 0.0 {
             json!({
                 "clientOid": Uuid::new_v4().to_string(),
@@ -34,7 +38,7 @@ impl ExchangeConnector for KucoinConnector {
                 "side": side,
                 "type": "limit",
                 "timeInForce": "IOC",
-                "price": format!("{:.8}", price),
+                "price": price_str,
                 "size": contracts.round() as i64,
                 "leverage": lev_str,
                 "marginMode": "CROSS",

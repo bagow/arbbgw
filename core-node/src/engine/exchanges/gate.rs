@@ -34,7 +34,10 @@ impl ExchangeConnector for GateConnector {
         let size = if is_buy { contracts.round() as i64 } else { -(contracts.round() as i64) };
         let path = "/api/v4/futures/usdt/orders";
         
-        let price_str = if use_ioc && price > 0.0 { format!("{:.8}", price) } else { "0".to_string() };
+        let mut raw_price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        if raw_price_str.ends_with('.') { raw_price_str.pop(); }
+        if raw_price_str.is_empty() { raw_price_str = "0".to_string(); }
+        let price_str = if use_ioc && price > 0.0 { raw_price_str } else { "0".to_string() };
         let tif = if use_ioc && price > 0.0 { "ioc" } else { "gtc" };
         
         let body = json!({
