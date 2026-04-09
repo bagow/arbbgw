@@ -554,8 +554,20 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
             let vol = settings.trade_volume;
             let dir = row.direction.clone();
-            let sp = row.spread;
+            // Compute entry spread from ACTUAL fill prices, not row.spread (which was
+            // computed by the spread scanner before orders were placed and may be stale).
+            let actual_entry_spread = if fill_a > 0.0 && fill_b > 0.0 {
+                if is_a_higher {
+                    (fill_a - fill_b) / fill_b.max(1e-12) * 100.0
+                } else {
+                    (fill_b - fill_a) / fill_a.max(1e-12) * 100.0
+                }
+            } else {
+                row.spread // fallback if fills unexpected
+            };
+            let sp = actual_entry_spread;
             let profile_id = settings.id.clone();
+
             let api_comm = fee_a_val + fee_b_val;
             let entry_comm = if api_comm > 1e-9 { api_comm } else {
                 let rate_a = e_ctx.fee_rates.get(&exa).map(|v| *v).unwrap_or(0.0);
@@ -577,8 +589,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let exb_for_verify = exb.clone();
             let pair_for_verify = pair.clone();
 
-            info!("[real] ✅ OPEN {} A={:.6}(c={}) B={:.6}(c={}) fees={:.4} slip={:.4} latency={}ms",
-                pair, fill_a, contracts_a, fill_b, contracts_b, entry_comm, entry_slip, total_ms);
+            info!("[real] ✅ OPEN {} A={:.6}(c={}) B={:.6}(c={}) fees={:.4} slip={:.4} scanner_sp={:.4}% actual_sp={:.4}% latency={}ms",
+                pair, fill_a, contracts_a, fill_b, contracts_b, entry_comm, entry_slip, row.spread, sp, total_ms);
 
             repo.insert_new_entry(pair.clone(), exa.clone(), exb.clone(), dir.clone(), vol, fill_a, fill_b, sp, entry_time, profile_id.clone(), entry_comm, entry_slip, oid_a_db, oid_b_db, contracts_a, contracts_b).await;
 
