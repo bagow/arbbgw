@@ -195,6 +195,7 @@ impl TradeRepository {
         exit_slip: f64,
     ) {
         let r = reason.to_string();
+        let r_clone = r.clone();
         let current_ms = now_ms();
         let _ = self.db.call(move |conn| {
             conn.execute(
@@ -206,7 +207,7 @@ impl TradeRepository {
                  WHERE id=?",
                 params![
                     exit_price_a, exit_price_b, exit_spread, current_ms,
-                    pnl_a, pnl_b, gross_pnl, gross_pnl, r,
+                    pnl_a, pnl_b, gross_pnl, gross_pnl, r_clone,
                     fund_cost, exit_fee, exit_slip, exit_fee, exit_slip,
                     id
                 ]
