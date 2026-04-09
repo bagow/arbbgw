@@ -355,15 +355,27 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         if open_pairs.contains(&row.pair) { continue; }
 
-        if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) { info!("[real] SKIP {}: missing exchange keys", row.pair); continue; }
-        if settings.disabled_exchanges.contains(&row.exchange_a) || settings.disabled_exchanges.contains(&row.exchange_b) { info!("[real] SKIP {}: disabled exchange", row.pair); continue; }
+        if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) { 
+            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: missing exchange keys", row.pair); }
+            continue; 
+        }
+        if settings.disabled_exchanges.contains(&row.exchange_a) || settings.disabled_exchanges.contains(&row.exchange_b) { 
+            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: disabled exchange", row.pair); }
+            continue; 
+        }
 
         let cd_a = ex_cd.get(&row.exchange_a).map(|v| *v).unwrap_or(0);
         let cd_b = ex_cd.get(&row.exchange_b).map(|v| *v).unwrap_or(0);
-        if now - cd_a < ts.exchange_cooldown_ms || now - cd_b < ts.exchange_cooldown_ms { info!("[real] SKIP {}: exchange on cooldown", row.pair); continue; }
+        if now - cd_a < ts.exchange_cooldown_ms || now - cd_b < ts.exchange_cooldown_ms { 
+            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: exchange on cooldown", row.pair); }
+            continue; 
+        }
 
         let cd_pair = pair_cd.get(&row.pair).map(|v| *v).unwrap_or(0);
-        if now - cd_pair < ts.pair_cooldown_ms { info!("[real] SKIP {}: pair on cooldown", row.pair); continue; }
+        if now - cd_pair < ts.pair_cooldown_ms { 
+            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: pair on cooldown", row.pair); }
+            continue; 
+        }
 
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
         let mut entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
