@@ -271,4 +271,35 @@ impl ExchangeConnector for BybitConnector {
         // Returning 0 for Bybit or need to look up real one
         Ok((0.0, 0))
     }
+
+    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<super::traits::PositionInfo>, String> {
+        let ts = now_ms().to_string();
+        let recv = "5000";
+        let qs = "category=linear&settleCoin=USDT";
+        let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs);
+        let resp = http.get(format!("https://api.bybit.com/v5/position/list?{}", qs))
+            .header("X-BAPI-API-KEY", &keys.bybit_key)
+            .header("X-BAPI-SIGN", &sig)
+            .header("X-BAPI-TIMESTAMP", &ts)
+            .header("X-BAPI-RECV-WINDOW", recv)
+            .timeout(Duration::from_secs(10))
+            .send().await.map_err(|e| e.to_string())?;
+        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let mut positions = Vec::new();
+        if let Some(arr) = v["result"]["list"].as_array() {
+            for p in arr {
+                let size: f64 = p["size"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                if size.abs() < 1e-12 { continue; }
+                let side = p["side"].as_str().unwrap_or("");
+                let signed_size = if side == "Sell" { -size } else { size };
+                positions.push(super::traits::PositionInfo {
+                    symbol: p["symbol"].as_str().unwrap_or("").to_string(),
+                    size: signed_size,
+                    entry_price: p["avgPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    unrealized_pnl: p["unrealisedPnl"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                });
+            }
+        }
+        Ok(positions)
+    }
 }

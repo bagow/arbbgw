@@ -175,4 +175,31 @@ impl ExchangeConnector for GateConnector {
         }
         Err("Gate funding rate fetch failed".to_string())
     }
+
+    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<super::traits::PositionInfo>, String> {
+        let path = "/api/v4/futures/usdt/positions";
+        let resp = http.get(format!("https://api.gateio.ws{}", path))
+            .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, ""))
+            .timeout(std::time::Duration::from_secs(10))
+            .send().await.map_err(|e| e.to_string())?;
+        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let mut positions = Vec::new();
+        if let Some(arr) = v.as_array() {
+            for p in arr {
+                let size: f64 = p["size"].as_i64().unwrap_or(0) as f64;
+                if size.abs() < 1e-12 { continue; }
+                // Gate symbol: "BTC_USDT" → "BTCUSDT"
+                let contract = p["contract"].as_str().unwrap_or("").replace("_", "");
+                positions.push(super::traits::PositionInfo {
+                    symbol: contract,
+                    size,
+                    entry_price: p["entry_price"].as_str().and_then(|s| s.parse().ok())
+                        .or_else(|| p["entry_price"].as_f64()).unwrap_or(0.0),
+                    unrealized_pnl: p["unrealised_pnl"].as_str().and_then(|s| s.parse().ok())
+                        .or_else(|| p["unrealised_pnl"].as_f64()).unwrap_or(0.0),
+                });
+            }
+        }
+        Ok(positions)
+    }
 }

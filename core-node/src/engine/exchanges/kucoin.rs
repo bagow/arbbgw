@@ -243,4 +243,43 @@ impl ExchangeConnector for KucoinConnector {
         }
         Err("KuCoin funding rate fetch failed".to_string())
     }
+
+    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<super::traits::PositionInfo>, String> {
+        let ts = now_ms().to_string();
+        let path = "/api/v1/positions";
+        let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", path, "");
+        let resp = http.get(format!("https://api-futures.kucoin.com{}", path))
+            .header("KC-API-KEY", &keys.kucoin_key)
+            .header("KC-API-SIGN", sig)
+            .header("KC-API-TIMESTAMP", &ts)
+            .header("KC-API-PASSPHRASE", pass_sig)
+            .header("KC-API-KEY-VERSION", "2")
+            .timeout(Duration::from_secs(10))
+            .send().await.map_err(|e| e.to_string())?;
+        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let mut positions = Vec::new();
+        if let Some(arr) = v["data"].as_array() {
+            for p in arr {
+                let qty: f64 = p["currentQty"].as_f64()
+                    .or_else(|| p["currentQty"].as_i64().map(|i| i as f64))
+                    .unwrap_or(0.0);
+                if qty.abs() < 1e-12 { continue; }
+                // KuCoin symbol: "XBTUSDTM" → "BTCUSDT", "ETHUSDTM" → "ETHUSDT"
+                let raw_sym = p["symbol"].as_str().unwrap_or("");
+                let mut std_sym = raw_sym.replace("USDTM", "USDT").replace("USDM", "USDT");
+                if std_sym == "XBTUSDT" { std_sym = "BTCUSDT".to_string(); }
+                positions.push(super::traits::PositionInfo {
+                    symbol: std_sym,
+                    size: qty,
+                    entry_price: p["avgEntryPrice"].as_f64()
+                        .or_else(|| p["avgEntryPrice"].as_str().and_then(|s| s.parse().ok()))
+                        .unwrap_or(0.0),
+                    unrealized_pnl: p["unrealisedPnl"].as_f64()
+                        .or_else(|| p["unrealisedPnl"].as_str().and_then(|s| s.parse().ok()))
+                        .unwrap_or(0.0),
+                });
+            }
+        }
+        Ok(positions)
+    }
 }

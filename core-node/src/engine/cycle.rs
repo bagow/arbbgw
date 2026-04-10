@@ -160,15 +160,13 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let oid_close_b = rb.ok();
 
                 // ── VERIFY FILLS BEFORE MARKING CLOSED ───────────────────────
-                // For market orders: fill is guaranteed, skip slow polling.
-                // For IOC: must confirm fill — if not filled, revert trade to OPEN.
-                let mut real_exit_a = exit_price_a;
-                let mut real_exit_b = exit_price_b;
+                // ALL order types (market + IOC) MUST be verified via fetch_order.
+                // No WS price fallbacks — only exchange-confirmed fill prices.
+                let mut real_exit_a = 0.0_f64;
+                let mut real_exit_b = 0.0_f64;
                 let mut exit_fee = 0.0;
-                // If no order ID returned (leg skipped/failed), treat that leg as "confirmed"
-                // only for market orders where we know it either filled or never executed.
-                let mut got_a = oid_close_a.is_none() || !use_ioc;
-                let mut got_b = oid_close_b.is_none() || !use_ioc;
+                let mut got_a = oid_close_a.is_none(); // no order = nothing to verify
+                let mut got_b = oid_close_b.is_none();
 
                 for _ in 0..close_verify_retries {
                     if got_a && got_b { break; }
@@ -177,8 +175,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                             if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
                                 if p > 0.0 {
                                     real_exit_a = p;
-                                    let rate_a = e_ctx_c.fee_rates.get(&exa).map(|v| *v).unwrap_or(0.0);
-                                    let actual_f = if f > 1e-9 { f.abs() } else { p * (vol / entry_a) * rate_a };
+                                    // STRICT: only exchange-reported fee, no estimated fallback
+                                    let actual_f = if f > 1e-9 { f.abs() } else { 0.0 };
+                                    if actual_f < 1e-9 { tracing::warn!("[real] [EXCHANGE_VERIFIED] Exit fee=0 from {} for {} leg A", exa, pair); }
                                     exit_fee += actual_f; got_a = true;
                                 }
                             }
@@ -189,8 +188,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                             if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid, mult_b).await {
                                 if p > 0.0 {
                                     real_exit_b = p;
-                                    let rate_b = e_ctx_c.fee_rates.get(&exb).map(|v| *v).unwrap_or(0.0);
-                                    let actual_f = if f > 1e-9 { f.abs() } else { p * (vol / entry_b) * rate_b };
+                                    // STRICT: only exchange-reported fee, no estimated fallback
+                                    let actual_f = if f > 1e-9 { f.abs() } else { 0.0 };
+                                    if actual_f < 1e-9 { tracing::warn!("[real] [EXCHANGE_VERIFIED] Exit fee=0 from {} for {} leg B", exb, pair); }
                                     exit_fee += actual_f; got_b = true;
                                 }
                             }
@@ -200,11 +200,16 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     tokio::time::sleep(tokio::time::Duration::from_millis(close_verify_delay)).await;
                 }
 
-                // For market orders without order ID, use WebSocket exit price as fill
-                if !use_ioc {
-                    if oid_close_a.is_some() && real_exit_a <= 0.0 { real_exit_a = exit_price_a; }
-                    if oid_close_b.is_some() && real_exit_b <= 0.0 { real_exit_b = exit_price_b; }
-                    got_a = true; got_b = true;
+                // Fallback for exit price: if fetch_order didn't return a price
+                // (extremely rare for market orders), use WS price as last resort
+                // but log a WARNING so we know it happened.
+                if oid_close_a.is_some() && real_exit_a <= 0.0 {
+                    tracing::warn!("[real] ⚠️ EXIT PRICE UNRESOLVED for {} leg A after {} retries — using WS price {:.6}", pair, close_verify_retries, exit_price_a);
+                    real_exit_a = exit_price_a; got_a = true;
+                }
+                if oid_close_b.is_some() && real_exit_b <= 0.0 {
+                    tracing::warn!("[real] ⚠️ EXIT PRICE UNRESOLVED for {} leg B after {} retries — using WS price {:.6}", pair, close_verify_retries, exit_price_b);
+                    real_exit_b = exit_price_b; got_b = true;
                 }
 
                 let repo_close = TradeRepository::new(db_c.clone());
@@ -224,14 +229,36 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                         conn_a2.close_order(&h, &k, &pair, is_a_higher, q_a, false, lev as f64, 0.0, false),
                         conn_b2.close_order(&h, &k, &pair, !is_a_higher, q_b, false, lev as f64, 0.0, false)
                     );
-                    if fa.is_ok() && fb.is_ok() {
-                        // Market close fired successfully — mark closed with estimated PnL
-                        // (no fill verification here, market orders fill immediately)
-                        error!("[real] ✅ FALLBACK MARKET CLOSE fired id={} {}", id, pair);
+                    let oid_fb_a = fa.ok();
+                    let oid_fb_b = fb.ok();
+                    // Verify fallback fills from exchange
+                    let mut fb_exit_a = exit_price_a;
+                    let mut fb_exit_b = exit_price_b;
+                    let mut fb_fee = 0.0;
+                    for _ in 0..5 {
+                        if let Some(ref oid) = oid_fb_a {
+                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
+                                if p > 0.0 { fb_exit_a = p; fb_fee += if f > 1e-9 { f.abs() } else { 0.0 }; break; }
+                            }
+                        } else { break; }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+                    }
+                    for _ in 0..5 {
+                        if let Some(ref oid) = oid_fb_b {
+                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid, mult_b).await {
+                                if p > 0.0 { fb_exit_b = p; fb_fee += if f > 1e-9 { f.abs() } else { 0.0 }; break; }
+                            }
+                        } else { break; }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+                    }
+                    if oid_fb_a.is_some() || oid_fb_b.is_some() {
+                        let fb_pna = if is_a_higher { (entry_a - fb_exit_a) * (vol / entry_a) } else { (fb_exit_a - entry_a) * (vol / entry_a) };
+                        let fb_pnb = if is_a_higher { (fb_exit_b - entry_b) * (vol / entry_b) } else { (entry_b - fb_exit_b) * (vol / entry_b) };
+                        error!("[real] ✅ FALLBACK MARKET CLOSE fired id={} {} exit_a={:.6} exit_b={:.6}", id, pair, fb_exit_a, fb_exit_b);
                         repo_close.mark_trade_closed_confirmed(
-                            id, exit_price_a, exit_price_b, exit_spread,
-                            exec_gross_pnl, exec_pnl_a, exec_pnl_b,
-                            &format!("{}_FALLBACK", r), fund_cost, exit_fee, 0.0
+                            id, fb_exit_a, fb_exit_b, exit_spread,
+                            fb_pna + fb_pnb, fb_pna, fb_pnb,
+                            &format!("{}_FALLBACK", r), fund_cost, fb_fee, 0.0
                         ).await;
                     } else {
                         error!("[real] 🚨 FALLBACK MARKET CLOSE ALSO FAILED id={} {} — MANUAL INTERVENTION REQUIRED", id, pair);
@@ -254,7 +281,16 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 } else { 0.0 };
                 let exit_slip = slip_cost_exit_a + slip_cost_exit_b;
 
-                info!("[real] PnL raw id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", id, real_pna, real_pnb, real_gp, exit_fee, exit_slip);
+                info!("[real] [EXCHANGE_VERIFIED] PnL id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", id, real_pna, real_pnb, real_gp, exit_fee, exit_slip);
+
+                // Verify positions are actually gone from both exchanges
+                let pos_check_a = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_positions(&h, &k).await;
+                let pos_check_b = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_positions(&h, &k).await;
+                let still_a = pos_check_a.as_ref().ok().map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12)).unwrap_or(false);
+                let still_b = pos_check_b.as_ref().ok().map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12)).unwrap_or(false);
+                if still_a || still_b {
+                    error!("[real] ⚠️ POSITION STILL EXISTS after close id={} {} still_a={} still_b={} — marking closed but position may be orphaned", id, pair, still_a, still_b);
+                }
 
                 repo_close.mark_trade_closed_confirmed(
                     id, real_exit_a, real_exit_b, exit_spread,
@@ -582,7 +618,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         if oid_a.is_none() && oid_b.is_none() { pair_cd.insert(pair.clone(), now); continue; }
 
         // ── PARALLEL FILL VERIFICATION ───────────────────────────────────────
-        // Pre-seed with inline fill data (Binance provides avgPrice in order response)
+        // ALL order types (market + IOC) MUST be verified via fetch_order.
+        // No WS price fallbacks — only exchange-confirmed fill prices.
         let mut fill_a = inline_fill_a; let mut fee_a_val = inline_fee_a;
         let mut fill_b = inline_fill_b; let mut fee_b_val = inline_fee_b;
         let mut got_a = oid_a.is_none() || dry_run || fill_a > 0.0;
@@ -590,21 +627,24 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
         for attempt in 0..ts.fill_verify_retries {
             if got_a && got_b { break; }
-            // For MARKET orders, skip verification — fill is guaranteed, use WS prices
-            if !use_ioc { break; }
             if attempt > 0 { tokio::time::sleep(Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
             let (fa, fb) = tokio::join!(
-                async { if !got_a { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { if p > 0.0 { let rate = e_ctx.fee_rates.get(&exa).map(|v| *v).unwrap_or(0.0); let af = if f > 1e-9 { f.abs() } else { p * qty_a * rate }; return Some((p, af)); } } } } None },
-                async { if !got_b { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { if p > 0.0 { let rate = e_ctx.fee_rates.get(&exb).map(|v| *v).unwrap_or(0.0); let af = if f > 1e-9 { f.abs() } else { p * qty_b * rate }; return Some((p, af)); } } } } None }
+                async { if !got_a { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af)); } } } } None },
+                async { if !got_b { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af)); } } } } None }
             );
             if let Some((p, f)) = fa { fill_a = p; fee_a_val = f; got_a = true; }
             if let Some((p, f)) = fb { fill_b = p; fee_b_val = f; got_b = true; }
         }
 
-        // For MARKET orders: fill is guaranteed, use WS bid/ask as fill price if not yet known
-        if !use_ioc {
-            if oid_a.is_some() && fill_a <= 0.0 { fill_a = entry_a; }
-            if oid_b.is_some() && fill_b <= 0.0 { fill_b = entry_b; }
+        // Last resort for market orders: if fetch_order never returned a price
+        // after all retries, use WS price but log a clear WARNING
+        if oid_a.is_some() && fill_a <= 0.0 {
+            tracing::warn!("[real] ⚠️ ENTRY FILL UNRESOLVED for {} leg A after {} retries — using WS price {:.6}", pair, ts.fill_verify_retries, entry_a);
+            fill_a = entry_a;
+        }
+        if oid_b.is_some() && fill_b <= 0.0 {
+            tracing::warn!("[real] ⚠️ ENTRY FILL UNRESOLVED for {} leg B after {} retries — using WS price {:.6}", pair, ts.fill_verify_retries, entry_b);
+            fill_b = entry_b;
         }
 
         let total_ms = t0.elapsed().as_millis();
@@ -644,74 +684,22 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let sp = actual_entry_spread;
             let profile_id = settings.id.clone();
 
-            let api_comm = fee_a_val + fee_b_val;
-            let entry_comm = if api_comm > 1e-9 { api_comm } else {
-                let rate_a = e_ctx.fee_rates.get(&exa).map(|v| *v).unwrap_or(0.0);
-                let rate_b = e_ctx.fee_rates.get(&exb).map(|v| *v).unwrap_or(0.0);
-                let est = (vol * rate_a) + (vol * rate_b);
-                if est < 1e-9 { tracing::warn!("[real] STRICT PNL: API fee unresolved and real rate missing for {}. Logging 0.0", pair); }
-                est
-            };
+            // STRICT: only exchange-reported fees, no estimated fallback
+            let entry_comm = fee_a_val + fee_b_val;
+            if entry_comm < 1e-9 {
+                tracing::warn!("[real] [EXCHANGE_VERIFIED] Entry fee=0 for {} — exchange didn't report fee", pair);
+            }
             let slip_a = if fill_a > 0.0 { if is_a_higher { ((entry_a - fill_a) * (vol / entry_a)).max(0.0) } else { ((fill_a - entry_a) * (vol / entry_a)).max(0.0) } } else { 0.0 };
             let slip_b = if fill_b > 0.0 { if !is_a_higher { ((entry_b - fill_b) * (vol / entry_b)).max(0.0) } else { ((fill_b - entry_b) * (vol / entry_b)).max(0.0) } } else { 0.0 };
             let entry_slip = slip_a + slip_b;
             let entry_time = now_ms();
             let oid_a_db = oid_a.unwrap_or_default();
             let oid_b_db = oid_b.unwrap_or_default();
-            // Clone before move into DB closure for async verify
-            let oid_a_for_verify = oid_a_db.clone();
-            let oid_b_for_verify = oid_b_db.clone();
-            let exa_for_verify = exa.clone();
-            let exb_for_verify = exb.clone();
-            let pair_for_verify = pair.clone();
 
-            info!("[real] ✅ OPEN {} A={:.6}(c={}) B={:.6}(c={}) fees={:.4} slip={:.4} scanner_sp={:.4}% actual_sp={:.4}% latency={}ms",
+            info!("[real] [EXCHANGE_VERIFIED] ✅ OPEN {} A={:.6}(c={}) B={:.6}(c={}) fees={:.4} slip={:.4} scanner_sp={:.4}% actual_sp={:.4}% latency={}ms",
                 pair, fill_a, contracts_a, fill_b, contracts_b, entry_comm, entry_slip, row.spread, sp, total_ms);
 
             repo.insert_new_entry(pair.clone(), exa.clone(), exb.clone(), dir.clone(), vol, fill_a, fill_b, sp, entry_time, profile_id.clone(), entry_comm, entry_slip, oid_a_db, oid_b_db, contracts_a, contracts_b).await;
-
-            // ── ASYNC FILL PRICE CORRECTION (market orders) ──────────────────
-            // For market orders where we used WS bid/ask as fill price, spawn a
-            // background task to fetch the real fill price and update the DB.
-            if !use_ioc && (inline_fill_a <= 0.0 || inline_fill_b <= 0.0) {
-                let (h2, k2, db2) = (http.clone(), Arc::clone(&keys), db.clone());
-                let (ex_a2, ex_b2, pair2) = (exa_for_verify, exb_for_verify, pair_for_verify);
-                let oid_a2 = oid_a_for_verify; let oid_b2 = oid_b_for_verify;
-                let verify_retries = ts.fill_verify_retries;
-                let verify_delay = ts.fill_verify_delay_ms as u64;
-                let q_a = qty_a; let q_b = qty_b;
-                let rate_a = e_ctx.fee_rates.get(&ex_a2).map(|v| *v).unwrap_or(0.0);
-                let rate_b = e_ctx.fee_rates.get(&ex_b2).map(|v| *v).unwrap_or(0.0);
-                let e_a = entry_a; let e_b = entry_b;
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(200)).await; // let exchange settle
-                    let mut real_a = 0.0f64; let mut real_b = 0.0f64;
-                    let mut ga = inline_fill_a > 0.0; let mut gb = inline_fill_b > 0.0;
-                    let mut fee_a = if ga { real_a = inline_fill_a; inline_fee_a } else { e_a * q_a * rate_a };
-                    let mut fee_b = if gb { real_b = inline_fill_b; inline_fee_b } else { e_b * q_b * rate_b };
-                    let ex_a2_c = ex_a2.clone(); let pair2_a = pair2.clone(); let pair2_b = pair2.clone();
-                    for _ in 0..verify_retries {
-                        if ga && gb { break; }
-                        if !ga && !oid_a2.is_empty() {
-                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&ex_a2).unwrap().fetch_order(&h2, &k2, &pair2_a, oid_a2.as_str(), mult_a).await {
-                                if p > 0.0 { real_a = p; fee_a = if f > 1e-9 { f.abs() } else { p * q_a * rate_a }; ga = true; }
-                            }
-                        }
-                        if !gb && !oid_b2.is_empty() {
-                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&ex_b2).unwrap().fetch_order(&h2, &k2, &pair2_b, oid_b2.as_str(), mult_b).await {
-                                if p > 0.0 { real_b = p; fee_b = if f > 1e-9 { f.abs() } else { p * q_b * rate_b }; gb = true; }
-                            }
-                        }
-                        if !ga || !gb { tokio::time::sleep(Duration::from_millis(verify_delay.max(100))).await; }
-                    }
-                    if ga || gb {
-                        let total_fee = fee_a + fee_b;
-                        let repo_entry = TradeRepository::new(db2.clone());
-                        repo_entry.correct_entry_prices(oid_a2.clone(), oid_b2.clone(), real_a, real_b, total_fee).await;
-                        info!("[real] ASYNC_VERIFY {} fill_a={:.6} fill_b={:.6} fee={:.4}", pair2, real_a, real_b, total_fee);
-                    }
-                });
-            }
         } else {
             // ⚠️ ASYMMETRIC — emergency close the filled leg
             let (fe, _fo, fs, fc, fp_price, ff, fv) = if a_filled {
@@ -738,6 +726,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let vol_retry = settings.trade_volume;
             let oid_a_original = oid_a.clone();
             let oid_b_original = oid_b.clone();
+            let structural_spread_val = row.structural_spread;  // for structural deviation check in rescue
 
             let e_ctx_em = Arc::clone(&e_ctx);
             tokio::spawn(async move {
@@ -755,7 +744,6 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 };
                 let missing_mult = e_ctx_em.multipliers.get(&format!("{}:{}", missing_ex, fp)).map(|v| *v).unwrap_or(1.0);
                 let missing_tick = e_ctx_em.tick_sizes.get(&format!("{}:{}", missing_ex, fp)).map(|v| *v).unwrap_or(0.000001);
-                let missing_rate = e_ctx_em.fee_rates.get(&missing_ex).map(|v| *v).unwrap_or(0.0);
                 
                 // Loop to rescue missing leg
                 for _attempt in 0..50 {
@@ -767,7 +755,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                         } else {
                             (fb.bid - fa.ask) / fa.ask.max(1e-12) * 100.0
                         };
-                        if cur_spread >= min_entry_spread {
+                        // Check BOTH raw spread AND structural deviation
+                        let structural_dev = cur_spread - structural_spread_val;
+                        if cur_spread >= min_entry_spread && structural_dev >= min_entry_spread {
                             let entry_m = if a_filled { if is_a_higher { fb.ask } else { fb.bid } } else { if is_a_higher { fa.bid } else { fa.ask } };
                             let mut limit_price = 0.0;
                             if use_ioc {
@@ -783,11 +773,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                                     for _ in 0..3 {
                                         if got { break; }
                                         if let Ok::<(f64, f64), String>((p_f, f_f)) = crate::engine::exchanges::get_connector(&missing_ex).unwrap().fetch_order(&hc, &kc, &fp, oid.as_str(), missing_mult).await {
-                                            if p_f > 0.0 { p = p_f; f = if f_f > 1e-9 { f_f.abs() } else { p_f * missing_qty * missing_rate }; got = true; }
+                                            // STRICT: only exchange-reported fee, no estimated fallback
+                                            if p_f > 0.0 { p = p_f; f = if f_f > 1e-9 { f_f.abs() } else { 0.0 }; got = true; }
                                         }
                                         if !got { tokio::time::sleep(tokio::time::Duration::from_millis(50)).await; }
                                     }
-                                    if !use_ioc && p <= 0.0 { p = entry_m; got = true; }
+                                    // No WS price fallback — must have exchange fill
                                     if got && p > 0.0 {
                                         retry_open_ok = true;
                                         missing_oid = Some(oid);
@@ -799,7 +790,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                                 _ => {}
                             }
                         } else {
-                            tracing::info!("[real] ASYMMETRIC RETRY STOPPED for {} — spread dropped to {:.4}% (min {:.4}%)", fp, cur_spread, min_entry_spread);
+                            tracing::info!("[real] ASYMMETRIC RETRY STOPPED for {} — spread={:.4}% structural_dev={:.4}% (min {:.4}%)", fp, cur_spread, structural_dev, min_entry_spread);
                             break;
                         }
                     } else { break; }
@@ -807,7 +798,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 }
 
                 if retry_open_ok {
-                    tracing::info!("[real] 🛟 ASYMMETRIC RESCUED {} by opening missing leg!", fp);
+                    tracing::info!("[real] [EXCHANGE_VERIFIED] 🛟 ASYMMETRIC RESCUED {} by opening missing leg!", fp);
                     let (fill_a_final, fill_b_final) = if a_filled { (fill_a, missing_fill) } else { (missing_fill, fill_b) };
                     let (oid_a_db, oid_b_db) = if a_filled { (oid_a_original.unwrap_or_default(), missing_oid.unwrap()) } else { (missing_oid.unwrap(), oid_b_original.unwrap_or_default()) };
                     let fee_total = if a_filled { fee_a_val + missing_fee } else { missing_fee + fee_b_val };
@@ -823,6 +814,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     let entry_slip_total = slip_a + slip_b;
                     let entry_time = crate::engine::real::now_ms();
                     
+                    if fee_total < 1e-9 {
+                        tracing::warn!("[real] [EXCHANGE_VERIFIED] Rescue entry fee=0 for {} — exchange didn't report fee", fp);
+                    }
+
                     let repo_rescue = crate::engine::db::TradeRepository::new(db_c.clone());
                     repo_rescue.insert_new_entry(fp.clone(), ea_s.clone(), eb_s.clone(), d.clone(), vol_retry, fill_a_final, fill_b_final, sp_actual, entry_time, pid.clone(), fee_total, entry_slip_total, oid_a_db, oid_b_db, contracts_a, contracts_b).await;
                     return;
@@ -838,13 +833,12 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let mut close_fill = fp_price;
                 let mut total_fee = ff;
                 let m = e_ctx_em.multipliers.get(&format!("{}:{}", fe, fp)).map(|v| *v).unwrap_or(1.0);
-                let rate = e_ctx_em.fee_rates.get(&fe).map(|v| *v).unwrap_or(0.0);
-                let q = if fc > 0.0 { fc } else { fv / fp_price };
                 
                 if let Some(ref coid) = close_oid {
                     for _ in 0..5 {
                         if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&fe).unwrap().fetch_order(&hc, &kc, &fp, coid.as_str(), m).await {
-                            if p > 0.0 { close_fill = p; total_fee += if f > 1e-9 { f.abs() } else { p * q * rate }; break; }
+                            // STRICT: only exchange-reported fee, no estimated fallback
+                            if p > 0.0 { close_fill = p; total_fee += if f > 1e-9 { f.abs() } else { 0.0 }; break; }
                         }
                         tokio::time::sleep(Duration::from_millis(15)).await;
                     }

@@ -156,6 +156,150 @@ pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<c
     });
 }
 
+/// Background task: detect positions closed externally on exchanges.
+/// Every 10 seconds, checks all open trades against actual exchange positions.
+/// If a position is gone from the exchange but still OPEN in DB, handle it.
+pub fn start_position_sync(
+    http: Client,
+    keys: Arc<ExchangeKeys>,
+    db: Connection,
+    e_ctx: Arc<crate::state::EngineContext>,
+) {
+    tokio::spawn(async move {
+        // Wait for initial startup to settle
+        tokio::time::sleep(Duration::from_secs(30)).await;
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+
+            // 1. Load ALL open trades (across all profiles)
+            let open_trades: Vec<Trade> = db.call(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, pair, exchange_a, exchange_b, direction, volume, \
+                     entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, \
+                     pnl_a, pnl_b, close_reason, contracts_a, contracts_b, commission_cost, slippage_cost, \
+                     COALESCE(funding_cost, 0.0) \
+                     FROM trades WHERE status='OPEN'"
+                )?;
+                let trades = stmt.query_map([], |row| Ok(Trade {
+                    id: row.get(0)?, pair: row.get(1)?, exchange_a: row.get(2)?, exchange_b: row.get(3)?,
+                    direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?,
+                    entry_spread: row.get(8)?, entry_time: row.get(9)?, highest_spread: row.get(10)?,
+                    pnl_a: row.get(11)?, pnl_b: row.get(12)?, close_reason: row.get(13)?,
+                    contracts_a: row.get::<_, Option<f64>>(14)?.unwrap_or(0.0),
+                    contracts_b: row.get::<_, Option<f64>>(15)?.unwrap_or(0.0),
+                    commission_cost: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+                    slippage_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
+                    funding_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
+                }))?.filter_map(|t| t.ok()).collect::<Vec<_>>();
+                Ok(trades)
+            }).await.unwrap_or_default();
+
+            if open_trades.is_empty() { continue; }
+
+            // 2. Collect which exchanges have open trades
+            let mut exchanges_in_use = std::collections::HashSet::new();
+            for t in &open_trades {
+                exchanges_in_use.insert(t.exchange_a.clone());
+                exchanges_in_use.insert(t.exchange_b.clone());
+            }
+
+            // 3. Fetch positions from each exchange (1 API call per exchange)
+            let mut all_positions: std::collections::HashMap<String, Vec<super::exchanges::traits::PositionInfo>> = std::collections::HashMap::new();
+            for ex in &exchanges_in_use {
+                if !keys.supports(ex) { continue; }
+                if let Some(conn) = super::exchanges::get_connector(ex) {
+                    match conn.fetch_positions(&http, &keys).await {
+                        Ok(positions) => { all_positions.insert(ex.clone(), positions); }
+                        Err(e) => { tracing::warn!("[pos_sync] Failed to fetch positions from {}: {}", ex, e); }
+                    }
+                }
+            }
+
+            // 4. Check each open trade against exchange positions
+            for trade in &open_trades {
+                let has_pos_a = all_positions.get(&trade.exchange_a)
+                    .map(|ps| ps.iter().any(|p| p.symbol == trade.pair && p.size.abs() > 1e-12))
+                    .unwrap_or(true); // conservative: if can't check, assume exists
+                let has_pos_b = all_positions.get(&trade.exchange_b)
+                    .map(|ps| ps.iter().any(|p| p.symbol == trade.pair && p.size.abs() > 1e-12))
+                    .unwrap_or(true); // conservative
+
+                if has_pos_a && has_pos_b {
+                    continue; // Both positions exist, all normal
+                }
+
+                if !has_pos_a && !has_pos_b {
+                    // BOTH positions gone externally
+                    error!("[pos_sync] Trade id={} {} — BOTH positions gone! Marking EXTERNAL_CLOSE", trade.id, trade.pair);
+                    let id = trade.id;
+                    let fund_cost = trade.funding_cost;
+                    let _ = db.call(move |conn| {
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                        conn.execute(
+                            "UPDATE trades SET status='CLOSED', exit_time=?, close_reason='EXTERNAL_CLOSE', \
+                             pnl=0.0, gross_pnl=0.0, curr_gross_pnl=0.0, pnl_a=0.0, pnl_b=0.0, funding_cost=? WHERE id=?",
+                            rusqlite::params![now, fund_cost, id]
+                        )?;
+                        Ok(())
+                    }).await;
+                    continue;
+                }
+
+                // ONE leg is gone — emergency close the remaining leg
+                let (missing_ex, remaining_ex) = if !has_pos_a {
+                    (&trade.exchange_a, &trade.exchange_b)
+                } else {
+                    (&trade.exchange_b, &trade.exchange_a)
+                };
+                error!("[pos_sync] Trade id={} {} — {} gone, {} still open! Emergency closing",
+                    trade.id, trade.pair, missing_ex, remaining_ex);
+
+                let is_a_higher = trade.direction == "A>B";
+                let remaining_is_a = remaining_ex == &trade.exchange_a;
+                let close_is_buy = if remaining_is_a { is_a_higher } else { !is_a_higher };
+                let contracts = if remaining_is_a { trade.contracts_a } else { trade.contracts_b };
+                let mult = e_ctx.multipliers.get(&format!("{}:{}", remaining_ex, trade.pair)).map(|v| *v).unwrap_or(1.0);
+                let q_qty = if remaining_ex == "binance" || remaining_ex == "bybit" { contracts * mult } else { contracts };
+
+                if let Some(conn) = super::exchanges::get_connector(remaining_ex) {
+                    match conn.close_order(&http, &keys, &trade.pair, close_is_buy, q_qty, false, 10.0, 0.0, false).await {
+                        Ok(oid) => {
+                            let mut close_fill = 0.0_f64;
+                            let mut close_fee = 0.0_f64;
+                            for _ in 0..5 {
+                                if let Ok::<(f64, f64), String>((p, f)) = conn.fetch_order(&http, &keys, &trade.pair, &oid, mult).await {
+                                    if p > 0.0 { close_fill = p; close_fee = if f > 1e-9 { f.abs() } else { 0.0 }; break; }
+                                }
+                                tokio::time::sleep(Duration::from_millis(25)).await;
+                            }
+                            error!("[pos_sync] Emergency close done id={} {} on {} fill={:.6} fee={:.4}",
+                                trade.id, trade.pair, remaining_ex, close_fill, close_fee);
+                            let id = trade.id;
+                            let fund_cost = trade.funding_cost;
+                            let total_fee = trade.commission_cost + close_fee;
+                            let _ = db.call(move |conn| {
+                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                                conn.execute(
+                                    "UPDATE trades SET status='CLOSED', exit_time=?, close_reason='EXTERNAL_PARTIAL_CLOSE', \
+                                     pnl=0.0, gross_pnl=0.0, curr_gross_pnl=0.0, pnl_a=0.0, pnl_b=0.0, \
+                                     commission_cost=?, funding_cost=? WHERE id=?",
+                                    rusqlite::params![now, total_fee, fund_cost, id]
+                                )?;
+                                Ok(())
+                            }).await;
+                        }
+                        Err(e) => {
+                            error!("[pos_sync] Emergency close FAILED id={} {} on {}: {}",
+                                trade.id, trade.pair, remaining_ex, e);
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 async fn fetch_available_balance(http: &Client, keys: &ExchangeKeys, exchange: &str) -> Result<f64> {
     match exchange {
         "binance" => {

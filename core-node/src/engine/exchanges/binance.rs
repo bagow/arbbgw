@@ -216,4 +216,28 @@ impl ExchangeConnector for BinanceConnector {
         }
         Err("Binance funding rate fetch failed".to_string())
     }
+
+    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<super::traits::PositionInfo>, String> {
+        let ts = now_ms();
+        let qs = format!("timestamp={}", ts);
+        let sig = binance_sign(&keys.binance_secret, &qs);
+        let url = format!("https://fapi.binance.com/fapi/v2/positionRisk?{}&signature={}", qs, sig);
+        let resp = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let mut positions = Vec::new();
+        if let Some(arr) = v.as_array() {
+            for p in arr {
+                let amt: f64 = p["positionAmt"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                if amt.abs() < 1e-12 { continue; }
+                positions.push(super::traits::PositionInfo {
+                    symbol: p["symbol"].as_str().unwrap_or("").to_string(),
+                    size: amt,
+                    entry_price: p["entryPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    unrealized_pnl: p["unRealizedProfit"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                });
+            }
+        }
+        Ok(positions)
+    }
 }

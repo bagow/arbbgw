@@ -144,6 +144,9 @@ async fn main() -> Result<()> {
     // ── Balance fetcher — refreshes available margin every 30s ────────────────
     engine::real::start_balance_fetcher(http.clone(), exchange_keys.clone(), engine_ctx.clone());
 
+    // ── Position sync — detects externally-closed positions every 10s ─────────
+    engine::real::start_position_sync(http.clone(), exchange_keys.clone(), real_db.clone(), engine_ctx.clone());
+
     // ── Pre-warm HTTP connections to exchange APIs ────────────────────────────
     // Establishes DNS + TCP + TLS ahead of time so the first trade doesn't
     // pay a 200-500ms cold-start penalty for handshake.
