@@ -113,23 +113,48 @@ pub fn generate_signals(
             if depth_sell > 0.0 && depth_sell < min_depth_usd { continue; }
             if depth_buy > 0.0 && depth_buy < min_depth_usd { continue; }
 
-            // Ensure strict adherence to LOT_SIZE / qtyStep ticks or integer contracts
-            let contracts_a = ((profile.trade_volume / entry_a.max(1e-12)) / mult_a).round();
-            if contracts_a < 1.0 { continue; }
+            // ENSURE PERFECT PHYSICAL BALANCE (0.0% COIN DUST)
+            let big_step = mult_a.max(mult_b);
+            let target_phys = profile.trade_volume / entry_a.max(1e-12);
+            let mut base_steps = (target_phys / big_step).round();
+            if base_steps < 1.0 { base_steps = 1.0; } 
+
+            let mut phys_qty = 0.0;
+            let mut found_match = false;
+            // Iterate gracefully to find the nearest perfect multiple for BOTH exchanges
+            for delta in 0..=5 {
+                for dir in [1.0, -1.0] {
+                    let test_steps = base_steps + (delta as f64) * dir;
+                    if test_steps < 1.0 { continue; }
+                    let test_phys = test_steps * big_step;
+                    
+                    let c_a = (test_phys / mult_a).round();
+                    let c_b = (test_phys / mult_b).round();
+                    
+                    if (c_a * mult_a - test_phys).abs() < 1e-8 && (c_b * mult_b - test_phys).abs() < 1e-8 {
+                        phys_qty = test_phys;
+                        found_match = true;
+                        break;
+                    }
+                }
+                if found_match { break; }
+            }
+
+            if !found_match { continue; } // Physically impossible to balance lot sizes
+
+            let contracts_a = (phys_qty / mult_a).round();
+            let contracts_b = (phys_qty / mult_b).round();
             
-            let actual_vol_a = contracts_a * mult_a * entry_a;
-            let contracts_b = ((actual_vol_a / entry_b.max(1e-12)) / mult_b).round();
-            if contracts_b < 1.0 { continue; }
+            if contracts_a < 1.0 || contracts_b < 1.0 { continue; }
             
-            let actual_vol_b = contracts_b * mult_b * entry_b;
-            let vol_diff_pct = (actual_vol_a - actual_vol_b).abs() / actual_vol_a * 100.0;
-            if vol_diff_pct > ts.vol_diff_max_pct { continue; }
+            let actual_vol_a = phys_qty * entry_a;
+            let actual_vol_b = phys_qty * entry_b;
 
             let max_v = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
             if actual_vol_a > max_v { continue; }
 
             if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional) || 
-               (row.exchange_b == "binance" && actual_vol_b < ts.binance_min_notional) { 
+               (row.exchange_b == "binance" && phys_qty * entry_b < ts.binance_min_notional) { 
                 continue; 
             }
 
