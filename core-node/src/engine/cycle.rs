@@ -728,8 +728,103 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let lev = settings.leverage;
             let emergency_retries = ts.emergency_close_retries;
 
+            let prices_retry = prices.clone();
+            let min_entry_spread = settings.min_entry_spread;
+            let slip_pct = settings.slippage_percent;
+            let use_ioc = ts.entry_order_type == "ioc";
+            let vol_retry = settings.trade_volume;
+            let oid_a_original = oid_a.clone();
+            let oid_b_original = oid_b.clone();
+
             let e_ctx_em = Arc::clone(&e_ctx);
             tokio::spawn(async move {
+                let mut retry_open_ok = false;
+                let mut missing_oid = None;
+                let mut missing_fill = 0.0;
+                let mut missing_fee = 0.0;
+                
+                let missing_ex = if a_filled { eb_s.clone() } else { ea_s.clone() };
+                let missing_is_buy = if a_filled { is_a_higher } else { !is_a_higher };
+                let missing_qty = if a_filled {
+                    if eb_s == "binance" || eb_s == "bybit" { contracts_b * mult_b } else { contracts_b }
+                } else {
+                    if ea_s == "binance" || ea_s == "bybit" { contracts_a * mult_a } else { contracts_a }
+                };
+                let missing_mult = e_ctx_em.multipliers.get(&format!("{}:{}", missing_ex, fp)).map(|v| *v).unwrap_or(1.0);
+                let missing_tick = e_ctx_em.tick_sizes.get(&format!("{}:{}", missing_ex, fp)).map(|v| *v).unwrap_or(0.000001);
+                let missing_rate = e_ctx_em.fee_rates.get(&missing_ex).map(|v| *v).unwrap_or(0.0);
+                
+                // Loop to rescue missing leg
+                for _attempt in 0..50 {
+                    let fresh_a = prices_retry.get(&ea_s).and_then(|m| m.get(&fp).cloned());
+                    let fresh_b = prices_retry.get(&eb_s).and_then(|m| m.get(&fp).cloned());
+                    if let (Some(fa), Some(fb)) = (&fresh_a, &fresh_b) {
+                        let cur_spread = if is_a_higher {
+                            (fa.bid - fb.ask) / fb.ask.max(1e-12) * 100.0
+                        } else {
+                            (fb.bid - fa.ask) / fa.ask.max(1e-12) * 100.0
+                        };
+                        if cur_spread >= min_entry_spread {
+                            let entry_m = if a_filled { if is_a_higher { fb.ask } else { fb.bid } } else { if is_a_higher { fa.bid } else { fa.ask } };
+                            let mut limit_price = 0.0;
+                            if use_ioc {
+                                let max_slip_frac = slip_pct / 100.0;
+                                let lpm = if missing_is_buy { entry_m * (1.0 + max_slip_frac) } else { entry_m * (1.0 - max_slip_frac) };
+                                limit_price = (lpm / missing_tick).round() * missing_tick;
+                            }
+                            match crate::engine::exchanges::get_connector(&missing_ex).unwrap().place_order(&hc, &kc, &fp, missing_is_buy, missing_qty, false, limit_price, limit_price > 0.0).await {
+                                Ok((Some(oid), fill_inline)) => {
+                                    let mut p = fill_inline;
+                                    let mut f = 0.0;
+                                    let mut got = p > 0.0;
+                                    for _ in 0..3 {
+                                        if got { break; }
+                                        if let Ok::<(f64, f64), String>((p_f, f_f)) = crate::engine::exchanges::get_connector(&missing_ex).unwrap().fetch_order(&hc, &kc, &fp, oid.as_str(), missing_mult).await {
+                                            if p_f > 0.0 { p = p_f; f = if f_f > 1e-9 { f_f.abs() } else { p_f * missing_qty * missing_rate }; got = true; }
+                                        }
+                                        if !got { tokio::time::sleep(tokio::time::Duration::from_millis(50)).await; }
+                                    }
+                                    if !use_ioc && p <= 0.0 { p = entry_m; got = true; }
+                                    if got && p > 0.0 {
+                                        retry_open_ok = true;
+                                        missing_oid = Some(oid);
+                                        missing_fill = p;
+                                        missing_fee = f;
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            tracing::info!("[real] ASYMMETRIC RETRY STOPPED for {} — spread dropped to {:.4}% (min {:.4}%)", fp, cur_spread, min_entry_spread);
+                            break;
+                        }
+                    } else { break; }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+
+                if retry_open_ok {
+                    tracing::info!("[real] 🛟 ASYMMETRIC RESCUED {} by opening missing leg!", fp);
+                    let (fill_a_final, fill_b_final) = if a_filled { (fill_a, missing_fill) } else { (missing_fill, fill_b) };
+                    let (oid_a_db, oid_b_db) = if a_filled { (oid_a_original.unwrap_or_default(), missing_oid.unwrap()) } else { (missing_oid.unwrap(), oid_b_original.unwrap_or_default()) };
+                    let fee_total = if a_filled { fee_a_val + missing_fee } else { missing_fee + fee_b_val };
+                    
+                    let sp_actual = if is_a_higher {
+                        (fill_a_final - fill_b_final) / fill_b_final.max(1e-12) * 100.0
+                    } else {
+                        (fill_b_final - fill_a_final) / fill_a_final.max(1e-12) * 100.0
+                    };
+                    
+                    let slip_a = if fill_a_final > 0.0 { if is_a_higher { ((entry_a - fill_a_final) * (vol_retry / entry_a)).max(0.0) } else { ((fill_a_final - entry_a) * (vol_retry / entry_a)).max(0.0) } } else { 0.0 };
+                    let slip_b = if fill_b_final > 0.0 { if !is_a_higher { ((entry_b - fill_b_final) * (vol_retry / entry_b)).max(0.0) } else { ((fill_b_final - entry_b) * (vol_retry / entry_b)).max(0.0) } } else { 0.0 };
+                    let entry_slip_total = slip_a + slip_b;
+                    let entry_time = crate::engine::real::now_ms();
+                    
+                    let repo_rescue = crate::engine::db::TradeRepository::new(db_c.clone());
+                    repo_rescue.insert_new_entry(fp.clone(), ea_s.clone(), eb_s.clone(), d.clone(), vol_retry, fill_a_final, fill_b_final, sp_actual, entry_time, pid.clone(), fee_total, entry_slip_total, oid_a_db, oid_b_db, contracts_a, contracts_b).await;
+                    return;
+                }
+
                 let mut close_oid = None;
                 for attempt in 1u32..=emergency_retries as u32 {
                     match crate::engine::exchanges::get_connector(&fe).unwrap().close_order(&hc, &kc, &fp, fs, fc, false, lev as f64, 0.0, false).await {
