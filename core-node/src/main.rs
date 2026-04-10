@@ -233,9 +233,17 @@ async fn main() -> Result<()> {
 
                 if spreads.is_empty() { continue; }
 
+                // ── BACKGROUND LEVERAGE WARMUP ──
+                crate::engine::real::warmup_leverages(&spreads, &real_profiles, http.clone(), keys.clone());
+
+                // ── EVALUATE SMART SIGNALS ──
+                let signals = crate::engine::scanner::generate_signals(
+                    &spreads, &prices, &real_profiles, &keys, &e_ctx, &ts
+                );
+
                 // Run REAL engine first — real money needs freshest prices
                 for real_s in real_profiles {
-                    engine::cycle::run_cycle(spreads.clone(), prices.clone(), real_s, http.clone(), real_db.clone(), keys.clone(), &ts, e_ctx.clone()).await;
+                    engine::cycle::run_cycle(signals.clone(), spreads.clone(), prices.clone(), real_s, http.clone(), real_db.clone(), keys.clone(), &ts, e_ctx.clone()).await;
                 }
             }
         });

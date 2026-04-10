@@ -15,12 +15,13 @@ static LAST_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
 
 // NOTE: LAST_LIVE_FLUSH is declared as a function-local static inside run_cycle below.
 
-pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection, keys: Arc<ExchangeKeys>, ts: &TechnicalSettings, e_ctx: Arc<crate::state::EngineContext>) {
+pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection, keys: Arc<ExchangeKeys>, ts: &TechnicalSettings, e_ctx: Arc<crate::state::EngineContext>) {
     let dry_run = false;
     let repo = TradeRepository::new(db.clone());
 
     let trades = repo.load_open_trades(&settings.id).await;
     let num_active = trades.len() as i64;
+    let open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
     // funding_rate_8h setting is INTENTIONALLY not used here.
     // Real accumulated funding is read from trade.funding_cost (DB column updated from exchange API).
 
@@ -335,209 +336,59 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
     // This eliminates phantom trades, $0 PnL records, and immediate open/close chaos.
     if !settings.is_active { return; } // only block NEW entries, not closes above
     if num_active >= settings.max_active_trades { return; }
-    let open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
-
-    // ── Cooldown maps (persist across cycles to prevent spam) ─────────────────
-    let ex_cd = &e_ctx.exchange_cooldown;
-    let pair_cd = &e_ctx.pair_cooldown;
-    let now = now_ms();
-
-    // Diagnostic logging (throttled)
-    static DIAG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let dtick = DIAG_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if dtick % ts.diag_log_interval as u64 == 0 {
-        let fees: Vec<_> = e_ctx.fee_rates.iter().map(|e| format!("{}={:.3}%", e.key(), e.value() * 100.0)).collect();
-        let in_range = spreads.iter().filter(|r| r.spread >= settings.min_entry_spread && r.spread <= settings.max_entry_spread).count();
-        let supported = spreads.iter().filter(|r| keys.supports(&r.exchange_a) && keys.supports(&r.exchange_b)).count();
-        let cooled_ex: Vec<_> = ex_cd.iter().filter(|e| now - *e.value() < ts.exchange_cooldown_ms).map(|e| e.key().clone()).collect();
-        info!("[diag] spreads={} in_range={} supported={} active={}/{} cooled={:?} fees={:?}",
-            spreads.len(), in_range, supported, num_active, settings.max_active_trades, cooled_ex, fees);
-    }
 
     // Only open ONE trade per engine cycle to prevent burst-opening
     let mut opened_this_cycle = false;
 
-    for row in spreads.iter().take(ts.max_spreads_per_cycle as usize) {
+    // Filter signals meant for current profile
+    let profile_signals: Vec<_> = signals.into_iter().filter(|s| s.profile_id == settings.id).collect();
+
+    for sig in profile_signals {
         if opened_this_cycle { break; }
-        if row.spread < settings.min_entry_spread || row.spread > settings.max_entry_spread { continue; }
+        if open_pairs.contains(&sig.pair) { continue; }
 
-        // Absolute floor: spread must exceed round-trip costs from REAL exchange fee rates
-        let fee_a = crate::engine::real::get_exchange_fee(&row.exchange_a, ts.default_fee_rate, &e_ctx);
-        let fee_b = crate::engine::real::get_exchange_fee(&row.exchange_b, ts.default_fee_rate, &e_ctx);
-        let slippage_frac = settings.slippage_percent / 100.0;
-        let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
+        let exa = sig.exchange_a.clone();
+        let exb = sig.exchange_b.clone();
+        let pair = sig.pair.clone();
+        
+        let actual_vol_a = sig.actual_vol_a_usd;
+        let actual_vol_b = sig.actual_vol_b_usd;
 
-        // Structural deviation filter: the current spread must have deviated from its
-        // long-term EMA mean by at least min_entry_spread. This rejects "structural"
-        // spreads (permanently present, e.g. kimchi premium) and only allows genuine
-        // temporary divergences that are likely to converge.
-        let structural_deviation = row.spread - row.structural_spread;
-        if structural_deviation < settings.min_entry_spread {
-            // Log only occasionally to avoid spam (piggybacking on diag_log_interval)
-            if dtick % (ts.diag_log_interval as u64 * 10) == 0 {
-                info!("[real] SKIP {}: structural_dev={:.4} < min_entry_spread={:.4} (ema={:.4} max={:.4} min={:.4})",
-                    row.pair, structural_deviation, settings.min_entry_spread,
-                    row.structural_spread, row.structural_max, row.structural_min);
-            }
-            continue;
-        }
+        let contracts_a = sig.contracts_a;
+        let contracts_b = sig.contracts_b;
+        let qty_a = sig.target_qty_a;
+        let qty_b = sig.target_qty_b;
 
-        if open_pairs.contains(&row.pair) { continue; }
+        let limit_price_a = sig.limit_price_a;
+        let limit_price_b = sig.limit_price_b;
+        
+        let entry_a = sig.entry_a;
+        let entry_b = sig.entry_b;
+        
+        let break_even_pct = sig.break_even_pct;
+        let is_a_higher = sig.is_a_higher;
 
-        if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) { 
-            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: missing exchange keys", row.pair); }
-            continue; 
-        }
-        if settings.disabled_exchanges.contains(&row.exchange_a) || settings.disabled_exchanges.contains(&row.exchange_b) { 
-            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: disabled exchange", row.pair); }
-            continue; 
-        }
-
-        let cd_a = ex_cd.get(&row.exchange_a).map(|v| *v).unwrap_or(0);
-        let cd_b = ex_cd.get(&row.exchange_b).map(|v| *v).unwrap_or(0);
-        if now - cd_a < ts.exchange_cooldown_ms || now - cd_b < ts.exchange_cooldown_ms { 
-            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: exchange on cooldown", row.pair); }
-            continue; 
-        }
-
-        let cd_pair = pair_cd.get(&row.pair).map(|v| *v).unwrap_or(0);
-        if now - cd_pair < ts.pair_cooldown_ms { 
-            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: pair on cooldown", row.pair); }
-            continue; 
-        }
-
-        let is_a_higher = row.direction.starts_with(&row.exchange_a);
-        let mut entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
-        let mut entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
-
-        // Removed max_price_ratio check per user request
-
-        // ── LIQUIDITY DEPTH FILTER ────────────────────────────────────────────
-        let data_a = prices.get(&row.exchange_a).and_then(|m| m.get(&row.pair).cloned());
-        let data_b = prices.get(&row.exchange_b).and_then(|m| m.get(&row.pair).cloned());
-        let min_depth_usd = settings.trade_volume * ts.depth_multiplier;
-        if let (Some(ref da), Some(ref db)) = (&data_a, &data_b) {
-            let depth_sell = if is_a_higher { da.bid_size } else { db.bid_size };
-            let depth_buy  = if is_a_higher { db.ask_size } else { da.ask_size };
-            if depth_sell > 0.0 && depth_sell < min_depth_usd { 
-                if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: depth_sell {:.1} < min {:.1}", row.pair, depth_sell, min_depth_usd); }
-                continue; 
-            }
-            if depth_buy > 0.0 && depth_buy < min_depth_usd { 
-                if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: depth_buy {:.1} < min {:.1}", row.pair, depth_buy, min_depth_usd); }
-                continue; 
-            }
-            let intra_a = (da.ask - da.bid) / da.bid.max(1e-12) * 100.0;
-            let intra_b = (db.ask - db.bid) / db.bid.max(1e-12) * 100.0;
-            // FIX: configurable intra-spread max (was hardcoded 0.5%)
-            if intra_a > ts.intra_spread_max_pct || intra_b > ts.intra_spread_max_pct { 
-                if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: intra_spread a={:.2} b={:.2} > max {:.2}", row.pair, intra_a, intra_b, ts.intra_spread_max_pct); }
-                continue; 
-            }
-        }
-
-        let map = &e_ctx.multipliers;
-        let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) { Some(v) => *v, None => { info!("[real] SKIP {}: no mult_a", row.pair); continue } };
-        let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) { Some(v) => *v, None => { info!("[real] SKIP {}: no mult_b", row.pair); continue } };
-
-        let contracts_a = ((settings.trade_volume / entry_a.max(1e-12)) / mult_a).round();
-        if contracts_a < 1.0 { 
-            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: contracts_a < 1", row.pair); }
-            continue; 
-        }
-        let actual_vol_a = contracts_a * mult_a * entry_a;
-        let contracts_b = ((actual_vol_a / entry_b.max(1e-12)) / mult_b).round();
-        if contracts_b < 1.0 { 
-            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: contracts_b < 1", row.pair); }
-            continue; 
-        }
-        let actual_vol_b = contracts_b * mult_b * entry_b;
-        let vol_diff_pct = (actual_vol_a - actual_vol_b).abs() / actual_vol_a * 100.0;
-        if vol_diff_pct > ts.vol_diff_max_pct { 
-            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: vol_diff {:.2} > max {:.2}", row.pair, vol_diff_pct, ts.vol_diff_max_pct); }
-            continue; 
-        }
-
-        let max_v = settings.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
-        if actual_vol_a > max_v { 
-            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: actual_vol {:.2} > max_v {:.2}", row.pair, actual_vol_a, max_v); }
-            continue; 
-        }
-
-        let lmap = &e_ctx.launch_times;
-        let now_s = now_secs();
-        let min_age_secs = ts.min_listing_age_days * 24 * 3600;
-        let age_a = lmap.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|r| *r).unwrap_or(0);
-        let age_b = lmap.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|r| *r).unwrap_or(0);
-        if (age_a > 0 && now_s - age_a < min_age_secs) || (age_b > 0 && now_s - age_b < min_age_secs) { info!("[real] SKIP {}: new coin listing", row.pair); continue; }
+        let now = now_ms();
 
         // ── BALANCE LOW GUARD (zero-latency) ─────────────────────────────────
-        // background balance monitor marks this flag when an exchange rejects an
-        // order for insufficient margin. Cleared automatically once balance > $1.
-        if e_ctx.balance_low.get(&row.exchange_a).map(|v| *v).unwrap_or(false) {
-            info!("[real] SKIP {}: {} balance_low — waiting for balance recovery", row.pair, row.exchange_a);
-            continue;
-        }
-        if e_ctx.balance_low.get(&row.exchange_b).map(|v| *v).unwrap_or(false) {
-            info!("[real] SKIP {}: {} balance_low — waiting for balance recovery", row.pair, row.exchange_b);
-            continue;
-        }
-
-        if !has_sufficient_margin(&row.exchange_a, actual_vol_a, &e_ctx) { 
-            let now = now_ms() as i64;
-            if now - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
-                info!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_a);
-                LAST_MARGIN_LOG.store(now, Ordering::Relaxed);
-            } else {
-                tracing::debug!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_a);
+        if !has_sufficient_margin(&exa, actual_vol_a, &e_ctx) { 
+            let now_m = now_ms() as i64;
+            if now_m - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
+                info!("[real] SKIP {}: insufficient margin {}", pair, exa);
+                LAST_MARGIN_LOG.store(now_m, Ordering::Relaxed);
             }
             continue; 
         }
-        if !has_sufficient_margin(&row.exchange_b, actual_vol_b, &e_ctx) { 
-            let now = now_ms() as i64;
-            if now - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
-                info!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_b);
-                LAST_MARGIN_LOG.store(now, Ordering::Relaxed);
-            } else {
-                tracing::debug!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_b);
-            }
-            continue; 
-        }
-        if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional) || (row.exchange_b == "binance" && actual_vol_b < ts.binance_min_notional) { 
-            let now = now_ms() as i64;
-            if now - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
-                info!("[real] SKIP {}: binance min notional", row.pair);
-                LAST_MARGIN_LOG.store(now, Ordering::Relaxed);
-            } else {
-                tracing::debug!("[real] SKIP {}: binance min notional", row.pair);
+        if !has_sufficient_margin(&exb, actual_vol_b, &e_ctx) { 
+            let now_m = now_ms() as i64;
+            if now_m - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
+                info!("[real] SKIP {}: insufficient margin {}", pair, exb);
+                LAST_MARGIN_LOG.store(now_m, Ordering::Relaxed);
             }
             continue; 
         }
 
-        let has_tick_a = e_ctx.tick_sizes.contains_key(&format!("{}:{}", row.exchange_a, row.pair));
-        let has_tick_b = e_ctx.tick_sizes.contains_key(&format!("{}:{}", row.exchange_b, row.pair));
-        if !has_tick_a || !has_tick_b { info!("[real] SKIP {}: tick size missing", row.pair); continue; }
-        let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|v| *v).unwrap_or(0.000001);
-        let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|v| *v).unwrap_or(0.000001);
-
-        let use_ioc = ts.entry_order_type == "ioc";
-        let (mut limit_price_a, mut limit_price_b) = if use_ioc {
-            let max_slip_frac = settings.slippage_percent / 100.0;
-            let lpa = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
-            let lpb = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
-            
-            let lpa_rounded = (lpa / tick_a).round() * tick_a;
-            let lpb_rounded = (lpb / tick_b).round() * tick_b;
-            (lpa_rounded, lpb_rounded)
-        } else {
-            (0.0, 0.0) // market order — price=0 means no limit
-        };
-
-        let exa = row.exchange_a.clone();
-        let exb = row.exchange_b.clone();
-        let pair = row.pair.clone();
-
-        // Leverage: parallel, cached after first call → instant on subsequent
+        // Leverage: pre-warmed so this returns instantly
         let (conn_ensure_a, conn_ensure_b) = (
             crate::engine::exchanges::get_connector(&exa).unwrap(),
             crate::engine::exchanges::get_connector(&exb).unwrap()
@@ -547,55 +398,16 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             conn_ensure_b.ensure_leverage(&http, &keys, &pair, settings.leverage as f64)
         );
 
-        // ── PRE-EXECUTION SPREAD RE-CHECK ───────────────────────────────────
-        // After leverage setup (which may take 200-500ms on first call per pair),
-        // re-read FRESH bid/ask from in-memory PriceMap and verify spread hasn't collapsed.
-        // This prevents entering on stale prices that moved during the leverage API call.
-        let fresh_a = prices.get(&exa).and_then(|m| m.get(&pair).cloned());
-        let fresh_b = prices.get(&exb).and_then(|m| m.get(&pair).cloned());
-        if let (Some(fa), Some(fb)) = (&fresh_a, &fresh_b) {
-            let fresh_entry_a = if is_a_higher { fa.bid } else { fa.ask };
-            let fresh_entry_b = if is_a_higher { fb.ask } else { fb.bid };
-            let fresh_spread = if is_a_higher {
-                (fa.bid - fb.ask) / fb.ask.max(1e-12) * 100.0
-            } else {
-                (fb.bid - fa.ask) / fa.ask.max(1e-12) * 100.0
-            };
-            if fresh_spread < settings.min_entry_spread {
-                info!("[real] PRE-EXEC ABORT {} — spread collapsed {:.4}% → {:.4}% (be={:.4}%)",
-                    pair, row.spread, fresh_spread, break_even_pct);
-                continue;
-            }
-            // Use the fresh prices for the actual order
-            entry_a = fresh_entry_a;
-            entry_b = fresh_entry_b;
-            // Re-calc limit prices if IOC mode
-            if use_ioc {
-                let max_slip_frac = settings.slippage_percent / 100.0;
-                let raw_lpa = if is_a_higher { entry_a * (1.0 - max_slip_frac) } else { entry_a * (1.0 + max_slip_frac) };
-                let raw_lpb = if is_a_higher { entry_b * (1.0 + max_slip_frac) } else { entry_b * (1.0 - max_slip_frac) };
-                limit_price_a = (raw_lpa / tick_a).round() * tick_a;
-                limit_price_b = (raw_lpb / tick_b).round() * tick_b;
-            }
-        }
-
         let t0 = std::time::Instant::now();
-
+        let use_ioc = ts.entry_order_type == "ioc";
         let order_type_label = if use_ioc { "IOC" } else { "MKT" };
         info!("[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}%",
-            pair, order_type_label, exa, contracts_a, limit_price_a, exb, contracts_b, limit_price_b, row.spread, break_even_pct);
+            pair, order_type_label, exa, contracts_a, limit_price_a, exb, contracts_b, limit_price_b, sig.spread, break_even_pct);
 
         // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
-        let conn_place_a = crate::engine::exchanges::get_connector(&exa).unwrap();
-        let conn_place_b = crate::engine::exchanges::get_connector(&exb).unwrap();
-        let is_qty_based_a = exa == "binance" || exa == "bybit";
-        let is_qty_based_b = exb == "binance" || exb == "bybit";
-        let qty_a = if is_qty_based_a { contracts_a * mult_a } else { contracts_a };
-        let qty_b = if is_qty_based_b { contracts_b * mult_b } else { contracts_b };
-
         let (result_a, result_b) = tokio::join!(
-            conn_place_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0),
-            conn_place_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0)
+            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0),
+            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0)
         );
 
         let order_ms = t0.elapsed().as_millis();
@@ -606,8 +418,6 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             Err(e) => {
                 let es = e.to_string();
                 error!("[real] LEG_A reject {}/{}: {} ({}ms)", exa, pair, es, order_ms);
-                // Detect balance/margin rejections and flag immediately.
-                // background balance fetcher will clear flag once funds recover.
                 let esl = es.to_lowercase();
                 if esl.contains("insufficient") || esl.contains("balance") ||
                    esl.contains("margin") || esl.contains("exceed") ||
@@ -632,7 +442,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             }
         };
 
+        let pair_cd = &e_ctx.pair_cooldown;
         if oid_a.is_none() && oid_b.is_none() { pair_cd.insert(pair.clone(), now); continue; }
+
+        let mult_a = sig.mult_a;
+        let mult_b = sig.mult_b;
 
         // ── PARALLEL FILL VERIFICATION ───────────────────────────────────────
         // ALL order types (market + IOC) MUST be verified via fetch_order.
@@ -685,7 +499,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             opened_this_cycle = true;
 
             let vol = settings.trade_volume;
-            let dir = row.direction.clone();
+                // direction comes from sig.direction
+            let dir = sig.direction.clone();
             // Compute entry spread from ACTUAL fill prices, not row.spread (which was
             // computed by the spread scanner before orders were placed and may be stale).
             let actual_entry_spread = if fill_a > 0.0 && fill_b > 0.0 {
@@ -695,7 +510,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     (fill_b - fill_a) / fill_a.max(1e-12) * 100.0
                 }
             } else {
-                row.spread // fallback if fills unexpected
+                sig.spread // fallback if fills unexpected
             };
             let sp = actual_entry_spread;
             let profile_id = settings.id.clone();
@@ -713,7 +528,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             let oid_b_db = oid_b.unwrap_or_default();
 
             info!("[real] [EXCHANGE_VERIFIED] ✅ OPEN {} A={:.6}(c={}) B={:.6}(c={}) fees={:.4} slip={:.4} scanner_sp={:.4}% actual_sp={:.4}% latency={}ms",
-                pair, fill_a, contracts_a, fill_b, contracts_b, entry_comm, entry_slip, row.spread, sp, total_ms);
+                pair, fill_a, contracts_a, fill_b, contracts_b, entry_comm, entry_slip, sig.spread, sp, total_ms);
 
             repo.insert_new_entry(pair.clone(), exa.clone(), exb.clone(), dir.clone(), vol, fill_a, fill_b, sp, entry_time, profile_id.clone(), entry_comm, entry_slip, oid_a_db, oid_b_db, contracts_a, contracts_b).await;
         } else {
@@ -731,18 +546,20 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
             let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
             let fp = pair.clone();
-            let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), row.direction.clone(), row.spread, settings.id.clone());
+            let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), sig.direction.clone(), sig.spread, settings.id.clone());
             let lev = settings.leverage;
             let emergency_retries = ts.emergency_close_retries;
 
             let prices_retry = prices.clone();
+            let entry_a = sig.entry_a;
+            let entry_b = sig.entry_b;
             let min_entry_spread = settings.min_entry_spread;
             let slip_pct = settings.slippage_percent;
             let use_ioc = ts.entry_order_type == "ioc";
             let vol_retry = settings.trade_volume;
             let oid_a_original = oid_a.clone();
             let oid_b_original = oid_b.clone();
-            let structural_spread_val = row.structural_spread;  // for structural deviation check in rescue
+            let structural_spread_val = sig.structural_spread; // Read from TradeSignal
 
             let e_ctx_em = Arc::clone(&e_ctx);
             tokio::spawn(async move {
