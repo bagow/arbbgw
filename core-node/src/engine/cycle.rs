@@ -433,7 +433,10 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         }
 
         let max_v = settings.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
-        if actual_vol_a > max_v { info!("[real] SKIP {}: actual_vol {:.2} > max_v {:.2}", row.pair, actual_vol_a, max_v); continue; }
+        if actual_vol_a > max_v { 
+            if dtick % (ts.diag_log_interval as u64 * 10) == 0 { info!("[real] SKIP {}: actual_vol {:.2} > max_v {:.2}", row.pair, actual_vol_a, max_v); }
+            continue; 
+        }
 
         let lmap = &e_ctx.launch_times;
         let now_s = now_secs();
