@@ -197,18 +197,33 @@ impl TradeRepository {
         let r = reason.to_string();
         let r_clone = r.clone();
         let current_ms = now_ms();
+        // Compute net PnL here from known parameter values, NOT from stale DB column values.
+        // Previously the SQL used column references (gross_pnl, commission_cost, funding_cost)
+        // which resolve to OLD row values during UPDATE, causing wrong PnL.
         let _ = self.db.call(move |conn| {
+            // First read entry commission+slippage to include them in net pnl
+            let (entry_comm, entry_slip): (f64, f64) = conn.query_row(
+                "SELECT COALESCE(commission_cost, 0.0), COALESCE(slippage_cost, 0.0) FROM trades WHERE id=?",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?))
+            ).unwrap_or((0.0, 0.0));
+
+            let total_comm = entry_comm + exit_fee;
+            let total_slip = entry_slip + exit_slip;
+            let net_pnl = gross_pnl - total_comm - fund_cost;
+
             conn.execute(
                 "UPDATE trades SET \
                  status='CLOSED', exit_price_a=?, exit_price_b=?, exit_spread=?, exit_time=?, \
                  pnl_a=?, pnl_b=?, gross_pnl=?, curr_gross_pnl=?, close_reason=?, \
-                 funding_cost=?, commission_cost=commission_cost+?, slippage_cost=slippage_cost+?, \
-                 pnl=(gross_pnl - funding_cost - (commission_cost+?) - ?) \
+                 funding_cost=?, commission_cost=?, slippage_cost=?, \
+                 pnl=? \
                  WHERE id=?",
                 params![
                     exit_price_a, exit_price_b, exit_spread, current_ms,
                     pnl_a, pnl_b, gross_pnl, gross_pnl, r_clone,
-                    fund_cost, exit_fee, exit_slip, exit_fee, exit_slip,
+                    fund_cost, total_comm, total_slip,
+                    net_pnl,
                     id
                 ]
             )?;
