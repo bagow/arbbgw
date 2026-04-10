@@ -104,18 +104,33 @@ impl ExchangeConnector for BinanceConnector {
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64), String> {
         if order_id.starts_with("dry_") { return Ok((0.0, 0.0)); }
         let ts = now_ms();
-        // Step 1: Get average fill price from the order endpoint
         let qs = format!("symbol={}&orderId={}&timestamp={}", pair, order_id, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
         let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
         let resp = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
             .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let price = v["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
 
-        // Step 2: Fetch real commission from userTrades endpoint.
-        // This is the ONLY way to get accurate commission for Binance futures.
-        // Weight: 5 — acceptable for post-trade verification (called once per leg per close).
+        // Check order status — if EXPIRED/CANCELED/REJECTED, no fill will ever come
+        let status = v["status"].as_str().unwrap_or("");
+        if status == "EXPIRED" || status == "CANCELED" || status == "REJECTED" {
+            tracing::warn!("[binance] fetch_order {} status={} — definitively unfilled", order_id, status);
+            return Ok((0.0, 0.0));
+        }
+
+        // Check executedQty — if 0, order didn't fill
+        let exec_qty: f64 = v["executedQty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        if exec_qty < 1e-12 {
+            // Order exists but hasn't filled yet (or was partially cancelled)
+            return Ok((0.0, 0.0));
+        }
+
+        let price = v["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        if price <= 0.0 {
+            return Ok((0.0, 0.0));
+        }
+
+        // Step 2: Fetch real commission from userTrades endpoint
         let ts2 = now_ms();
         let qs2 = format!("symbol={}&orderId={}&timestamp={}", pair, order_id, ts2);
         let sig2 = binance_sign(&keys.binance_secret, &qs2);
@@ -132,7 +147,6 @@ impl ExchangeConnector for BinanceConnector {
                     .map(|arr| {
                         arr.iter()
                             .filter(|t| {
-                                // Match only fills for this exact order
                                 t["orderId"].as_i64().map(|id| id.to_string()).as_deref()
                                     == Some(order_id)
                             })
@@ -142,10 +156,8 @@ impl ExchangeConnector for BinanceConnector {
                                     .and_then(|s| s.parse::<f64>().ok())
                                     .unwrap_or(0.0);
                                 let asset = t["commissionAsset"].as_str().unwrap_or("USDT");
-                                // Normalise all commission assets to USDT
                                 acc + match asset {
                                     "USDT" => comm,
-                                    // If paid in BNB or base asset, convert via fill price
                                     _ => if price > 0.0 { comm * price } else { comm },
                                 }
                             })

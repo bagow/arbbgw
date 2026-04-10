@@ -160,6 +160,20 @@ impl ExchangeConnector for BybitConnector {
             
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         let order = &v["result"]["list"][0];
+
+        // Check order status — if Cancelled/Rejected/Deactivated, no fill
+        let status = order["orderStatus"].as_str().unwrap_or("");
+        if status == "Cancelled" || status == "Rejected" || status == "Deactivated" {
+            tracing::warn!("[bybit] fetch_order {} status={} — definitively unfilled", order_id, status);
+            return Ok((0.0, 0.0));
+        }
+
+        // Check cumExecQty — if 0, order didn't fill
+        let exec_qty: f64 = order["cumExecQty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        if exec_qty < 1e-12 {
+            return Ok((0.0, 0.0));
+        }
+
         let price = order["avgPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
         let fee = order["cumExecFee"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         

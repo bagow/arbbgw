@@ -636,15 +636,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             if let Some((p, f)) = fb { fill_b = p; fee_b_val = f; got_b = true; }
         }
 
-        // Last resort for market orders: if fetch_order never returned a price
-        // after all retries, use WS price but log a clear WARNING
+        // NO WS FALLBACK for entry fills! If fetch_order couldn't verify the fill
+        // after all retries, the order is treated as UNFILLED (ghost trade prevention).
+        // Previous code used WS prices here, creating trades that didn't exist on exchanges.
         if oid_a.is_some() && fill_a <= 0.0 {
-            tracing::warn!("[real] ⚠️ ENTRY FILL UNRESOLVED for {} leg A after {} retries — using WS price {:.6}", pair, ts.fill_verify_retries, entry_a);
-            fill_a = entry_a;
+            error!("[real] ❌ ENTRY FILL UNVERIFIED for {} leg A after {} retries — treating as UNFILLED", pair, ts.fill_verify_retries);
         }
         if oid_b.is_some() && fill_b <= 0.0 {
-            tracing::warn!("[real] ⚠️ ENTRY FILL UNRESOLVED for {} leg B after {} retries — using WS price {:.6}", pair, ts.fill_verify_retries, entry_b);
-            fill_b = entry_b;
+            error!("[real] ❌ ENTRY FILL UNVERIFIED for {} leg B after {} retries — treating as UNFILLED", pair, ts.fill_verify_retries);
         }
 
         let total_ms = t0.elapsed().as_millis();
