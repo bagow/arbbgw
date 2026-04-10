@@ -317,7 +317,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             // in the DB reflects the true net position (gross - commission - real_funding).
             let real_live_net_pnl = live_gross_pnl - trade.commission_cost - acc_fund_cost;
 
-            live_updates.push((trade.id, c_price_a, c_price_b, current_spread, real_live_net_pnl, fr_a, fr_b, fund_next, acc_fund_cost));
+            live_updates.push((trade.id, c_price_a, c_price_b, current_spread, real_live_net_pnl, fr_a, fr_b, fund_next, acc_fund_cost, live_pnl_a, live_pnl_b));
             if top_spread > trade.highest_spread {
                 let id = trade.id;
                 // Wait, need await here, earlier it was synchronous?
