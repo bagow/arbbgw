@@ -567,9 +567,12 @@ function renderCexTab(profile, exchangesData) {
                         const isLong = pos.size > 0;
                         const pnlColor = pos.unrealized_pnl >= 0 ? 'var(--green)' : 'var(--red)';
                         const dirStr = isLong ? '<span style="color:var(--green)">[L]</span>' : '<span style="color:var(--red)">[S]</span>';
-                        return `<div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:6px;font-family:var(--font-mono);">
+                        return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:0.85rem;margin-bottom:6px;font-family:var(--font-mono);">
                             <span>${dirStr} ${pos.symbol} <span style="color:var(--text-sub)">${Math.abs(pos.size)}</span></span>
-                            <span style="color:${pnlColor}">${pos.unrealized_pnl >= 0 ? '+' : ''}$${pos.unrealized_pnl.toFixed(4)}</span>
+                            <span style="display:flex;align-items:center;gap:6px;">
+                                <span style="color:${pnlColor}">${pos.unrealized_pnl >= 0 ? '+' : ''}$${pos.unrealized_pnl.toFixed(4)}</span>
+                                <button onclick="closeActivePosition('${exA}', '${pos.symbol}', ${pos.size})" style="background:none;border:none;color:var(--text-sub);cursor:pointer;font-size:1.1rem;line-height:1;padding:0;" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--text-sub)'" title="Market Close Position">×</button>
+                            </span>
                         </div>`;
                     }).join('')}
                 </div>
@@ -587,6 +590,26 @@ function renderCexTab(profile, exchangesData) {
     html += `</div>`;
     return html;
 }
+
+
+window.closeActivePosition = async function(exchange, symbol, size) {
+    if (!confirm(`Are you sure you want to completely close ${symbol} on ${exchange} at market price?`)) return;
+    try {
+        const res = await authFetch(`${API_BASE}/api/positions/close`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ exchange, symbol, size })
+        });
+        if (res.ok) {
+            flashMessage('Close order submitted!', 'success');
+            setTimeout(window.fetchUnifiedData, 500);
+        } else {
+            flashMessage('Failed to close position', 'error');
+        }
+    } catch (e) {
+        flashMessage('Error closing position', 'error');
+    }
+};
 
 function renderSettingsForm(profile) {
     const p = profile;

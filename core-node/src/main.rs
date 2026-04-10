@@ -9,8 +9,9 @@ use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc, time::Dur
 use tokio::sync::RwLock;
 
 use anyhow::{Context, Result};
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Router, Json, extract::State};
 use reqwest::Client;
+use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio_rusqlite::Connection;
 use tower_http::cors::{Any, CorsLayer};
@@ -334,8 +335,11 @@ async fn main() -> Result<()> {
 
     // ── HTTP API ─────────────────────────────────────────────────────────────
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    let app_state = (http.clone(), exchange_keys.clone());
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/api/positions/close", post(handle_close_position))
+        .with_state(app_state)
         .layer(cors);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -417,3 +421,22 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
 // trigger core node again
 
 // trigger deploy
+
+#[derive(Deserialize)]
+pub struct CloseReq { pub exchange: String, pub symbol: String, pub size: f64 }
+
+async fn handle_close_position(
+    State((http, keys)): State<(Client, Arc<crate::engine::real::ExchangeKeys>)>,
+    Json(req): Json<CloseReq>
+) -> Result<&'static str, (axum::http::StatusCode, String)> {
+    let conn = crate::engine::exchanges::get_connector(&req.exchange)
+        .ok_or((axum::http::StatusCode::BAD_REQUEST, "Unknown exchange".into()))?;
+    
+    let is_buy = req.size < 0.0;
+    let size = req.size.abs();
+    
+    match conn.close_order(&http, &keys, &req.symbol, is_buy, size, false, 1.0, 0.0, false).await {
+        Ok(_) => Ok("ok"),
+        Err(e) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
+    }
+}

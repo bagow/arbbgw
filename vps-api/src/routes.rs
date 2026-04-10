@@ -715,3 +715,32 @@ pub async fn handle_patch_technical_settings(
         Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct PositionCloseReq {
+    pub exchange: String,
+    pub symbol: String,
+    pub size: f64,
+}
+
+pub async fn handle_close_exchange_position(
+    axum::extract::State(_state): axum::extract::State<crate::AppState>,
+    axum::Json(payload): axum::Json<PositionCloseReq>,
+) -> impl axum::response::IntoResponse {
+    let client = reqwest::Client::new();
+    let res = client.post("http://127.0.0.1:3003/api/positions/close")
+        .json(&payload)
+        .send()
+        .await;
+        
+    match res {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                axum::http::StatusCode::OK
+            } else {
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            }
+        },
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
