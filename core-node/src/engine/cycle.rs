@@ -144,14 +144,17 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 (0.0, 0.0)
             };
 
+            let q_a = if exa == "binance" || exa == "bybit" { c_a * mult_a } else { c_a };
+            let q_b = if exb == "binance" || exb == "bybit" { c_b * mult_b } else { c_b };
+
             let e_ctx_c = Arc::clone(&e_ctx);
             tokio::spawn(async move {
                 let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
                 // Place close orders in parallel
                 let (ra, rb) = tokio::join!(
-                    conn_a.close_order(&h, &k, &pair, is_a_higher, c_a, dry_run, lev as f64, limit_close_a, use_ioc),
-                    conn_b.close_order(&h, &k, &pair, !is_a_higher, c_b, dry_run, lev as f64, limit_close_b, use_ioc)
+                    conn_a.close_order(&h, &k, &pair, is_a_higher, q_a, dry_run, lev as f64, limit_close_a, use_ioc),
+                    conn_b.close_order(&h, &k, &pair, !is_a_higher, q_b, dry_run, lev as f64, limit_close_b, use_ioc)
                 );
                 let oid_close_a = ra.ok();
                 let oid_close_b = rb.ok();
@@ -218,8 +221,8 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     let conn_a2 = crate::engine::exchanges::get_connector(&exa).unwrap();
                     let conn_b2 = crate::engine::exchanges::get_connector(&exb).unwrap();
                     let (fa, fb) = tokio::join!(
-                        conn_a2.close_order(&h, &k, &pair, is_a_higher, c_a, false, lev as f64, 0.0, false),
-                        conn_b2.close_order(&h, &k, &pair, !is_a_higher, c_b, false, lev as f64, 0.0, false)
+                        conn_a2.close_order(&h, &k, &pair, is_a_higher, q_a, false, lev as f64, 0.0, false),
+                        conn_b2.close_order(&h, &k, &pair, !is_a_higher, q_b, false, lev as f64, 0.0, false)
                     );
                     if fa.is_ok() && fb.is_ok() {
                         // Market close fired successfully — mark closed with estimated PnL
@@ -709,9 +712,11 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         } else {
             // ⚠️ ASYMMETRIC — emergency close the filled leg
             let (fe, _fo, fs, fc, fp_price, ff, fv) = if a_filled {
-                (exa.clone(), oid_a.as_ref().unwrap().clone(), is_a_higher, contracts_a, fill_a, fee_a_val, actual_vol_a)
+                let q_qty = if exa == "binance" || exa == "bybit" { contracts_a * mult_a } else { contracts_a };
+                (exa.clone(), oid_a.as_ref().unwrap().clone(), is_a_higher, q_qty, fill_a, fee_a_val, actual_vol_a)
             } else {
-                (exb.clone(), oid_b.as_ref().unwrap().clone(), !is_a_higher, contracts_b, fill_b, fee_b_val, actual_vol_b)
+                let q_qty = if exb == "binance" || exb == "bybit" { contracts_b * mult_b } else { contracts_b };
+                (exb.clone(), oid_b.as_ref().unwrap().clone(), !is_a_higher, q_qty, fill_b, fee_b_val, actual_vol_b)
             };
 
             error!("[real] ⚠️ ASYMMETRIC {} — only {} filled @ {:.6} ({}ms)", pair, fe, fp_price, total_ms);
