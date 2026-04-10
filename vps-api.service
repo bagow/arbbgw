@@ -12,7 +12,6 @@ Environment="INTERNAL_TOKEN=Drc8#mP2vLq!"
 Environment="PASS_DIMA=Xk9mP2#vLqRt7Yw"
 Environment="PASS_SERGEI=Bn4cZ8@jNhKs3Fd"
 Environment="PROFILES_DB_PATH=/home/opc/core-node/vps-api.db"
-Environment="PAPER_DB_PATH=/home/opc/core-node/paper-trader.db"
 Environment="REAL_DB_PATH=/home/opc/core-node/real-trader.db"
 ExecStart=/usr/local/bin/vps-api
 Restart=always

@@ -79,7 +79,7 @@ impl Default for TradingProfile {
         Self {
             id: "".to_string(),
             name: "New Profile".to_string(),
-            mode: "paper".to_string(),
+            mode: "real".to_string(),
             is_active: false,
             min_entry_spread: 1.0,
             max_entry_spread: 10.0,

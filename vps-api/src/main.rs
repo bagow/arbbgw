@@ -16,7 +16,6 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[derive(Clone)]
 pub struct AppState {
     pub db: Connection,           // vps-api.db — profiles + server_cache
-    pub paper_db: Connection,     // paper-trader.db — paper trades only
     pub real_db: Connection,      // real-trader.db  — real trades only
     pub collector_token: String,
     pub pass_dima: String,
@@ -41,8 +40,6 @@ async fn main() -> anyhow::Result<()> {
 
     let db_path    = env::var("PROFILES_DB_PATH")
         .unwrap_or_else(|_| "/home/opc/core-node/vps-api.db".to_string());
-    let paper_path = env::var("PAPER_DB_PATH")
-        .unwrap_or_else(|_| "/home/opc/core-node/paper-trader.db".to_string());
     let real_path  = env::var("REAL_DB_PATH")
         .unwrap_or_else(|_| "/home/opc/core-node/real-trader.db".to_string());
 
@@ -51,10 +48,6 @@ async fn main() -> anyhow::Result<()> {
     let db = Connection::open(&db_path).await?;
     db::init_db(&db).await?;
 
-    // ── Paper trades DB ───────────────────────────────────────────────────────
-    tracing::info!("Paper DB:    {}", paper_path);
-    let paper_db = Connection::open(&paper_path).await?;
-    db::init_trades_db(&paper_db).await?;
 
     // ── Real trades DB ────────────────────────────────────────────────────────
     tracing::info!("Real DB:     {}", real_path);
@@ -63,7 +56,6 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         db,
-        paper_db,
         real_db,
         collector_token,
         pass_dima,

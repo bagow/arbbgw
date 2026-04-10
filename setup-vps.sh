@@ -51,20 +51,14 @@ cargo build --release -p real-trader 2>&1 | tail -5
 echo "--- core-node ---"
 cargo build --release -p core-node 2>&1 | tail -5
 
-echo "--- paper-trader ---"
-cargo build --release -p paper-trader 2>&1 | tail -5
 
-echo "--- rust-collector ---"
-cargo build --release -p rust-collector 2>&1 | tail -5
 
 echo "=== 8. Копируем бинарники ==="
 sudo cp target/release/vps-api      /usr/local/bin/
 sudo cp target/release/real-trader  /usr/local/bin/
 sudo cp target/release/core-node    /usr/local/bin/
-sudo cp target/release/paper-trader /usr/local/bin/
-sudo cp target/release/rust-collector /usr/local/bin/
-sudo chmod +x /usr/local/bin/{vps-api,real-trader,core-node,paper-trader,rust-collector}
-sudo restorecon -v /usr/local/bin/{vps-api,real-trader,core-node,paper-trader,rust-collector} 2>/dev/null || true
+sudo chmod +x /usr/local/bin/{vps-api,real-trader,core-node}
+sudo restorecon -v /usr/local/bin/{vps-api,real-trader,core-node} 2>/dev/null || true
 
 echo "=== 9. Systemd сервисы ==="
 sudo cp vps-api.service      /etc/systemd/system/ 2>/dev/null || true
@@ -83,4 +77,4 @@ echo "  1. Заполни /etc/vps-api.env"
 echo "  2. Заполни /etc/real-trader.env (или /etc/core-node.env)"
 echo "  3. sudo systemctl enable --now vps-api"
 echo "  4. DRY_RUN=true sudo systemctl start real-trader"
-ls -la /usr/local/bin/{vps-api,real-trader,core-node,paper-trader,rust-collector} 2>/dev/null
+ls -la /usr/local/bin/{vps-api,real-trader,core-node} 2>/dev/null

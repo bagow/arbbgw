@@ -24,7 +24,7 @@ pub async fn init_db(db: &Connection) -> Result<()> {
             CREATE TABLE IF NOT EXISTS trading_profiles (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                mode TEXT NOT NULL DEFAULT 'paper',
+                mode TEXT NOT NULL DEFAULT 'real',
                 is_active INTEGER DEFAULT 0,
                 min_entry_spread REAL DEFAULT 1.0,
                 max_entry_spread REAL DEFAULT 10.0,
@@ -171,27 +171,14 @@ pub async fn init_db(db: &Connection) -> Result<()> {
             )?;
         }
 
-        // Restore activity for the shared default profiles.
-        // After a DB path migration (e.g. env var change), the new DB file may have
-        // is_active=0 for paper-default because saveSettings previously sent is_active=0.
-        // The shared default profiles should always be active unless explicitly stopped by the user.
+        // Restore activity for the shared default real profile.
         let _ = conn.execute(
-            "UPDATE trading_profiles SET is_active=1 WHERE id='paper-default' AND is_active=0",
+            "UPDATE trading_profiles SET is_active=1 WHERE id='real-default' AND is_active=0",
             [],
         );
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
-        // INSERT OR IGNORE — only runs once when the row does not yet exist.
-        // Existing rows are NEVER modified here — user settings are preserved.
-        conn.execute(
-            "INSERT OR IGNORE INTO trading_profiles
-                (id,name,mode,is_active,min_entry_spread,max_entry_spread,
-                 trade_volume,take_profit_percent,trailing_stop_percent,max_active_trades,
-                 commission_rate,slippage_percent,funding_rate_8h,min_volume_millions,
-                 collector_interval_secs,created_at,updated_at,disabled_exchanges)
-            VALUES ('paper-default','Paper Default','paper',1,1.0,10.0,10.0,0.2,0.3,3,0.05,0.05,0.01,10.0,5,?,?,'[]')",
-            params![now, now],
-        )?;
+
         conn.execute(
             "INSERT OR IGNORE INTO trading_profiles
                 (id,name,mode,is_active,min_entry_spread,max_entry_spread,
@@ -206,7 +193,7 @@ pub async fn init_db(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Init trades-only DB (paper-trader.db or real-trader.db)
+/// Init trades-only DB (real-trader.db)
 pub async fn init_trades_db(db: &Connection) -> Result<()> {
     db.call(|conn| {
         conn.execute_batch(
@@ -244,7 +231,7 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
                 pnl_a REAL,
                 pnl_b REAL,
                 close_reason TEXT,
-                profile_id TEXT DEFAULT 'paper-default',
+                profile_id TEXT DEFAULT 'real-default',
                 order_id_a TEXT,
                 order_id_b TEXT,
                 contracts_a INTEGER,

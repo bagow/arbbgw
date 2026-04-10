@@ -1,6 +1,6 @@
 //! real-trader — Live order execution engine for CEX arbitrage
 //!
-//! Mirrors paper-trader architecture but places REAL orders on exchanges.
+//! Places REAL orders on exchanges.
 //!
 //! HTTP endpoints:
 //!   POST /internal/spreads  ← receives spread data from rust-collector

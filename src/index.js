@@ -3,7 +3,6 @@
  *
  * Data flow:
  *   Rust collector → POST /api/update  → D1 (server_cache + spread_history)
- *                                      → paper-trader /internal/spreads  (direct VPS)
  *                                      → real-trader  /internal/spreads  (direct VPS)
  *
  * Auth:
@@ -16,14 +15,6 @@
  *   GET  /api/snapshot                        → cached spread table
  *   GET  /api/klines/:ex/:sym/:interval/:limit → kline proxy
  *   GET  /api/history/:pair/:exA/:exB         → D1 spread history
- *
- *   GET  /api/trading/settings                → paper-trader default settings
- *   POST /api/trading/settings                → update paper-trader default settings
- *   GET  /api/trading/trades                  → active + closed paper trades
- *   DELETE /api/trading/trades                → clear paper trades
- *   POST /api/trading/commands/ack            → paper-trader acks command
- *   POST /api/trading/active                  → paper-trader pushes active trades
- *   POST /api/archive                         → paper-trader archives closed trade
  *
  *   GET  /api/profiles                        → list all trading profiles
  *   POST /api/profiles                        → create new profile

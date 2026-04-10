@@ -93,17 +93,13 @@ pub async fn handle_update(
         )?)
     }).await;
 
-    // Also notify paper-trader via an internal channel or just expect paper-trader to connect independently?
-    // Wait, paper-trader is a separate bin, so how does it get spreads? It can query /api/snapshot!
-    // Or rust-collector can push to BOTH paper-trader and vps-api.
-    
     (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
 }
 
 // ─── GET /api/trading/settings/all ───
 pub async fn handle_get_all_settings(State(state): State<AppState>) -> Response {
     let profiles = match state.db.call(|conn| {
-        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE mode = 'paper'")?;
+        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE mode = 'real'")?;
         let items: Vec<_> = stmt.query_map([], row_to_profile)?.filter_map(|r| r.ok()).collect();
         Ok(items)
     }).await {
@@ -141,7 +137,7 @@ pub async fn handle_get_profiles(State(state): State<AppState>, headers: HeaderM
     };
 
     let profiles = match state.db.call(move |conn| {
-        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE owner = ? OR id IN ('paper-default','real-default') ORDER BY created_at ASC")?;
+        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE owner = ? OR id = 'real-default' ORDER BY created_at ASC")?;
         let items: Vec<_> = stmt.query_map([username], row_to_profile)?.filter_map(|r| r.ok()).collect();
         Ok(items)
     }).await {
@@ -169,13 +165,13 @@ pub async fn handle_get_unified(
     };
 
     // 1. Get Snapshot and Exchange Maps
-    let snapshot = state.paper_db.call(|conn| {
+    let snapshot = state.real_db.call(|conn| {
         let row: Result<String, rusqlite::Error> = conn.query_row("SELECT value FROM server_cache WHERE key = 'snapshot'", [], |r| r.get(0));
         let val: serde_json::Value = if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) };
         Ok::<serde_json::Value, tokio_rusqlite::Error>(val)
     }).await.unwrap_or(json!({}));
 
-    let exchanges = state.paper_db.call(|conn| {
+    let exchanges = state.real_db.call(|conn| {
         let row: Result<String, rusqlite::Error> = conn.query_row("SELECT value FROM server_cache WHERE key = 'exchange_maps'", [], |r| r.get(0));
         let val: serde_json::Value = if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) };
         Ok::<serde_json::Value, tokio_rusqlite::Error>(val)
@@ -183,18 +179,17 @@ pub async fn handle_get_unified(
 
     // 2. Get Profiles
     let profiles = state.db.call(move |conn| {
-        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE owner = ? OR id IN ('paper-default','real-default') ORDER BY created_at ASC")?;
+        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE owner = ? OR id = 'real-default' ORDER BY created_at ASC")?;
         let items: Vec<_> = stmt.query_map([username], row_to_profile)?.filter_map(|r| r.ok()).collect();
         Ok(items)
     }).await.unwrap_or_else(|_| vec![]);
 
-    // 3. Pick trade DB based on profile mode (paper vs real)
-    let pid = query.profile_id.unwrap_or_else(|| "paper-default".to_string());
+    let pid = query.profile_id.unwrap_or_else(|| "real-default".to_string());
     let profile_mode = profiles.iter()
         .find(|p| p.id == pid)
         .map(|p| p.mode.clone())
-        .unwrap_or_else(|| "paper".into());
-    let trade_db = if profile_mode == "real" { state.real_db.clone() } else { state.paper_db.clone() };
+        .unwrap_or_else(|| "real".into());
+    let trade_db = state.real_db.clone();
 
     let active_trades = trade_db.call({
         let p = pid.clone();
@@ -412,7 +407,7 @@ pub async fn handle_get_profile(
         None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let (maps_json, _) = state.paper_db.call(move |conn| {
+    let (maps_json, _) = state.real_db.call(move |conn| {
         let mut stmt = conn.prepare("SELECT value FROM server_cache WHERE key='exchange_maps'")?;
         let json_str: String = stmt.query_row([], |row| row.get(0))?;
         Ok::<(String, ()), tokio_rusqlite::Error>((json_str, ()))
@@ -446,7 +441,7 @@ pub async fn handle_post_profile(
 
     // Extract only what the frontend sends — fill everything else with sensible defaults.
     let name  = payload.get("name" ).and_then(|v| v.as_str()).unwrap_or("New Profile").to_string();
-    let mode  = payload.get("mode" ).and_then(|v| v.as_str()).unwrap_or("paper").to_string();
+    let mode  = payload.get("mode" ).and_then(|v| v.as_str()).unwrap_or("real").to_string();
 
     let (default_vol, default_tp, default_stop, default_max_trades) = if mode == "real" {
         (100.0_f64, 0.2_f64, 0.3_f64, 3_i64)
@@ -551,7 +546,7 @@ pub async fn handle_patch_profile(
         params_vec.push(rusqlite::types::Value::Integer(now));
         
         let id_clone = id.clone();
-        let query = format!("UPDATE trading_profiles SET {} WHERE id=? AND (owner IS NULL OR owner=? OR id IN ('paper-default','real-default'))", sets.join(", "));
+        let query = format!("UPDATE trading_profiles SET {} WHERE id=? AND (owner IS NULL OR owner=? OR id = 'real-default')", sets.join(", "));
         
         // Push final params
         params_vec.push(rusqlite::types::Value::Text(id_clone));
@@ -590,7 +585,7 @@ pub async fn handle_delete_profile(
         None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    if id == "paper-default" || id == "real-default" {
+    if id == "real-default" {
         return json_err(StatusCode::BAD_REQUEST, "Cannot delete default profiles");
     }
 
@@ -599,11 +594,7 @@ pub async fn handle_delete_profile(
         conn.execute("DELETE FROM trading_profiles WHERE id=? AND owner=?", params![id.clone(), username])?;
         Ok(())
     }).await;
-    // Clear trades from both DBs (profile might have trades in either)
-    let _ = state.paper_db.call(move |conn| {
-        conn.execute("DELETE FROM trades WHERE profile_id=?", params![id2])?;
-        Ok(())
-    }).await;
+    // Clear trades from DB
     let _ = state.real_db.call(move |conn| {
         conn.execute("DELETE FROM trades WHERE profile_id=?", params![id3])?;
         Ok(())
@@ -625,10 +616,6 @@ pub async fn handle_clear_trades(
     let id2 = id.clone(); let id3 = id.clone();
     let _ = state.db.call(move |conn| {
         conn.execute("UPDATE trading_profiles SET pending_commands='CLEAR_TRADES' WHERE id=?", params![id])?;
-        Ok(())
-    }).await;
-    let _ = state.paper_db.call(move |conn| {
-        conn.execute("DELETE FROM trades WHERE profile_id=?", params![id2])?;
         Ok(())
     }).await;
     let _ = state.real_db.call(move |conn| {
@@ -655,13 +642,7 @@ pub async fn handle_market_close_all(
         Ok(())
     }).await;
     
-    let r2 = state.paper_db.call(move |conn| {
-        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status='OPEN'", params![id2])?;
-        Ok(())
-    }).await;
-
     if let Err(e) = r1 { tracing::error!("Failed to close all on real DB: {:?}", e); }
-    if let Err(e) = r2 { tracing::error!("Failed to close all on paper DB: {:?}", e); }
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
@@ -681,13 +662,7 @@ pub async fn handle_market_close_trade(
         Ok(())
     }).await;
     
-    let r2 = state.paper_db.call(move |conn| {
-        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status='OPEN'", params![trade_id])?;
-        Ok(())
-    }).await;
-
     if let Err(e) = r1 { tracing::error!("Failed to close trade {} on real DB: {:?}", trade_id, e); }
-    if let Err(e) = r2 { tracing::error!("Failed to close trade {} on paper DB: {:?}", trade_id, e); }
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }

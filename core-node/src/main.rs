@@ -27,9 +27,7 @@ mod collector {
     pub mod bybit;
 }
 
-mod engine; /*
-    pub mod real;
-    pub mod paper; */
+mod engine;
  
 
 #[tokio::main]
@@ -45,8 +43,6 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "vps-api.db".to_string());
     let real_db_path = std::env::var("REAL_DB_PATH")
         .unwrap_or_else(|_| "real-trader.db".to_string());
-    let paper_db_path = std::env::var("PAPER_DB_PATH")
-        .unwrap_or_else(|_| "paper-trader.db".to_string());
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "3003".to_string())
         .parse().unwrap_or(3003);
@@ -102,20 +98,15 @@ async fn main() -> Result<()> {
         .context(format!("Cannot open real-trader DB: {}", real_db_path))?;
     init_trades_db(&real_db).await?;
 
-    let paper_db = Connection::open(&paper_db_path).await
-        .context(format!("Cannot open paper-trader DB: {}", paper_db_path))?;
-    init_trades_db(&paper_db).await?;
-
     info!("Profiles DB path: {}", profiles_db_path);
-    info!("Paper DB path:    {}", paper_db_path);
     info!("Real DB path:     {}", real_db_path);
 
     // ── STARTUP DIAGNOSTIC: log and persist profile settings ─────────────────
     {
-        let startup_profiles = load_all_settings(&profiles_db, "paper").await;
-        info!("STARTUP: {} active paper profiles found in DB='{}'",
+        let startup_profiles = load_all_settings(&profiles_db, "real").await;
+        info!("STARTUP: {} active real profiles found in DB='{}'",
             startup_profiles.len(), profiles_db_path);
-        let mut lines = format!("db_path={}\nactive_paper_count={}\n",
+        let mut lines = format!("db_path={}\nactive_real_count={}\n",
             profiles_db_path, startup_profiles.len());
         for p in &startup_profiles {
             let line = format!("id={} vol={} active={} min_spread={} max_spread={}\n",
@@ -127,15 +118,12 @@ async fn main() -> Result<()> {
     }
 
     // ── Cached settings (refreshed every 2s from DB, not per-tick) ────────────
-    let paper_settings_cache: Arc<RwLock<Vec<settings::TradingSettings>>> = Arc::new(RwLock::new(Vec::new()));
     let real_settings_cache: Arc<RwLock<Vec<settings::TradingSettings>>> = Arc::new(RwLock::new(Vec::new()));
 
     // Initial load
-    *paper_settings_cache.write().await = load_all_settings(&profiles_db, "paper").await;
     *real_settings_cache.write().await = load_all_settings(&profiles_db, "real").await;
 
     // Background refresher — every 2 seconds
-    settings::spawn_all_settings_refresher(profiles_db.clone(), "paper", paper_settings_cache.clone(), 2);
     settings::spawn_all_settings_refresher(profiles_db.clone(), "real", real_settings_cache.clone(), 2);
 
     // ── Global technical settings (refreshed every 10s) ──────────────────────
@@ -181,8 +169,6 @@ async fn main() -> Result<()> {
         let signal      = signal.clone();
         let http        = http.clone();
         let real_db     = real_db.clone();
-        let paper_db    = paper_db.clone();
-        let paper_cache = paper_settings_cache.clone();
         let real_cache  = real_settings_cache.clone();
         let keys        = exchange_keys.clone();
         let ts_cache    = tech_settings_cache.clone();
@@ -199,24 +185,19 @@ async fn main() -> Result<()> {
                 last_run = std::time::Instant::now();
 
                 // Read cached settings (no SQL, just RwLock read)
-                let paper_profiles = paper_cache.read().await.clone();
                 let real_profiles  = real_cache.read().await.clone();
 
                 // Log settings being used (every ~5s = ~500 ticks at 10ms)
                 static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if tick % 500 == 0 {
-                    for p in paper_profiles.iter() {
-                        info!("[settings] paper id={} active={} vol={} tp={}% min_spread={}",
-                            p.id, p.is_active, p.trade_volume, p.take_profit_percent, p.min_entry_spread);
-                    }
                     for p in real_profiles.iter() {
                         info!("[settings] real  id={} active={} vol={} tp={}% min_spread={}",
                             p.id, p.is_active, p.trade_volume, p.take_profit_percent, p.min_entry_spread);
                     }
                 }
 
-                let min_vol = paper_profiles.iter().chain(real_profiles.iter())
+                let min_vol = real_profiles.iter()
                     .map(|p| p.min_volume_millions)
                     .fold(f64::MAX, f64::min);
                 let min_vol = if min_vol == f64::MAX { 1.0 } else { min_vol };
@@ -225,15 +206,14 @@ async fn main() -> Result<()> {
 
                 let spreads = compute_spreads(&prices, min_vol, &ts);
                 
-                // Publish snapshot to UI frontend (throttle to 1000ms)
-                // Writes to paper_db (server_cache) to avoid locking profiles_db
+                // Writes to real_db (server_cache) to avoid locking profiles_db
                 static LAST_SNAP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
                 if now_ms.saturating_sub(LAST_SNAP.load(std::sync::atomic::Ordering::Relaxed)) > 1000 {
                     LAST_SNAP.store(now_ms, std::sync::atomic::Ordering::Relaxed);
                     let snapshot_spreads: Vec<_> = spreads.iter().take(500).cloned().collect();
                     let snapshot_val = serde_json::json!({ "ts": now_ms as i64, "data": snapshot_spreads }).to_string();
-                    let cache_db = paper_db.clone();
+                    let cache_db = real_db.clone();
                     tokio::spawn(async move {
                         let _ = cache_db.call(move |conn| {
                             let _ = conn.execute("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);", []);
@@ -252,21 +232,13 @@ async fn main() -> Result<()> {
                 for real_s in real_profiles {
                     engine::cycle::run_cycle(spreads.clone(), prices.clone(), real_s, http.clone(), real_db.clone(), keys.clone(), &ts, e_ctx.clone()).await;
                 }
-                // Run paper engine in background — don't block next tick
-                for paper_s in paper_profiles {
-                    let (sp, pr, h, pdb) = (spreads.clone(), prices.clone(), http.clone(), paper_db.clone());
-                    tokio::spawn(async move {
-                        engine::paper::run_cycle(sp, pr, paper_s, h, pdb).await;
-                    });
-                }
             }
         });
     }
 
     {
         let prices_snap  = prices.clone();
-        let cache_db     = paper_db.clone();  // write to paper-trader.db, not profiles
-        let paper_cache  = paper_settings_cache.clone();
+        let cache_db     = real_db.clone();  // write to real-trader.db, not profiles
         let e_ctx        = engine_ctx.clone();
         tokio::spawn(async move {
             // Wait just 5s for collectors to connect, then publish immediately
@@ -279,7 +251,6 @@ async fn main() -> Result<()> {
                 } else {
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
-                let paper_debug = paper_cache.read().await.clone();
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -317,7 +288,7 @@ async fn main() -> Result<()> {
                     fees.insert(entry.key().clone(), *entry.value());
                 }
 
-                let val = serde_json::json!({ "ts": now_ms, "data": pairs_map, "balances": balances, "fees": fees, "DEBUG_PROFILES": paper_debug }).to_string();
+                let val = serde_json::json!({ "ts": now_ms, "data": pairs_map, "balances": balances, "fees": fees }).to_string();
                 let n = exchanges_list.len();
                 let _ = cache_db.call(move |conn| {
                     let _ = conn.execute_batch("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);");
@@ -381,7 +352,7 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
                 pnl_a                 REAL,
                 pnl_b                 REAL,
                 close_reason          TEXT,
-                profile_id            TEXT DEFAULT 'paper-default',
+                profile_id            TEXT DEFAULT 'real-default',
                 order_id_a            TEXT,
                 order_id_b            TEXT,
                 contracts_a           INTEGER,
@@ -390,7 +361,7 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
         ")?;
         // 2. Migrate older DBs (errors ignored — columns might already exist)
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN gross_pnl REAL", []);
-        let _ = conn.execute("ALTER TABLE trades ADD COLUMN profile_id TEXT DEFAULT 'paper-default'", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN profile_id TEXT DEFAULT 'real-default'", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN slippage_cost REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN order_id_a TEXT", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN order_id_b TEXT", []);

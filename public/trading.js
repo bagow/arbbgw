@@ -1,7 +1,7 @@
 /**
  * trading.js – Multi-tab trading UI
  *
- * Each "tab" is a trading profile (paper or real). Profiles are stored in D1 via
+ * Each "tab" is a trading profile. Profiles are stored in D1 via
  * API calls. The active tab's data is polled every 10s; others are lazy-loaded.
  * Tab visibility/order is persisted in localStorage.
  */
@@ -125,13 +125,10 @@ function renderTabBar() {
         tab.className = 'tab-item' + (p.id === activeTabId ? ' tab-item--active' : '');
         tab.dataset.id = p.id;
 
-        const badge = p.mode === 'real'
-            ? '<span class="tab-badge tab-badge--real">💰</span>'
-            : '<span class="tab-badge tab-badge--paper">🧪</span>';
+        const badge = '<span class="tab-badge tab-badge--real">💰</span>';
 
-        const isDefault = p.id === 'paper-default' || p.id === 'real-default';
+        const isDefault = p.id === 'real-default';
         let dispName = escHtml(p.name);
-        if (p.id === 'paper-default') dispName = 'Public Paper';
         if (p.id === 'real-default') dispName = 'Public Real';
 
         tab.innerHTML = `
@@ -190,7 +187,7 @@ async function refreshActiveTab() {
     }
 
     // Use profile-scoped data if available (from profile_id param in request)
-    // Otherwise fall back to the global paper/real data
+    // Use profile-scoped data
     let active, history;
     if (profile_active !== undefined) {
         active  = profile_active;
@@ -448,8 +445,8 @@ function renderSubNavStats(active, stats, mode) {
                 ${fmtPnL(stats?.total_pnl||0)}
             </strong>
         </span>` : ''}
-        <span class="mode-badge ${mode === 'real' ? 'mode-badge--real' : 'mode-badge--paper'}">
-            ${mode === 'real' ? '💰 Real' : '🧪 Paper'}
+        <span class="mode-badge mode-badge--real">
+            💰 Real
         </span>
     `;
 }
@@ -653,7 +650,7 @@ function renderSettingsForm(profile) {
                     <button type="button"
                         onclick="clearTrades('${p.id}', '${p.mode}')"
                         class="trading-save-btn outline-btn"
-                        style="${p.mode === 'paper' ? 'margin:0 0 0 auto;' : 'margin:0;'}width:auto;padding:12px 32px;font-size:.95rem;background:transparent;color:var(--text-sub);border:1px solid var(--border);">
+                        style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:transparent;color:var(--text-sub);border:1px solid var(--border);">
                         Clear DB (Wipe Trades)
                     </button>
                 </div>
@@ -1331,16 +1328,13 @@ window.renderLogsHTML = function(text) {
 
         // Context filtering
         const currentProfile = profiles.find(p => p.id === activeTabId);
-        const currentMode = currentProfile ? currentProfile.mode : 'paper';
 
-        if (currentMode === 'real' && cleanLine.includes('[paper]')) return '';
-        if (currentMode === 'paper' && cleanLine.includes('[real]')) return '';
         if (cleanLine.includes('[settings]')) {
             if (!cleanLine.includes(`id=${activeTabId}`)) return '';
         }
 
         // Sub-Type filtering (Trades vs Technical)
-        const isTradeLog = cleanLine.includes('[real]') || cleanLine.includes('[paper]') || cleanLine.includes('[settings]');
+        const isTradeLog = cleanLine.includes('[real]') || cleanLine.includes('[settings]');
         const isTechLog = !isTradeLog;
         if (window.logViewMode === 'trade' && isTechLog) return '';
         if (window.logViewMode === 'tech' && isTradeLog) return '';
@@ -1510,7 +1504,7 @@ document.getElementById('nt-cancel').addEventListener('click', () => {
 });
 document.getElementById('nt-create').addEventListener('click', async () => {
     const name = document.getElementById('nt-name').value.trim() || 'New Profile';
-    const mode = document.querySelector('input[name="nt-mode"]:checked')?.value || 'paper';
+    const mode = document.querySelector('input[name="nt-mode"]:checked')?.value || 'real';
     document.getElementById('nt-create').textContent = 'Creating…';
     try {
         const p = await createProfile(name, mode);
@@ -1570,7 +1564,7 @@ if (loginForm) {
 document.getElementById('tab-bar').addEventListener('click', async (e) => {
     if (!e.target.classList.contains('tab-close')) return;
     const id = e.target.dataset.id;
-    if (id === 'paper-default' || id === 'real-default') {
+    if (id === 'real-default') {
         alert('Cannot close the default profiles.');
         return;
     }

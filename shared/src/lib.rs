@@ -1,7 +1,7 @@
 //! shared — common types used across all services
 //!
 //! This crate is the single source of truth for data structures that are
-//! shared between rust-collector, real-trader, paper-trader and vps-api.
+//! shared between rust-collector, real-trader, and vps-api.
 //!
 //! When building core-node, all services import from here instead of
 //! duplicating struct definitions.
@@ -73,7 +73,7 @@ pub struct SpreadPayload {
 // ─── Trading profile / settings ───────────────────────────────────────────────
 
 /// Active settings for one trading profile, mirroring the `trading_profiles`
-/// SQLite table row.  Both paper-trader and real-trader use this struct.
+/// SQLite table row. Real-trader uses this struct.
 ///
 /// Column order in DB:
 ///   0=id  1=name  2=mode  3=is_active  4=min_entry_spread  5=max_entry_spread

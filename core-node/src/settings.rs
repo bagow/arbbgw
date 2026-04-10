@@ -38,7 +38,7 @@ const PROFILE_SELECT: &str = "
     FROM trading_profiles
 ";
 
-/// Load settings for a given mode ('real' | 'paper') from the profiles DB.
+/// Load settings for a given mode ('real') from the profiles DB.
 pub async fn load_settings(db: &Connection, mode: &str) -> TradingSettings {
     let mode = mode.to_string();
     db.call(move |conn| {
