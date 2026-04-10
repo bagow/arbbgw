@@ -113,12 +113,13 @@ pub fn generate_signals(
             if depth_sell > 0.0 && depth_sell < min_depth_usd { continue; }
             if depth_buy > 0.0 && depth_buy < min_depth_usd { continue; }
 
-            let contracts_a = (profile.trade_volume / entry_a.max(1e-12)) / mult_a;
-            if contracts_a <= 0.0 { continue; }
+            // Ensure strict adherence to LOT_SIZE / qtyStep ticks or integer contracts
+            let contracts_a = ((profile.trade_volume / entry_a.max(1e-12)) / mult_a).round();
+            if contracts_a < 1.0 { continue; }
             
             let actual_vol_a = contracts_a * mult_a * entry_a;
-            let contracts_b = (actual_vol_a / entry_b.max(1e-12)) / mult_b;
-            if contracts_b <= 0.0 { continue; }
+            let contracts_b = ((actual_vol_a / entry_b.max(1e-12)) / mult_b).round();
+            if contracts_b < 1.0 { continue; }
             
             let actual_vol_b = contracts_b * mult_b * entry_b;
             let vol_diff_pct = (actual_vol_a - actual_vol_b).abs() / actual_vol_a * 100.0;
