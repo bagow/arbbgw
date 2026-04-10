@@ -182,7 +182,39 @@ impl ExchangeConnector for KucoinConnector {
         let mult = if multiplier > 0.0 { multiplier } else { 1.0 }; 
         
         let price = if size > 0.0 && mult > 0.0 { val / (size * mult) } else { 0.0 };
-        Ok((price, fee, size))
+        
+        let mut final_fee = fee;
+        if price > 0.0 {
+            let path_fills = format!("/api/v1/fills?orderId={}", order_id);
+            let ts2 = now_ms().to_string();
+            let (sig2, pass_sig2) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts2, "GET", &path_fills, "");
+            if let Ok(resp2) = http.get(format!("https://api-futures.kucoin.com{}", path_fills))
+                .header("KC-API-KEY", &keys.kucoin_key)
+                .header("KC-API-SIGN", sig2)
+                .header("KC-API-TIMESTAMP", &ts2)
+                .header("KC-API-PASSPHRASE", pass_sig2)
+                .header("KC-API-KEY-VERSION", "2")
+                .timeout(Duration::from_secs(5))
+                .send().await {
+                
+                if let Ok(v2) = resp2.json::<Value>().await {
+                    if let Some(items) = v2["data"]["data"].as_array().or_else(|| v2["data"]["items"].as_array()) {
+                        let mut sum_fee = 0.0;
+                        for item in items {
+                            sum_fee += item["fee"].as_f64()
+                                .or_else(|| item["fee"].as_str().and_then(|s| s.parse().ok()))
+                                .unwrap_or(0.0);
+                        }
+                        // Replace only if the fills endpoint yielded a real fee
+                        if sum_fee > 1e-9 {
+                            final_fee = sum_fee;
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok((price, final_fee, size))
     }
 
     async fn fetch_available_balance(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
