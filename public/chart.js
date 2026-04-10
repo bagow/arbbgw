@@ -287,7 +287,7 @@ async function fetchSnapshot() {
             rawData = rawData.filter(r => {
                 if (disabled.includes(r.exchangeA) || disabled.includes(r.exchangeB)) return false;
                 const deviation = r.spread - (r.structural_spread || 0);
-                if (deviation < scannerState.threshold) return false;
+                if (deviation < 0.0) return false; // Show all breathing spreads above their baseline
                 return true;
             });
         }
