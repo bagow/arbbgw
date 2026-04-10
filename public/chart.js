@@ -205,13 +205,27 @@ async function fetchKlines(exchange, pair, tfSec, endTime = null) {
     }
 }
 
+function getEnabledExchanges() {
+    let disabled = [];
+    if (typeof profiles !== 'undefined' && typeof activeTabId !== 'undefined') {
+        const p = profiles.find(pr => pr.id === activeTabId);
+        if (p) {
+            try { 
+                disabled = typeof p.disabled_exchanges === 'string' ? JSON.parse(p.disabled_exchanges) : (p.disabled_exchanges || []); 
+            } catch(e){}
+        }
+    }
+    return KNOWN_EXCHANGES.filter(ex => !disabled.includes(ex));
+}
+
 /** Fetch klines from ALL known exchanges in parallel for the given pair. */
 async function loadChartData(row) {
     const key = rowKey(row);
     scannerState.loadKey = key;
 
+    const enabledEx = getEnabledExchanges();
     const results = await Promise.all(
-        KNOWN_EXCHANGES.map(ex => fetchKlines(ex, row.pair, scannerState.timeframeSec)
+        enabledEx.map(ex => fetchKlines(ex, row.pair, scannerState.timeframeSec)
             .then(kl => [ex, kl])
         )
     );
@@ -442,9 +456,10 @@ window.openModal = async function(row) {
     scannerState.activeRow = row;
     scannerState.klines = {};
     scannerState.liveTicks = {};
-    // By default show only the pair's two exchanges; hide all others
+    // By default show only the pair's two exchanges; hide all others among enabled
+    const enabledEx = getEnabledExchanges();
     scannerState.hiddenExchanges = new Set(
-        KNOWN_EXCHANGES.filter(ex => ex !== row.exchangeA && ex !== row.exchangeB)
+        enabledEx.filter(ex => ex !== row.exchangeA && ex !== row.exchangeB)
     );
 
     modalTitle.textContent = row.pair;
@@ -896,9 +911,10 @@ async function loadOlderHistory() {
     const allTs = visibleEx.flatMap(ex => (scannerState.klines[ex] || []).map(p => p.ts));
     const absoluteMinT = allTs.length ? Math.min(...allTs) : scannerState.visibleMinT;
     
-    // Fetch older data for all known exchanges
+    // Fetch older data for enabled exchanges
+    const enabledEx = getEnabledExchanges();
     const results = await Promise.all(
-        KNOWN_EXCHANGES.map(ex => fetchKlines(ex, scannerState.activeRow.pair, scannerState.timeframeSec, absoluteMinT)
+        enabledEx.map(ex => fetchKlines(ex, scannerState.activeRow.pair, scannerState.timeframeSec, absoluteMinT)
             .then(kl => [ex, kl])
         )
     );
