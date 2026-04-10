@@ -45,6 +45,9 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             symbols.push(sym.to_string());
         }
     }
+    if symbols.is_empty() {
+        return Err(anyhow::anyhow!("Failed to fetch symbols or list is empty"));
+    }
     info!("[bybit] Seeded {} USDT linear tickers", symbols.len());
 
     // WS: subscribe to tickers in batches of 10
