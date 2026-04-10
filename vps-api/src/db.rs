@@ -171,11 +171,8 @@ pub async fn init_db(db: &Connection) -> Result<()> {
             )?;
         }
 
-        // Restore activity for the shared default real profile.
-        let _ = conn.execute(
-            "UPDATE trading_profiles SET is_active=1 WHERE id='real-default' AND is_active=0",
-            [],
-        );
+        // NOTE: is_active is NOT restored here — profile starts only via user's Start button.
+        // Previously this auto-set is_active=1 on every deploy, overriding user's Stop.
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
 
