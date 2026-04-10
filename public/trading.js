@@ -567,10 +567,10 @@ function renderCexTab(profile, exchangesData) {
                         const isLong = pos.size > 0;
                         const pnlColor = pos.unrealized_pnl >= 0 ? 'var(--green)' : 'var(--red)';
                         const dirStr = isLong ? '<span style="color:var(--green)">[L]</span>' : '<span style="color:var(--red)">[S]</span>';
-                        return \`<div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:6px;font-family:var(--font-mono);">
-                            <span>\${dirStr} \${pos.symbol} <span style="color:var(--text-sub)">\${Math.abs(pos.size)}</span></span>
-                            <span style="color:\${pnlColor}">\${pos.unrealized_pnl >= 0 ? '+' : ''}$\${pos.unrealized_pnl.toFixed(4)}</span>
-                        </div>\`;
+                        return `<div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:6px;font-family:var(--font-mono);">
+                            <span>${dirStr} ${pos.symbol} <span style="color:var(--text-sub)">${Math.abs(pos.size)}</span></span>
+                            <span style="color:${pnlColor}">${pos.unrealized_pnl >= 0 ? '+' : ''}$${pos.unrealized_pnl.toFixed(4)}</span>
+                        </div>`;
                     }).join('')}
                 </div>
                 
