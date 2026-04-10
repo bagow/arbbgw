@@ -9,6 +9,9 @@ use shared::{TradingSettings, TechnicalSettings, SpreadRow};
 use crate::state::{EngineContext, PriceMap};
 use crate::engine::real::{ExchangeKeys, Trade, load_open_trades, now_ms, now_secs, has_sufficient_margin, binance_sign, mark_balance_low};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, Ordering};
+
+static LAST_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
 
 // NOTE: LAST_LIVE_FLUSH is declared as a function-local static inside run_cycle below.
 
@@ -170,7 +173,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     if verified_a && verified_b { break; }
                     if !verified_a {
                         if let Some(ref oid) = oid_close_a {
-                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
+                            if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
                                 if p > 0.0 {
                                     real_exit_a = p;
                                     let actual_f = if f > 1e-9 { f.abs() } else { 0.0 };
@@ -182,7 +185,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     }
                     if !verified_b {
                         if let Some(ref oid) = oid_close_b {
-                            if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid, mult_b).await {
+                            if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid, mult_b).await {
                                 if p > 0.0 {
                                     real_exit_b = p;
                                     let actual_f = if f > 1e-9 { f.abs() } else { 0.0 };
@@ -222,14 +225,14 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     for _ in 0..5 {
                         if fb_exit_a == 0.0 {
                             if let Some(ref oid) = oid_fb_a {
-                                if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
+                                if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
                                     if p > 0.0 { fb_exit_a = p; fb_fee += if f > 1e-9 { f.abs() } else { 0.0 }; }
                                 }
                             }
                         }
                         if fb_exit_b == 0.0 {
                             if let Some(ref oid) = oid_fb_b {
-                                if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid, mult_b).await {
+                                if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid, mult_b).await {
                                     if p > 0.0 { fb_exit_b = p; fb_fee += if f > 1e-9 { f.abs() } else { 0.0 }; }
                                 }
                             }
@@ -480,9 +483,36 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             continue;
         }
 
-        if !has_sufficient_margin(&row.exchange_a, actual_vol_a, &e_ctx) { tracing::debug!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_a); continue; }
-        if !has_sufficient_margin(&row.exchange_b, actual_vol_b, &e_ctx) { tracing::debug!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_b); continue; }
-        if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional) || (row.exchange_b == "binance" && actual_vol_b < ts.binance_min_notional) { tracing::debug!("[real] SKIP {}: binance min notional", row.pair); continue; }
+        if !has_sufficient_margin(&row.exchange_a, actual_vol_a, &e_ctx) { 
+            let now = now_ms() as i64;
+            if now - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
+                info!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_a);
+                LAST_MARGIN_LOG.store(now, Ordering::Relaxed);
+            } else {
+                tracing::debug!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_a);
+            }
+            continue; 
+        }
+        if !has_sufficient_margin(&row.exchange_b, actual_vol_b, &e_ctx) { 
+            let now = now_ms() as i64;
+            if now - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
+                info!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_b);
+                LAST_MARGIN_LOG.store(now, Ordering::Relaxed);
+            } else {
+                tracing::debug!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_b);
+            }
+            continue; 
+        }
+        if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional) || (row.exchange_b == "binance" && actual_vol_b < ts.binance_min_notional) { 
+            let now = now_ms() as i64;
+            if now - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
+                info!("[real] SKIP {}: binance min notional", row.pair);
+                LAST_MARGIN_LOG.store(now, Ordering::Relaxed);
+            } else {
+                tracing::debug!("[real] SKIP {}: binance min notional", row.pair);
+            }
+            continue; 
+        }
 
         let has_tick_a = e_ctx.tick_sizes.contains_key(&format!("{}:{}", row.exchange_a, row.pair));
         let has_tick_b = e_ctx.tick_sizes.contains_key(&format!("{}:{}", row.exchange_b, row.pair));
@@ -607,20 +637,20 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
         // ── PARALLEL FILL VERIFICATION ───────────────────────────────────────
         // ALL order types (market + IOC) MUST be verified via fetch_order.
         // No WS price fallbacks — only exchange-confirmed fill prices.
-        let mut fill_a = inline_fill_a; let mut fee_a_val = inline_fee_a;
-        let mut fill_b = inline_fill_b; let mut fee_b_val = inline_fee_b;
+        let mut fill_a = inline_fill_a; let mut fee_a_val = inline_fee_a; let mut actual_vol_contracts_a = None;
+        let mut fill_b = inline_fill_b; let mut fee_b_val = inline_fee_b; let mut actual_vol_contracts_b = None;
         let mut got_a = oid_a.is_none() || dry_run || fill_a > 0.0;
         let mut got_b = oid_b.is_none() || dry_run || fill_b > 0.0;
 
         for attempt in 0..ts.fill_verify_retries {
-            if got_a && got_b { break; }
+            if got_a && got_b && actual_vol_contracts_a.is_some() && actual_vol_contracts_b.is_some() { break; }
             if attempt > 0 { tokio::time::sleep(Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
             let (fa, fb) = tokio::join!(
-                async { if !got_a { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af)); } } } } None },
-                async { if !got_b { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af)); } } } } None }
+                async { if !got_a || actual_vol_contracts_a.is_none() { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } } None },
+                async { if !got_b || actual_vol_contracts_b.is_none() { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } } None }
             );
-            if let Some((p, f)) = fa { fill_a = p; fee_a_val = f; got_a = true; }
-            if let Some((p, f)) = fb { fill_b = p; fee_b_val = f; got_b = true; }
+            if let Some((p, f, ev)) = fa { fill_a = p; fee_a_val = f; actual_vol_contracts_a = Some(ev); got_a = true; }
+            if let Some((p, f, ev)) = fb { fill_b = p; fee_b_val = f; actual_vol_contracts_b = Some(ev); got_b = true; }
         }
 
         // NO WS FALLBACK for entry fills! If fetch_order couldn't verify the fill
@@ -724,9 +754,15 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 let missing_ex = if a_filled { eb_s.clone() } else { ea_s.clone() };
                 let missing_is_buy = if a_filled { is_a_higher } else { !is_a_higher };
                 let missing_qty = if a_filled {
-                    if eb_s == "binance" || eb_s == "bybit" { contracts_b * mult_b } else { contracts_b }
+                    let known_fill_a = actual_vol_contracts_a.unwrap_or(contracts_a);
+                    let ratio = known_fill_a / contracts_a.max(1e-12);
+                    let target_contracts_b = contracts_b * ratio;
+                    if eb_s == "binance" || eb_s == "bybit" { target_contracts_b * mult_b } else { target_contracts_b }
                 } else {
-                    if ea_s == "binance" || ea_s == "bybit" { contracts_a * mult_a } else { contracts_a }
+                    let known_fill_b = actual_vol_contracts_b.unwrap_or(contracts_b);
+                    let ratio = known_fill_b / contracts_b.max(1e-12);
+                    let target_contracts_a = contracts_a * ratio;
+                    if ea_s == "binance" || ea_s == "bybit" { target_contracts_a * mult_a } else { target_contracts_a }
                 };
                 let missing_mult = e_ctx_em.multipliers.get(&format!("{}:{}", missing_ex, fp)).map(|v| *v).unwrap_or(1.0);
                 let missing_tick = e_ctx_em.tick_sizes.get(&format!("{}:{}", missing_ex, fp)).map(|v| *v).unwrap_or(0.000001);
@@ -758,7 +794,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                                     let mut got = p > 0.0;
                                     for _ in 0..3 {
                                         if got { break; }
-                                        if let Ok::<(f64, f64), String>((p_f, f_f)) = crate::engine::exchanges::get_connector(&missing_ex).unwrap().fetch_order(&hc, &kc, &fp, oid.as_str(), missing_mult).await {
+                                        if let Ok::<(f64, f64, f64), String>((p_f, f_f, _ev)) = crate::engine::exchanges::get_connector(&missing_ex).unwrap().fetch_order(&hc, &kc, &fp, oid.as_str(), missing_mult).await {
                                             // STRICT: only exchange-reported fee, no estimated fallback
                                             if p_f > 0.0 { p = p_f; f = if f_f > 1e-9 { f_f.abs() } else { 0.0 }; got = true; }
                                         }
@@ -811,7 +847,19 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
 
                 let mut close_oid = None;
                 for attempt in 1u32..=emergency_retries as u32 {
-                    match crate::engine::exchanges::get_connector(&fe).unwrap().close_order(&hc, &kc, &fp, fs, fc, false, lev as f64, 0.0, false).await {
+                    // Try to use a safe wide LIMIT-IOC fallback before dumping to unconstrained MARKET
+                    let use_safe_limit = true; // attempt < emergency_retries;
+                    let panic_slip_margin = 0.05; // 5% slippage tolerance for emergency close limit
+                    let safe_limit_price = if fs { 
+                        fp_price * (1.0 + panic_slip_margin) 
+                    } else { 
+                        fp_price * (1.0 - panic_slip_margin) 
+                    };
+                    // if use_safe_limit && safe_limit_price ...
+                    
+                    let limit_price = if use_safe_limit { safe_limit_price } else { 0.0 };
+                    
+                    match crate::engine::exchanges::get_connector(&fe).unwrap().close_order(&hc, &kc, &fp, fs, fc, false, lev as f64, limit_price, use_safe_limit).await {
                         Ok(id) => { error!("🛡️ Emergency close ok {}/{}: {}", fe, fp, id); close_oid = Some(id); break; }
                         Err(err) => { tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await; error!("Emergency close {}/{}: {}", attempt, emergency_retries, err); }
                     }
@@ -822,7 +870,7 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                 
                 if let Some(ref coid) = close_oid {
                     for _ in 0..5 {
-                        if let Ok::<(f64, f64), String>((p, f)) = crate::engine::exchanges::get_connector(&fe).unwrap().fetch_order(&hc, &kc, &fp, coid.as_str(), m).await {
+                        if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&fe).unwrap().fetch_order(&hc, &kc, &fp, coid.as_str(), m).await {
                             // STRICT: only exchange-reported fee, no estimated fallback
                             if p > 0.0 { close_fill = p; total_fee += if f > 1e-9 { f.abs() } else { 0.0 }; break; }
                         }

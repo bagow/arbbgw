@@ -268,7 +268,7 @@ pub fn start_position_sync(
                             let mut close_fill = 0.0_f64;
                             let mut close_fee = 0.0_f64;
                             for _ in 0..5 {
-                                if let Ok::<(f64, f64), String>((p, f)) = conn.fetch_order(&http, &keys, &trade.pair, &oid, mult).await {
+                                if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = conn.fetch_order(&http, &keys, &trade.pair, &oid, mult).await {
                                     if p > 0.0 { close_fill = p; close_fee = if f > 1e-9 { f.abs() } else { 0.0 }; break; }
                                 }
                                 tokio::time::sleep(Duration::from_millis(25)).await;

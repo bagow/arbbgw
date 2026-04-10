@@ -29,8 +29,8 @@ pub trait ExchangeConnector: Send + Sync {
     /// Connects to the exchange and closes an existing position.
     async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool) -> Result<String, String>;
 
-    /// Fetches the order details. Returns (executed_price, absolute_fee)
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64), String>;
+    /// Fetches the order details. Returns (executed_price, absolute_fee, executed_qty_contracts)
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String>;
 
     /// Fetches available balance in USD(T).
     async fn fetch_available_balance(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String>;

@@ -101,8 +101,8 @@ impl ExchangeConnector for BinanceConnector {
             .ok_or_else(|| "Binance failed to return orderId on close".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64), String> {
-        if order_id.starts_with("dry_") { return Ok((0.0, 0.0)); }
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
+        if order_id.starts_with("dry_") { return Ok((0.0, 0.0, 0.0)); }
         let ts = now_ms();
         let qs = format!("symbol={}&orderId={}&timestamp={}", pair, order_id, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
@@ -115,19 +115,19 @@ impl ExchangeConnector for BinanceConnector {
         let status = v["status"].as_str().unwrap_or("");
         if status == "EXPIRED" || status == "CANCELED" || status == "REJECTED" {
             tracing::warn!("[binance] fetch_order {} status={} — definitively unfilled", order_id, status);
-            return Ok((0.0, 0.0));
+            return Ok((0.0, 0.0, 0.0));
         }
 
         // Check executedQty — if 0, order didn't fill
         let exec_qty: f64 = v["executedQty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
         if exec_qty < 1e-12 {
             // Order exists but hasn't filled yet (or was partially cancelled)
-            return Ok((0.0, 0.0));
+            return Ok((0.0, 0.0, 0.0));
         }
 
         let price = v["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         if price <= 0.0 {
-            return Ok((0.0, 0.0));
+            return Ok((0.0, 0.0, 0.0));
         }
 
         // Step 2: Fetch real commission from userTrades endpoint
@@ -167,7 +167,8 @@ impl ExchangeConnector for BinanceConnector {
             },
             Err(_) => 0.0,
         };
-        Ok((price, fee))
+        let exec_contracts = exec_qty / multiplier.max(1e-12);
+        Ok((price, fee, exec_contracts))
     }
 
     async fn fetch_available_balance(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {

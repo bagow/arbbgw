@@ -153,7 +153,7 @@ impl ExchangeConnector for KucoinConnector {
             .ok_or_else(|| "KuCoin failed to return orderId on close".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64), String> {
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
         let ts = now_ms().to_string();
         let path = format!("/api/v1/orders/{}", order_id);
         let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", &path, "");
@@ -173,11 +173,16 @@ impl ExchangeConnector for KucoinConnector {
         let val  = v["data"]["dealValue"].as_f64().or_else(|| v["data"]["filledValue"].as_f64()).or_else(|| v["data"]["dealValue"].as_str().and_then(|s| s.parse().ok())).or_else(|| v["data"]["filledValue"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
         let fee  = v["data"]["fee"].as_f64().or_else(|| v["data"]["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
         
+        let status = v["data"]["status"].as_str().unwrap_or("");
+        if status == "done" && size <= 0.0 {
+            return Ok((0.0, 0.0, 0.0));
+        }
+        
         // Note: KuCoin multiplier is dynamically passed to correctly compute price
         let mult = if multiplier > 0.0 { multiplier } else { 1.0 }; 
         
         let price = if size > 0.0 && mult > 0.0 { val / (size * mult) } else { 0.0 };
-        Ok((price, fee))
+        Ok((price, fee, size))
     }
 
     async fn fetch_available_balance(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {

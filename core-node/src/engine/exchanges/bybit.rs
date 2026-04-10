@@ -144,7 +144,7 @@ impl ExchangeConnector for BybitConnector {
             .ok_or_else(|| "Bybit return no orderId on close".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64), String> {
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let qs = format!("category=linear&orderId={}", order_id);
@@ -165,19 +165,20 @@ impl ExchangeConnector for BybitConnector {
         let status = order["orderStatus"].as_str().unwrap_or("");
         if status == "Cancelled" || status == "Rejected" || status == "Deactivated" {
             tracing::warn!("[bybit] fetch_order {} status={} — definitively unfilled", order_id, status);
-            return Ok((0.0, 0.0));
+            return Ok((0.0, 0.0, 0.0));
         }
 
         // Check cumExecQty — if 0, order didn't fill
         let exec_qty: f64 = order["cumExecQty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
         if exec_qty < 1e-12 {
-            return Ok((0.0, 0.0));
+            return Ok((0.0, 0.0, 0.0));
         }
 
         let price = order["avgPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
         let fee = order["cumExecFee"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         
-        Ok((price, fee.abs()))
+        let exec_contracts = exec_qty / multiplier.max(1e-12);
+        Ok((price, fee.abs(), exec_contracts))
     }
 
     async fn fetch_available_balance(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
