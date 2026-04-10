@@ -16,6 +16,7 @@ pub struct GateConnector;
 #[allow(non_snake_case)]
 struct GateBalanceResponse {
     available: String,
+    total: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -139,7 +140,7 @@ impl ExchangeConnector for GateConnector {
         Ok((price, fee, exec_contracts))
     }
 
-    async fn fetch_available_balance(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+    async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
         let path = "/api/v4/futures/usdt/accounts";
         let resp = http.get(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, ""))
@@ -147,7 +148,9 @@ impl ExchangeConnector for GateConnector {
             .send().await.map_err(|e| e.to_string())?;
             
         let data: GateBalanceResponse = resp.json().await.map_err(|e| format!("Gate balance parse err: {}", e))?;
-        data.available.parse::<f64>().map_err(|_| "Failed to parse Gate balance as f64".to_string())
+        let avail = data.available.parse::<f64>().map_err(|_| "Failed to parse Gate available balance as f64".to_string())?;
+        let total = data.total.parse::<f64>().unwrap_or(0.0);
+        Ok((total, avail))
     }
 
     async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {

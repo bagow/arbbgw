@@ -42,6 +42,8 @@ pub struct EngineContext {
     /// Set immediately on API rejection. Cleared by start_balance_fetcher when balance recovers.
     /// Prevents entering trades on an exchange that has no margin, avoiding asymmetric fills.
     pub balance_low: Arc<DashMap<String, bool>>,
+    pub margin_balances: Arc<DashMap<String, f64>>,
+    pub positions: Arc<DashMap<String, Vec<crate::engine::exchanges::traits::PositionInfo>>>,
 }
 
 impl Default for EngineContext {
@@ -57,6 +59,8 @@ impl Default for EngineContext {
             pair_cooldown: Arc::new(DashMap::new()),
             funding_rates: Arc::new(DashMap::new()),
             balance_low: Arc::new(DashMap::new()),
+            margin_balances: Arc::new(DashMap::new()),
+            positions: Arc::new(DashMap::new()),
         }
     }
 }

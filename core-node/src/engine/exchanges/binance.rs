@@ -15,6 +15,7 @@ pub struct BinanceConnector;
 #[allow(non_snake_case)]
 struct BinanceBalanceAccountResponse {
     availableBalance: String,
+    totalWalletBalance: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -171,7 +172,7 @@ impl ExchangeConnector for BinanceConnector {
         Ok((price, fee, exec_contracts))
     }
 
-    async fn fetch_available_balance(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+    async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
         let ts = now_ms();
         let qs = format!("timestamp={}", ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
@@ -180,7 +181,9 @@ impl ExchangeConnector for BinanceConnector {
             .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
 
         let data: BinanceBalanceAccountResponse = resp.json().await.map_err(|e| format!("Binance balance json parse err: {}", e))?;
-        data.availableBalance.parse::<f64>().map_err(|_| "Failed to parse Binance balance as f64".to_string())
+        let avail = data.availableBalance.parse::<f64>().map_err(|_| "Failed to parse Binance availableBalance as f64".to_string())?;
+        let wallet = data.totalWalletBalance.parse::<f64>().unwrap_or(0.0); // totalWalletBalance might not exist in some responses? It should.
+        Ok((wallet, avail))
     }
 
     async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {

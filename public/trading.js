@@ -515,6 +515,8 @@ function renderCexTab(profile, exchangesData) {
         let maxTickers = 0;
         const rawArr = exchangesData.data[exA];
         const bal = (exchangesData.balances && exchangesData.balances[exA]) || 0;
+        const marginBal = (exchangesData.margin_balances && exchangesData.margin_balances[exA]) || 0;
+        const positions = (exchangesData.positions && exchangesData.positions[exA]) || [];
         const fee = (exchangesData.fees && exchangesData.fees[exA]) || 0;
         for (const exB of exNames) {
             if (exA === exB) continue;
@@ -538,14 +540,16 @@ function renderCexTab(profile, exchangesData) {
         
         html += `
             <div class="stat-card" style="display:flex;flex-direction:column; background:var(--bg-panel); border:1px solid var(--border); border-radius:12px; padding:20px;">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
                     <div style="display:flex;align-items:center;gap:10px;">
                         <div style="width:10px;height:10px;border-radius:50%;background:${isEnabled?'var(--green)':'var(--text-sub)'}"></div>
                         <h3 style="margin:0;font-size:1.2rem;font-weight:600;text-transform:uppercase;">${exA}</h3>
                     </div>
                     <div style="text-align:right;">
-                        <span style="font-size:0.75rem;color:var(--text-sub);display:block;text-transform:uppercase;letter-spacing:0.5px;">Balance</span>
+                        <span style="font-size:0.75rem;color:var(--text-sub);display:block;text-transform:uppercase;letter-spacing:0.5px;">Wallet</span>
                         <span style="font-family:var(--font-mono);font-weight:600;color:${bal > 0 ? 'var(--green)' : 'var(--text-sub)'};">$${bal.toFixed(2)}</span>
+                        <span style="font-size:0.75rem;color:var(--text-sub);display:block;text-transform:uppercase;letter-spacing:0.5px;margin-top:6px;">Available</span>
+                        <span style="font-family:var(--font-mono);font-weight:600;color:${marginBal > 0 ? 'var(--green)' : 'var(--text-sub)'};">$${marginBal.toFixed(2)}</span>
                     </div>
                 </div>
                 <div style="display:flex;gap:16px;margin-bottom:12px;padding:8px 0;border-bottom:1px solid var(--border-dim);">
@@ -553,8 +557,21 @@ function renderCexTab(profile, exchangesData) {
                     <span style="font-size:0.8rem;color:var(--text-sub);">Fee: <strong style="color:var(--text);">${(fee * 100).toFixed(3)}%</strong></span>
                 </div>
                 
-                <div style="flex:1;margin-bottom:20px;padding-right:8px;">
+                <div style="margin-bottom:16px;">
                     ${pairsList || '<div class="text-sub" style="font-size:0.9rem;padding:12px 0;">No matching pairs found.</div>'}
+                </div>
+
+                <div style="flex:1;margin-bottom:20px;">
+                    <div style="font-size:0.8rem;color:var(--text-sub);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">Active Positions</div>
+                    ${positions.length === 0 ? '<div class="text-sub" style="font-size:0.85rem;">No active positions</div>' : positions.map(pos => {
+                        const isLong = pos.size > 0;
+                        const pnlColor = pos.unrealized_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+                        const dirStr = isLong ? '<span style="color:var(--green)">[L]</span>' : '<span style="color:var(--red)">[S]</span>';
+                        return \`<div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:6px;font-family:var(--font-mono);">
+                            <span>\${dirStr} \${pos.symbol} <span style="color:var(--text-sub)">\${Math.abs(pos.size)}</span></span>
+                            <span style="color:\${pnlColor}">\${pos.unrealized_pnl >= 0 ? '+' : ''}$\${pos.unrealized_pnl.toFixed(4)}</span>
+                        </div>\`;
+                    }).join('')}
                 </div>
                 
                 <label style="display:flex;align-items:center;gap:12px;cursor:pointer;padding-top:16px;border-top:1px solid var(--border-dim); user-select:none;">

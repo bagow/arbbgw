@@ -284,18 +284,10 @@ async function fetchSnapshot() {
             let disabled = [];
             try { disabled = typeof currentProfile.disabled_exchanges === 'string' ? JSON.parse(currentProfile.disabled_exchanges) : (currentProfile.disabled_exchanges || []); } catch(e){}
             
-            // Smart structural filter matching backend engine:
-            // deviation (spread - structural) must cover break-even costs
-            const commRate = (currentProfile.commission_rate || 0.05) / 100;
-            const slipRate = (currentProfile.slippage_percent || 0.05) / 100;
-            const breakEvenPct = 4 * (commRate + slipRate) * 100 * 1.5; // 150% safety margin
-
             rawData = rawData.filter(r => {
                 if (disabled.includes(r.exchangeA) || disabled.includes(r.exchangeB)) return false;
-                
                 const deviation = r.spread - (r.structural_spread || 0);
-                if (deviation < breakEvenPct) return false;
-
+                if (deviation < scannerState.threshold) return false;
                 return true;
             });
         }

@@ -217,7 +217,7 @@ impl ExchangeConnector for KucoinConnector {
         Ok((price, final_fee, size))
     }
 
-    async fn fetch_available_balance(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+    async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
         let ts = now_ms().to_string();
         let path = "/api/v1/account-overview?currency=USDT";
         let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", path, "");
@@ -232,11 +232,14 @@ impl ExchangeConnector for KucoinConnector {
             .send().await.map_err(|e| e.to_string())?;
             
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let bal = v["data"]["availableBalance"].as_f64()
+        let avail = v["data"]["availableBalance"].as_f64()
             .or_else(|| v["data"]["availableBalance"].as_str().and_then(|s| s.parse().ok()))
             .unwrap_or(0.0);
+        let equity = v["data"]["accountEquity"].as_f64()
+            .or_else(|| v["data"]["accountEquity"].as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or(0.0);
             
-        Ok(bal)
+        Ok((equity, avail))
     }
 
     async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {

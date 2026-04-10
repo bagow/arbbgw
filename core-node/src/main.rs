@@ -142,7 +142,7 @@ async fn main() -> Result<()> {
         exchange_keys.supports("bybit"));
 
     // ── Balance fetcher — refreshes available margin every 30s ────────────────
-    engine::real::start_balance_fetcher(http.clone(), exchange_keys.clone(), engine_ctx.clone());
+    engine::fetcher::start_balance_fetcher(http.clone(), exchange_keys.clone(), engine_ctx.clone());
 
     // ── Position sync — DISABLED: caused false EXTERNAL_PARTIAL_CLOSE ──────────
     // Symbol format mismatch between DB (ARIAUSDT) and exchange API responses
@@ -293,15 +293,30 @@ async fn main() -> Result<()> {
 
                 // Collect real balances + fee rates from engine caches
                 let mut balances: HashMap<String, f64> = HashMap::new();
+                let mut margin_balances: HashMap<String, f64> = HashMap::new();
+                let mut positions: HashMap<String, Vec<crate::engine::exchanges::traits::PositionInfo>> = HashMap::new();
                 let mut fees: HashMap<String, f64> = HashMap::new();
                 for entry in e_ctx.balances.iter() {
                     balances.insert(entry.key().clone(), *entry.value());
+                }
+                for entry in e_ctx.margin_balances.iter() {
+                    margin_balances.insert(entry.key().clone(), *entry.value());
+                }
+                for entry in e_ctx.positions.iter() {
+                    positions.insert(entry.key().clone(), entry.value().clone());
                 }
                 for entry in e_ctx.fee_rates.iter() {
                     fees.insert(entry.key().clone(), *entry.value());
                 }
 
-                let val = serde_json::json!({ "ts": now_ms, "data": pairs_map, "balances": balances, "fees": fees }).to_string();
+                let val = serde_json::json!({ 
+                    "ts": now_ms, 
+                    "data": pairs_map, 
+                    "balances": balances, 
+                    "margin_balances": margin_balances,
+                    "positions": positions,
+                    "fees": fees 
+                }).to_string();
                 let n = exchanges_list.len();
                 let _ = cache_db.call(move |conn| {
                     let _ = conn.execute_batch("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);");

@@ -3,9 +3,11 @@ use reqwest::Client;
 use async_trait::async_trait;
 use crate::engine::real::ExchangeKeys;
 
+use serde::{Deserialize, Serialize};
+
 /// Info about a single open position on an exchange.
 /// Returned by fetch_positions() — used to verify that trades actually exist on the exchange.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionInfo {
     /// Standardised symbol, e.g. "BTCUSDT"
     pub symbol: String,
@@ -32,8 +34,8 @@ pub trait ExchangeConnector: Send + Sync {
     /// Fetches the order details. Returns (executed_price, absolute_fee, executed_qty_contracts)
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String>;
 
-    /// Fetches available balance in USD(T).
-    async fn fetch_available_balance(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String>;
+    /// Fetches balances in USD(T). Returns (wallet_balance, available_margin).
+    async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String>;
 
     /// Fetches taker fee rate. (e.g. 0.0005)
     async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String>;

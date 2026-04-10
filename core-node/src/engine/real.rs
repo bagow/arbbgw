@@ -89,73 +89,10 @@ pub fn get_exchange_fee(exchange: &str, default_fee: f64, e_ctx: &crate::state::
 /// The start_balance_fetcher loop will clear this flag once it sees balance has recovered.
 pub fn mark_balance_low(exchange: &str, e_ctx: &crate::state::EngineContext) {
     if !e_ctx.balance_low.get(exchange).map(|v| *v).unwrap_or(false) {
-        warn!("[balance] {} marked balance_low — new trades on this exchange are blocked until balance recovers", exchange);
+        tracing::warn!("[balance] {} marked balance_low — new trades on this exchange are blocked until balance recovers", exchange);
         e_ctx.balance_low.insert(exchange.to_string(), true);
     }
 }
-
-/// Spawn background task that refreshes balances and fee rates.
-/// Adaptive intervals:
-///   - Normal mode : every 60s — full refresh (balance + fee rates) for all exchanges
-///   - Recovery mode: every 2s  — balance ONLY for the exchange(s) with balance_low=true
-///     Fee rates are NOT re-fetched in recovery mode to avoid rate limits.
-pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<crate::state::EngineContext>) {
-    tokio::spawn(async move {
-        let fast_interval_ms  = 2_000u64;  // Poll interval when any balance_low is active
-        let normal_interval_s = 60u64;     // Full refresh cadence (balance + fees)
-        let all_exchanges = ["binance", "gate", "kucoin", "bybit"];
-
-        loop {
-            // Determine which exchanges have balance_low set
-            let low_exchanges: Vec<&str> = all_exchanges.iter()
-                .copied()
-                .filter(|ex| keys.supports(ex) && e_ctx.balance_low.get(*ex).map(|v| *v).unwrap_or(false))
-                .collect();
-
-            if !low_exchanges.is_empty() {
-                // ── FAST RECOVERY MODE ─────────────────────────────────────────
-                // Only check balance on affected exchanges (no fee refresh → no rate limit)
-                for ex in &low_exchanges {
-                    match fetch_available_balance(&http, &keys, ex).await {
-                        Ok(bal) => {
-                            e_ctx.balances.insert(ex.to_string(), bal);
-                            if bal > 1.0 {
-                                info!("[balance] {} recovered (${:.2}) — clearing balance_low flag, trades unblocked", ex, bal);
-                                e_ctx.balance_low.insert(ex.to_string(), false);
-                            } else {
-                                warn!("[balance] {} still balance_low (${:.2}) — retry in {}ms", ex, bal, fast_interval_ms);
-                            }
-                        }
-                        Err(e) => error!("[balance] {} fetch error (recovery mode): {}", ex, e),
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(fast_interval_ms)).await;
-            } else {
-                // ── NORMAL MODE ────────────────────────────────────────────────
-                // Full refresh: balance + fee rates for all supported exchanges
-                for ex in &all_exchanges {
-                    if !keys.supports(ex) { continue; }
-                    match fetch_available_balance(&http, &keys, ex).await {
-                        Ok(bal) => {
-                            e_ctx.balances.insert(ex.to_string(), bal);
-                            info!("[balance] {} = ${:.2}", ex, bal);
-                        }
-                        Err(e) => error!("[balance] {} fetch error: {}", ex, e),
-                    }
-                    match fetch_taker_fee(&http, &keys, ex).await {
-                        Ok(fee) => {
-                            e_ctx.fee_rates.insert(ex.to_string(), fee);
-                            info!("[fee] {} taker = {:.4}%", ex, fee * 100.0);
-                        }
-                        Err(e) => error!("[fee] {} fetch error: {}", ex, e),
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(normal_interval_s)).await;
-            }
-        }
-    });
-}
-
 /// Background task: detect positions closed externally on exchanges.
 /// Every 10 seconds, checks all open trades against actual exchange positions.
 /// If a position is gone from the exchange but still OPEN in DB, handle it.
@@ -300,141 +237,18 @@ pub fn start_position_sync(
     });
 }
 
-async fn fetch_available_balance(http: &Client, keys: &ExchangeKeys, exchange: &str) -> Result<f64> {
-    match exchange {
-        "binance" => {
-            let ts = now_ms();
-            let qs = format!("timestamp={}", ts);
-            let sig = binance_sign(&keys.binance_secret, &qs);
-            let url = format!("https://fapi.binance.com/fapi/v2/balance?{}&signature={}", qs, sig);
-            let resp: Value = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
-                .timeout(Duration::from_secs(10)).send().await?.json().await?;
-            // Find USDT balance
-            let bal = resp.as_array().and_then(|arr| {
-                arr.iter().find(|a| a["asset"].as_str() == Some("USDT"))
-                    .and_then(|a| a["availableBalance"].as_str().and_then(|s| s.parse().ok()))
-            }).unwrap_or(0.0);
-            Ok(bal)
-        }
-        "gate" => {
-            let path = "/api/v4/futures/usdt/accounts";
-            let resp: Value = http.get(format!("https://api.gateio.ws{}", path))
-                .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, ""))
-                .timeout(Duration::from_secs(10)).send().await?.json().await?;
-            let bal = resp["available"].as_str().and_then(|s| s.parse().ok())
-                .or_else(|| resp["available"].as_f64()).unwrap_or(0.0);
-            Ok(bal)
-        }
-        "kucoin" => {
-            let ts = now_ms().to_string();
-            let path = "/api/v1/account-overview?currency=USDT";
-            let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", path, "");
-            let resp: Value = http.get(format!("https://api-futures.kucoin.com{}", path))
-                .header("KC-API-KEY", &keys.kucoin_key).header("KC-API-SIGN", sig)
-                .header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig)
-                .header("KC-API-KEY-VERSION", "2")
-                .timeout(Duration::from_secs(10)).send().await?.json().await?;
-            let bal = resp["data"]["availableBalance"].as_f64()
-                .or_else(|| resp["data"]["availableBalance"].as_str().and_then(|s| s.parse().ok()))
-                .unwrap_or(0.0);
-            Ok(bal)
-        }
-        "bybit" => {
-            let ts = now_ms().to_string();
-            let recv = "5000";
-            let qs = "accountType=UNIFIED&coin=USDT";
-            let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs);
-            let resp: Value = http.get(format!("https://api.bybit.com/v5/account/wallet-balance?{}", qs))
-                .header("X-BAPI-API-KEY", &keys.bybit_key)
-                .header("X-BAPI-SIGN", &sig)
-                .header("X-BAPI-TIMESTAMP", &ts)
-                .header("X-BAPI-RECV-WINDOW", recv)
-                .timeout(Duration::from_secs(10)).send().await?.json().await?;
-            let bal = resp["result"]["list"].as_array()
-                .and_then(|arr| arr.first())
-                .and_then(|a| a["coin"].as_array())
-                .and_then(|coins| coins.iter().find(|c| c["coin"].as_str() == Some("USDT")))
-                .and_then(|c| c["walletBalance"].as_str().and_then(|s| s.parse().ok())
-                    .or_else(|| c["equity"].as_str().and_then(|s| s.parse().ok())))
-                .unwrap_or(0.0);
-            Ok(bal)
-        }
-        _ => Err(anyhow::anyhow!("Unknown exchange: {}", exchange)),
-    }
-}
 
-/// Fetch taker fee rate from exchange API. Returns fraction (e.g. 0.0005 = 0.05%).
-async fn fetch_taker_fee(http: &Client, keys: &ExchangeKeys, exchange: &str) -> Result<f64> {
-    match exchange {
-        "binance" => {
-            let ts = now_ms();
-            let qs = format!("symbol=BTCUSDT&timestamp={}", ts);
-            let sig = binance_sign(&keys.binance_secret, &qs);
-            let url = format!("https://fapi.binance.com/fapi/v1/commissionRate?{}&signature={}", qs, sig);
-            let resp: Value = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
-                .timeout(Duration::from_secs(10)).send().await?.json().await?;
-            let taker = resp["takerCommissionRate"].as_str()
-                .and_then(|s| s.parse().ok())
-                .or_else(|| resp["takerCommissionRate"].as_f64())
-                .ok_or_else(|| anyhow::anyhow!("missing taker rate in binance response"))?;
-            Ok(taker)
-        }
-        "gate" => {
-            // Gate.io fee tier endpoint
-            let path = "/api/v4/futures/usdt/accounts";
-            let resp: Value = http.get(format!("https://api.gateio.ws{}", path))
-                .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, ""))
-                .timeout(Duration::from_secs(10)).send().await?.json().await?;
-            // Gate returns fee in "point_fee" or tier info; use tier taker fee
-            let taker = resp["fee_rate"].as_str().and_then(|s| s.parse().ok())
-                .or_else(|| resp["fee_rate"].as_f64())
-                .ok_or_else(|| anyhow::anyhow!("missing fee_rate in gate response"))?;
-            Ok(taker.abs()) // ensure positive
-        }
-        "kucoin" => {
-            let ts = now_ms().to_string();
-            let path = "/api/v1/trade-fees?symbol=XBTUSDTM";
-            let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", path, "");
-            let resp: Value = http.get(format!("https://api-futures.kucoin.com{}", path))
-                .header("KC-API-KEY", &keys.kucoin_key).header("KC-API-SIGN", sig)
-                .header("KC-API-TIMESTAMP", &ts).header("KC-API-PASSPHRASE", pass_sig)
-                .header("KC-API-KEY-VERSION", "2")
-                .timeout(Duration::from_secs(10)).send().await?.json().await?;
-            let taker = resp["data"]["takerFeeRate"].as_str()
-                .and_then(|s| s.parse().ok())
-                .or_else(|| resp["data"]["takerFeeRate"].as_f64())
-                .ok_or_else(|| anyhow::anyhow!("missing takerFeeRate in kucoin response"))?;
-            Ok(taker)
-        }
-        "bybit" => {
-            let ts = now_ms().to_string();
-            let recv = "5000";
-            let qs = "category=linear&symbol=BTCUSDT";
-            let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs);
-            let resp: Value = http.get(format!("https://api.bybit.com/v5/account/fee-rate?{}", qs))
-                .header("X-BAPI-API-KEY", &keys.bybit_key)
-                .header("X-BAPI-SIGN", &sig)
-                .header("X-BAPI-TIMESTAMP", &ts)
-                .header("X-BAPI-RECV-WINDOW", recv)
-                .timeout(Duration::from_secs(10)).send().await?.json().await?;
-            let taker = resp["result"]["list"].as_array()
-                .and_then(|arr| arr.first())
-                .and_then(|a| a["takerFeeRate"].as_str().and_then(|s| s.parse().ok()))
-                .ok_or_else(|| anyhow::anyhow!("missing takerFeeRate in bybit response"))?;
-            Ok(taker)
-        }
-        _ => Err(anyhow::anyhow!("fetch_taker_fee unsupported for this exchange")),
-    }
-}
 
 /// Check if exchange has enough margin for the notional volume.
 /// Returns true if balance is unknown (don't block on missing cache).
-pub fn has_sufficient_margin(exchange: &str, notional_usd: f64, e_ctx: &crate::state::EngineContext) -> bool {
-    match e_ctx.balances.get(exchange) {
-        Some(bal) => {
-            let available = *bal;
-            // Require at least 1.5x notional (to account for existing positions + fees)
-            available >= notional_usd * 1.5
+pub fn has_sufficient_margin(exchange: &str, notional_usd: f64, leverage: f64, e_ctx: &crate::state::EngineContext) -> bool {
+    match e_ctx.margin_balances.get(exchange) {
+        Some(margin) => {
+            let available = *margin;
+            // Physical margin needed for this trade
+            let required = notional_usd / leverage.max(1.0);
+            // Require 1.5x of the required margin as a safety buffer
+            available >= required * 1.5
         }
         None => true, // No data yet — allow (fail-safe)
     }

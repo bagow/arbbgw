@@ -181,7 +181,7 @@ impl ExchangeConnector for BybitConnector {
         Ok((price, fee.abs(), exec_contracts))
     }
 
-    async fn fetch_available_balance(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+    async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let qs = "accountType=UNIFIED&coin=USDT";
@@ -196,15 +196,21 @@ impl ExchangeConnector for BybitConnector {
             .send().await.map_err(|e| e.to_string())?;
             
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let bal = v["result"]["list"].as_array()
+        
+        let coin_obj = v["result"]["list"].as_array()
             .and_then(|arr| arr.first())
             .and_then(|a| a["coin"].as_array())
-            .and_then(|coins| coins.iter().find(|c| c["coin"].as_str() == Some("USDT")))
-            .and_then(|c| c["walletBalance"].as_str().and_then(|s| s.parse().ok())
-                .or_else(|| c["equity"].as_str().and_then(|s| s.parse().ok())))
+            .and_then(|coins| coins.iter().find(|c| c["coin"].as_str() == Some("USDT")));
+
+        let wallet = coin_obj
+            .and_then(|c| c["walletBalance"].as_str().and_then(|s| s.parse().ok()))
             .unwrap_or(0.0);
             
-        Ok(bal)
+        let equity = coin_obj
+            .and_then(|c| c["equity"].as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or(wallet);
+
+        Ok((wallet, equity))
     }
 
     async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {

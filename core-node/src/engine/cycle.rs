@@ -371,7 +371,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let now = now_ms();
 
         // ── BALANCE LOW GUARD (zero-latency) ─────────────────────────────────
-        if !has_sufficient_margin(&exa, actual_vol_a, &e_ctx) { 
+        if !has_sufficient_margin(&exa, actual_vol_a, settings.leverage as f64, &e_ctx) { 
             let now_m = now_ms() as i64;
             if now_m - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
                 info!("[real] SKIP {}: insufficient margin {}", pair, exa);
@@ -379,7 +379,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             }
             continue; 
         }
-        if !has_sufficient_margin(&exb, actual_vol_b, &e_ctx) { 
+        if !has_sufficient_margin(&exb, actual_vol_b, settings.leverage as f64, &e_ctx) { 
             let now_m = now_ms() as i64;
             if now_m - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
                 info!("[real] SKIP {}: insufficient margin {}", pair, exb);
