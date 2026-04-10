@@ -850,14 +850,15 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
                     // Try to use a safe wide LIMIT-IOC fallback before dumping to unconstrained MARKET
                     let use_safe_limit = true; // attempt < emergency_retries;
                     let panic_slip_margin = 0.05; // 5% slippage tolerance for emergency close limit
+                    let tick_for_close = e_ctx_em.tick_sizes.get(&format!("{}:{}", fe, fp)).map(|v| *v).unwrap_or(0.000001);
                     let safe_limit_price = if fs { 
                         fp_price * (1.0 + panic_slip_margin) 
                     } else { 
                         fp_price * (1.0 - panic_slip_margin) 
                     };
-                    // if use_safe_limit && safe_limit_price ...
+                    let rounded_safe_limit_price = (safe_limit_price / tick_for_close).round() * tick_for_close;
                     
-                    let limit_price = if use_safe_limit { safe_limit_price } else { 0.0 };
+                    let limit_price = if use_safe_limit { rounded_safe_limit_price } else { 0.0 };
                     
                     match crate::engine::exchanges::get_connector(&fe).unwrap().close_order(&hc, &kc, &fp, fs, fc, false, lev as f64, limit_price, use_safe_limit).await {
                         Ok(id) => { error!("🛡️ Emergency close ok {}/{}: {}", fe, fp, id); close_oid = Some(id); break; }
