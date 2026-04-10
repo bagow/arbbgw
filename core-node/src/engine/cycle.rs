@@ -480,9 +480,9 @@ pub async fn run_cycle(spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, 
             continue;
         }
 
-        if !has_sufficient_margin(&row.exchange_a, actual_vol_a, &e_ctx) { info!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_a); continue; }
-        if !has_sufficient_margin(&row.exchange_b, actual_vol_b, &e_ctx) { info!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_b); continue; }
-        if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional) || (row.exchange_b == "binance" && actual_vol_b < ts.binance_min_notional) { info!("[real] SKIP {}: binance min notional", row.pair); continue; }
+        if !has_sufficient_margin(&row.exchange_a, actual_vol_a, &e_ctx) { tracing::debug!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_a); continue; }
+        if !has_sufficient_margin(&row.exchange_b, actual_vol_b, &e_ctx) { tracing::debug!("[real] SKIP {}: insufficient margin {}", row.pair, row.exchange_b); continue; }
+        if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional) || (row.exchange_b == "binance" && actual_vol_b < ts.binance_min_notional) { tracing::debug!("[real] SKIP {}: binance min notional", row.pair); continue; }
 
         let has_tick_a = e_ctx.tick_sizes.contains_key(&format!("{}:{}", row.exchange_a, row.pair));
         let has_tick_b = e_ctx.tick_sizes.contains_key(&format!("{}:{}", row.exchange_b, row.pair));
