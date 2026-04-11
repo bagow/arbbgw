@@ -160,8 +160,17 @@ pub fn generate_signals(
 
             let use_ioc = ts.entry_order_type == "ioc";
             let (limit_price_a, limit_price_b) = if use_ioc {
-                let lpa = if is_a_higher { entry_a * (1.0 - slippage_frac) } else { entry_a * (1.0 + slippage_frac) };
-                let lpb = if is_a_higher { entry_b * (1.0 + slippage_frac) } else { entry_b * (1.0 - slippage_frac) };
+                // Dynamic Spread-Based Slippage Calculation
+                // Target executing strictly equal to or better than `profile.min_entry_spread`.
+                let spread_allowance = (row.spread - profile.min_entry_spread).max(0.0);
+                // Divide by 2.0 (split over 2 legs) and apply 0.95 safety factor to not overshoot
+                let dynamic_slip_pct = spread_allowance / 2.0 * 0.95;
+                // Cap it by user's hard slippage_percent limit
+                let active_slip_pct = dynamic_slip_pct.min(profile.slippage_percent);
+                let active_slip_frac = active_slip_pct / 100.0;
+
+                let lpa = if is_a_higher { entry_a * (1.0 - active_slip_frac) } else { entry_a * (1.0 + active_slip_frac) };
+                let lpb = if is_a_higher { entry_b * (1.0 + active_slip_frac) } else { entry_b * (1.0 - active_slip_frac) };
                 
                 let lpa_rounded = (lpa / tick_a).round() * tick_a;
                 let lpb_rounded = (lpb / tick_b).round() * tick_b;

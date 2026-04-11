@@ -480,11 +480,14 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let total_ms = t0.elapsed().as_millis();
         if dry_run { fill_a = entry_a; fill_b = entry_b; }
 
-        let a_filled = oid_a.is_some() && fill_a > 0.0;
-        let b_filled = oid_b.is_some() && fill_b > 0.0;
+        let phys_a = actual_vol_contracts_a.unwrap_or(0.0) * mult_a;
+        let phys_b = actual_vol_contracts_b.unwrap_or(0.0) * mult_b;
+        
+        let a_filled = oid_a.is_some() && phys_a > 0.0;
+        let b_filled = oid_b.is_some() && phys_b > 0.0;
 
-        info!("[real] RESULT {} A={} B={} fill_a={:.6} fill_b={:.6} orders={}ms total={}ms",
-            pair, a_filled, b_filled, fill_a, fill_b, order_ms, total_ms);
+        info!("[real] RESULT {} A={} B={} phys_a={:.6} phys_b={:.6} fill_a={:.6} fill_b={:.6} latency={}ms",
+            pair, a_filled, b_filled, phys_a, phys_b, fill_a, fill_b, total_ms);
 
         if !a_filled && !b_filled {
             info!("[real] Both IOC unfilled {} — no exposure ({}ms)", pair, total_ms);
@@ -492,225 +495,125 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             continue;
         }
 
-        if a_filled && b_filled {
-            // ✅ SUCCESS
-            crate::engine::real::deduct_cached_balance(&exa, actual_vol_a);
-            crate::engine::real::deduct_cached_balance(&exb, actual_vol_b);
-            opened_this_cycle = true;
+        let matched_phys = phys_a.min(phys_b);
+        let delta_a = phys_a - matched_phys;
+        let delta_b = phys_b - matched_phys;
+        
+        // ── DELTA TRIMMING (Phase 3) ──
+        let mut trimming_loss = 0.0;
+        let mut trimming_fee = 0.0;
+        let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
+        let fp = pair.clone();
 
-            let vol = settings.trade_volume;
-                // direction comes from sig.direction
-            let dir = sig.direction.clone();
-            // Compute entry spread from ACTUAL fill prices, not row.spread (which was
-            // computed by the spread scanner before orders were placed and may be stale).
-            let actual_entry_spread = if fill_a > 0.0 && fill_b > 0.0 {
-                if is_a_higher {
-                    (fill_a - fill_b) / fill_b.max(1e-12) * 100.0
-                } else {
-                    (fill_b - fill_a) / fill_a.max(1e-12) * 100.0
+        if delta_a > 1e-12 {
+            let contracts_to_dump = delta_a / mult_a; // Convert excess coins back to contracts for the API
+            let is_buy = is_a_higher; // If we entered A by Selling (!is_a_higher), we exit A by Buying (is_a_higher)
+            error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys ({:.6} contracts)", pair, delta_a, contracts_to_dump);
+            
+            // Fire MARKET CLOSE instantly!
+            let dump_price = if is_buy { fill_a * 1.05 } else { fill_a * 0.95 }; // Deep market limit for safety
+            let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
+            let rounded_safe_limit_price = (dump_price / tick_for_close).round() * tick_for_close;
+            
+            match crate::engine::exchanges::get_connector(&exa).unwrap().close_order(&hc, &kc, &fp, is_buy, contracts_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, true).await {
+                Ok(close_oid) => {
+                    for attempt in 0..5 {
+                        if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&hc, &kc, &fp, close_oid.as_str(), mult_a).await {
+                            if p > 0.0 { 
+                                trimming_fee += if f > 1e-9 { f.abs() } else { 0.0 };
+                                // Original was entry_a, close is p. We dumped delta_a coins.
+                                let gross_loss = if is_buy { (fill_a - p) * delta_a } else { (p - fill_a) * delta_a };
+                                trimming_loss += gross_loss.min(0.0).abs(); // Only penalize if it's a loss
+                                break; 
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(15 * (attempt + 1) as u64)).await;
+                    }
                 }
-            } else {
-                sig.spread // fallback if fills unexpected
-            };
-            let sp = actual_entry_spread;
-            let profile_id = settings.id.clone();
-
-            // STRICT: only exchange-reported fees, no estimated fallback
-            let entry_comm = fee_a_val + fee_b_val;
-            if entry_comm < 1e-9 {
-                tracing::warn!("[real] [EXCHANGE_VERIFIED] Entry fee=0 for {} — exchange didn't report fee", pair);
+                Err(e) => { error!("[real] Failed to trim DELTA A: {}", e); }
             }
-            let slip_a = if fill_a > 0.0 { if is_a_higher { ((entry_a - fill_a) * (vol / entry_a)).max(0.0) } else { ((fill_a - entry_a) * (vol / entry_a)).max(0.0) } } else { 0.0 };
-            let slip_b = if fill_b > 0.0 { if !is_a_higher { ((entry_b - fill_b) * (vol / entry_b)).max(0.0) } else { ((fill_b - entry_b) * (vol / entry_b)).max(0.0) } } else { 0.0 };
-            let entry_slip = slip_a + slip_b;
-            let entry_time = now_ms();
-            let oid_a_db = oid_a.unwrap_or_default();
-            let oid_b_db = oid_b.unwrap_or_default();
-
-            info!("[real] [EXCHANGE_VERIFIED] ✅ OPEN {} A={:.6}(c={}) B={:.6}(c={}) fees={:.4} slip={:.4} scanner_sp={:.4}% actual_sp={:.4}% latency={}ms",
-                pair, fill_a, contracts_a, fill_b, contracts_b, entry_comm, entry_slip, sig.spread, sp, total_ms);
-
-            repo.insert_new_entry(pair.clone(), exa.clone(), exb.clone(), dir.clone(), vol, fill_a, fill_b, sp, entry_time, profile_id.clone(), entry_comm, entry_slip, oid_a_db, oid_b_db, contracts_a, contracts_b).await;
-        } else {
-            // ⚠️ ASYMMETRIC — emergency close the filled leg
-            let (fe, _fo, fs, fc, fp_price, ff, fv) = if a_filled {
-                let q_qty = if exa == "binance" || exa == "bybit" { contracts_a * mult_a } else { contracts_a };
-                (exa.clone(), oid_a.as_ref().unwrap().clone(), is_a_higher, q_qty, fill_a, fee_a_val, actual_vol_a)
-            } else {
-                let q_qty = if exb == "binance" || exb == "bybit" { contracts_b * mult_b } else { contracts_b };
-                (exb.clone(), oid_b.as_ref().unwrap().clone(), !is_a_higher, q_qty, fill_b, fee_b_val, actual_vol_b)
-            };
-
-            error!("[real] ⚠️ ASYMMETRIC {} — only {} filled @ {:.6} ({}ms)", pair, fe, fp_price, total_ms);
-            pair_cd.insert(pair.clone(), now + ts.asymmetric_cooldown_ms);
-
-            let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
-            let fp = pair.clone();
-            let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), sig.direction.clone(), sig.spread, settings.id.clone());
-            let lev = settings.leverage;
-            let emergency_retries = ts.emergency_close_retries;
-
-            let prices_retry = prices.clone();
-            let entry_a = sig.entry_a;
-            let entry_b = sig.entry_b;
-            let min_entry_spread = settings.min_entry_spread;
-            let slip_pct = settings.slippage_percent;
-            let use_ioc = ts.entry_order_type == "ioc";
-            let vol_retry = settings.trade_volume;
-            let oid_a_original = oid_a.clone();
-            let oid_b_original = oid_b.clone();
-            let structural_spread_val = sig.structural_spread; // Read from TradeSignal
-
-            let e_ctx_em = Arc::clone(&e_ctx);
-            tokio::spawn(async move {
-                let mut retry_open_ok = false;
-                let mut missing_oid = None;
-                let mut missing_fill = 0.0;
-                let mut missing_fee = 0.0;
-                
-                let missing_ex = if a_filled { eb_s.clone() } else { ea_s.clone() };
-                let missing_is_buy = if a_filled { is_a_higher } else { !is_a_higher };
-                let missing_qty = if a_filled {
-                    let known_fill_a = actual_vol_contracts_a.unwrap_or(contracts_a);
-                    let ratio = known_fill_a / contracts_a.max(1e-12);
-                    let target_contracts_b = contracts_b * ratio;
-                    if eb_s == "binance" || eb_s == "bybit" { target_contracts_b * mult_b } else { target_contracts_b }
-                } else {
-                    let known_fill_b = actual_vol_contracts_b.unwrap_or(contracts_b);
-                    let ratio = known_fill_b / contracts_b.max(1e-12);
-                    let target_contracts_a = contracts_a * ratio;
-                    if ea_s == "binance" || ea_s == "bybit" { target_contracts_a * mult_a } else { target_contracts_a }
-                };
-                let missing_mult = e_ctx_em.multipliers.get(&format!("{}:{}", missing_ex, fp)).map(|v| *v).unwrap_or(1.0);
-                let missing_tick = e_ctx_em.tick_sizes.get(&format!("{}:{}", missing_ex, fp)).map(|v| *v).unwrap_or(0.000001);
-                
-                // Loop to rescue missing leg
-                for _attempt in 0..50 {
-                    let fresh_a = prices_retry.get(&ea_s).and_then(|m| m.get(&fp).cloned());
-                    let fresh_b = prices_retry.get(&eb_s).and_then(|m| m.get(&fp).cloned());
-                    if let (Some(fa), Some(fb)) = (&fresh_a, &fresh_b) {
-                        let cur_spread = if is_a_higher {
-                            (fa.bid - fb.ask) / fb.ask.max(1e-12) * 100.0
-                        } else {
-                            (fb.bid - fa.ask) / fa.ask.max(1e-12) * 100.0
-                        };
-                        // Check BOTH raw spread AND structural deviation
-                        let structural_dev = cur_spread - structural_spread_val;
-                        if cur_spread >= min_entry_spread && structural_dev >= min_entry_spread {
-                            let entry_m = if a_filled { if is_a_higher { fb.ask } else { fb.bid } } else { if is_a_higher { fa.bid } else { fa.ask } };
-                            let mut limit_price = 0.0;
-                            if use_ioc {
-                                let max_slip_frac = slip_pct / 100.0;
-                                let lpm = if missing_is_buy { entry_m * (1.0 + max_slip_frac) } else { entry_m * (1.0 - max_slip_frac) };
-                                limit_price = (lpm / missing_tick).round() * missing_tick;
-                            }
-                            match crate::engine::exchanges::get_connector(&missing_ex).unwrap().place_order(&hc, &kc, &fp, missing_is_buy, missing_qty, false, limit_price, limit_price > 0.0).await {
-                                Ok((Some(oid), fill_inline)) => {
-                                    let mut p = fill_inline;
-                                    let mut f = 0.0;
-                                    let mut got = p > 0.0;
-                                    for _ in 0..3 {
-                                        if got { break; }
-                                        if let Ok::<(f64, f64, f64), String>((p_f, f_f, _ev)) = crate::engine::exchanges::get_connector(&missing_ex).unwrap().fetch_order(&hc, &kc, &fp, oid.as_str(), missing_mult).await {
-                                            // STRICT: only exchange-reported fee, no estimated fallback
-                                            if p_f > 0.0 { p = p_f; f = if f_f > 1e-9 { f_f.abs() } else { 0.0 }; got = true; }
-                                        }
-                                        if !got { tokio::time::sleep(tokio::time::Duration::from_millis(50)).await; }
-                                    }
-                                    // No WS price fallback — must have exchange fill
-                                    if got && p > 0.0 {
-                                        retry_open_ok = true;
-                                        missing_oid = Some(oid);
-                                        missing_fill = p;
-                                        missing_fee = f;
-                                        break;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        } else {
-                            tracing::info!("[real] ASYMMETRIC RETRY STOPPED for {} — spread={:.4}% structural_dev={:.4}% (min {:.4}%)", fp, cur_spread, structural_dev, min_entry_spread);
-                            break;
-                        }
-                    } else { break; }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                }
-
-                if retry_open_ok {
-                    tracing::info!("[real] [EXCHANGE_VERIFIED] 🛟 ASYMMETRIC RESCUED {} by opening missing leg!", fp);
-                    let (fill_a_final, fill_b_final) = if a_filled { (fill_a, missing_fill) } else { (missing_fill, fill_b) };
-                    let (oid_a_db, oid_b_db) = if a_filled { (oid_a_original.unwrap_or_default(), missing_oid.unwrap()) } else { (missing_oid.unwrap(), oid_b_original.unwrap_or_default()) };
-                    let fee_total = if a_filled { fee_a_val + missing_fee } else { missing_fee + fee_b_val };
-                    
-                    let sp_actual = if is_a_higher {
-                        (fill_a_final - fill_b_final) / fill_b_final.max(1e-12) * 100.0
-                    } else {
-                        (fill_b_final - fill_a_final) / fill_a_final.max(1e-12) * 100.0
-                    };
-                    
-                    let slip_a = if fill_a_final > 0.0 { if is_a_higher { ((entry_a - fill_a_final) * (vol_retry / entry_a)).max(0.0) } else { ((fill_a_final - entry_a) * (vol_retry / entry_a)).max(0.0) } } else { 0.0 };
-                    let slip_b = if fill_b_final > 0.0 { if !is_a_higher { ((entry_b - fill_b_final) * (vol_retry / entry_b)).max(0.0) } else { ((fill_b_final - entry_b) * (vol_retry / entry_b)).max(0.0) } } else { 0.0 };
-                    let entry_slip_total = slip_a + slip_b;
-                    let entry_time = crate::engine::real::now_ms();
-                    
-                    if fee_total < 1e-9 {
-                        tracing::warn!("[real] [EXCHANGE_VERIFIED] Rescue entry fee=0 for {} — exchange didn't report fee", fp);
-                    }
-
-                    let repo_rescue = crate::engine::db::TradeRepository::new(db_c.clone());
-                    repo_rescue.insert_new_entry(fp.clone(), ea_s.clone(), eb_s.clone(), d.clone(), vol_retry, fill_a_final, fill_b_final, sp_actual, entry_time, pid.clone(), fee_total, entry_slip_total, oid_a_db, oid_b_db, contracts_a, contracts_b).await;
-                    return;
-                }
-
-                let mut close_oid = None;
-                for attempt in 1u32..=emergency_retries as u32 {
-                    // Try to use a safe wide LIMIT-IOC fallback before dumping to unconstrained MARKET
-                    let use_safe_limit = true; // attempt < emergency_retries;
-                    let panic_slip_margin = 0.05; // 5% slippage tolerance for emergency close limit
-                    let tick_for_close = e_ctx_em.tick_sizes.get(&format!("{}:{}", fe, fp)).map(|v| *v).unwrap_or(0.000001);
-                    let safe_limit_price = if fs { 
-                        fp_price * (1.0 + panic_slip_margin) 
-                    } else { 
-                        fp_price * (1.0 - panic_slip_margin) 
-                    };
-                    let rounded_safe_limit_price = (safe_limit_price / tick_for_close).round() * tick_for_close;
-                    
-                    let limit_price = if use_safe_limit { rounded_safe_limit_price } else { 0.0 };
-                    
-                    match crate::engine::exchanges::get_connector(&fe).unwrap().close_order(&hc, &kc, &fp, fs, fc, false, lev as f64, limit_price, use_safe_limit).await {
-                        Ok(id) => { error!("🛡️ Emergency close ok {}/{}: {}", fe, fp, id); close_oid = Some(id); break; }
-                        Err(err) => { tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await; error!("Emergency close {}/{}: {}", attempt, emergency_retries, err); }
-                    }
-                }
-                let mut close_fill = fp_price;
-                let mut total_fee = ff;
-                let m = e_ctx_em.multipliers.get(&format!("{}:{}", fe, fp)).map(|v| *v).unwrap_or(1.0);
-                
-                if let Some(ref coid) = close_oid {
-                    for _ in 0..5 {
-                        if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&fe).unwrap().fetch_order(&hc, &kc, &fp, coid.as_str(), m).await {
-                            // STRICT: only exchange-reported fee, no estimated fallback
-                            if p > 0.0 { close_fill = p; total_fee += if f > 1e-9 { f.abs() } else { 0.0 }; break; }
-                        }
-                        tokio::time::sleep(Duration::from_millis(15)).await;
-                    }
-                }
-                let qty = fv / fp_price.max(1e-12);
-                let gross_pnl = if fs { (fp_price - close_fill) * qty } else { (close_fill - fp_price) * qty };
-                let slip = if fs { ((close_fill - fp_price) * qty).max(0.0) } else { ((fp_price - close_fill) * qty).max(0.0) };
-                
-                let net_pnl = gross_pnl - total_fee;
-                let entry_time = now_ms();
-
-                error!("[real] ASYMMETRIC PnL {}: gross={:.4} fee={:.4} net={:.4}", fp, gross_pnl, total_fee, net_pnl);
-
-                let (ent_a, ent_b) = if a_filled { (fp_price, 0.0f64) } else { (0.0f64, fp_price) };
-                let (ext_a, ext_b) = if a_filled { (close_fill, 0.0f64) } else { (0.0f64, close_fill) };
-                let (pnl_a_val, pnl_b_val) = if a_filled { (gross_pnl, 0.0f64) } else { (0.0f64, gross_pnl) };
-
-                let repo_close = TradeRepository::new(db_c.clone());
-                repo_close.append_asymmetric_close(fp, ea_s, eb_s, d, fv, ent_a, ent_b, sp, entry_time, pnl_a_val, pnl_b_val, pid, total_fee, slip, net_pnl, gross_pnl, ext_a, ext_b).await;
-            });
         }
+        
+        if delta_b > 1e-12 {
+            let contracts_to_dump = delta_b / mult_b; // Convert excess coins back to contracts
+            let is_buy = !is_a_higher; // Opposite of entry B
+            error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys ({:.6} contracts)", pair, delta_b, contracts_to_dump);
+            
+            let dump_price = if is_buy { fill_b * 1.05 } else { fill_b * 0.95 };
+            let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
+            let rounded_safe_limit_price = (dump_price / tick_for_close).round() * tick_for_close;
+            
+            match crate::engine::exchanges::get_connector(&exb).unwrap().close_order(&hc, &kc, &fp, is_buy, contracts_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, true).await {
+                Ok(close_oid) => {
+                    for attempt in 0..5 {
+                        if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&hc, &kc, &fp, close_oid.as_str(), mult_b).await {
+                            if p > 0.0 { 
+                                trimming_fee += if f > 1e-9 { f.abs() } else { 0.0 };
+                                let gross_loss = if is_buy { (fill_b - p) * delta_b } else { (p - fill_b) * delta_b };
+                                trimming_loss += gross_loss.min(0.0).abs();
+                                break; 
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(15 * (attempt + 1) as u64)).await;
+                    }
+                }
+                Err(e) => { error!("[real] Failed to trim DELTA B: {}", e); }
+            }
+        }
+
+        // ── TRADE BOOKING (Phase 4) ──
+        if matched_phys < 1e-12 {
+            // Nothing survived the trim (e.g. one leg didn't fill at all, and we dumped the other)
+            error!("[real] ❌ FULL ASYMMETRY DUMPED {}. Trade canceled. Trimming Loss: {:.4}, Trimming Fee: {:.4}", pair, trimming_loss, trimming_fee);
+            pair_cd.insert(pair.clone(), now + ts.asymmetric_cooldown_ms);
+            
+            // Record failed asymmetrical trade into database...
+            let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), sig.direction.clone(), sig.spread, settings.id.clone());
+            let (ent_a, ent_b) = if a_filled { (fill_a, 0.0) } else { (0.0, fill_b) };
+            let fv_coins = if a_filled { delta_a } else { delta_b };
+            let gross_pnl = -trimming_loss;
+            let net_pnl = gross_pnl - trimming_fee;
+            
+            let repo_close = TradeRepository::new(db.clone());
+            repo_close.append_asymmetric_close(pair.clone(), ea_s, eb_s, d, fv_coins, ent_a, ent_b, sp, now_ms(), gross_pnl, 0.0, pid, trimming_fee, trimming_loss, net_pnl, gross_pnl, 0.0, 0.0).await;
+            continue;
+        }
+
+        // We have a VALID matching volume! Calculate final trading volume
+        let final_vol_usd = matched_phys * entry_a;
+        crate::engine::real::deduct_cached_balance(&exa, final_vol_usd);
+        crate::engine::real::deduct_cached_balance(&exb, final_vol_usd);
+        opened_this_cycle = true;
+
+        let dir = sig.direction.clone();
+        let actual_entry_spread = if fill_a > 0.0 && fill_b > 0.0 {
+            if is_a_higher {
+                (fill_a - fill_b) / fill_b.max(1e-12) * 100.0
+            } else {
+                (fill_b - fill_a) / fill_a.max(1e-12) * 100.0
+            }
+        } else {
+            sig.spread
+        };
+
+        let entry_comm = fee_a_val + fee_b_val + trimming_fee; // Add trimming fees to the opening fees
+        let slip_a = if fill_a > 0.0 { if is_a_higher { ((entry_a - fill_a) * matched_phys).max(0.0) } else { ((fill_a - entry_a) * matched_phys).max(0.0) } } else { 0.0 };
+        let slip_b = if fill_b > 0.0 { if !is_a_higher { ((entry_b - fill_b) * matched_phys).max(0.0) } else { ((fill_b - entry_b) * matched_phys).max(0.0) } } else { 0.0 };
+        
+        // Trimming loss is baked into the entry slippage curve (as it was an immediate loss to enter the market symmetrically)
+        let entry_slip = slip_a + slip_b + trimming_loss; 
+        
+        let contracts_a_db = matched_phys / mult_a;
+        let contracts_b_db = matched_phys / mult_b;
+
+        info!("[real] [EXCHANGE_VERIFIED] ✅ OPEN {} phys={:.6} (Trimming: -${:.4}) A_price={:.6} B_price={:.6} fees={:.4} slip={:.4} actual_sp={:.4}%",
+            pair, matched_phys, trimming_loss, fill_a, fill_b, entry_comm, entry_slip, actual_entry_spread);
+
+        repo.insert_new_entry(
+            pair.clone(), exa.clone(), exb.clone(), dir.clone(), final_vol_usd, 
+            fill_a, fill_b, actual_entry_spread, now_ms(), settings.id.clone(), 
+            entry_comm, entry_slip, oid_a.unwrap_or_default(), oid_b.unwrap_or_default(), 
+            contracts_a_db, contracts_b_db
+        ).await;
     }
 }
