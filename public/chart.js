@@ -23,7 +23,7 @@ async function authFetch(url, options = {}) {
 }
 
 // ─── Exchange config ───────────────────────────────────────────────────────────
-const KNOWN_EXCHANGES = ['binance', 'bybit', 'okx', 'gate', 'bingx', 'kucoin', 'xt', 'coinex'];
+const KNOWN_EXCHANGES = ['binance', 'bybit', 'gate', 'kucoin'];
 
 const EXCHANGE_COLORS = {
     binance: '#f97316',  // orange
