@@ -23,7 +23,7 @@ async function authFetch(url, options = {}) {
 }
 
 // ─── Exchange config ───────────────────────────────────────────────────────────
-const KNOWN_EXCHANGES = ['binance', 'bybit', 'gate', 'kucoin'];
+let KNOWN_EXCHANGES = [];
 
 const EXCHANGE_COLORS = {
     binance: '#f97316',  // orange
@@ -308,7 +308,18 @@ async function fetchSnapshot() {
         
         // 2. Discover exchanges
         const seen = new Set(scannerState.snapshot.flatMap(r => [r.exchangeA, r.exchangeB]));
-        seen.forEach(ex => scannerState.activeExchanges.add(ex));
+        seen.forEach(ex => {
+            scannerState.activeExchanges.add(ex);
+            if (!KNOWN_EXCHANGES.includes(ex)) KNOWN_EXCHANGES.push(ex);
+        });
+        
+        // Also add from global unified state to ensure CEXes with 0 pairs are still recognized
+        if (typeof lastUnified !== 'undefined' && lastUnified && lastUnified.exchanges) {
+            Object.keys(lastUnified.exchanges).forEach(ex => {
+                if (!KNOWN_EXCHANGES.includes(ex)) KNOWN_EXCHANGES.push(ex);
+            });
+        }
+        
         renderExchangeFilters();
         renderTable();
 
