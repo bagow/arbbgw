@@ -564,6 +564,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         // ── TRADE BOOKING (Phase 4) ──
         if matched_phys < 1e-12 {
             // Nothing survived the trim (e.g. one leg didn't fill at all, and we dumped the other)
+            let total_fee = fee_a_val + fee_b_val + trimming_fee;
             error!("[real] ❌ FULL ASYMMETRY DUMPED {}. Trade canceled. Trimming Loss: {:.4}, Trimming Fee: {:.4}", pair, trimming_loss, trimming_fee);
             pair_cd.insert(pair.clone(), now + ts.asymmetric_cooldown_ms);
             
@@ -572,10 +573,17 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             let (ent_a, ent_b) = if a_filled { (fill_a, 0.0) } else { (0.0, fill_b) };
             let fv_coins = if a_filled { delta_a } else { delta_b };
             let gross_pnl = -trimming_loss;
-            let net_pnl = gross_pnl - trimming_fee;
+            let net_pnl = gross_pnl - total_fee;
+            
+            let pnl_a_val = if a_filled { gross_pnl } else { 0.0 };
+            let pnl_b_val = if !a_filled { gross_pnl } else { 0.0 };
             
             let repo_close = TradeRepository::new(db.clone());
-            repo_close.append_asymmetric_close(pair.clone(), ea_s, eb_s, d, fv_coins, ent_a, ent_b, sp, now_ms(), gross_pnl, 0.0, pid, trimming_fee, trimming_loss, net_pnl, gross_pnl, 0.0, 0.0).await;
+            // slip is 0.0 for cancelled trades, loss comes from gross_pnl / pnl_x
+            repo_close.append_asymmetric_close(
+                pair.clone(), ea_s, eb_s, d, fv_coins, ent_a, ent_b, sp, now_ms(), 
+                pnl_a_val, pnl_b_val, pid, total_fee, 0.0, net_pnl, gross_pnl, 0.0, 0.0
+            ).await;
             continue;
         }
 
