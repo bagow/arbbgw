@@ -59,6 +59,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     for chunk in symbols.chunks(10) {
         let args: Vec<String> = chunk.iter().map(|s| format!("tickers.{}", s)).collect();
         ws.send(Message::Text(json!({"op":"subscribe","args":args}).to_string().into())).await?;
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
     let mut ping = tokio::time::interval(Duration::from_secs(20));
