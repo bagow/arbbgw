@@ -19,13 +19,13 @@ impl ExchangeConnector for KucoinConnector {
         "kucoin"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool, leverage: f64) -> Result<(Option<String>, f64), String> {
         let sym = format!("{}M", pair);
         let ts = now_ms().to_string(); 
         let path = "/api/v1/orders";
         let side = if is_buy { "buy" } else { "sell" };
         
-        let lev_str = "10"; // Default static, KuCoin requires leverage in order payload
+        let lev_str = (leverage.max(1.0) as i64).to_string();
 
         let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
         if price_str.ends_with('.') { price_str.pop(); }
@@ -95,7 +95,7 @@ impl ExchangeConnector for KucoinConnector {
         let path = "/api/v1/orders";
         let side = if is_buy { "buy" } else { "sell" };
 
-        let lev_str = "10";
+        let lev_str = (leverage.max(1.0) as i64).to_string();
         let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
         if price_str.ends_with('.') { price_str.pop(); }
         if price_str.is_empty() { price_str = "0".to_string(); }

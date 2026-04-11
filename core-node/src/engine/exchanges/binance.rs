@@ -30,24 +30,28 @@ impl ExchangeConnector for BinanceConnector {
         "binance"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64) -> Result<(Option<String>, f64), String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run {
             return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), price));
         }
 
         let ts = now_ms();
-        let time_in_force = if use_ioc { "IOC" } else { "GTC" };
         let mut qty_str = format!("{:.8}", contracts).trim_end_matches('0').to_string();
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
         
-        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
-        if price_str.ends_with('.') { price_str.pop(); }
-        if price_str.is_empty() { price_str = "0".to_string(); }
-        
-        let qs = format!("symbol={}&side={}&type=LIMIT&timeInForce={}&quantity={}&price={}&timestamp={}", 
-            pair, side, time_in_force, qty_str, price_str, ts);
+        // MARKET vs IOC LIMIT — previously always used LIMIT even for market orders
+        let qs = if use_ioc && price > 0.0 {
+            let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+            if price_str.ends_with('.') { price_str.pop(); }
+            if price_str.is_empty() { price_str = "0".to_string(); }
+            format!("symbol={}&side={}&type=LIMIT&timeInForce=IOC&quantity={}&price={}&timestamp={}", 
+                pair, side, qty_str, price_str, ts)
+        } else {
+            format!("symbol={}&side={}&type=MARKET&quantity={}&timestamp={}", 
+                pair, side, qty_str, ts)
+        };
         let sig = binance_sign(&keys.binance_secret, &qs);
         let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
         let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
@@ -199,22 +203,15 @@ impl ExchangeConnector for BinanceConnector {
     }
 
     async fn ensure_leverage(&self, http: &Client, keys: &ExchangeKeys, pair: &str, leverage: f64) -> Result<(), String> {
-        // Implement cache locally or via shared cache to avoid spamming
-        // Since the interface signature doesn't take EngineContext, we'll keep it simple for now
+        // Only set leverage — do NOT force margin type here.
+        // Margin type (CROSSED/ISOLATED) should be configured once on the exchange or via
+        // the full ensure_leverage in warmup_leverages (real.rs) which has access to profile settings.
         let ts = now_ms();
         let qs = format!("symbol={}&leverage={}&timestamp={}", pair, leverage as i64, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
-        let url = format!("https://fapi.binance.com/fapi/v1/leverage?{}&signature={}", qs, sig);
-        let _ = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
+        let _ = http.post(format!("https://fapi.binance.com/fapi/v1/leverage?{}&signature={}", qs, sig))
+            .header("X-MBX-APIKEY", &keys.binance_key)
             .timeout(Duration::from_secs(10)).send().await;
-        
-        let ts = now_ms();
-        let qs = format!("symbol={}&marginType=ISOLATED&timestamp={}", pair, ts);
-        let sig = binance_sign(&keys.binance_secret, &qs);
-        let url = format!("https://fapi.binance.com/fapi/v1/marginType?{}&signature={}", qs, sig);
-        let _ = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_secs(10)).send().await;
-            
         Ok(())
     }
 

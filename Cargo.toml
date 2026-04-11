@@ -1,7 +1,5 @@
 [workspace]
 members = [
-    "rust-collector",
-    "real-trader",
     "vps-api",
     "shared",
     "core-node",

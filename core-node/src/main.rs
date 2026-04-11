@@ -334,7 +334,9 @@ async fn main() -> Result<()> {
     }
 
     // ── HTTP API ─────────────────────────────────────────────────────────────
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    let cors = CorsLayer::new()
+        .allow_origin("http://127.0.0.1:4000".parse::<axum::http::HeaderValue>().unwrap())
+        .allow_methods(Any).allow_headers(Any);
     let app_state = (http.clone(), exchange_keys.clone());
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -407,6 +409,10 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN pnl_a REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN pnl_b REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN close_reason TEXT", []);
+        // Funding rate tracking columns (added for accurate PnL)
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_rate_a REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_rate_b REAL", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_next_ts INTEGER", []);
         // 3. Create indexes AFTER ensuring columns exist
         let _ = conn.execute_batch("
             CREATE INDEX IF NOT EXISTS idx_trades_status  ON trades(status);
@@ -435,7 +441,7 @@ async fn handle_close_position(
     let is_buy = req.size < 0.0;
     let size = req.size.abs();
     
-    match conn.close_order(&http, &keys, &req.symbol, is_buy, size, false, 1.0, 0.0, false).await {
+    match conn.close_order(&http, &keys, &req.symbol, is_buy, size, false, 10.0, 0.0, false).await {
         Ok(_) => Ok("ok"),
         Err(e) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
     }

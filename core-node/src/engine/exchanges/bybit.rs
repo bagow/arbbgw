@@ -18,7 +18,7 @@ impl ExchangeConnector for BybitConnector {
         "bybit"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64) -> Result<(Option<String>, f64), String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let side_str = if is_buy { "Buy" } else { "Sell" };
@@ -237,60 +237,46 @@ impl ExchangeConnector for BybitConnector {
     }
 
     async fn ensure_leverage(&self, http: &Client, keys: &ExchangeKeys, pair: &str, leverage: f64) -> Result<(), String> {
+        // Only set leverage — do NOT force margin mode here.
+        // Margin mode should be configured via warmup_leverages (real.rs) which has profile context.
         let ts = now_ms().to_string();
         let recv = "5000";
-        
-        // 1. Switch ISOLATED / CROSS
-        // For logic here we hardcode to CROSS (tradeMode: 0) as typical for Bybit
-        let trade_mode = 0; // 0: cross, 1: isolated
-        let body1 = json!({
-            "category": "linear",
-            "symbol": pair,
-            "tradeMode": trade_mode,
-            "buyLeverage": leverage.to_string(),
-            "sellLeverage": leverage.to_string()
-        });
-        let body_str1 = body1.to_string();
-        let sig1 = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &body_str1);
-        
-        let _ = http.post("https://api.bybit.com/v5/position/switch-isolated")
-            .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-SIGN", &sig1)
-            .header("X-BAPI-TIMESTAMP", &ts)
-            .header("X-BAPI-RECV-WINDOW", recv)
-            .header("Content-Type", "application/json")
-            .body(body_str1)
-            .timeout(Duration::from_secs(5))
-            .send().await;
-
-        // 2. Set Leverage
-        let ts2 = now_ms().to_string();
-        let body2 = json!({
+        let body = json!({
             "category": "linear",
             "symbol": pair,
             "buyLeverage": leverage.to_string(),
             "sellLeverage": leverage.to_string()
         });
-        let body_str2 = body2.to_string();
-        let sig2 = bybit_sign(&keys.bybit_secret, &ts2, &keys.bybit_key, recv, &body_str2);
+        let body_str = body.to_string();
+        let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &body_str);
         
         let _ = http.post("https://api.bybit.com/v5/position/set-leverage")
             .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-SIGN", &sig2)
-            .header("X-BAPI-TIMESTAMP", &ts2)
+            .header("X-BAPI-SIGN", &sig)
+            .header("X-BAPI-TIMESTAMP", &ts)
             .header("X-BAPI-RECV-WINDOW", recv)
             .header("Content-Type", "application/json")
-            .body(body_str2)
+            .body(body_str)
             .timeout(Duration::from_secs(5))
             .send().await;
-            
         Ok(())
     }
 
     async fn get_funding_rate(&self, http: &Client, pair: &str) -> Result<(f64, i64), String> {
-        // Unfortunately standard premium index or tickers doesn't return directly for bybit without special auth or other endpoints. 
-        // Returning 0 for Bybit or need to look up real one
-        Ok((0.0, 0))
+        // Bybit V5 tickers endpoint returns funding rate without authentication
+        let url = format!("https://api.bybit.com/v5/market/tickers?category=linear&symbol={}", pair);
+        if let Ok(resp) = http.get(&url).timeout(Duration::from_secs(5)).send().await {
+            if let Ok(json) = resp.json::<Value>().await {
+                if let Some(item) = json["result"]["list"].as_array().and_then(|a| a.first()) {
+                    let rate = item["fundingRate"].as_str()
+                        .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                    let next_ts = item["nextFundingTime"].as_str()
+                        .and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                    return Ok((rate, next_ts));
+                }
+            }
+        }
+        Err("Bybit funding rate fetch failed".to_string())
     }
 
     async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<super::traits::PositionInfo>, String> {

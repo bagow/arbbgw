@@ -406,8 +406,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
         // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
         let (result_a, result_b) = tokio::join!(
-            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0),
-            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0)
+            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0, settings.leverage as f64),
+            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0, settings.leverage as f64)
         );
 
         let order_ms = t0.elapsed().as_millis();
@@ -589,8 +589,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
         // We have a VALID matching volume! Calculate final trading volume
         let final_vol_usd = matched_phys * entry_a;
-        crate::engine::real::deduct_cached_balance(&exa, final_vol_usd);
-        crate::engine::real::deduct_cached_balance(&exb, final_vol_usd);
+        crate::engine::real::deduct_cached_balance(&exa, final_vol_usd, settings.leverage as f64, &e_ctx);
+        crate::engine::real::deduct_cached_balance(&exb, final_vol_usd, settings.leverage as f64, &e_ctx);
         opened_this_cycle = true;
 
         let dir = sig.direction.clone();

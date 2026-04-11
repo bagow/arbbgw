@@ -30,7 +30,7 @@ impl ExchangeConnector for GateConnector {
         "gate"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64) -> Result<(Option<String>, f64), String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if is_buy { contracts.round() as i64 } else { -(contracts.round() as i64) };
         let path = "/api/v4/futures/usdt/orders";
@@ -179,7 +179,7 @@ impl ExchangeConnector for GateConnector {
         let url = format!("https://api.gateio.ws/api/v4/futures/usdt/contracts/{}", contract);
         if let Ok(resp) = http.get(&url).timeout(Duration::from_secs(5)).send().await {
             if let Ok(json) = resp.json::<Value>().await {
-                if let Some(rate_str) = json["funding_rate_indicative"].as_str() {
+                if let Some(rate_str) = json["funding_rate"].as_str().or_else(|| json["funding_rate_indicative"].as_str()) {
                     if let Ok(rate) = rate_str.parse::<f64>() {
                         let next_ts = json["funding_next_apply"].as_i64().unwrap_or(0) * 1000;
                         return Ok((rate, next_ts));
