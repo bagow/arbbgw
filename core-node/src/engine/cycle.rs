@@ -161,8 +161,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 (0.0, 0.0)
             };
 
-            let q_a = c_a;
-            let q_b = c_b;
+            let q_a = c_a as f64 * mult_a;
+            let q_b = c_b as f64 * mult_b;
 
             let _e_ctx_c = Arc::clone(&e_ctx);
             let closing_guard = Arc::clone(&e_ctx.closing_in_flight);
