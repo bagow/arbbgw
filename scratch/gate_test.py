@@ -5,11 +5,10 @@ import hashlib
 import hmac
 import os
 
-with open("/home/bagow/dev/cryptoarb/cex-arb/core-node/test_settings.json", "r") as f:
-    s = json.load(f)
-
-k = s["gate"]["key"]
-sec = s["gate"]["secret"]
+with open("/home/opc/core-node/.env", "r") as f:
+    for line in f:
+        if line.startswith("GATE_KEY="): k = line.split("=")[1].strip()
+        if line.startswith("GATE_SECRET="): sec = line.split("=")[1].strip()
 
 def run_gate(payload_dict):
     method = "POST"
@@ -38,21 +37,12 @@ def run_gate(payload_dict):
     except urllib.error.HTTPError as e:
         print(f"HTTPError: {e.code} - {e.read().decode()}")
 
-print("1. Try dual-mode close=false, reduce_only=true, size < 0")
+print("Try dual-mode market order (price=0) without close=true")
 run_gate({
     "contract": "NOM_USDT",
     "size": -20,
-    "price": "0.0039",
+    "price": "0",
     "tif": "ioc",
     "reduce_only": True,
     "close": False
-})
-
-print("2. Try dual-mode close=true, size=0")
-run_gate({
-    "contract": "NOM_USDT",
-    "size": 0,
-    "price": "0",
-    "tif": "ioc",
-    "close": True
 })
