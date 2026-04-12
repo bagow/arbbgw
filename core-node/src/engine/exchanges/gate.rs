@@ -89,13 +89,16 @@ impl ExchangeConnector for GateConnector {
         let price_str = if use_ioc && price > 0.0 { raw_price_str } else { "0".to_string() };
         let tif = if price_str == "0" || (use_ioc && price > 0.0) { "ioc" } else { "gtc" };
         
+        let is_market_close = price_str == "0";
+        let final_size = if is_market_close { 0 } else { size };
+        
         let body = json!({
             "contract": contract,
-            "size": size,
+            "size": final_size,
             "price": price_str,
             "tif": tif,
             "reduce_only": true,
-            "close": false,
+            "close": is_market_close,
             "text": "t-corenode-close"
         });
         let body_str = body.to_string();
