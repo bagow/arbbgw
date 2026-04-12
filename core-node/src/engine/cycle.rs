@@ -259,14 +259,36 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                             &format!("{}_FALLBACK", r), fund_cost, fb_fee, 0.0
                         ).await;
                     } else {
-                        // Force-close in DB to stop the infinite retry loop.
-                        // The position sync task will detect any orphaned positions.
-                        error!("[real] 🚨 FALLBACK FAILED id={} {} — FORCE CLOSING in DB. Check exchange positions manually!", id, pair);
-                        repo_close.mark_trade_closed_confirmed(
-                            id, 0.0, 0.0, 0.0,
-                            0.0, 0.0, 0.0,
-                            &format!("{}_FORCE_CLOSED", r), fund_cost, 0.0, 0.0
-                        ).await;
+                        // Fallback fills not confirmed. Check actual positions on exchanges
+                        // before deciding whether to force-close or leave open.
+                        let pos_a = crate::engine::exchanges::get_connector(&exa).unwrap()
+                            .fetch_positions(&h, &k).await;
+                        let pos_b = crate::engine::exchanges::get_connector(&exb).unwrap()
+                            .fetch_positions(&h, &k).await;
+                        let still_has_a = pos_a.as_ref().ok()
+                            .map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12))
+                            .unwrap_or(true); // conservative: if API fails, assume position exists
+                        let still_has_b = pos_b.as_ref().ok()
+                            .map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12))
+                            .unwrap_or(true);
+
+                        if !still_has_a && !still_has_b {
+                            // Positions are GONE on both exchanges — orders did execute,
+                            // we just couldn't verify via fetch_order. Safe to close in DB.
+                            error!("[real] 🚨 FALLBACK verification failed but positions are GONE on exchanges. Force-closing id={} {} in DB", id, pair);
+                            repo_close.mark_trade_closed_confirmed(
+                                id, 0.0, 0.0, 0.0,
+                                0.0, 0.0, 0.0,
+                                &format!("{}_FORCE_CLOSED", r), fund_cost, 0.0, 0.0
+                            ).await;
+                        } else {
+                            // Positions STILL EXIST on at least one exchange.
+                            // Do NOT close in DB — leave OPEN so next cycle retries.
+                            error!("[real] 🚨 FALLBACK FAILED id={} {} — positions still on exchange (a={} b={})! Keeping OPEN for retry.",
+                                id, pair, still_has_a, still_has_b);
+                            // revert_to_open clears close_reason so the cycle can re-trigger
+                            repo_close.revert_to_open(id).await;
+                        }
                     }
                     closing_guard.remove(&trade_id_for_guard);
                     return;
