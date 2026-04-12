@@ -217,10 +217,16 @@ impl ExchangeConnector for BybitConnector {
             v = resp2.json().await.map_err(|e| e.to_string())?;
         }
         
-        let coin_obj = v["result"]["list"].as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|a| a["coin"].as_array())
-            .and_then(|coins| coins.iter().find(|c| c["coin"].as_str() == Some("USDT")));
+        let mut coin_obj = None;
+        if let Some(arr) = v["result"]["list"].as_array() {
+            if let Some(first) = arr.first() {
+                if first["coin"].is_array() {
+                    coin_obj = first["coin"].as_array().unwrap().iter().find(|c| c["coin"].as_str() == Some("USDT"));
+                } else {
+                    coin_obj = arr.iter().find(|c| c["coin"].as_str() == Some("USDT"));
+                }
+            }
+        }
 
         let wallet = coin_obj
             .and_then(|c| c["walletBalance"].as_str().and_then(|s| s.parse().ok()))
