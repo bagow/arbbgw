@@ -441,7 +441,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         };
 
         let pair_cd = &e_ctx.pair_cooldown;
-        if oid_a.is_none() && oid_b.is_none() { pair_cd.insert(pair.clone(), now); continue; }
+        if oid_a.is_none() && oid_b.is_none() { continue; }
 
         let mult_a = sig.mult_a;
         let mult_b = sig.mult_b;
@@ -489,7 +489,6 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
         if !a_filled && !b_filled {
             info!("[real] Both IOC unfilled {} — no exposure ({}ms)", pair, total_ms);
-            pair_cd.insert(pair.clone(), now);
             continue;
         }
 

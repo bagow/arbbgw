@@ -115,8 +115,10 @@ pub fn generate_signals(
             let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
 
             let min_depth_usd = profile.trade_volume * ts.depth_multiplier;
-            if depth_sell > 0.0 && depth_sell < min_depth_usd { continue; }
-            if depth_buy > 0.0 && depth_buy < min_depth_usd { continue; }
+            let depth_sell_usd = depth_sell * entry_a;
+            let depth_buy_usd = depth_buy * entry_b;
+            if depth_sell > 0.0 && depth_sell_usd < min_depth_usd { continue; }
+            if depth_buy > 0.0 && depth_buy_usd < min_depth_usd { continue; }
 
             // ENSURE PERFECT PHYSICAL BALANCE (0.0% COIN DUST)
             let big_step = mult_a.max(mult_b);
@@ -165,14 +167,8 @@ pub fn generate_signals(
 
             let use_ioc = ts.entry_order_type == "ioc";
             let (limit_price_a, limit_price_b) = if use_ioc {
-                // Dynamic Spread-Based Slippage Calculation
-                // Target executing strictly equal to or better than `profile.min_entry_spread`.
-                let spread_allowance = (row.spread - profile.min_entry_spread).max(0.0);
-                // Divide by 2.0 (split over 2 legs) and apply 0.95 safety factor to not overshoot
-                let dynamic_slip_pct = spread_allowance / 2.0 * 0.95;
-                // Cap it by user's hard slippage_percent limit
-                let active_slip_pct = dynamic_slip_pct.min(profile.slippage_percent);
-                let active_slip_frac = active_slip_pct / 100.0;
+                // Remove dynamic choke. Use the exact slippage percent specified by the user.
+                let active_slip_frac = profile.slippage_percent / 100.0;
 
                 let lpa = if is_a_higher { entry_a * (1.0 - active_slip_frac) } else { entry_a * (1.0 + active_slip_frac) };
                 let lpb = if is_a_higher { entry_b * (1.0 + active_slip_frac) } else { entry_b * (1.0 - active_slip_frac) };
