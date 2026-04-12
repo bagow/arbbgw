@@ -143,17 +143,9 @@ pub fn generate_signals(
             let slippage_frac = profile.slippage_percent / 100.0;
             let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
 
-            let min_depth_usd = profile.trade_volume * ts.depth_multiplier;
-            let depth_sell_usd = depth_sell * entry_a;
-            let depth_buy_usd = depth_buy * entry_b;
-            if depth_sell > 0.0 && depth_sell_usd < min_depth_usd { 
-                if let Some(p) = &diag_prefix { tracing::info!("{} -> depth sell ${:.0} < min ${:.0}", p, depth_sell_usd, min_depth_usd); }
-                continue; 
-            }
-            if depth_buy > 0.0 && depth_buy_usd < min_depth_usd { 
-                if let Some(p) = &diag_prefix { tracing::info!("{} -> depth buy ${:.0} < min ${:.0}", p, depth_buy_usd, min_depth_usd); }
-                continue; 
-            }
+            // NOTE: depth filter removed — IOC orders with slippage tolerance
+            // naturally reject fills beyond the price band, making pre-entry
+            // depth checks redundant. Delta trimming handles partial fills.
 
             // ENSURE PERFECT PHYSICAL BALANCE (0.0% COIN DUST)
             let big_step = mult_a.max(mult_b);
