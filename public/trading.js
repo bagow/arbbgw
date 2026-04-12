@@ -1385,7 +1385,7 @@ window.renderLogsHTML = function(text) {
         }
 
         // Sub-Type filtering (Trades vs Technical)
-        const isTradeLog = cleanLine.includes('[real]') || cleanLine.includes('[settings]');
+        const isTradeLog = cleanLine.includes('[real]') || cleanLine.includes('[settings]') || (cleanLine.includes('[scanner]') && cleanLine.includes('REJECT'));
         const isTechLog = !isTradeLog;
         if (window.logViewMode === 'trade' && isTechLog) return '';
         if (window.logViewMode === 'tech' && isTradeLog) return '';
@@ -1414,6 +1414,9 @@ window.renderLogsHTML = function(text) {
             } else if (html.includes('Emergency close') || html.includes('FAILED_ASYMMETRIC')) {
                 html = '🛡️ ' + html;
                 style = 'color: #ff4b4b; background: rgba(255,0,0,0.1); padding: 2px 4px; border-radius: 4px;';
+            } else if (html.includes('[scanner]') && html.includes('REJECT')) {
+                html = '🛡️ ' + html;
+                style = 'color: #e8a87c;';
             }
 
             // Bold the pair names (e.g. BTCUSDT)

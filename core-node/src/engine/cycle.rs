@@ -29,7 +29,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
     // ── Close qualifying trades ────────────────────────────────────────────────
     if !trades.is_empty() {
-        info!("[real] Processing {} open trades for profile {}", trades.len(), settings.id);
+        tracing::debug!("[real] Processing {} open trades for profile {}", trades.len(), settings.id);
     }
     // Tuple: (trade_id, price_a, price_b, spread, net_pnl, funding_rate_a, funding_rate_b, funding_next_ts, accumulated_funding_cost)
     let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)> = Vec::new();
