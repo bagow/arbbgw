@@ -171,11 +171,59 @@ pub async fn handle_get_unified(
         Ok::<serde_json::Value, tokio_rusqlite::Error>(val)
     }).await.unwrap_or(json!({}));
 
-    let exchanges = state.real_db.call(|conn| {
+    let exchanges_raw = state.real_db.call(|conn| {
         let row: Result<String, rusqlite::Error> = conn.query_row("SELECT value FROM server_cache WHERE key = 'exchange_maps'", [], |r| r.get(0));
         let val: serde_json::Value = if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) };
         Ok::<serde_json::Value, tokio_rusqlite::Error>(val)
     }).await.unwrap_or(json!({}));
+
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let today_midnight_ms = now_ms - (now_ms % 86_400_000); // Rounds down to midnight UTC
+    let daily_exch_stats = state.real_db.call(move |conn| {
+        let mut map: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let mut stmt = match conn.prepare("SELECT exchange_a, exchange_b, pnl_a, pnl_b, commission_cost, funding_cost, slippage_cost FROM trades WHERE status='CLOSED' AND exit_time >= ?") {
+            Ok(s) => s,
+            Err(_) => return Ok::<_, tokio_rusqlite::Error>(map)
+        };
+        let rows: Vec<_> = stmt.query_map([today_midnight_ms], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+            ))
+        }).map(|iter| iter.filter_map(|r| r.ok()).collect::<Vec<_>>()).unwrap_or_default();
+        
+        for (exa, exb, pnla, pnlb, comm, fund, slip) in rows {
+            let shared_costs = (comm + fund + slip) / 2.0;
+            *map.entry(exa).or_insert(0.0) += pnla - shared_costs;
+            *map.entry(exb).or_insert(0.0) += pnlb - shared_costs;
+        }
+        Ok::<_, tokio_rusqlite::Error>(map)
+    }).await.unwrap_or_default();
+
+    let mut exchanges = exchanges_raw.clone();
+    if let Some(obj) = exchanges.as_object_mut() {
+        let mut daily_pnl_map = serde_json::Map::new();
+        let mut daily_pct_map = serde_json::Map::new();
+        let balances = obj.get("balances").and_then(|b| b.as_object());
+        
+        for (ex, pnl) in daily_exch_stats {
+            daily_pnl_map.insert(ex.clone(), json!(pnl));
+            if let Some(bals) = balances {
+                if let Some(bal) = bals.get(&ex).and_then(|v| v.as_f64()) {
+                    if bal > 0.0 {
+                        daily_pct_map.insert(ex, json!((pnl / bal) * 100.0));
+                    }
+                }
+            }
+        }
+        obj.insert("daily_pnl".to_string(), json!(daily_pnl_map));
+        obj.insert("daily_pnl_pct".to_string(), json!(daily_pct_map));
+    }
 
     // 2. Get Profiles
     let profiles = state.db.call(move |conn| {

@@ -518,6 +518,8 @@ function renderCexTab(profile, exchangesData) {
         const marginBal = (exchangesData.margin_balances && exchangesData.margin_balances[exA]) || 0;
         const positions = (exchangesData.positions && exchangesData.positions[exA]) || [];
         const fee = (exchangesData.fees && exchangesData.fees[exA]) || 0;
+        const dailyPnl = (exchangesData.daily_pnl && exchangesData.daily_pnl[exA]) || 0;
+        const dailyPct = (exchangesData.daily_pnl_pct && exchangesData.daily_pnl_pct[exA]) || 0;
         for (const exB of exNames) {
             if (exA === exB) continue;
             let matchCount = 0;
@@ -541,9 +543,17 @@ function renderCexTab(profile, exchangesData) {
         html += `
             <div class="stat-card" style="display:flex;flex-direction:column; background:var(--bg-panel); border:1px solid var(--border); border-radius:12px; padding:20px;">
                 <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
-                    <div style="display:flex;align-items:center;gap:10px;">
-                        <div style="width:10px;height:10px;border-radius:50%;background:${isEnabled?'var(--green)':'var(--text-sub)'}"></div>
-                        <h3 style="margin:0;font-size:1.2rem;font-weight:600;text-transform:uppercase;">${exA}</h3>
+                    <div style="display:flex;flex-direction:column;gap:4px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <div style="width:10px;height:10px;border-radius:50%;background:${isEnabled?'var(--green)':'var(--text-sub)'}"></div>
+                            <h3 style="margin:0;font-size:1.2rem;font-weight:600;text-transform:uppercase;">${exA}</h3>
+                        </div>
+                        <div style="font-size:0.85rem;font-family:var(--font-mono);margin-left:20px;">
+                            <span style="color:var(--text-sub);">Today: </span>
+                            <span style="color:${dailyPnl > 0 ? 'var(--green)' : dailyPnl < 0 ? 'var(--red)' : 'var(--text-sub)'};">
+                                ${dailyPnl > 0 ? '+' : ''}$${dailyPnl.toFixed(2)} <span style="font-size:0.75rem;">(${dailyPct > 0 ? '+' : ''}${dailyPct.toFixed(2)}%)</span>
+                            </span>
+                        </div>
                     </div>
                     <div style="text-align:right;">
                         <span style="font-size:0.75rem;color:var(--text-sub);display:block;text-transform:uppercase;letter-spacing:0.5px;">Wallet</span>
