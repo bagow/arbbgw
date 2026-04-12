@@ -83,12 +83,34 @@ impl ExchangeConnector for GateConnector {
         };
         let path = "/api/v4/futures/usdt/orders";
         
-        let mut raw_price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        let mut final_price = price;
+        // Gate API completely forbids `close: true` Market Orders on Dual-Mode accounts.
+        // Therefore, any "Market Order" (price = 0.0) requested by the core engine
+        // MUST be securely intercepted here and converted to a deeply penetrating Limit Order (IOC).
+        if final_price == 0.0 {
+            let ticker_url = format!("https://api.gateio.ws/api/v4/futures/usdt/tickers?contract={}", contract);
+            if let Ok(resp) = http.get(&ticker_url).send().await {
+                if let Ok(v) = resp.json::<Vec<serde_json::Value>>().await {
+                    if let Some(t) = v.first() {
+                        let mark: f64 = t["mark_price"].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+                        if mark > 0.0 {
+                            final_price = if is_buy { mark * 1.05 } else { mark * 0.95 };
+                        }
+                    }
+                }
+            }
+        }
+        
+        let mut raw_price_str = format!("{:.8}", final_price).trim_end_matches('0').to_string();
         if raw_price_str.ends_with('.') { raw_price_str.pop(); }
         if raw_price_str.is_empty() { raw_price_str = "0".to_string(); }
-        let price_str = if use_ioc && price > 0.0 { raw_price_str } else { "0".to_string() };
-        let tif = if price_str == "0" || (use_ioc && price > 0.0) { "ioc" } else { "gtc" };
         
+        // If final_price > 0.0, we ALWAYS force Limit IOC behavior to avert Dual-Mode crash
+        let use_limit_ioc = final_price > 0.0;
+        let price_str = if use_limit_ioc { raw_price_str } else { "0".to_string() };
+        let tif = if price_str == "0" || use_limit_ioc { "ioc" } else { "gtc" };
+        
+        // ONLY trigger native close-order if absolutely no price could be resolved (which will likely fail on hedge mode, but serves as ultimate fallback)
         let is_market_close = price_str == "0";
         let final_size = if is_market_close { 0 } else { size };
         
