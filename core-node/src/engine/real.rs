@@ -367,7 +367,8 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                             for s in symbols {
                                 let sym = s["symbol"].as_str().unwrap_or("");
                                 if !sym.ends_with("USDT") { continue; }
-                                if s["contractType"].as_str() != Some("PERPETUAL") { continue; }
+                                let ct = s["contractType"].as_str().unwrap_or("");
+                                if ct != "PERPETUAL" && ct != "TRADIFI_PERPETUAL" { continue; }
                                 // Extract stepSize from LOT_SIZE filter as the multiplier
                                 if let Some(filters) = s["filters"].as_array() {
                                     for f in filters {
