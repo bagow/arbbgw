@@ -233,10 +233,6 @@ pub fn start_position_sync(
     });
 }
 
-
-
-/// Check if exchange has enough margin for the notional volume.
-/// Returns true if balance is unknown (don't block on missing cache).
 pub fn has_sufficient_margin(exchange: &str, notional_usd: f64, leverage: f64, e_ctx: &crate::state::EngineContext) -> bool {
     match e_ctx.margin_balances.get(exchange) {
         Some(margin) => {
@@ -246,7 +242,7 @@ pub fn has_sufficient_margin(exchange: &str, notional_usd: f64, leverage: f64, e
             // Require 1.5x of the required margin as a safety buffer
             available >= required * 1.5
         }
-        None => true, // No data yet — allow (fail-safe)
+        None => false, // STRICT MODE: Do not enter trades blindly if we don't know our balance
     }
 }
 

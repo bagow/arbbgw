@@ -126,7 +126,7 @@ pub fn generate_signals(
             let mut dev_threshold = if profile.min_structural_deviation > 0.0 {
                 profile.min_structural_deviation
             } else {
-                profile.min_entry_spread // backward compat: 0.0 means "use min_entry_spread"
+                0.0 // CHANGED: 0.0 means filter disabled. Do not inherit min_entry_spread
             };
 
             // If the pairs' legs changed places within the last 24h, the spread is highly volatile.
@@ -135,7 +135,8 @@ pub fn generate_signals(
                 dev_threshold = -1000.0;
             }
 
-            if structural_deviation < dev_threshold { 
+            // Only enforce deviation if explicitly set (>0.0)
+            if profile.min_structural_deviation > 0.0 && structural_deviation < dev_threshold { 
                 if let Some(p) = &diag_prefix { tracing::info!("{} -> ema deviation {:.4}% < {:.4}% req (base: {:.4}%)", p, structural_deviation, dev_threshold, row.structural_spread); }
                 continue; 
             }
@@ -179,6 +180,14 @@ pub fn generate_signals(
                 continue; 
             } // Physically impossible to balance lot sizes
 
+            let max_v = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
+            
+            // Loop down scaling big_step until volumetric match fits inside the max_v limit
+            while phys_qty * entry_a > max_v && phys_qty > big_step {
+                phys_qty -= big_step;
+            }
+            if phys_qty <= 0.0 { continue; } // Couldn't fit
+
             let contracts_a = (phys_qty / mult_a).round();
             let contracts_b = (phys_qty / mult_b).round();
             
@@ -190,7 +199,6 @@ pub fn generate_signals(
             let actual_vol_a = phys_qty * entry_a;
             let actual_vol_b = phys_qty * entry_b;
 
-            let max_v = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
             if actual_vol_a > max_v { 
                 if let Some(p) = &diag_prefix { tracing::info!("{} -> actual_vol exceeds max_v (${:.2} > ${:.2}) (mult_trap)", p, actual_vol_a, max_v); }
                 continue; 

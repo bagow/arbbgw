@@ -71,10 +71,12 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 exit_price_a = if is_a_higher { da.ask } else { da.bid };
                 exit_price_b = if is_a_higher { db.bid } else { db.ask };
                 
+                // Use absolute worst-case bid/ask for current spread so trailing stops trigger correctly on volatile orderbook spikes
+                // rather than lagging mark prices.
                 current_spread = if is_a_higher {
-                    (da.price - db.price) / db.price.max(1e-12) * 100.0
+                    (da.bid - db.ask) / db.ask.max(1e-12) * 100.0
                 } else {
-                    (db.price - da.price) / da.price.max(1e-12) * 100.0
+                    (db.bid - da.ask) / da.ask.max(1e-12) * 100.0
                 };
                 exit_spread = if is_a_higher {
                     (da.ask - db.bid) / db.bid.max(1e-12) * 100.0
@@ -288,6 +290,9 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                                 id, pair, still_has_a, still_has_b);
                             // revert_to_open clears close_reason so the cycle can re-trigger
                             repo_close.revert_to_open(id).await;
+                            
+                            // ANTI-SPAM GUARD: Suspend flight guard removal for 15 seconds!
+                            tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
                         }
                     }
                     closing_guard.remove(&trade_id_for_guard);
@@ -334,13 +339,13 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             let (fr_b, next_b) = crate::engine::exchanges::get_connector(&trade.exchange_b).unwrap().get_funding_rate(&http, &trade.pair).await.unwrap_or((0.0, 0));
             let fund_next = next_a.min(next_b); // nearest funding event
 
-            // Compute total accumulated funding cost from entry using REAL exchange rates.
-            // Delta-neutral: we're long one exchange, short the other.
-            // Net cost per 8h = (fr_long - fr_short) * volume  [positive = we net-pay]
-            // fr_long and fr_short follow the actual direction of the trade.
+            // Replace momentary funding projection map with predictable smooth funding cost estimation (using settings parameter).
+            // This prevents random huge distortions in lifetime PnL if live API rate suddenly spikes.
             let hours_open = (now_ms() - trade.entry_time) as f64 / 3_600_000.0_f64;
-            let (fr_long, fr_short) = if is_a_higher { (fr_b, fr_a) } else { (fr_a, fr_b) };
-            let acc_fund_cost = (fr_long - fr_short) * trade.volume * (hours_open / 8.0);
+            // Configured rate (e.g. 0.01) is in percentage terms, so divide by 100
+            let fr_user = settings.funding_rate_8h / 100.0;
+            // Total cost estimation
+            let acc_fund_cost = fr_user * trade.volume * (hours_open / 8.0);
 
             // Recompute net PnL with the freshly-fetched real funding cost so curr_gross_pnl
             // in the DB reflects the true net position (gross - commission - real_funding).
@@ -543,58 +548,64 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let fp = pair.clone();
 
         if delta_a > 1e-12 {
-            let contracts_to_dump = delta_a / mult_a; // Convert excess coins back to contracts for the API
-            let is_buy = is_a_higher; // If we entered A by Selling (!is_a_higher), we exit A by Buying (is_a_higher)
-            error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys ({:.6} contracts)", pair, delta_a, contracts_to_dump);
-            
-            // Fire MARKET CLOSE instantly!
-            let dump_price = if is_buy { fill_a * 1.05 } else { fill_a * 0.95 }; // Deep market limit for safety
-            let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
-            let rounded_safe_limit_price = (dump_price / tick_for_close).round() * tick_for_close;
-            
-            match crate::engine::exchanges::get_connector(&exa).unwrap().close_order(&hc, &kc, &fp, is_buy, contracts_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, true).await {
-                Ok(close_oid) => {
-                    for attempt in 0..5 {
-                        if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&hc, &kc, &fp, close_oid.as_str(), mult_a).await {
-                            if p > 0.0 { 
-                                trimming_fee += if f > 1e-9 { f.abs() } else { 0.0 };
-                                // Original was entry_a, close is p. We dumped delta_a coins.
-                                let gross_loss = if is_buy { (fill_a - p) * delta_a } else { (p - fill_a) * delta_a };
-                                trimming_loss += gross_loss.min(0.0).abs(); // Only penalize if it's a loss
-                                break; 
+            let contracts_to_dump = (delta_a / mult_a).round(); // Convert excess coins back to integer contracts
+            if contracts_to_dump >= 1.0 {
+                let is_buy = is_a_higher; // If we entered A by Selling (!is_a_higher), we exit A by Buying (is_a_higher)
+                error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys ({:.0} contracts)", pair, delta_a, contracts_to_dump);
+                
+                // Fire MARKET CLOSE instantly!
+                let dump_price = if is_buy { fill_a * 1.05 } else { fill_a * 0.95 }; // Deep market limit for safety
+                let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
+                let rounded_safe_limit_price = (dump_price / tick_for_close).round() * tick_for_close;
+                
+                // MUST PASS false to use_ioc to ensure exchange completes the market dump deeply
+                match crate::engine::exchanges::get_connector(&exa).unwrap().close_order(&hc, &kc, &fp, is_buy, contracts_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, false).await {
+                    Ok(close_oid) => {
+                        for attempt in 0..5 {
+                            if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&hc, &kc, &fp, close_oid.as_str(), mult_a).await {
+                                if p > 0.0 { 
+                                    trimming_fee += if f > 1e-9 { f.abs() } else { 0.0 };
+                                    // Original was entry_a, close is p. We dumped delta_a coins.
+                                    let gross_loss = if is_buy { (fill_a - p) * delta_a } else { (p - fill_a) * delta_a };
+                                    trimming_loss += gross_loss.min(0.0).abs(); // Only penalize if it's a loss
+                                    break; 
+                                }
                             }
+                            tokio::time::sleep(Duration::from_millis(15 * (attempt + 1) as u64)).await;
                         }
-                        tokio::time::sleep(Duration::from_millis(15 * (attempt + 1) as u64)).await;
                     }
+                    Err(e) => { error!("[real] Failed to trim DELTA A: {}", e); }
                 }
-                Err(e) => { error!("[real] Failed to trim DELTA A: {}", e); }
             }
         }
         
         if delta_b > 1e-12 {
-            let contracts_to_dump = delta_b / mult_b; // Convert excess coins back to contracts
-            let is_buy = !is_a_higher; // Opposite of entry B
-            error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys ({:.6} contracts)", pair, delta_b, contracts_to_dump);
-            
-            let dump_price = if is_buy { fill_b * 1.05 } else { fill_b * 0.95 };
-            let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
-            let rounded_safe_limit_price = (dump_price / tick_for_close).round() * tick_for_close;
-            
-            match crate::engine::exchanges::get_connector(&exb).unwrap().close_order(&hc, &kc, &fp, is_buy, contracts_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, true).await {
-                Ok(close_oid) => {
-                    for attempt in 0..5 {
-                        if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&hc, &kc, &fp, close_oid.as_str(), mult_b).await {
-                            if p > 0.0 { 
-                                trimming_fee += if f > 1e-9 { f.abs() } else { 0.0 };
-                                let gross_loss = if is_buy { (fill_b - p) * delta_b } else { (p - fill_b) * delta_b };
-                                trimming_loss += gross_loss.min(0.0).abs();
-                                break; 
+            let contracts_to_dump = (delta_b / mult_b).round(); // Convert excess coins back to contracts
+            if contracts_to_dump >= 1.0 {
+                let is_buy = !is_a_higher; // Opposite of entry B
+                error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys ({:.0} contracts)", pair, delta_b, contracts_to_dump);
+                
+                let dump_price = if is_buy { fill_b * 1.05 } else { fill_b * 0.95 };
+                let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
+                let rounded_safe_limit_price = (dump_price / tick_for_close).round() * tick_for_close;
+                
+                // MUST PASS false to use_ioc to ensure exchange completes the market dump deeply
+                match crate::engine::exchanges::get_connector(&exb).unwrap().close_order(&hc, &kc, &fp, is_buy, contracts_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, false).await {
+                    Ok(close_oid) => {
+                        for attempt in 0..5 {
+                            if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&hc, &kc, &fp, close_oid.as_str(), mult_b).await {
+                                if p > 0.0 { 
+                                    trimming_fee += if f > 1e-9 { f.abs() } else { 0.0 };
+                                    let gross_loss = if is_buy { (fill_b - p) * delta_b } else { (p - fill_b) * delta_b };
+                                    trimming_loss += gross_loss.min(0.0).abs();
+                                    break; 
+                                }
                             }
+                            tokio::time::sleep(Duration::from_millis(15 * (attempt + 1) as u64)).await;
                         }
-                        tokio::time::sleep(Duration::from_millis(15 * (attempt + 1) as u64)).await;
                     }
+                    Err(e) => { error!("[real] Failed to trim DELTA B: {}", e); }
                 }
-                Err(e) => { error!("[real] Failed to trim DELTA B: {}", e); }
             }
         }
 
