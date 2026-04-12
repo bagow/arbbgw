@@ -301,12 +301,13 @@ function renderPanel(profile, active, history, stats, exchanges) {
                             <th data-sort="priceA">Price A</th>
                             <th data-sort="priceB">Price B</th>
                             <th data-sort="spread" class="sorted-desc">Spread %</th>
+                            <th data-sort="structural_spread">Struc Spread %</th>
                             <th>Dir</th>
                         </tr>
                     </thead>
                     <tbody id="spread-tbody">
                         <tr class="placeholder-row">
-                            <td colspan="7" style="text-align:center; padding:40px; color:var(--text-sub);">⟳ Initializing scanner…</td>
+                            <td colspan="8" style="text-align:center; padding:40px; color:var(--text-sub);">⟳ Initializing scanner…</td>
                         </tr>
                     </tbody>
                 </table>

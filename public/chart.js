@@ -413,7 +413,7 @@ function renderTable() {
     pairCount && (pairCount.textContent = `${sorted.length} pairs`);
     refs.tableBody.innerHTML = '';
     if (!sorted.length) {
-        refs.tableBody.innerHTML = `<tr class="placeholder-row"><td colspan="7">No pairs above threshold</td></tr>`;
+        refs.tableBody.innerHTML = `<tr class="placeholder-row"><td colspan="8">No pairs above threshold</td></tr>`;
         return;
     }
     for (const row of sorted) {
@@ -421,10 +421,17 @@ function renderTable() {
         const tr = document.createElement('tr');
         if (key === scannerState.activeRowKey) tr.classList.add('active-row');
         const sc = row.spread >= 0.5 ? 'spread--high' : row.spread >= 0.2 ? 'spread--medium' : 'spread--low';
+        
+        let scStruc = '';
+        if (row.has_structural_spread) {
+            scStruc = row.structural_spread >= 0.5 ? 'spread--high' : row.structural_spread >= 0.2 ? 'spread--medium' : 'spread--low';
+        }
+        
         tr.innerHTML = `
           <td>${row.pair}</td><td>${row.exchangeA}</td><td>${row.exchangeB}</td>
           <td>${fmtPrice(row.priceA)}</td><td>${fmtPrice(row.priceB)}</td>
           <td class="spread-cell ${sc}">${fmtSpread(row.spread)}</td>
+          <td class="spread-cell ${scStruc}">${row.has_structural_spread ? fmtSpread(row.structural_spread) : '<span style="color:var(--text-sub);">None</span>'}</td>
           <td class="dir-cell">${row.direction || '–'}</td>`;
         tr.addEventListener('click', () => openModal(row));
         refs.tableBody.appendChild(tr);
