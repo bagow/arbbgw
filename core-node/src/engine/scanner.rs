@@ -123,11 +123,18 @@ pub fn generate_signals(
             let diag_prefix = if log_diag && row.spread >= profile.min_entry_spread { Some(format!("[scanner] REJECT {} {}={:.4}%", row.pair, profile.id, row.spread)) } else { None };
 
             let structural_deviation = row.spread - row.structural_spread;
-            let dev_threshold = if profile.min_structural_deviation > 0.0 {
+            let mut dev_threshold = if profile.min_structural_deviation > 0.0 {
                 profile.min_structural_deviation
             } else {
                 profile.min_entry_spread // backward compat: 0.0 means "use min_entry_spread"
             };
+
+            // If the pairs' legs changed places within the last 24h, the spread is highly volatile.
+            // Disable structural spread filter entirely so we only mathematically enter by min_entry_spread
+            if !row.has_structural_spread {
+                dev_threshold = -1000.0;
+            }
+
             if structural_deviation < dev_threshold { 
                 if let Some(p) = &diag_prefix { tracing::info!("{} -> ema deviation {:.4}% < {:.4}% req (base: {:.4}%)", p, structural_deviation, dev_threshold, row.structural_spread); }
                 continue; 

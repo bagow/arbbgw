@@ -61,6 +61,8 @@ struct SpreadRow {
     #[serde(rename = "fundingB")]  funding_b: f64,
     spread: f64,
     direction: String,
+    #[serde(default)]
+    has_structural_spread: bool,
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -182,6 +184,7 @@ fn compute_spreads(price_map: &PriceMap, min_vol_m: f64) -> Vec<SpreadRow> {
                     vol_a: data_a.vol, vol_b: data_b.vol,
                     funding_a: data_a.funding_rate, funding_b: data_b.funding_rate,
                     spread: (spread * 10000.0).round() / 10000.0, direction,
+                    has_structural_spread: true,
                 });
             }
         }

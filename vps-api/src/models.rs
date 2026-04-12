@@ -40,6 +40,8 @@ pub struct SpreadRow {
     pub funding_b: f64,
     pub spread: f64,
     pub direction: String,
+    #[serde(default)]
+    pub has_structural_spread: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

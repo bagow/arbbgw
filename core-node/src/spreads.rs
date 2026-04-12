@@ -7,8 +7,8 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// (ema_ab, ema_ba, max_ab, min_ab, max_ba, min_ba, last_ts_secs)
-static STRUCTURAL_EMA: OnceLock<DashMap<String, (f64, f64, f64, f64, f64, f64, f64)>> = OnceLock::new();
+/// (ema_ab, ema_ba, max_ab, min_ab, max_ba, min_ba, last_cross_ab, last_cross_ba, last_ts_secs)
+static STRUCTURAL_EMA: OnceLock<DashMap<String, (f64, f64, f64, f64, f64, f64, f64, f64, f64)>> = OnceLock::new();
 
 /// Compute spread opportunities from PriceMap.
 /// Called directly by the engine loop — zero serialization/HTTP overhead.
@@ -77,9 +77,9 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
                 let premium_2_over_1 = (mid2 - mid1) / mid1 * 100.0;
                 
                 let ema_key = format!("{}|{}|{}", sym, name1, name2);
-                let (ema_12, ema_21, max_12, min_12, max_21, min_21) =
+                let (ema_12, ema_21, max_12, min_12, max_21, min_21, cross_12, cross_21) =
                     if let Some(mut entry) = ema_map.get_mut(&ema_key) {
-                        let (old_12, old_21, old_max_12, old_min_12, old_max_21, old_min_21, last_updated) = *entry;
+                        let (old_12, old_21, old_max_12, old_min_12, old_max_21, old_min_21, mut old_cross_12, mut old_cross_21, last_updated) = *entry;
                         let dt = (now_f64 - last_updated).max(0.0);
                         let alpha = if dt > 0.0 { 1.0 - (-dt / ts.ema_tau_secs).exp() } else { 0.0 };
                         
@@ -91,20 +91,25 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
                         let new_max_21 = old_max_21.max(premium_2_over_1);
                         let new_min_21 = old_min_21.min(premium_2_over_1);
                         
-                        *entry = (new_12, new_21, new_max_12, new_min_12, new_max_21, new_min_21, now_f64);
-                        (new_12, new_21, new_max_12, new_min_12, new_max_21, new_min_21)
+                        if premium_1_over_2 <= 0.0 { old_cross_12 = now_f64; }
+                        if premium_2_over_1 <= 0.0 { old_cross_21 = now_f64; }
+
+                        *entry = (new_12, new_21, new_max_12, new_min_12, new_max_21, new_min_21, old_cross_12, old_cross_21, now_f64);
+                        (new_12, new_21, new_max_12, new_min_12, new_max_21, new_min_21, old_cross_12, old_cross_21)
                     } else {
-                        ema_map.insert(ema_key, (premium_1_over_2, premium_2_over_1, premium_1_over_2, premium_1_over_2, premium_2_over_1, premium_2_over_1, now_f64));
-                        (premium_1_over_2, premium_2_over_1, premium_1_over_2, premium_1_over_2, premium_2_over_1, premium_2_over_1)
+                        let cross_12 = if premium_1_over_2 <= 0.0 { now_f64 } else { 0.0 };
+                        let cross_21 = if premium_2_over_1 <= 0.0 { now_f64 } else { 0.0 };
+                        ema_map.insert(ema_key, (premium_1_over_2, premium_2_over_1, premium_1_over_2, premium_1_over_2, premium_2_over_1, premium_2_over_1, cross_12, cross_21, now_f64));
+                        (premium_1_over_2, premium_2_over_1, premium_1_over_2, premium_1_over_2, premium_2_over_1, premium_2_over_1, cross_12, cross_21)
                     };
 
                 // Map values depending on trade direction
                 let is_dir_1_over_2 = if is_a_first { direction == format!("{name_a}>{name_b}") } else { direction == format!("{name_b}>{name_a}") };
                 
-                let (ema_mid_spread, current_mid_spread, structural_max, structural_min) = if is_dir_1_over_2 {
-                    (ema_12, premium_1_over_2, max_12, min_12)
+                let (ema_mid_spread, current_mid_spread, structural_max, structural_min, last_cross) = if is_dir_1_over_2 {
+                    (ema_12, premium_1_over_2, max_12, min_12, cross_12)
                 } else {
-                    (ema_21, premium_2_over_1, max_21, min_21)
+                    (ema_21, premium_2_over_1, max_21, min_21, cross_21)
                 };
                 
                 // Isolating the penalty: calculate the pure deviation mathematically.
@@ -117,6 +122,8 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
                 // This tracks the historical behavior of the actual executable spread cleanly!
                 let structural_spread = spread - mid_deviation;
 
+                let has_structural_spread = (now_f64 - last_cross) > 86400.0;
+
                 rows.push(SpreadRow {
                     pair: sym.clone(), exchange_a: name_a.clone(), exchange_b: name_b.clone(),
                     price_a: data_a.price, price_b: data_b.price, bid_a: data_a.bid, ask_a: data_a.ask, bid_b: data_b.bid, ask_b: data_b.ask,
@@ -126,6 +133,7 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
                     structural_min,
                     spread: (spread * 10000.0).round() / 10000.0,
                     direction,
+                    has_structural_spread,
                 });
             }
         }
@@ -147,8 +155,8 @@ pub fn warmup_ema_from_premiums(history: &[(f64, f64, f64, String, String, Strin
 
     for (ts_val, premium_12, premium_21, pair, name1, name2) in &sorted {
         let key = format!("{}|{}|{}", pair, name1, name2);
-        let mut entry = ema_map.entry(key).or_insert((*premium_12, *premium_21, *premium_12, *premium_12, *premium_21, *premium_21, *ts_val));
-        let (old_12, old_21, old_max_12, old_min_12, old_max_21, old_min_21, last_ts) = *entry;
+        let mut entry = ema_map.entry(key).or_insert((*premium_12, *premium_21, *premium_12, *premium_12, *premium_21, *premium_21, 0.0, 0.0, *ts_val));
+        let (old_12, old_21, old_max_12, old_min_12, old_max_21, old_min_21, mut old_cross_12, mut old_cross_21, last_ts) = *entry;
         let dt = (ts_val - last_ts).max(0.0);
         let alpha = if dt > 0.0 { 1.0 - (-dt / tau).exp() } else { 0.0 };
         
@@ -160,6 +168,9 @@ pub fn warmup_ema_from_premiums(history: &[(f64, f64, f64, String, String, Strin
         let new_max_21 = old_max_21.max(*premium_21);
         let new_min_21 = old_min_21.min(*premium_21);
         
-        *entry = (new_12, new_21, new_max_12, new_min_12, new_max_21, new_min_21, *ts_val);
+        if *premium_12 <= 0.0 { old_cross_12 = *ts_val; }
+        if *premium_21 <= 0.0 { old_cross_21 = *ts_val; }
+
+        *entry = (new_12, new_21, new_max_12, new_min_12, new_max_21, new_min_21, old_cross_12, old_cross_21, *ts_val);
     }
 }
