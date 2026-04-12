@@ -145,9 +145,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             let close_verify_delay = ts.close_verify_delay_ms as u64;
             let close_verify_retries = ts.close_verify_retries;
 
-            let use_ioc = ts.entry_order_type == "ioc" || manual_close || true; // Force IOC everywhere to bypass market order logic bugs on gate/binance
-            let max_slip_frac = if manual_close { 0.05 } else { settings.slippage_percent / 100.0 };
-            
+            let use_ioc = ts.entry_order_type == "ioc" && !manual_close;
+            let max_slip_frac = settings.slippage_percent / 100.0;
             let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
             let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
             let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
@@ -224,16 +223,11 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
                     // Fallback: fire a market close to ensure position is actually closed
                     error!("[real] 🔄 FALLBACK MARKET CLOSE id={} {}", id, pair);
-                    let fb_lpa = if is_a_higher { exit_price_a * 1.05 } else { exit_price_a * 0.95 };
-                    let fb_lpb = if !is_a_higher { exit_price_b * 1.05 } else { exit_price_b * 0.95 };
-                    let fb_safe_a = (fb_lpa / tick_a).round() * tick_a;
-                    let fb_safe_b = (fb_lpb / tick_b).round() * tick_b;
-
                     let conn_a2 = crate::engine::exchanges::get_connector(&exa).unwrap();
                     let conn_b2 = crate::engine::exchanges::get_connector(&exb).unwrap();
                     let (fa, fb) = tokio::join!(
-                        conn_a2.close_order(&h, &k, &pair, is_a_higher, q_a, false, lev as f64, fb_safe_a, true, mult_a),
-                        conn_b2.close_order(&h, &k, &pair, !is_a_higher, q_b, false, lev as f64, fb_safe_b, true, mult_b)
+                        conn_a2.close_order(&h, &k, &pair, is_a_higher, q_a, false, lev as f64, 0.0, false, mult_a),
+                        conn_b2.close_order(&h, &k, &pair, !is_a_higher, q_b, false, lev as f64, 0.0, false, mult_b)
                     );
                     let oid_fb_a = match &fa { Ok(oid) => Some(oid.clone()), Err(e) => { error!("[real] ❌ Fallback close A failed: {}", e); None } };
                     let oid_fb_b = match &fb { Ok(oid) => Some(oid.clone()), Err(e) => { error!("[real] ❌ Fallback close B failed: {}", e); None } };
