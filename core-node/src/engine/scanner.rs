@@ -60,6 +60,9 @@ pub fn generate_signals(
         let depth_sell: f64;
         let depth_buy: f64;
 
+        // Check if this spread is worth diagnosing (exceeds any active profile's min)
+        let worth_diag = log_diag && profiles.iter().any(|p| p.is_active && row.spread >= p.min_entry_spread && row.spread <= p.max_entry_spread);
+
         if let (Some(ref da), Some(ref db)) = (&data_a, &data_b) {
             depth_sell = if is_a_higher { da.bid_size } else { db.bid_size };
             depth_buy  = if is_a_higher { db.ask_size } else { da.ask_size };
@@ -67,20 +70,31 @@ pub fn generate_signals(
             let intra_a = (da.ask - da.bid) / da.bid.max(1e-12) * 100.0;
             let intra_b = (db.ask - db.bid) / db.bid.max(1e-12) * 100.0;
             if intra_a > ts.intra_spread_max_pct || intra_b > ts.intra_spread_max_pct { 
+                if worth_diag { tracing::info!("[scanner] REJECT {} spread={:.4}% -> intra_spread too wide ({:.2}%/{:.2}% > max {:.2}%)", row.pair, row.spread, intra_a, intra_b, ts.intra_spread_max_pct); }
                 continue; 
             }
         } else {
+            if worth_diag { tracing::info!("[scanner] REJECT {} spread={:.4}% -> no price data for {}/{}", row.pair, row.spread, row.exchange_a, row.exchange_b); }
             continue;
         }
 
         // ── BASE MODIFIERS ──
         let map = &e_ctx.multipliers;
-        let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) { Some(v) => *v, None => continue };
-        let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) { Some(v) => *v, None => continue };
+        let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) { Some(v) => *v, None => {
+            if worth_diag { tracing::info!("[scanner] REJECT {} spread={:.4}% -> no multiplier for {}:{}", row.pair, row.spread, row.exchange_a, row.pair); }
+            continue;
+        }};
+        let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) { Some(v) => *v, None => {
+            if worth_diag { tracing::info!("[scanner] REJECT {} spread={:.4}% -> no multiplier for {}:{}", row.pair, row.spread, row.exchange_b, row.pair); }
+            continue;
+        }};
         
         let has_tick_a = e_ctx.tick_sizes.contains_key(&format!("{}:{}", row.exchange_a, row.pair));
         let has_tick_b = e_ctx.tick_sizes.contains_key(&format!("{}:{}", row.exchange_b, row.pair));
-        if !has_tick_a || !has_tick_b { continue; }
+        if !has_tick_a || !has_tick_b { 
+            if worth_diag { tracing::info!("[scanner] REJECT {} spread={:.4}% -> missing tick_size (a={} b={})", row.pair, row.spread, has_tick_a, has_tick_b); }
+            continue; 
+        }
         
         let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|v| *v).unwrap_or(0.000001);
         let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|v| *v).unwrap_or(0.000001);
@@ -89,7 +103,10 @@ pub fn generate_signals(
         let min_age_secs = ts.min_listing_age_days * 24 * 3600;
         let age_a = lmap.get(&format!("{}:{}", row.exchange_a, row.pair)).map(|r| *r).unwrap_or(0);
         let age_b = lmap.get(&format!("{}:{}", row.exchange_b, row.pair)).map(|r| *r).unwrap_or(0);
-        if (age_a > 0 && now_s - age_a < min_age_secs) || (age_b > 0 && now_s - age_b < min_age_secs) { continue; }
+        if (age_a > 0 && now_s - age_a < min_age_secs) || (age_b > 0 && now_s - age_b < min_age_secs) { 
+            if worth_diag { tracing::info!("[scanner] REJECT {} spread={:.4}% -> listing too young", row.pair, row.spread); }
+            continue; 
+        }
 
         let fee_a = crate::engine::real::get_exchange_fee(&row.exchange_a, ts.default_fee_rate, e_ctx);
         let fee_b = crate::engine::real::get_exchange_fee(&row.exchange_b, ts.default_fee_rate, e_ctx);
