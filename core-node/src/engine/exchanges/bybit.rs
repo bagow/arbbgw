@@ -184,18 +184,38 @@ impl ExchangeConnector for BybitConnector {
     async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
         let ts = now_ms().to_string();
         let recv = "5000";
-        let qs = "accountType=UNIFIED&coin=USDT";
-        let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs);
         
-        let resp = http.get(format!("https://api.bybit.com/v5/account/wallet-balance?{}", qs))
+        // 1. Try UNIFIED (Unified Trading Account)
+        let qs1 = "accountType=UNIFIED";
+        let sig1 = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs1);
+        
+        let resp1 = http.get(format!("https://api.bybit.com/v5/account/wallet-balance?{}", qs1))
             .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-SIGN", &sig)
+            .header("X-BAPI-SIGN", &sig1)
             .header("X-BAPI-TIMESTAMP", &ts)
             .header("X-BAPI-RECV-WINDOW", recv)
             .timeout(Duration::from_secs(10))
             .send().await.map_err(|e| e.to_string())?;
             
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let mut v: Value = resp1.json().await.map_err(|e| e.to_string())?;
+        
+        // If the account is a Classic/Standard account, retCode will be 10001 or list empty
+        let ret_code = v["retCode"].as_i64().unwrap_or(-1);
+        if ret_code != 0 || v["result"]["list"].as_array().map(|a| a.is_empty()).unwrap_or(true) {
+            // 2. Fallback to CONTRACT (Classic Account)
+            let qs2 = "accountType=CONTRACT";
+            let sig2 = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs2);
+            
+            let resp2 = http.get(format!("https://api.bybit.com/v5/account/wallet-balance?{}", qs2))
+                .header("X-BAPI-API-KEY", &keys.bybit_key)
+                .header("X-BAPI-SIGN", &sig2)
+                .header("X-BAPI-TIMESTAMP", &ts)
+                .header("X-BAPI-RECV-WINDOW", recv)
+                .timeout(Duration::from_secs(10))
+                .send().await.map_err(|e| e.to_string())?;
+                
+            v = resp2.json().await.map_err(|e| e.to_string())?;
+        }
         
         let coin_obj = v["result"]["list"].as_array()
             .and_then(|arr| arr.first())

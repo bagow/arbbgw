@@ -48,3 +48,4 @@ async-trait = "0.1.89"
 
 [dependencies.shared]
 path = "../shared"
+
