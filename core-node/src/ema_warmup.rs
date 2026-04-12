@@ -124,13 +124,10 @@ async fn fetch_bybit_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
 // ─── Main warmup function — called from main.rs after WS collectors start ────
 
 pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) {
-    // Wait for collectors to populate the price map (up to 15s)
+    // Wait for collectors to populate the price map (full 15s to ensure all exchanges connect)
     for _ in 0..30 {
-        let ex_count = prices.len();
-        let total: usize = prices.iter().map(|e| e.value().len()).sum();
-        // Wait until at least 2 exchanges are connected and we have enough symbols
-        if ex_count >= 2 && total > 100 { break; }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Don't break early, otherwise slower exchanges like Gate/Kucoin miss historical warmup!
     }
 
     // Collect all pairs available on each exchange
