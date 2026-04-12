@@ -544,7 +544,7 @@ pub async fn handle_patch_profile(
                     params_vec.push(rusqlite::types::Value::Integer(if active { 1 } else { 0 }));
                 },
                 "min_entry_spread" | "max_entry_spread" | "trade_volume" | "take_profit_percent" | 
-                "trailing_stop_percent" | "commission_rate" | "slippage_percent" | "funding_rate_8h" | "min_volume_millions" => {
+                "trailing_stop_percent" | "commission_rate" | "slippage_percent" | "funding_rate_8h" | "min_volume_millions" | "min_structural_deviation" => {
                     if let Some(f) = v.as_f64() {
                         sets.push(format!("{}=?", k));
                         params_vec.push(rusqlite::types::Value::Real(f));

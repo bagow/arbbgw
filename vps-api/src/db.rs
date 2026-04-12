@@ -51,6 +51,7 @@ pub async fn init_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'", []);
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN leverage INTEGER DEFAULT 10", []);
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN margin_mode TEXT DEFAULT 'cross'", []);
+        let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN min_structural_deviation REAL DEFAULT 0", []);
 
         // ── Technical settings table (global engine params) ──
         conn.execute_batch("
@@ -280,6 +281,7 @@ pub fn row_to_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradingProfil
         disabled_exchanges: row.get::<_, Option<String>>(19).unwrap_or(Some("[]".into())),
         leverage: row.get::<_, Option<i64>>(20).unwrap_or(Some(10)).unwrap_or(10),
         margin_mode: row.get::<_, Option<String>>(21).unwrap_or(Some("cross".into())).unwrap_or_else(|| "cross".into()),
+        min_structural_deviation: row.get::<_, Option<f64>>(22).unwrap_or(Some(0.0)).unwrap_or(0.0),
     })
 }
 

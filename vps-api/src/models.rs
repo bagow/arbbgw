@@ -73,6 +73,7 @@ pub struct TradingProfile {
     pub disabled_exchanges: Option<String>,
     pub leverage: i64,
     pub margin_mode: String,
+    pub min_structural_deviation: f64,
 }
 
 impl Default for TradingProfile {
@@ -100,6 +101,7 @@ impl Default for TradingProfile {
             disabled_exchanges: Some("[]".to_string()),
             leverage: 10,
             margin_mode: "cross".to_string(),
+            min_structural_deviation: 0.0,
         }
     }
 }

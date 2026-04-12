@@ -104,7 +104,12 @@ pub fn generate_signals(
             if row.spread < profile.min_entry_spread || row.spread > profile.max_entry_spread { continue; }
 
             let structural_deviation = row.spread - row.structural_spread;
-            if structural_deviation < profile.min_entry_spread { continue; }
+            let dev_threshold = if profile.min_structural_deviation > 0.0 {
+                profile.min_structural_deviation
+            } else {
+                profile.min_entry_spread // backward compat: 0.0 means "use min_entry_spread"
+            };
+            if structural_deviation < dev_threshold { continue; }
 
             let slippage_frac = profile.slippage_percent / 100.0;
             let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;

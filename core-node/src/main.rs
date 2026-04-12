@@ -91,7 +91,8 @@ async fn main() -> Result<()> {
     {
         let http_w  = http.clone();
         let prices_w = prices.clone();
-        tokio::spawn(async move { ema_warmup::run(http_w, prices_w).await });
+        let ts_warmup = tech_settings_cache.read().await.clone();
+        tokio::spawn(async move { ema_warmup::run(http_w, prices_w, ts_warmup).await });
     }
 
     // ── Trade DBs ────────────────────────────────────────────────────────────

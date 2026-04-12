@@ -34,7 +34,8 @@ const PROFILE_SELECT: &str = "
         pending_commands,
         disabled_exchanges,
         leverage,
-        margin_mode
+        margin_mode,
+        min_structural_deviation
     FROM trading_profiles
 ";
 
@@ -106,6 +107,7 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
         disabled_exchanges,
         leverage:                get_i64(row, 17).unwrap_or(10),
         margin_mode:             row.get::<_, Option<String>>(18).ok().flatten().unwrap_or_else(|| "cross".to_string()),
+        min_structural_deviation: get_f64(row, 19).unwrap_or(0.0),
     }
 }
 

@@ -8,7 +8,7 @@ use serde_json::Value;
 use tracing::info;
 
 use crate::state::PriceMap;
-use crate::spreads::warmup_ema_from_history;
+use crate::spreads::warmup_ema_from_premiums;
 
 const LOOKBACK_SECS: u64 = 86_400; // 24 hours
 
@@ -105,7 +105,7 @@ async fn fetch_binance_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
 async fn fetch_bybit_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
     let from = now_secs() - LOOKBACK_SECS;
     let url = format!(
-        "https://api.bybit.com/v5/market/kline?category=linear&symbol={}&interval=1&start={}&limit=1000",
+        "https://api.bybit.com/v5/market/kline?category=linear&symbol={}&interval=1&start={}&limit=1440",
         pair, from * 1000
     );
     let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
@@ -123,7 +123,7 @@ async fn fetch_bybit_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
 
 // ─── Main warmup function — called from main.rs after WS collectors start ────
 
-pub async fn run(http: Client, prices: PriceMap) {
+pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) {
     // Wait for collectors to populate the price map (up to 15s)
     for _ in 0..30 {
         let total: usize = prices.iter().map(|e| e.value().len()).sum();
@@ -133,7 +133,7 @@ pub async fn run(http: Client, prices: PriceMap) {
 
     // Collect all pairs available on each exchange
     let exchanges: Vec<String> = prices.iter().map(|e| e.key().clone()).collect();
-    info!("[ema_warmup] Starting EMA warmup with {} exchanges", exchanges.len());
+    info!("[ema_warmup] Starting EMA warmup with {} exchanges (tau={}s)", exchanges.len(), ts.ema_tau_secs);
 
     let mut warmed = 0usize;
 
@@ -164,21 +164,30 @@ pub async fn run(http: Client, prices: PriceMap) {
                 let merged = merge_candles(&candles_a, &candles_b);
                 if merged.len() < 10 { continue; }
 
-                // Calculate spread at each historical point and feed EMA
+                // Canonical order: name1 < name2 (matching live compute_spreads)
+                let is_a_first = ex_a < ex_b;
+                let (name1, name2) = if is_a_first {
+                    (ex_a.clone(), ex_b.clone())
+                } else {
+                    (ex_b.clone(), ex_a.clone())
+                };
+
+                // Calculate canonical premium at each historical point.
+                // Treat close price as mid-price proxy (candles don't have bid/ask).
+                // Premium = (close2 - close1) / close1 * 100 — same formula as live.
                 let mut history = Vec::with_capacity(merged.len());
-                for (ts, price_a, price_b) in &merged {
+                for (ts_val, price_a, price_b) in &merged {
                     if *price_a <= 0.0 || *price_b <= 0.0 { continue; }
-                    let spread_ab = (price_a - price_b) / price_b * 100.0;
-                    let spread_ba = (price_b - price_a) / price_a * 100.0;
-                    let (spread, direction) = if spread_ab >= spread_ba {
-                        (spread_ab, format!("{ex_a}>{ex_b}"))
+                    let (close1, close2) = if is_a_first {
+                        (*price_a, *price_b)
                     } else {
-                        (spread_ba, format!("{ex_b}>{ex_a}"))
+                        (*price_b, *price_a)
                     };
-                    history.push((*ts, spread, direction, pair.to_string(), ex_a.to_string(), ex_b.to_string()));
+                    let premium = (close2 - close1) / close1 * 100.0;
+                    history.push((*ts_val, premium, pair.to_string(), name1.clone(), name2.clone()));
                 }
 
-                warmup_ema_from_history(&history, &shared::TechnicalSettings::default());
+                warmup_ema_from_premiums(&history, &ts);
                 warmed += 1;
             }
         }

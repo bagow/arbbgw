@@ -106,7 +106,7 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
                     pair: sym.clone(), exchange_a: name_a.clone(), exchange_b: name_b.clone(),
                     price_a: data_a.price, price_b: data_b.price, bid_a: data_a.bid, ask_a: data_a.ask, bid_b: data_b.bid, ask_b: data_b.ask,
                     vol_a: data_a.vol, vol_b: data_b.vol, funding_a: data_a.funding_rate, funding_b: data_b.funding_rate,
-                    structural_spread,
+                    structural_spread: (structural_spread * 10000.0).round() / 10000.0,
                     structural_max,
                     structural_min,
                     spread: (spread * 10000.0).round() / 10000.0,
@@ -121,33 +121,25 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
     rows
 }
 
-/// Pre-seed the STRUCTURAL_EMA from historical data.
-pub fn warmup_ema_from_history(history: &[(f64, f64, String, String, String, String)], ts: &TechnicalSettings) {
+/// Pre-seed the STRUCTURAL_EMA from historical canonical premiums.
+/// Tuple: (timestamp_secs, premium_pct, pair, ex1_canonical, ex2_canonical)
+/// Premium is already in canonical order: (mid2 - mid1) / mid1 * 100 where ex1 < ex2.
+pub fn warmup_ema_from_premiums(history: &[(f64, f64, String, String, String)], ts: &TechnicalSettings) {
     let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
     let tau = ts.ema_tau_secs;
 
     let mut sorted = history.to_vec();
     sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    for (ts_val, spread, direction, pair, ex_a, ex_b) in &sorted {
-        let is_a_first = ex_a < ex_b;
-        let (name1, name2) = if is_a_first { (ex_a.clone(), ex_b.clone()) } else { (ex_b.clone(), ex_a.clone()) };
-        
-        // Approximate historical premium from directional history
-        let premium = if direction == &format!("{ex_a}>{ex_b}") {
-            if is_a_first { -*spread } else { *spread }
-        } else {
-            if is_a_first { *spread } else { -*spread }
-        };
-
+    for (ts_val, premium, pair, name1, name2) in &sorted {
         let key = format!("{}|{}|{}", pair, name1, name2);
-        let mut entry = ema_map.entry(key).or_insert((premium, *ts_val, premium, premium));
+        let mut entry = ema_map.entry(key).or_insert((*premium, *ts_val, *premium, *premium));
         let (old_ema, last_ts, old_max, old_min) = *entry;
         let dt = (ts_val - last_ts).max(0.0);
         let alpha = 1.0 - (-dt / tau).exp();
         let new_ema = old_ema + alpha * (premium - old_ema);
-        let new_max = old_max.max(premium);
-        let new_min = old_min.min(premium);
+        let new_max = old_max.max(*premium);
+        let new_min = old_min.min(*premium);
         *entry = (new_ema, *ts_val, new_max, new_min);
     }
 }
