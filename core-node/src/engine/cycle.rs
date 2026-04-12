@@ -64,6 +64,11 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
         if let (Some(da), Some(db)) = (&data_a, &data_b) {
             if da.bid <= 0.0 || da.ask <= 0.0 || db.bid <= 0.0 || db.ask <= 0.0 {
+                // If orderbook is completely empty or just preloaded (0 prices), fallback to entry prices for limit projection
+                c_price_a = if da.price > 0.0 { da.price } else { trade.entry_price_a };
+                c_price_b = if db.price > 0.0 { db.price } else { trade.entry_price_b };
+                exit_price_a = if is_a_higher { c_price_a } else { c_price_a };
+                exit_price_b = if is_a_higher { c_price_b } else { c_price_b };
                 if !manual_close { continue; }
             } else {
                 c_price_a = da.price;

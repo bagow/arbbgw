@@ -102,6 +102,7 @@ impl ExchangeConnector for GateConnector {
             "text": "t-corenode-close"
         });
         let body_str = body.to_string();
+        tracing::error!("[gate-debug] close_order payload: {}", body_str);
 
         if dry_run { return Ok(format!("dry_close_{}", Uuid::new_v4())); }
 
