@@ -44,6 +44,9 @@ pub struct EngineContext {
     pub balance_low: Arc<DashMap<String, bool>>,
     pub margin_balances: Arc<DashMap<String, f64>>,
     pub positions: Arc<DashMap<String, Vec<crate::engine::exchanges::traits::PositionInfo>>>,
+    /// Guard against parallel close attempts on the same trade_id.
+    /// Set to true when a close is in-flight; cleared when the spawn finishes.
+    pub closing_in_flight: Arc<DashMap<i64, bool>>,
 }
 
 impl Default for EngineContext {
@@ -61,6 +64,7 @@ impl Default for EngineContext {
             balance_low: Arc::new(DashMap::new()),
             margin_balances: Arc::new(DashMap::new()),
             positions: Arc::new(DashMap::new()),
+            closing_in_flight: Arc::new(DashMap::new()),
         }
     }
 }

@@ -116,6 +116,13 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let zero_spread    = exit_spread <= 0.0 && exec_net_pnl >= 0.0;
 
         if manual_close || triggered_tp || triggered_stop || zero_spread {
+            // Guard: skip if this trade is already being closed by a previous spawn
+            if e_ctx.closing_in_flight.get(&trade.id).map(|v| *v).unwrap_or(false) {
+                tracing::debug!("[real] Close already in-flight for id={} {}, skipping", trade.id, trade.pair);
+                continue;
+            }
+            e_ctx.closing_in_flight.insert(trade.id, true);
+
             let reason = if manual_close { "MANUAL" } else if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
             info!("[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4} norm={:.4}", trade.id, trade.pair, reason, exec_net_pct, exit_spread,
                 spreads.iter().find(|s| s.pair == trade.pair && s.direction == trade.direction).map(|s| s.structural_spread).unwrap_or(0.0));
@@ -150,6 +157,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             let q_b = if exb == "binance" || exb == "bybit" { c_b * mult_b } else { c_b };
 
             let _e_ctx_c = Arc::clone(&e_ctx);
+            let closing_guard = Arc::clone(&e_ctx.closing_in_flight);
+            let trade_id_for_guard = trade.id;
             tokio::spawn(async move {
                 let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
@@ -250,8 +259,16 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                             &format!("{}_FALLBACK", r), fund_cost, fb_fee, 0.0
                         ).await;
                     } else {
-                        error!("[real] 🚨 FALLBACK MARKET CLOSE ALSO FAILED id={} {} — MANUAL INTERVENTION REQUIRED", id, pair);
+                        // Force-close in DB to stop the infinite retry loop.
+                        // The position sync task will detect any orphaned positions.
+                        error!("[real] 🚨 FALLBACK FAILED id={} {} — FORCE CLOSING in DB. Check exchange positions manually!", id, pair);
+                        repo_close.mark_trade_closed_confirmed(
+                            id, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0,
+                            &format!("{}_FORCE_CLOSED", r), fund_cost, 0.0, 0.0
+                        ).await;
                     }
+                    closing_guard.remove(&trade_id_for_guard);
                     return;
                 }
 
@@ -286,6 +303,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                     real_gp, real_pna, real_pnb,
                     &r, fund_cost, exit_fee, exit_slip
                 ).await;
+                closing_guard.remove(&trade_id_for_guard);
             });
 
         } else {
