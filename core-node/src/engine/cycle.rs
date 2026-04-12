@@ -140,7 +140,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             let close_verify_delay = ts.close_verify_delay_ms as u64;
             let close_verify_retries = ts.close_verify_retries;
 
-            let use_ioc = ts.entry_order_type == "ioc";
+            let use_ioc = ts.entry_order_type == "ioc" && !manual_close;
             let max_slip_frac = settings.slippage_percent / 100.0;
             let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
             let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);

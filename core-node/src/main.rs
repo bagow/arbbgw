@@ -98,10 +98,11 @@ async fn main() -> Result<()> {
     // ── STARTUP DIAGNOSTIC: log and persist profile settings ─────────────────
     {
         let startup_profiles = load_all_settings(&profiles_db, "real").await;
-        info!("STARTUP: {} active real profiles found in DB='{}'",
-            startup_profiles.len(), profiles_db_path);
+        let active_count = startup_profiles.iter().filter(|p| p.is_active).count();
+        info!("STARTUP: {} active real profiles found in DB='{}' (total {})",
+            active_count, profiles_db_path, startup_profiles.len());
         let mut lines = format!("db_path={}\nactive_real_count={}\n",
-            profiles_db_path, startup_profiles.len());
+            profiles_db_path, active_count);
         for p in &startup_profiles {
             let line = format!("id={} vol={} active={} min_spread={} max_spread={}\n",
                 p.id, p.trade_volume, p.is_active, p.min_entry_spread, p.max_entry_spread);

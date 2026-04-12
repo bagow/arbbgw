@@ -53,7 +53,7 @@ pub async fn load_settings(db: &Connection, mode: &str) -> TradingSettings {
 pub async fn load_all_settings(db: &Connection, mode: &str) -> Vec<TradingSettings> {
     let mode = mode.to_string();
     db.call(move |conn| {
-        let sql = format!("{} WHERE mode=? AND is_active=1", PROFILE_SELECT);
+        let sql = format!("{} WHERE mode=?", PROFILE_SELECT);
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![mode], |row| Ok(parse_row(row)))?
             .filter_map(|r| r.ok())
