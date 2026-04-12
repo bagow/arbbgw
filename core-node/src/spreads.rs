@@ -52,6 +52,32 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
 
                 // Removed max_funding_diff check per user request
 
+                // ── STRUCTURAL SPREAD (MID-PRICE PREMIUM) ──
+                let is_a_first = name_a < name_b;
+                let (name1, name2) = if is_a_first { (name_a.clone(), name_b.clone()) } else { (name_b.clone(), name_a.clone()) };
+                let (data1, data2) = if is_a_first { (&data_a, &data_b) } else { (&data_b, &data_a) };
+                
+                let mid1 = (data1.bid + data1.ask) / 2.0;
+                let mid2 = (data2.bid + data2.ask) / 2.0;
+                let premium = (mid2 - mid1) / mid1 * 100.0;
+                
+                let ema_key = format!("{}|{}|{}", sym, name1, name2);
+                let (structural_premium, max_prem, min_prem) =
+                    if let Some(mut entry) = ema_map.get_mut(&ema_key) {
+                        let (old_ema, last_updated, old_max, old_min) = *entry;
+                        let dt = (now_f64 - last_updated).max(0.0);
+                        let alpha = 1.0 - (-dt / ts.ema_tau_secs).exp();
+                        let new_ema = old_ema + alpha * (premium - old_ema);
+                        let new_max = old_max.max(premium);
+                        let new_min = old_min.min(premium);
+                        *entry = (new_ema, now_f64, new_max, new_min);
+                        (new_ema, new_max, new_min)
+                    } else {
+                        ema_map.insert(ema_key, (premium, now_f64, premium, premium));
+                        (premium, premium, premium)
+                    };
+
+                // ── DIRECTIONAL ARBITRAGE SPREAD ──
                 let a_over_b = (data_a.bid - data_b.ask) / data_b.ask * 100.0;
                 let b_over_a = (data_b.bid - data_a.ask) / data_a.ask * 100.0;
                 let (spread, direction) = if a_over_b >= b_over_a {
@@ -62,21 +88,19 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
 
                 if spread < ts.spread_threshold || spread > ts.spread_max { continue; }
 
-                let ema_key = format!("{}|{}|{}|{}", sym, name_a, name_b, direction);
-                let (structural_spread, structural_max, structural_min) =
-                    if let Some(mut entry) = ema_map.get_mut(&ema_key) {
-                        let (old_ema, last_updated, old_max, old_min) = *entry;
-                        let dt = (now_f64 - last_updated).max(0.0);
-                        let alpha = 1.0 - (-dt / ts.ema_tau_secs).exp();
-                        let new_ema = old_ema + alpha * (spread - old_ema);
-                        let new_max = old_max.max(spread);
-                        let new_min = old_min.min(spread);
-                        *entry = (new_ema, now_f64, new_max, new_min);
-                        (new_ema, new_max, new_min)
-                    } else {
-                        ema_map.insert(ema_key, (spread, now_f64, spread, spread));
-                        (spread, spread, spread)
-                    };
+                // Map the mid-price premium back to the expected directional structural spread
+                let structural_spread = if direction == format!("{name_a}>{name_b}") {
+                    if is_a_first { -structural_premium } else { structural_premium }
+                } else {
+                    if is_a_first { structural_premium } else { -structural_premium }
+                };
+                
+                // Track max/min as directional extremes just for observability in UI if needed
+                let (structural_max, structural_min) = if direction == format!("{name_a}>{name_b}") {
+                    if is_a_first { (-min_prem, -max_prem) } else { (max_prem, min_prem) }
+                } else {
+                    if is_a_first { (max_prem, min_prem) } else { (-min_prem, -max_prem) }
+                };
 
                 rows.push(SpreadRow {
                     pair: sym.clone(), exchange_a: name_a.clone(), exchange_b: name_b.clone(),
@@ -106,14 +130,24 @@ pub fn warmup_ema_from_history(history: &[(f64, f64, String, String, String, Str
     sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     for (ts_val, spread, direction, pair, ex_a, ex_b) in &sorted {
-        let key = format!("{}|{}|{}|{}", pair, ex_a, ex_b, direction);
-        let mut entry = ema_map.entry(key).or_insert((*spread, *ts_val, *spread, *spread));
+        let is_a_first = ex_a < ex_b;
+        let (name1, name2) = if is_a_first { (ex_a.clone(), ex_b.clone()) } else { (ex_b.clone(), ex_a.clone()) };
+        
+        // Approximate historical premium from directional history
+        let premium = if direction == &format!("{ex_a}>{ex_b}") {
+            if is_a_first { -*spread } else { *spread }
+        } else {
+            if is_a_first { *spread } else { -*spread }
+        };
+
+        let key = format!("{}|{}|{}", pair, name1, name2);
+        let mut entry = ema_map.entry(key).or_insert((premium, *ts_val, premium, premium));
         let (old_ema, last_ts, old_max, old_min) = *entry;
         let dt = (ts_val - last_ts).max(0.0);
         let alpha = 1.0 - (-dt / tau).exp();
-        let new_ema = old_ema + alpha * (spread - old_ema);
-        let new_max = old_max.max(*spread);
-        let new_min = old_min.min(*spread);
+        let new_ema = old_ema + alpha * (premium - old_ema);
+        let new_max = old_max.max(premium);
+        let new_min = old_min.min(premium);
         *entry = (new_ema, *ts_val, new_max, new_min);
     }
 }
