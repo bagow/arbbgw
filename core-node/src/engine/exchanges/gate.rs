@@ -116,7 +116,7 @@ impl ExchangeConnector for GateConnector {
             .ok_or_else(|| "Gate failed to return order ID on close".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, _pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64, f64), String> {
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64, f64), String> {
         let path = format!("/api/v4/futures/usdt/orders/{}", order_id);
         let resp = http.get(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, ""))
@@ -125,7 +125,7 @@ impl ExchangeConnector for GateConnector {
             
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         let price = v["fill_price"].as_f64().or_else(|| v["fill_price"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
-        let fee = v["fee"].as_f64().or_else(|| v["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+        let mut fee = v["fee"].as_f64().or_else(|| v["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
         
         let status = v["status"].as_str().unwrap_or("");
         if status == "finished" && price <= 0.0 {
@@ -137,7 +137,32 @@ impl ExchangeConnector for GateConnector {
         let left = v["left"].as_f64().or_else(|| v["left"].as_i64().map(|i| i as f64)).unwrap_or(0.0).abs();
         let exec_contracts = (size - left).max(0.0);
 
-        Ok((price, fee, exec_contracts))
+        // Fetch real commission from my_trades endpoint since orders endpoint fee is often 0 or delayed
+        if exec_contracts > 0.0 {
+            let contract = pair.replace("USDT", "_USDT");
+            let trades_path = format!("/api/v4/futures/usdt/my_trades?contract={}&order_id={}", contract, order_id);
+            if let Ok(resp2) = http.get(format!("https://api.gateio.ws{}", trades_path))
+                .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &trades_path, ""))
+                .timeout(Duration::from_secs(5))
+                .send().await {
+                if let Ok(v2) = resp2.json::<Value>().await {
+                    if let Some(trades) = v2.as_array() {
+                        let mut sum_fee = 0.0;
+                        for t in trades {
+                            let f = t["fee"].as_f64()
+                                .or_else(|| t["fee"].as_str().and_then(|s| s.parse().ok()))
+                                .unwrap_or(0.0);
+                            sum_fee += f;
+                        }
+                        if sum_fee.abs() > 1e-9 {
+                            fee = sum_fee;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((price, fee.abs(), exec_contracts))
     }
 
     async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
