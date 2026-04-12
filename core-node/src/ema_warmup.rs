@@ -174,7 +174,6 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
 
                 // Calculate canonical premium at each historical point.
                 // Treat close price as mid-price proxy (candles don't have bid/ask).
-                // Premium = (close2 - close1) / close1 * 100 — same formula as live.
                 let mut history = Vec::with_capacity(merged.len());
                 for (ts_val, price_a, price_b) in &merged {
                     if *price_a <= 0.0 || *price_b <= 0.0 { continue; }
@@ -183,8 +182,9 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
                     } else {
                         (*price_b, *price_a)
                     };
-                    let premium = (close2 - close1) / close1 * 100.0;
-                    history.push((*ts_val, premium, pair.to_string(), name1.clone(), name2.clone()));
+                    let premium_12 = (close1 - close2) / close2 * 100.0;
+                    let premium_21 = (close2 - close1) / close1 * 100.0;
+                    history.push((*ts_val, premium_12, premium_21, pair.to_string(), name1.clone(), name2.clone()));
                 }
 
                 warmup_ema_from_premiums(&history, &ts);
