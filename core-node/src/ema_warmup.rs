@@ -126,8 +126,10 @@ async fn fetch_bybit_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
 pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) {
     // Wait for collectors to populate the price map (up to 15s)
     for _ in 0..30 {
+        let ex_count = prices.len();
         let total: usize = prices.iter().map(|e| e.value().len()).sum();
-        if total > 100 { break; }
+        // Wait until at least 2 exchanges are connected and we have enough symbols
+        if ex_count >= 2 && total > 100 { break; }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
