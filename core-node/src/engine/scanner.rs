@@ -103,13 +103,18 @@ pub fn generate_signals(
             if profile.disabled_exchanges.contains(&row.exchange_a) || profile.disabled_exchanges.contains(&row.exchange_b) { continue; }
             if row.spread < profile.min_entry_spread || row.spread > profile.max_entry_spread { continue; }
 
+            let diag_prefix = if log_diag && row.spread >= profile.min_entry_spread { Some(format!("[scanner] REJECT {} {}={:.4}%", row.pair, profile.id, row.spread)) } else { None };
+
             let structural_deviation = row.spread - row.structural_spread;
             let dev_threshold = if profile.min_structural_deviation > 0.0 {
                 profile.min_structural_deviation
             } else {
                 profile.min_entry_spread // backward compat: 0.0 means "use min_entry_spread"
             };
-            if structural_deviation < dev_threshold { continue; }
+            if structural_deviation < dev_threshold { 
+                if let Some(p) = &diag_prefix { tracing::info!("{} -> ema deviation {:.4}% < {:.4}% req (base: {:.4}%)", p, structural_deviation, dev_threshold, row.structural_spread); }
+                continue; 
+            }
 
             let slippage_frac = profile.slippage_percent / 100.0;
             let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
@@ -117,8 +122,14 @@ pub fn generate_signals(
             let min_depth_usd = profile.trade_volume * ts.depth_multiplier;
             let depth_sell_usd = depth_sell * entry_a;
             let depth_buy_usd = depth_buy * entry_b;
-            if depth_sell > 0.0 && depth_sell_usd < min_depth_usd { continue; }
-            if depth_buy > 0.0 && depth_buy_usd < min_depth_usd { continue; }
+            if depth_sell > 0.0 && depth_sell_usd < min_depth_usd { 
+                if let Some(p) = &diag_prefix { tracing::info!("{} -> depth sell ${:.0} < min ${:.0}", p, depth_sell_usd, min_depth_usd); }
+                continue; 
+            }
+            if depth_buy > 0.0 && depth_buy_usd < min_depth_usd { 
+                if let Some(p) = &diag_prefix { tracing::info!("{} -> depth buy ${:.0} < min ${:.0}", p, depth_buy_usd, min_depth_usd); }
+                continue; 
+            }
 
             // ENSURE PERFECT PHYSICAL BALANCE (0.0% COIN DUST)
             let big_step = mult_a.max(mult_b);
@@ -147,21 +158,31 @@ pub fn generate_signals(
                 if found_match { break; }
             }
 
-            if !found_match { continue; } // Physically impossible to balance lot sizes
+            if !found_match { 
+                if let Some(p) = &diag_prefix { tracing::info!("{} -> physically impossible to balance lot sizes", p); }
+                continue; 
+            } // Physically impossible to balance lot sizes
 
             let contracts_a = (phys_qty / mult_a).round();
             let contracts_b = (phys_qty / mult_b).round();
             
-            if contracts_a < 1.0 || contracts_b < 1.0 { continue; }
+            if contracts_a < 1.0 || contracts_b < 1.0 { 
+                if let Some(p) = &diag_prefix { tracing::info!("{} -> contracts < 1.0 (qty: {:.4}, mult_a: {:.4}, mult_b: {:.4})", p, phys_qty, mult_a, mult_b); }
+                continue; 
+            }
             
             let actual_vol_a = phys_qty * entry_a;
             let actual_vol_b = phys_qty * entry_b;
 
             let max_v = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
-            if actual_vol_a > max_v { continue; }
+            if actual_vol_a > max_v { 
+                if let Some(p) = &diag_prefix { tracing::info!("{} -> actual_vol exceeds max_v (${:.2} > ${:.2}) (mult_trap)", p, actual_vol_a, max_v); }
+                continue; 
+            }
 
             if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional) || 
                (row.exchange_b == "binance" && phys_qty * entry_b < ts.binance_min_notional) { 
+                if let Some(p) = &diag_prefix { tracing::info!("{} -> below binance_min_notional (${:.2} < ${:.2})", p, actual_vol_a, ts.binance_min_notional); }
                 continue; 
             }
 
