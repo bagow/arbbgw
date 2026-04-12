@@ -26,12 +26,12 @@ pub trait ExchangeConnector: Send + Sync {
 
     /// Connects to the exchange and opens a new order.
     /// Returns (order_id, limit_price)
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool, leverage: f64) -> Result<(Option<String>, f64), String>;
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, price: f64, use_ioc: bool, leverage: f64, multiplier: f64) -> Result<(Option<String>, f64), String>;
 
     /// Connects to the exchange and closes an existing position.
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool) -> Result<String, String>;
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool, multiplier: f64) -> Result<String, String>;
 
-    /// Fetches the order details. Returns (executed_price, absolute_fee, executed_qty_contracts)
+    /// Fetches the order details. Returns (executed_price, absolute_fee, executed_physical_qty)
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String>;
 
     /// Fetches balances in USD(T). Returns (wallet_balance, available_margin).

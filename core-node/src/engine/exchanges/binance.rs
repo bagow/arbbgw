@@ -30,14 +30,14 @@ impl ExchangeConnector for BinanceConnector {
         "binance"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64, multiplier: f64) -> Result<(Option<String>, f64), String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run {
             return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), price));
         }
 
         let ts = now_ms();
-        let mut qty_str = format!("{:.8}", contracts).trim_end_matches('0').to_string();
+        let mut qty_str = format!("{:.8}", (phys_amount / multiplier.max(1e-12)).round() * multiplier.max(1e-12)).trim_end_matches('0').to_string();
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
         
@@ -70,12 +70,16 @@ impl ExchangeConnector for BinanceConnector {
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool, multiplier: f64) -> Result<String, String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run { return Ok(format!("dry_close_{}_{}", self.name(), now_ms())); }
 
         let ts = now_ms();
-        let mut qty_str = format!("{:.8}", contracts).trim_end_matches('0').to_string();
+        let mut qty_str = if multiplier == 0.0 {
+            format!("{:.8}", phys_amount).trim_end_matches('0').to_string()
+        } else {
+            format!("{:.8}", (phys_amount / multiplier.max(1e-12)).round() * multiplier.max(1e-12)).trim_end_matches('0').to_string()
+        };
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
         

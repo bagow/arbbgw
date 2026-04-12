@@ -18,12 +18,12 @@ impl ExchangeConnector for BybitConnector {
         "bybit"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64, multiplier: f64) -> Result<(Option<String>, f64), String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let side_str = if is_buy { "Buy" } else { "Sell" };
 
-        let mut qty_str = format!("{:.8}", contracts).trim_end_matches('0').to_string();
+        let mut qty_str = format!("{:.8}", (phys_amount / multiplier.max(1e-12)).round() * multiplier.max(1e-12)).trim_end_matches('0').to_string();
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
 
@@ -82,12 +82,16 @@ impl ExchangeConnector for BybitConnector {
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool, multiplier: f64) -> Result<String, String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let side_str = if is_buy { "Buy" } else { "Sell" };
 
-        let mut qty_str = format!("{:.8}", contracts).trim_end_matches('0').to_string();
+        let mut qty_str = if multiplier == 0.0 {
+            format!("{:.8}", phys_amount).trim_end_matches('0').to_string()
+        } else {
+            format!("{:.8}", (phys_amount / multiplier.max(1e-12)).round() * multiplier.max(1e-12)).trim_end_matches('0').to_string()
+        };
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
 
@@ -177,8 +181,7 @@ impl ExchangeConnector for BybitConnector {
         let price = order["avgPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
         let fee = order["cumExecFee"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         
-        let exec_contracts = exec_qty / multiplier.max(1e-12);
-        Ok((price, fee.abs(), exec_contracts))
+        Ok((price, fee.abs(), exec_qty))
     }
 
     async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {

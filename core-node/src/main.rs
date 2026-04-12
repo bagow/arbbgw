@@ -443,7 +443,7 @@ async fn handle_close_position(
     let is_buy = req.size < 0.0;
     let size = req.size.abs();
     
-    match conn.close_order(&http, &keys, &req.symbol, is_buy, size, false, 10.0, 0.0, false).await {
+    match conn.close_order(&http, &keys, &req.symbol, is_buy, size, false, 10.0, 0.0, false, 0.0).await {
         Ok(_) => Ok("ok"),
         Err(e) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
     }

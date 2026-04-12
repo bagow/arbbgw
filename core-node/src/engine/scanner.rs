@@ -188,13 +188,10 @@ pub fn generate_signals(
             }
             if phys_qty <= 0.0 { continue; } // Couldn't fit
 
-            let contracts_a = (phys_qty / mult_a).round();
-            let contracts_b = (phys_qty / mult_b).round();
+            let contracts_a = phys_qty;
+            let contracts_b = phys_qty;
             
-            if contracts_a < 1.0 || contracts_b < 1.0 { 
-                if let Some(p) = &diag_prefix { tracing::info!("{} -> contracts < 1.0 (qty: {:.4}, mult_a: {:.4}, mult_b: {:.4})", p, phys_qty, mult_a, mult_b); }
-                continue; 
-            }
+
             
             let actual_vol_a = phys_qty * entry_a;
             let actual_vol_b = phys_qty * entry_b;

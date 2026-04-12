@@ -155,8 +155,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 (0.0, 0.0)
             };
 
-            let q_a = if exa == "binance" || exa == "bybit" { c_a * mult_a } else { c_a };
-            let q_b = if exb == "binance" || exb == "bybit" { c_b * mult_b } else { c_b };
+            let q_a = c_a;
+            let q_b = c_b;
 
             let _e_ctx_c = Arc::clone(&e_ctx);
             let closing_guard = Arc::clone(&e_ctx.closing_in_flight);
@@ -166,8 +166,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
                 // Place close orders in parallel
                 let (ra, rb) = tokio::join!(
-                    conn_a.close_order(&h, &k, &pair, is_a_higher, q_a, dry_run, lev as f64, limit_close_a, use_ioc),
-                    conn_b.close_order(&h, &k, &pair, !is_a_higher, q_b, dry_run, lev as f64, limit_close_b, use_ioc)
+                    conn_a.close_order(&h, &k, &pair, is_a_higher, q_a, dry_run, lev as f64, limit_close_a, use_ioc, mult_a),
+                    conn_b.close_order(&h, &k, &pair, !is_a_higher, q_b, dry_run, lev as f64, limit_close_b, use_ioc, mult_b)
                 );
                 let oid_close_a = ra.ok();
                 let oid_close_b = rb.ok();
@@ -221,8 +221,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                     let conn_a2 = crate::engine::exchanges::get_connector(&exa).unwrap();
                     let conn_b2 = crate::engine::exchanges::get_connector(&exb).unwrap();
                     let (fa, fb) = tokio::join!(
-                        conn_a2.close_order(&h, &k, &pair, is_a_higher, q_a, false, lev as f64, 0.0, false),
-                        conn_b2.close_order(&h, &k, &pair, !is_a_higher, q_b, false, lev as f64, 0.0, false)
+                        conn_a2.close_order(&h, &k, &pair, is_a_higher, q_a, false, lev as f64, 0.0, false, mult_a),
+                        conn_b2.close_order(&h, &k, &pair, !is_a_higher, q_b, false, lev as f64, 0.0, false, mult_b)
                     );
                     let oid_fb_a = fa.ok();
                     let oid_fb_b = fb.ok();
@@ -448,9 +448,12 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             pair, order_type_label, exa, contracts_a, limit_price_a, exb, contracts_b, limit_price_b, sig.spread, break_even_pct);
 
         // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
+        let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
+        let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
+        
         let (result_a, result_b) = tokio::join!(
-            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0, settings.leverage as f64),
-            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0, settings.leverage as f64)
+            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0, settings.leverage as f64, mult_a),
+            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0, settings.leverage as f64, mult_b)
         );
 
         let order_ms = t0.elapsed().as_millis();
@@ -494,20 +497,20 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         // ── PARALLEL FILL VERIFICATION ───────────────────────────────────────
         // ALL order types (market + IOC) MUST be verified via fetch_order.
         // No WS price fallbacks — only exchange-confirmed fill prices.
-        let mut fill_a = inline_fill_a; let mut fee_a_val = inline_fee_a; let mut actual_vol_contracts_a = None;
-        let mut fill_b = inline_fill_b; let mut fee_b_val = inline_fee_b; let mut actual_vol_contracts_b = None;
+        let mut fill_a = inline_fill_a; let mut fee_a_val = inline_fee_a; let mut actual_vol_phys_a = None;
+        let mut fill_b = inline_fill_b; let mut fee_b_val = inline_fee_b; let mut actual_vol_phys_b = None;
         let mut got_a = oid_a.is_none() || dry_run || fill_a > 0.0;
         let mut got_b = oid_b.is_none() || dry_run || fill_b > 0.0;
 
         for attempt in 0..ts.fill_verify_retries {
-            if got_a && got_b && actual_vol_contracts_a.is_some() && actual_vol_contracts_b.is_some() { break; }
+            if got_a && got_b && actual_vol_phys_a.is_some() && actual_vol_phys_b.is_some() { break; }
             if attempt > 0 { tokio::time::sleep(Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
             let (fa, fb) = tokio::join!(
-                async { if !got_a || actual_vol_contracts_a.is_none() { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } } None },
-                async { if !got_b || actual_vol_contracts_b.is_none() { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } } None }
+                async { if !got_a || actual_vol_phys_a.is_none() { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } } None },
+                async { if !got_b || actual_vol_phys_b.is_none() { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } } None }
             );
-            if let Some((p, f, ev)) = fa { fill_a = p; fee_a_val = f; actual_vol_contracts_a = Some(ev); got_a = true; }
-            if let Some((p, f, ev)) = fb { fill_b = p; fee_b_val = f; actual_vol_contracts_b = Some(ev); got_b = true; }
+            if let Some((p, f, ev)) = fa { fill_a = p; fee_a_val = f; actual_vol_phys_a = Some(ev); got_a = true; }
+            if let Some((p, f, ev)) = fb { fill_b = p; fee_b_val = f; actual_vol_phys_b = Some(ev); got_b = true; }
         }
 
         // NO WS FALLBACK for entry fills! If fetch_order couldn't verify the fill
@@ -523,8 +526,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let total_ms = t0.elapsed().as_millis();
         if dry_run { fill_a = entry_a; fill_b = entry_b; }
 
-        let phys_a = actual_vol_contracts_a.unwrap_or(0.0) * mult_a;
-        let phys_b = actual_vol_contracts_b.unwrap_or(0.0) * mult_b;
+        let phys_a = actual_vol_phys_a.unwrap_or(0.0);
+        let phys_b = actual_vol_phys_b.unwrap_or(0.0);
         
         let a_filled = oid_a.is_some() && phys_a > 0.0;
         let b_filled = oid_b.is_some() && phys_b > 0.0;
@@ -548,10 +551,10 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let fp = pair.clone();
 
         if delta_a > 1e-12 {
-            let contracts_to_dump = (delta_a / mult_a).round(); // Convert excess coins back to integer contracts
-            if contracts_to_dump >= 1.0 {
+            let phys_to_dump = delta_a; // Pass physical volume directly
+            if phys_to_dump >= mult_a.min(1e-8) {
                 let is_buy = is_a_higher; // If we entered A by Selling (!is_a_higher), we exit A by Buying (is_a_higher)
-                error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys ({:.0} contracts)", pair, delta_a, contracts_to_dump);
+                error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys", pair, phys_to_dump);
                 
                 // Fire MARKET CLOSE instantly!
                 let dump_price = if is_buy { fill_a * 1.05 } else { fill_a * 0.95 }; // Deep market limit for safety
@@ -559,7 +562,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 let rounded_safe_limit_price = (dump_price / tick_for_close).round() * tick_for_close;
                 
                 // MUST PASS false to use_ioc to ensure exchange completes the market dump deeply
-                match crate::engine::exchanges::get_connector(&exa).unwrap().close_order(&hc, &kc, &fp, is_buy, contracts_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, false).await {
+                match crate::engine::exchanges::get_connector(&exa).unwrap().close_order(&hc, &kc, &fp, is_buy, phys_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, false, mult_a).await {
                     Ok(close_oid) => {
                         for attempt in 0..5 {
                             if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&hc, &kc, &fp, close_oid.as_str(), mult_a).await {
@@ -580,17 +583,17 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         }
         
         if delta_b > 1e-12 {
-            let contracts_to_dump = (delta_b / mult_b).round(); // Convert excess coins back to contracts
-            if contracts_to_dump >= 1.0 {
+            let phys_to_dump = delta_b; // Use physical coin volume
+            if phys_to_dump >= mult_b.min(1e-8) {
                 let is_buy = !is_a_higher; // Opposite of entry B
-                error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys ({:.0} contracts)", pair, delta_b, contracts_to_dump);
+                error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys", pair, phys_to_dump);
                 
                 let dump_price = if is_buy { fill_b * 1.05 } else { fill_b * 0.95 };
                 let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
                 let rounded_safe_limit_price = (dump_price / tick_for_close).round() * tick_for_close;
                 
                 // MUST PASS false to use_ioc to ensure exchange completes the market dump deeply
-                match crate::engine::exchanges::get_connector(&exb).unwrap().close_order(&hc, &kc, &fp, is_buy, contracts_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, false).await {
+                match crate::engine::exchanges::get_connector(&exb).unwrap().close_order(&hc, &kc, &fp, is_buy, phys_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, false, mult_b).await {
                     Ok(close_oid) => {
                         for attempt in 0..5 {
                             if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&hc, &kc, &fp, close_oid.as_str(), mult_b).await {

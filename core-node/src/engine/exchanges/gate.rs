@@ -30,9 +30,9 @@ impl ExchangeConnector for GateConnector {
         "gate"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64, multiplier: f64) -> Result<(Option<String>, f64), String> {
         let contract = pair.replace("USDT", "_USDT");
-        let size = if is_buy { contracts.round() as i64 } else { -(contracts.round() as i64) };
+        let size = if is_buy { (phys_amount / multiplier.max(1e-12)).round() as i64 } else { -((phys_amount / multiplier.max(1e-12)).round() as i64) };
         let path = "/api/v4/futures/usdt/orders";
         
         let mut raw_price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
@@ -74,9 +74,13 @@ impl ExchangeConnector for GateConnector {
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool, multiplier: f64) -> Result<String, String> {
         let contract = pair.replace("USDT", "_USDT");
-        let size = if is_buy { contracts.round() as i64 } else { -(contracts.round() as i64) };
+        let size = if multiplier == 0.0 {
+            if is_buy { phys_amount.round() as i64 } else { -(phys_amount.round() as i64) }
+        } else {
+            if is_buy { (phys_amount / multiplier.max(1e-12)).round() as i64 } else { -((phys_amount / multiplier.max(1e-12)).round() as i64) }
+        };
         let path = "/api/v4/futures/usdt/orders";
         
         let mut raw_price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
@@ -116,7 +120,7 @@ impl ExchangeConnector for GateConnector {
             .ok_or_else(|| "Gate failed to return order ID on close".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64, f64), String> {
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
         let path = format!("/api/v4/futures/usdt/orders/{}", order_id);
         let resp = http.get(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, ""))
@@ -162,7 +166,7 @@ impl ExchangeConnector for GateConnector {
             }
         }
 
-        Ok((price, fee.abs(), exec_contracts))
+        Ok((price, fee.abs(), exec_contracts * multiplier.max(1e-12)))
     }
 
     async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {

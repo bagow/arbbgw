@@ -19,7 +19,7 @@ impl ExchangeConnector for KucoinConnector {
         "kucoin"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, price: f64, use_ioc: bool, leverage: f64) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, price: f64, use_ioc: bool, leverage: f64, multiplier: f64) -> Result<(Option<String>, f64), String> {
         let sym = format!("{}M", pair);
         let ts = now_ms().to_string(); 
         let path = "/api/v1/orders";
@@ -39,7 +39,7 @@ impl ExchangeConnector for KucoinConnector {
                 "type": "limit",
                 "timeInForce": "IOC",
                 "price": price_str,
-                "size": contracts.round() as i64,
+                "size": (phys_amount / multiplier.max(1e-12)).round() as i64,
                 "leverage": lev_str,
                 "marginMode": "CROSS",
                 "reduceOnly": false
@@ -50,7 +50,7 @@ impl ExchangeConnector for KucoinConnector {
                 "symbol": sym,
                 "side": side,
                 "type": "market",
-                "size": contracts.round() as i64,
+                "size": (phys_amount / multiplier.max(1e-12)).round() as i64,
                 "leverage": lev_str,
                 "marginMode": "CROSS",
                 "reduceOnly": false
@@ -89,7 +89,7 @@ impl ExchangeConnector for KucoinConnector {
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, contracts: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool) -> Result<String, String> {
+    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool, multiplier: f64) -> Result<String, String> {
         let sym = format!("{}M", pair);
         let ts = now_ms().to_string(); 
         let path = "/api/v1/orders";
@@ -108,7 +108,7 @@ impl ExchangeConnector for KucoinConnector {
                 "type": "limit",
                 "timeInForce": "IOC",
                 "price": price_str,
-                "size": contracts.round() as i64,
+                "size": if multiplier == 0.0 { phys_amount.round() as i64 } else { (phys_amount / multiplier.max(1e-12)).round() as i64 },
                 "leverage": lev_str,
                 "marginMode": "CROSS",
                 "reduceOnly": true
@@ -119,7 +119,7 @@ impl ExchangeConnector for KucoinConnector {
                 "symbol": sym,
                 "side": side,
                 "type": "market",
-                "size": contracts.round() as i64,
+                "size": if multiplier == 0.0 { phys_amount.round() as i64 } else { (phys_amount / multiplier.max(1e-12)).round() as i64 },
                 "leverage": lev_str,
                 "marginMode": "CROSS",
                 "reduceOnly": true
@@ -214,7 +214,7 @@ impl ExchangeConnector for KucoinConnector {
             }
         }
         
-        Ok((price, final_fee, size))
+        Ok((price, final_fee, size * mult))
     }
 
     async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {

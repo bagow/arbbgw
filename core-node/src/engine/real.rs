@@ -193,10 +193,10 @@ pub fn start_position_sync(
                 let close_is_buy = if remaining_is_a { is_a_higher } else { !is_a_higher };
                 let contracts = if remaining_is_a { trade.contracts_a } else { trade.contracts_b };
                 let mult = e_ctx.multipliers.get(&format!("{}:{}", remaining_ex, trade.pair)).map(|v| *v).unwrap_or(1.0);
-                let q_qty = if remaining_ex == "binance" || remaining_ex == "bybit" { contracts * mult } else { contracts };
-
+                let q_qty = contracts;
+                
                 if let Some(conn) = super::exchanges::get_connector(remaining_ex) {
-                    match conn.close_order(&http, &keys, &trade.pair, close_is_buy, q_qty, false, 10.0, 0.0, false).await {
+                    match conn.close_order(&http, &keys, &trade.pair, close_is_buy, q_qty, false, 10.0, 0.0, false, mult).await {
                         Ok(oid) => {
                             let mut close_fill = 0.0_f64;
                             let mut close_fee = 0.0_f64;
