@@ -308,7 +308,14 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                         }
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                let loaded = e_ctx.multipliers.iter().filter(|e| e.key().starts_with("gate:")).count();
+                if loaded > 0 {
+                    info!("[multipliers] Gate: loaded {} symbols", loaded);
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                } else {
+                    tracing::warn!("[multipliers] Gate: FAILED to load, retrying in 30s");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
             }
         }
     });
@@ -346,7 +353,14 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                         }
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                let loaded = e_ctx.multipliers.iter().filter(|e| e.key().starts_with("kucoin:")).count();
+                if loaded > 0 {
+                    info!("[multipliers] KuCoin: loaded {} symbols", loaded);
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                } else {
+                    tracing::warn!("[multipliers] KuCoin: FAILED to load, retrying in 30s");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
             }
         }
     });
@@ -400,7 +414,13 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                         }
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                let loaded = e_ctx.multipliers.iter().filter(|e| e.key().starts_with("binance:")).count();
+                if loaded > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                } else {
+                    tracing::warn!("[multipliers] Binance: FAILED to load, retrying in 30s");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
             }
         }
     });
@@ -450,7 +470,13 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                         }
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                let loaded = e_ctx.multipliers.iter().filter(|e| e.key().starts_with("bybit:")).count();
+                if loaded > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                } else {
+                    tracing::warn!("[multipliers] Bybit: FAILED to load, retrying in 30s");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
             }
         }
     });
