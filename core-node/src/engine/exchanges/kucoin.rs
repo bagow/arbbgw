@@ -265,7 +265,7 @@ impl ExchangeConnector for KucoinConnector {
         Ok(taker)
     }
 
-    async fn ensure_leverage(&self, http: &Client, keys: &ExchangeKeys, pair: &str, leverage: f64) -> Result<(), String> {
+    async fn ensure_leverage(&self, _http: &Client, _keys: &ExchangeKeys, _pair: &str, _leverage: f64) -> Result<(), String> {
         // KuCoin leverage is set directly in the order payload.
         Ok(())
     }

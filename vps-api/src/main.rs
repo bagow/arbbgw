@@ -3,11 +3,11 @@ mod models;
 mod routes;
 
 use axum::{
-    routing::{delete, get, patch, post},
+    routing::{delete, get, post},
     Router,
 };
 use std::env;
-use std::sync::Arc;
+
 use tokio::net::TcpListener;
 use tokio_rusqlite::Connection;
 use tower_http::cors::CorsLayer;

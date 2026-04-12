@@ -185,7 +185,7 @@ pub async fn handle_get_unified(
     }).await.unwrap_or_else(|_| vec![]);
 
     let pid = query.profile_id.unwrap_or_else(|| "real-default".to_string());
-    let profile_mode = profiles.iter()
+    let _profile_mode = profiles.iter()
         .find(|p| p.id == pid)
         .map(|p| p.mode.clone())
         .unwrap_or_else(|| "real".into());
@@ -392,7 +392,7 @@ pub async fn handle_get_profile(
         None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let (maps_json, _) = state.real_db.call(move |conn| {
+    let (_maps_json, _) = state.real_db.call(move |conn| {
         let mut stmt = conn.prepare("SELECT value FROM server_cache WHERE key='exchange_maps'")?;
         let json_str: String = stmt.query_row([], |row| row.get(0))?;
         Ok::<(String, ()), tokio_rusqlite::Error>((json_str, ()))
@@ -574,7 +574,7 @@ pub async fn handle_delete_profile(
         return json_err(StatusCode::BAD_REQUEST, "Cannot delete default profiles");
     }
 
-    let id2 = id.clone(); let id3 = id.clone();
+    let _id2 = id.clone(); let id3 = id.clone();
     let _ = state.db.call(move |conn| {
         conn.execute("DELETE FROM trading_profiles WHERE id=? AND owner=?", params![id.clone(), username])?;
         Ok(())
@@ -598,7 +598,7 @@ pub async fn handle_clear_trades(
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
     }
 
-    let id2 = id.clone(); let id3 = id.clone();
+    let _id2 = id.clone(); let id3 = id.clone();
     let _ = state.db.call(move |conn| {
         conn.execute("UPDATE trading_profiles SET pending_commands='CLEAR_TRADES' WHERE id=?", params![id])?;
         Ok(())
@@ -621,7 +621,7 @@ pub async fn handle_market_close_all(
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
     }
 
-    let id2 = id.clone();
+    let _id2 = id.clone();
     let r1 = state.real_db.call(move |conn| {
         conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status='OPEN'", params![id])?;
         Ok(())

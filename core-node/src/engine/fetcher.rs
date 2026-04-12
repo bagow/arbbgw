@@ -32,10 +32,10 @@ pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<c
             if !low_exchanges.is_empty() {
                 for ex in &low_exchanges {
                     let fetch_res = match *ex {
-                        "binance" => binance.fetch_balances(&http, &keys).await.map(|(w, a)| w).map_err(|e| e.to_string()),
-                        "gate" => gate.fetch_balances(&http, &keys).await.map(|(w, a)| w).map_err(|e| e.to_string()),
-                        "kucoin" => kucoin.fetch_balances(&http, &keys).await.map(|(w, a)| w).map_err(|e| e.to_string()),
-                        "bybit" => bybit.fetch_balances(&http, &keys).await.map(|(w, a)| w).map_err(|e| e.to_string()),
+                        "binance" => binance.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "gate" => gate.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "kucoin" => kucoin.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "bybit" => bybit.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
                         _ => Err("Unknown exchange".to_string()),
                     };
                     

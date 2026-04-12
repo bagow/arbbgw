@@ -1,5 +1,5 @@
 use tokio_rusqlite::{Connection, params};
-use tracing::{info, error};
+use tracing::info;
 
 use crate::engine::real::Trade;
 use crate::engine::real::now_ms;

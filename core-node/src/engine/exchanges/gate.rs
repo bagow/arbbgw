@@ -116,7 +116,7 @@ impl ExchangeConnector for GateConnector {
             .ok_or_else(|| "Gate failed to return order ID on close".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64, f64), String> {
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, _pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64, f64), String> {
         let path = format!("/api/v4/futures/usdt/orders/{}", order_id);
         let resp = http.get(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, ""))

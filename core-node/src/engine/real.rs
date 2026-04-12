@@ -9,10 +9,10 @@ use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use sha2::Sha256;
 use tokio_rusqlite::Connection;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 
 
@@ -526,4 +526,40 @@ pub async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
         Ok(trades)
     }).await.unwrap_or_default()
 }
+
+/// Asynchronously preemptively initialize leverage for spreads that are nearing their entry criteria.
+/// If a spread is >= 80% to its target, ensure leverage so there is 0ms delay during trade time.
+pub fn warmup_leverages(
+    spreads: &[shared::SpreadRow],
+    profiles: &[shared::TradingSettings],
+    http: Client,
+    keys: Arc<ExchangeKeys>
+) {
+    let mut pairs_to_warm = Vec::new();
+
+    // Find pairs that are close to breaking entry threshold
+    for profile in profiles {
+        if !profile.is_active { continue; }
+        for row in spreads.iter().take(50) {
+            // A heuristic: if spread is at least 80% of config min_entry_spread we warm it up
+            if row.spread >= profile.min_entry_spread * 0.8 {
+                pairs_to_warm.push((row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone(), profile.leverage as f64, profile.margin_mode.clone()));
+            }
+        }
+    }
+
+    if pairs_to_warm.is_empty() { return; }
+
+    tokio::spawn(async move {
+        for (exa, exb, pair, lev, _margin) in pairs_to_warm {
+            if let Some(conn_a) = crate::engine::exchanges::get_connector(&exa) {
+                let _ = conn_a.ensure_leverage(&http, &keys, &pair, lev).await; // Ignore result
+            }
+            if let Some(conn_b) = crate::engine::exchanges::get_connector(&exb) {
+                let _ = conn_b.ensure_leverage(&http, &keys, &pair, lev).await; // Ignore result
+            }
+        }
+    });
+}
+
 

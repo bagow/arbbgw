@@ -1,14 +1,12 @@
 use std::sync::Arc;
 use tokio::time::Duration;
 use reqwest::Client;
-use tracing::{info, warn, error};
-use tokio_rusqlite::{Connection, params};
+use tracing::{info, error};
+use tokio_rusqlite::Connection;
 use crate::engine::db::TradeRepository;
 
 use shared::{TradingSettings, TechnicalSettings, SpreadRow};
-use crate::state::{EngineContext, PriceMap};
-use crate::engine::real::{ExchangeKeys, Trade, load_open_trades, now_ms, now_secs, has_sufficient_margin, binance_sign, mark_balance_low};
-use std::collections::{HashMap, HashSet};
+use crate::engine::real::{ExchangeKeys, now_ms, has_sufficient_margin, mark_balance_low};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 static LAST_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
@@ -37,7 +35,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
     let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)> = Vec::new();
     for trade in &trades {
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
-        let elapsed_ms = now_ms() - trade.entry_time;
+        let _elapsed_ms = now_ms() - trade.entry_time;
 
         let manual_close = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
         if manual_close {
@@ -99,7 +97,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         // Use the accumulated real funding cost from DB (column updated every live-update cycle
         // using real rates fetched from exchange API — NOT from the settings constant).
         let fund_cost = trade.funding_cost;
-        let live_net_pnl = live_gross_pnl - trade.commission_cost - fund_cost;
+        let _live_net_pnl = live_gross_pnl - trade.commission_cost - fund_cost;
 
         // PnL for CLOSE TRIGGERS (using bid/ask — pessimistic, for safe execution)
         let exec_pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) }
@@ -151,7 +149,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             let q_a = if exa == "binance" || exa == "bybit" { c_a * mult_a } else { c_a };
             let q_b = if exb == "binance" || exb == "bybit" { c_b * mult_b } else { c_b };
 
-            let e_ctx_c = Arc::clone(&e_ctx);
+            let _e_ctx_c = Arc::clone(&e_ctx);
             tokio::spawn(async move {
                 let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
@@ -502,7 +500,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         // ── DELTA TRIMMING (Phase 3) ──
         let mut trimming_loss = 0.0;
         let mut trimming_fee = 0.0;
-        let (hc, kc, db_c) = (http.clone(), Arc::clone(&keys), db.clone());
+        let (hc, kc, _db_c) = (http.clone(), Arc::clone(&keys), db.clone());
         let fp = pair.clone();
 
         if delta_a > 1e-12 {
