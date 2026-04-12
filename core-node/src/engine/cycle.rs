@@ -169,8 +169,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                     conn_a.close_order(&h, &k, &pair, is_a_higher, q_a, dry_run, lev as f64, limit_close_a, use_ioc, mult_a),
                     conn_b.close_order(&h, &k, &pair, !is_a_higher, q_b, dry_run, lev as f64, limit_close_b, use_ioc, mult_b)
                 );
-                let oid_close_a = ra.ok();
-                let oid_close_b = rb.ok();
+                let oid_close_a = match &ra { Ok(oid) => Some(oid.clone()), Err(e) => { error!("[real] ❌ Close order A failed: {}", e); None } };
+                let oid_close_b = match &rb { Ok(oid) => Some(oid.clone()), Err(e) => { error!("[real] ❌ Close order B failed: {}", e); None } };
 
                 // ── VERIFY FILLS BEFORE MARKING CLOSED ───────────────────────
                 let mut real_exit_a = 0.0_f64;
@@ -224,8 +224,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                         conn_a2.close_order(&h, &k, &pair, is_a_higher, q_a, false, lev as f64, 0.0, false, mult_a),
                         conn_b2.close_order(&h, &k, &pair, !is_a_higher, q_b, false, lev as f64, 0.0, false, mult_b)
                     );
-                    let oid_fb_a = fa.ok();
-                    let oid_fb_b = fb.ok();
+                    let oid_fb_a = match &fa { Ok(oid) => Some(oid.clone()), Err(e) => { error!("[real] ❌ Fallback close A failed: {}", e); None } };
+                    let oid_fb_b = match &fb { Ok(oid) => Some(oid.clone()), Err(e) => { error!("[real] ❌ Fallback close B failed: {}", e); None } };
                     
                     // Verify fallback fills from exchange - NO WS FALLBACKS
                     let mut fb_exit_a = 0.0;
