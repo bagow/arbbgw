@@ -608,7 +608,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             // Record failed asymmetrical trade into database...
             let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), sig.direction.clone(), sig.spread, settings.id.clone());
             let (ent_a, ent_b) = if a_filled { (fill_a, 0.0) } else { (0.0, fill_b) };
-            let fv_coins = if a_filled { delta_a } else { delta_b };
+            let fv_usd = if a_filled { delta_a * fill_a } else { delta_b * fill_b };
             let gross_pnl = -trimming_loss;
             let net_pnl = gross_pnl - total_fee;
             
@@ -618,7 +618,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             let repo_close = TradeRepository::new(db.clone());
             // slip is 0.0 for cancelled trades, loss comes from gross_pnl / pnl_x
             repo_close.append_asymmetric_close(
-                pair.clone(), ea_s, eb_s, d, fv_coins, ent_a, ent_b, sp, now_ms(), 
+                pair.clone(), ea_s, eb_s, d, fv_usd, ent_a, ent_b, sp, now_ms(), 
                 pnl_a_val, pnl_b_val, pid, total_fee, 0.0, net_pnl, gross_pnl, 0.0, 0.0
             ).await;
             continue;
