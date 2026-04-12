@@ -296,7 +296,19 @@ impl ExchangeConnector for KucoinConnector {
             .header("KC-API-KEY-VERSION", "2")
             .timeout(Duration::from_secs(10))
             .send().await.map_err(|e| e.to_string())?;
+            
+        if !resp.status().is_success() {
+            let err_txt = resp.text().await.unwrap_or_default();
+            return Err(format!("Kucoin position API error: {}", err_txt));
+        }
+            
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        
+        let code = v["code"].as_str().unwrap_or("");
+        if code != "200000" {
+            return Err(format!("Kucoin API returned error: {}", v));
+        }
+        
         let mut positions = Vec::new();
         if let Some(arr) = v["data"].as_array() {
             for p in arr {

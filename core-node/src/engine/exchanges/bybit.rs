@@ -320,7 +320,18 @@ impl ExchangeConnector for BybitConnector {
             .header("X-BAPI-RECV-WINDOW", recv)
             .timeout(Duration::from_secs(10))
             .send().await.map_err(|e| e.to_string())?;
+            
+        if !resp.status().is_success() {
+            let err_txt = resp.text().await.unwrap_or_default();
+            return Err(format!("Bybit position API error: {}", err_txt));
+        }
+            
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        
+        if v["retCode"].as_i64().unwrap_or(-1) != 0 {
+            return Err(format!("Bybit API returned error: {}", v));
+        }
+        
         let mut positions = Vec::new();
         if let Some(arr) = v["result"]["list"].as_array() {
             for p in arr {

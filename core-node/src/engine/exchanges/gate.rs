@@ -225,6 +225,12 @@ impl ExchangeConnector for GateConnector {
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, ""))
             .timeout(std::time::Duration::from_secs(10))
             .send().await.map_err(|e| e.to_string())?;
+            
+        if !resp.status().is_success() {
+            let err_txt = resp.text().await.unwrap_or_default();
+            return Err(format!("Gate position API error: {}", err_txt));
+        }
+            
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         let mut positions = Vec::new();
         if let Some(arr) = v.as_array() {

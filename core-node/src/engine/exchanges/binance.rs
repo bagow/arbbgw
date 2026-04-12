@@ -241,6 +241,12 @@ impl ExchangeConnector for BinanceConnector {
         let url = format!("https://fapi.binance.com/fapi/v2/positionRisk?{}&signature={}", qs, sig);
         let resp = http.get(&url).header("X-MBX-APIKEY", &keys.binance_key)
             .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+            
+        if !resp.status().is_success() {
+            let err_txt = resp.text().await.unwrap_or_default();
+            return Err(format!("Binance position API error: {}", err_txt));
+        }
+            
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         let mut positions = Vec::new();
         if let Some(arr) = v.as_array() {
