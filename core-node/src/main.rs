@@ -87,14 +87,6 @@ async fn main() -> Result<()> {
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::binance::run(p, s).await }); }
     { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::bybit::run(p, s).await }); }
 
-    // ── EMA Warmup: pre-seed structural spread norms from 24h candle history ──
-    {
-        let http_w  = http.clone();
-        let prices_w = prices.clone();
-        let ts_warmup = tech_settings_cache.read().await.clone();
-        tokio::spawn(async move { ema_warmup::run(http_w, prices_w, ts_warmup).await });
-    }
-
     // ── Trade DBs ────────────────────────────────────────────────────────────
     let real_db = Connection::open(&real_db_path).await
         .context(format!("Cannot open real-trader DB: {}", real_db_path))?;
@@ -135,6 +127,15 @@ async fn main() -> Result<()> {
     settings::spawn_technical_settings_refresher(profiles_db.clone(), tech_settings_cache.clone(), 10);
     info!("Technical settings loaded: tau={}s",
         tech_settings_cache.read().await.ema_tau_secs);
+
+    // ── EMA Warmup: pre-seed structural spread norms from 24h candle history ──
+    // Must be after tech_settings_cache init so we can pass real tau/settings.
+    {
+        let http_w  = http.clone();
+        let prices_w = prices.clone();
+        let ts_warmup = tech_settings_cache.read().await.clone();
+        tokio::spawn(async move { ema_warmup::run(http_w, prices_w, ts_warmup).await });
+    }
 
     // ── Exchange keys — loaded once at startup ───────────────────────────────
     let exchange_keys = Arc::new(engine::real::ExchangeKeys::from_env());
