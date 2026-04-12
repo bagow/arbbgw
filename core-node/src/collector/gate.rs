@@ -32,6 +32,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
         if let Some(name) = c["name"].as_str() {
             if c["in_delisting"].as_bool().unwrap_or(false) { continue; }
             symbols.push(name.to_string());
+            
+            let sym = name.replace('_', "");
+            if sym.ends_with("USDT") {
+                price_map.entry("gate".to_string()).or_default().entry(sym).or_default();
+            }
         }
     }
     info!("[gate] Fetched {} symbols from REST", symbols.len());
