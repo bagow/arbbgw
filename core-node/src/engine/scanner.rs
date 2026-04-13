@@ -214,8 +214,21 @@ pub fn generate_signals(
                 let lpa = if is_a_higher { entry_a * (1.0 - active_slip_frac) } else { entry_a * (1.0 + active_slip_frac) };
                 let lpb = if is_a_higher { entry_b * (1.0 + active_slip_frac) } else { entry_b * (1.0 - active_slip_frac) };
                 
-                let lpa_rounded = (lpa / tick_a).round() * tick_a;
-                let lpb_rounded = (lpb / tick_b).round() * tick_b;
+                // FATAL BUG FIX: We MUST round towards a more aggressive execution price.
+                // If we use standard .round(), a 0.05% slippage on a tight tick size gets completely rounded away to 0%.
+                // A limit order with 0% slippage allowance expires instantly on IOC due to 1-tick market fluctuations.
+                let lpa_rounded = if is_a_higher {
+                    (lpa / tick_a).floor() * tick_a // Sell -> price must round DOWN to preserve downward slippage allowance
+                } else {
+                    (lpa / tick_a).ceil() * tick_a  // Buy -> price must round UP to preserve upward slippage allowance
+                };
+
+                let lpb_rounded = if is_a_higher {
+                    (lpb / tick_b).ceil() * tick_b  // Buy -> price must round UP
+                } else {
+                    (lpb / tick_b).floor() * tick_b // Sell -> price must round DOWN
+                };
+
                 (lpa_rounded, lpb_rounded)
             } else {
                 (0.0, 0.0)
