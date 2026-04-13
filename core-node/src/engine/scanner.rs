@@ -228,9 +228,10 @@ pub fn generate_signals(
             // ABSOLUTE SANITY CHECK: 
             // In cases of WebSocket flash crashes (where entry_a flashes to 0.1 instead of 1.0)
             // the engine could miscalculate a 10x target_phys. This block explicitly prevents it.
-            // Enforcing a strict 20% (1.2x) absolute limit above the requested trade volume.
-            if actual_vol_a > profile.trade_volume * 1.2 || actual_vol_b > profile.trade_volume * 1.2 {
-                tracing::error!("[scanner] ❌ VOLUME BLOCK: Vol A ${:.2} Vol B ${:.2} exceeds Profile Vol ${:.2} by >20%. Skipping due to market data glitch.", actual_vol_a, actual_vol_b, profile.trade_volume);
+            // Enforcing a strict limit above the requested trade volume using `vol_tolerance_pct`.
+            let max_vol = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
+            if actual_vol_a > max_vol || actual_vol_b > max_vol {
+                tracing::error!("[scanner] ❌ VOLUME BLOCK: Vol A ${:.2} Vol B ${:.2} exceeds Profile Vol ${:.2} by >{}%. Skipping due to market data anomaly.", actual_vol_a, actual_vol_b, profile.trade_volume, ts.vol_tolerance_pct);
                 continue;
             }
 
