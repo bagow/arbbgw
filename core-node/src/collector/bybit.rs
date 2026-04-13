@@ -72,14 +72,30 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                     let d = &v["data"];
                     let sym = d["symbol"].as_str().unwrap_or("").to_string();
                     if sym.is_empty() || !sym.ends_with("USDT") { continue; }
-                    let bid: f64 = d["bid1Price"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let ask: f64 = d["ask1Price"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let bid_qty: f64 = d["bid1Size"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let ask_qty: f64 = d["ask1Size"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let price: f64 = d["lastPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or((bid+ask)/2.0);
-                    let ev = price_map.get("bybit").and_then(|m| m.get(&sym).map(|d| d.vol)).unwrap_or(0.0);
-                    if bid > 0.0 && ask > 0.0 {
-                        upsert(price_map, signal, sym, TickerData { bid, ask, price, vol: ev, funding_rate: 0.0, bid_size: bid_qty * price, ask_size: ask_qty * price, last_updated: 0 });
+                    let mut prev = price_map.get("bybit").and_then(|m| m.get(&sym).cloned()).unwrap_or_else(|| TickerData {
+                        bid: 0.0, ask: 0.0, price: 0.0, vol: 0.0, funding_rate: 0.0, bid_size: 0.0, ask_size: 0.0, last_updated: 0
+                    });
+
+                    if let Some(s) = d["bid1Price"].as_str() { if let Ok(val) = s.parse() { prev.bid = val; } }
+                    if let Some(s) = d["ask1Price"].as_str() { if let Ok(val) = s.parse() { prev.ask = val; } }
+                    if let Some(s) = d["lastPrice"].as_str() { if let Ok(val) = s.parse() { prev.price = val; } }
+                    
+                    let mut prev_bid_qty = if prev.price > 0.0 { prev.bid_size / prev.price } else { 0.0 };
+                    let mut prev_ask_qty = if prev.price > 0.0 { prev.ask_size / prev.price } else { 0.0 };
+                    
+                    if let Some(s) = d["bid1Size"].as_str() { if let Ok(val) = s.parse() { prev_bid_qty = val; } }
+                    if let Some(s) = d["ask1Size"].as_str() { if let Ok(val) = s.parse() { prev_ask_qty = val; } }
+                    
+                    if prev.price <= 0.0 && prev.bid > 0.0 && prev.ask > 0.0 {
+                        prev.price = (prev.bid + prev.ask) / 2.0;
+                    }
+
+                    prev.bid_size = prev_bid_qty * prev.price;
+                    prev.ask_size = prev_ask_qty * prev.price;
+                    prev.vol = price_map.get("bybit").and_then(|m| m.get(&sym).map(|x| x.vol)).unwrap_or(0.0);
+                    
+                    if prev.bid > 0.0 && prev.ask > 0.0 {
+                        upsert(price_map, signal, sym, prev);
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,

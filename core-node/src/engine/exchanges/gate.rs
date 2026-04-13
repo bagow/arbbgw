@@ -179,7 +179,7 @@ impl ExchangeConnector for GateConnector {
 
     async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, _fallback_price: f64) -> Result<CloseReceipt, String> {
         // Just call close_position utilizing Gate's default logic (where price=0 -> deep limit fallback)
-        self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, true, 0.0, multiplier, tick_size, 5, 20).await
+        self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, true, 0.0, multiplier, tick_size, 15, 100).await
     }
 
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
