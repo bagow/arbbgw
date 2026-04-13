@@ -80,15 +80,16 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                     if let Some(s) = d["ask1Price"].as_str() { if let Ok(val) = s.parse() { prev.ask = val; } }
                     if let Some(s) = d["lastPrice"].as_str() { if let Ok(val) = s.parse() { prev.price = val; } }
                     
+                    // CRITICAL: Initialize price BEFORE restoring quantities to avoid division by zero which erases WS volume history
+                    if prev.price <= 0.0 && prev.bid > 0.0 && prev.ask > 0.0 {
+                        prev.price = (prev.bid + prev.ask) / 2.0;
+                    }
+
                     let mut prev_bid_qty = if prev.price > 0.0 { prev.bid_size / prev.price } else { 0.0 };
                     let mut prev_ask_qty = if prev.price > 0.0 { prev.ask_size / prev.price } else { 0.0 };
                     
                     if let Some(s) = d["bid1Size"].as_str() { if let Ok(val) = s.parse() { prev_bid_qty = val; } }
                     if let Some(s) = d["ask1Size"].as_str() { if let Ok(val) = s.parse() { prev_ask_qty = val; } }
-                    
-                    if prev.price <= 0.0 && prev.bid > 0.0 && prev.ask > 0.0 {
-                        prev.price = (prev.bid + prev.ask) / 2.0;
-                    }
 
                     prev.bid_size = prev_bid_qty * prev.price;
                     prev.ask_size = prev_ask_qty * prev.price;
