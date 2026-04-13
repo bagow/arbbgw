@@ -411,7 +411,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             error!("[real] ❌ ENTRY FILL UNVERIFIED for {} leg A after {} retries — treating as UNFILLED", pair, ts.fill_verify_retries);
             tokio::spawn({
                 let hc = http.clone(); let kc = keys.clone(); let p = pair.clone(); let ex = exa.clone(); let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
-                let is_buy = !is_a_higher; let fallback = if is_buy { sig.bid_a } else { sig.ask_a };
+                let is_buy = !is_a_higher; let fallback = sig.entry_a;
                 async move {
                     error!("[real] 🚨 GHOST PREVENTION: Blind trimming {} on {} to drop unverified orphaned position", p, ex);
                     let _ = conn.trim_position(&hc, &kc, &p, !is_buy, qty_a, dry_run, mult_a, tick_a, fallback).await;
@@ -422,7 +422,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             error!("[real] ❌ ENTRY FILL UNVERIFIED for {} leg B after {} retries — treating as UNFILLED", pair, ts.fill_verify_retries);
             tokio::spawn({
                 let hc = http.clone(); let kc = keys.clone(); let p = pair.clone(); let ex = exb.clone(); let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
-                let is_buy = is_a_higher; let fallback = if is_buy { sig.bid_b } else { sig.ask_b };
+                let is_buy = is_a_higher; let fallback = sig.entry_b;
                 async move {
                     error!("[real] 🚨 GHOST PREVENTION: Blind trimming {} on {} to drop unverified orphaned position", p, ex);
                     let _ = conn.trim_position(&hc, &kc, &p, !is_buy, qty_b, dry_run, mult_b, tick_b, fallback).await;
