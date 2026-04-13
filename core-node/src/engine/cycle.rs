@@ -171,8 +171,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
                 // Place close orders in parallel (Connectors handle limit projection, retries & fallback native)
                 let (ra, rb) = tokio::join!(
-                    conn_a.close_position(&h, &k, &pair, is_a_higher, q_a, dry_run, lev as f64, exit_price_a, use_ioc, settings.slippage_percent, mult_a, tick_a, close_verify_retries, close_verify_delay),
-                    conn_b.close_position(&h, &k, &pair, !is_a_higher, q_b, dry_run, lev as f64, exit_price_b, use_ioc, settings.slippage_percent, mult_b, tick_b, close_verify_retries, close_verify_delay)
+                    conn_a.close_position(&h, &k, &pair, is_a_higher, q_a, dry_run, lev as f64, exit_price_a, use_ioc, settings.slippage_percent, mult_a, tick_a, close_verify_retries as u32, close_verify_delay),
+                    conn_b.close_position(&h, &k, &pair, !is_a_higher, q_b, dry_run, lev as f64, exit_price_b, use_ioc, settings.slippage_percent, mult_b, tick_b, close_verify_retries as u32, close_verify_delay)
                 );
 
                 let mut real_exit_a = 0.0;

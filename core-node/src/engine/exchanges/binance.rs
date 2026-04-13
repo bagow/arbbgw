@@ -29,7 +29,7 @@ impl ExchangeConnector for BinanceConnector {
         "binance"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, _leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run {
             return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), target_price, 0.0));
@@ -151,7 +151,7 @@ impl ExchangeConnector for BinanceConnector {
         }
     }
 
-    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, fallback_price: f64) -> Result<CloseReceipt, String> {
+    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, _tick_size: f64, _fallback_price: f64) -> Result<CloseReceipt, String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run { return Ok(CloseReceipt { final_price: fallback_price, total_fee: 0.0, closed_volume: phys_excess }); }
         

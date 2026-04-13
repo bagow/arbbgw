@@ -194,18 +194,13 @@ pub fn start_position_sync(
                 let contracts = if remaining_is_a { trade.contracts_a } else { trade.contracts_b };
                 let mult = e_ctx.multipliers.get(&format!("{}:{}", remaining_ex, trade.pair)).map(|v| *v).unwrap_or(1.0);
                 let q_qty = contracts;
+                let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", remaining_ex, trade.pair)).map(|v| *v).unwrap_or(0.000001);
                 
                 if let Some(conn) = super::exchanges::get_connector(remaining_ex) {
-                    match conn.close_order(&http, &keys, &trade.pair, close_is_buy, q_qty, false, 10.0, 0.0, false, mult).await {
-                        Ok(oid) => {
-                            let mut close_fill = 0.0_f64;
-                            let mut close_fee = 0.0_f64;
-                            for _ in 0..5 {
-                                if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = conn.fetch_order(&http, &keys, &trade.pair, &oid, mult).await {
-                                    if p > 0.0 { close_fill = p; close_fee = if f > 1e-9 { f.abs() } else { 0.0 }; break; }
-                                }
-                                tokio::time::sleep(Duration::from_millis(25)).await;
-                            }
+                    match conn.close_position(&http, &keys, &trade.pair, close_is_buy, q_qty, false, 10.0, 0.0, false, 0.0, mult, tick_for_close, 5, 25).await {
+                        Ok(rc) => {
+                            let close_fill = rc.final_price;
+                            let close_fee = rc.total_fee;
                             error!("[pos_sync] Emergency close done id={} {} on {} fill={:.6} fee={:.4}",
                                 trade.id, trade.pair, remaining_ex, close_fill, close_fee);
                             let id = trade.id;

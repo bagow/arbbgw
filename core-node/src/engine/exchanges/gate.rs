@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::engine::real::{ExchangeKeys, gate_sign, now_ms};
+use crate::engine::real::{ExchangeKeys, gate_sign};
 use super::traits::{ExchangeConnector, CloseReceipt, PositionInfo};
 
 pub struct GateConnector;
@@ -30,7 +30,7 @@ impl ExchangeConnector for GateConnector {
         "gate"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, _leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if is_buy { (phys_amount / multiplier.max(1e-12)).round() as i64 } else { -((phys_amount / multiplier.max(1e-12)).round() as i64) };
         let path = "/api/v4/futures/usdt/orders";
@@ -77,7 +77,7 @@ impl ExchangeConnector for GateConnector {
         }
     }
 
-    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
+    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, _leverage: f64, target_price: f64, _use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if multiplier == 0.0 {
             if is_buy { phys_amount.round() as i64 } else { -(phys_amount.round() as i64) }
@@ -165,7 +165,7 @@ impl ExchangeConnector for GateConnector {
         }
     }
 
-    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, fallback_price: f64) -> Result<CloseReceipt, String> {
+    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, _fallback_price: f64) -> Result<CloseReceipt, String> {
         // Just call close_position utilizing Gate's default logic (where price=0 -> deep limit fallback)
         self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, true, 0.0, multiplier, tick_size, 5, 20).await
     }
