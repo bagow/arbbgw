@@ -149,8 +149,8 @@ pub fn generate_signals(
                 let min_depth_usd = profile.trade_volume * (profile.min_depth_percent / 100.0);
                 
                 // If A is higher, we SELL A (hit bid) and BUY B (hit ask).
-                let depth_a_usd = if is_a_higher { data_a.bid_size } else { data_a.ask_size };
-                let depth_b_usd = if is_a_higher { data_b.ask_size } else { data_b.bid_size };
+                let depth_a_usd = if is_a_higher { data_a.as_ref().unwrap().bid_size } else { data_a.as_ref().unwrap().ask_size };
+                let depth_b_usd = if is_a_higher { data_b.as_ref().unwrap().ask_size } else { data_b.as_ref().unwrap().bid_size };
                 
                 if depth_a_usd < min_depth_usd || depth_b_usd < min_depth_usd {
                     if let Some(p) = &diag_prefix { 

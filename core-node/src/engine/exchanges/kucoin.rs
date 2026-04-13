@@ -1,7 +1,5 @@
-
 use reqwest::Client;
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
 use serde_json::json;
@@ -9,7 +7,6 @@ use uuid::Uuid;
 
 use crate::engine::real::{ExchangeKeys, now_ms, kucoin_sign};
 use super::traits::ExchangeConnector;
-use crate::state::EngineContext;
 
 pub struct KucoinConnector;
 
@@ -31,7 +28,7 @@ impl ExchangeConnector for KucoinConnector {
         if price_str.ends_with('.') { price_str.pop(); }
         if price_str.is_empty() { price_str = "0".to_string(); }
 
-        let mut body_json = if use_ioc && price > 0.0 {
+        let body_json = if use_ioc && price > 0.0 {
             json!({
                 "clientOid": Uuid::new_v4().to_string(),
                 "symbol": sym,
@@ -74,7 +71,6 @@ impl ExchangeConnector for KucoinConnector {
             .timeout(Duration::from_secs(10))
             .send().await.map_err(|e| e.to_string())?;
 
-        let status = resp.status();
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         
         if v["code"].as_str() != Some("200000") {
@@ -153,7 +149,7 @@ impl ExchangeConnector for KucoinConnector {
             .ok_or_else(|| "KuCoin failed to return orderId on close".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, _pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
         let ts = now_ms().to_string();
         let path = format!("/api/v1/orders/{}", order_id);
         let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", &path, "");

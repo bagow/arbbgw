@@ -76,6 +76,7 @@ pub struct TradingProfile {
     pub leverage: i64,
     pub margin_mode: String,
     pub min_structural_deviation: f64,
+    pub min_depth_percent: f64,
 }
 
 impl Default for TradingProfile {
@@ -104,6 +105,7 @@ impl Default for TradingProfile {
             leverage: 10,
             margin_mode: "cross".to_string(),
             min_structural_deviation: 0.0,
+            min_depth_percent: 100.0,
         }
     }
 }
