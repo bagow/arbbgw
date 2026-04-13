@@ -103,8 +103,9 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
                         (premium_1_over_2, premium_2_over_1, premium_1_over_2, premium_1_over_2, premium_2_over_1, premium_2_over_1, cross_12, cross_21)
                     };
 
-                // Map values depending on trade direction
-                let is_dir_1_over_2 = if is_a_first { direction == format!("{name_a}>{name_b}") } else { direction == format!("{name_b}>{name_a}") };
+                // Map values depending on trade direction.
+                // name_a is ALWAYS 1 (alphabetically first). name_b is ALWAYS 2 (alphabetically second).
+                let is_dir_1_over_2 = direction == format!("{name_a}>{name_b}");
                 
                 let (ema_mid_spread, current_mid_spread, structural_max, structural_min, last_cross) = if is_dir_1_over_2 {
                     (ema_12, premium_1_over_2, max_12, min_12, cross_12)
