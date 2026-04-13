@@ -225,7 +225,8 @@ impl ExchangeConnector for BybitConnector {
         let qs = format!("category=linear&orderId={}", order_id);
         let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
         
-        let resp = http.get(format!("https://api.bybit.com/v5/order/realtime?{}", qs))
+        // Changed to /history to see filled/cancelled IOC orders
+        let resp = http.get(format!("https://api.bybit.com/v5/order/history?{}", qs))
             .header("X-BAPI-API-KEY", &keys.bybit_key)
             .header("X-BAPI-SIGN", &sig)
             .header("X-BAPI-TIMESTAMP", &ts)
