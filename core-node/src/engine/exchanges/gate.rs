@@ -77,7 +77,7 @@ impl ExchangeConnector for GateConnector {
         }
     }
 
-    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, _leverage: f64, target_price: f64, _use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
+    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, _use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if multiplier == 0.0 {
             if is_buy { phys_amount.round() as i64 } else { -(phys_amount.round() as i64) }

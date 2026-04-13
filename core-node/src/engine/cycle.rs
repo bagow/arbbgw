@@ -146,19 +146,10 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             let close_verify_retries = ts.close_verify_retries;
 
             let use_ioc = ts.entry_order_type == "ioc" && !manual_close;
-            let max_slip_frac = settings.slippage_percent / 100.0;
             let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
             let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
             let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
             let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
-
-            let (limit_close_a, limit_close_b) = if use_ioc {
-                let lpa = if is_a_higher { exit_price_a * (1.0 + max_slip_frac) } else { exit_price_a * (1.0 - max_slip_frac) };
-                let lpb = if !is_a_higher { exit_price_b * (1.0 + max_slip_frac) } else { exit_price_b * (1.0 - max_slip_frac) };
-                ((lpa / tick_a).round() * tick_a, (lpb / tick_b).round() * tick_b)
-            } else {
-                (0.0, 0.0)
-            };
 
             let q_a = c_a as f64 * mult_a;
             let q_b = c_b as f64 * mult_b;
