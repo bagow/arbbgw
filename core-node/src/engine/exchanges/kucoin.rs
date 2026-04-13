@@ -25,7 +25,11 @@ impl ExchangeConnector for KucoinConnector {
         let lev_str = (leverage.max(1.0) as i64).to_string();
 
         let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
-        let rounded_price = (price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+        let rounded_price = if is_buy {
+            (price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+        } else {
+            (price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+        };
 
         let mut price_str = format!("{:.8}", rounded_price).trim_end_matches('0').to_string();
         if price_str.ends_with('.') { price_str.pop(); }
@@ -96,7 +100,11 @@ impl ExchangeConnector for KucoinConnector {
         let lev_str = (leverage.max(1.0) as i64).to_string();
         
         let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
-        let rounded_price = (price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+        let rounded_price = if is_buy {
+            (price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+        } else {
+            (price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+        };
         
         let mut price_str = format!("{:.8}", rounded_price).trim_end_matches('0').to_string();
         if price_str.ends_with('.') { price_str.pop(); }

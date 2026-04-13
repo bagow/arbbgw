@@ -36,7 +36,11 @@ impl ExchangeConnector for GateConnector {
         let path = "/api/v4/futures/usdt/orders";
         
         let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
-        let rounded_price = (price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+        let rounded_price = if is_buy {
+            (price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+        } else {
+            (price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+        };
 
         let mut raw_price_str = format!("{:.8}", rounded_price).trim_end_matches('0').to_string();
         if raw_price_str.ends_with('.') { raw_price_str.pop(); }
@@ -92,7 +96,11 @@ impl ExchangeConnector for GateConnector {
         let mut final_price = target_price;
         if final_price > 0.0 {
             final_price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
-            final_price = (final_price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+            final_price = if is_buy {
+                (final_price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+            } else {
+                (final_price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+            };
         } else {
             let ticker_url = format!("https://api.gateio.ws/api/v4/futures/usdt/tickers?contract={}", contract);
             if let Ok(resp) = http.get(&ticker_url).send().await {
@@ -101,7 +109,11 @@ impl ExchangeConnector for GateConnector {
                         let mark: f64 = t["mark_price"].as_str().unwrap_or("0").parse().unwrap_or(0.0);
                         if mark > 0.0 {
                             final_price = if is_buy { mark * 1.05 } else { mark * 0.95 };
-                            final_price = (final_price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+                            final_price = if is_buy {
+                                (final_price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+                            } else {
+                                (final_price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+                            };
                         }
                     }
                 }

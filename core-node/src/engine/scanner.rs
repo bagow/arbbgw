@@ -222,28 +222,9 @@ pub fn generate_signals(
 
             let use_ioc = ts.entry_order_type == "ioc";
             let (limit_price_a, limit_price_b) = if use_ioc {
-                // Remove dynamic choke. Use the exact slippage percent specified by the user.
-                let active_slip_frac = profile.slippage_percent / 100.0;
-
-                let lpa = if is_a_higher { entry_a * (1.0 - active_slip_frac) } else { entry_a * (1.0 + active_slip_frac) };
-                let lpb = if is_a_higher { entry_b * (1.0 + active_slip_frac) } else { entry_b * (1.0 - active_slip_frac) };
-                
-                // FATAL BUG FIX: We MUST round towards a more aggressive execution price.
-                // If we use standard .round(), a 0.05% slippage on a tight tick size gets completely rounded away to 0%.
-                // A limit order with 0% slippage allowance expires instantly on IOC due to 1-tick market fluctuations.
-                let lpa_rounded = if is_a_higher {
-                    (lpa / tick_a).floor() * tick_a // Sell -> price must round DOWN to preserve downward slippage allowance
-                } else {
-                    (lpa / tick_a).ceil() * tick_a  // Buy -> price must round UP to preserve upward slippage allowance
-                };
-
-                let lpb_rounded = if is_a_higher {
-                    (lpb / tick_b).ceil() * tick_b  // Buy -> price must round UP
-                } else {
-                    (lpb / tick_b).floor() * tick_b // Sell -> price must round DOWN
-                };
-
-                (lpa_rounded, lpb_rounded)
+                // Pass raw entry prices to the engine. Slippage and rounding are now handled cleanly
+                // and once by the exchange-specific connectors (place_order).
+                (entry_a, entry_b)
             } else {
                 (0.0, 0.0)
             };
