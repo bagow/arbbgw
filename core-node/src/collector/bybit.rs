@@ -57,7 +57,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     info!("[bybit] Connected, subscribing...");
 
     for chunk in symbols.chunks(10) {
-        let args: Vec<String> = chunk.iter().map(|s| format!("tickers.{}", s)).collect();
+        let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.1.{}", s)).collect();
         ws.send(Message::Text(json!({"op":"subscribe","args":args}).to_string().into())).await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
@@ -68,31 +68,42 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             msg = ws.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-                    if v["topic"].as_str().map(|t| !t.starts_with("tickers.")).unwrap_or(true) { continue; }
+                    if v["topic"].as_str().map(|t| !t.starts_with("orderbook.1.")).unwrap_or(true) { continue; }
                     let d = &v["data"];
-                    let sym = d["symbol"].as_str().unwrap_or("").to_string();
+                    
+                    // The symbol comes from the `s` field in orderbook data
+                    let sym = d["s"].as_str().unwrap_or("").to_string();
                     if sym.is_empty() || !sym.ends_with("USDT") { continue; }
+                    
                     let mut prev = price_map.get("bybit").and_then(|m| m.get(&sym).cloned()).unwrap_or_else(|| TickerData {
                         bid: 0.0, ask: 0.0, price: 0.0, vol: 0.0, funding_rate: 0.0, bid_size: 0.0, ask_size: 0.0, last_updated: 0
                     });
 
-                    if let Some(s) = d["bid1Price"].as_str() { if let Ok(val) = s.parse() { prev.bid = val; } }
-                    if let Some(s) = d["ask1Price"].as_str() { if let Ok(val) = s.parse() { prev.ask = val; } }
-                    if let Some(s) = d["lastPrice"].as_str() { if let Ok(val) = s.parse() { prev.price = val; } }
-                    
-                    // CRITICAL: Initialize price BEFORE restoring quantities to avoid division by zero which erases WS volume history
-                    if prev.price <= 0.0 && prev.bid > 0.0 && prev.ask > 0.0 {
-                        prev.price = (prev.bid + prev.ask) / 2.0;
+                    // Parse Best Bid from snapshot
+                    if let Some(b_arr_list) = d["b"].as_array() {
+                        if let Some(b_arr) = b_arr_list.first().and_then(|f| f.as_array()) {
+                            if let Some(p) = b_arr.get(0).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
+                                let qty = b_arr.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                                prev.bid = p;
+                                prev.bid_size = qty * p; // Convert physical coins to USD equivalent
+                            }
+                        }
                     }
 
-                    let mut prev_bid_qty = if prev.price > 0.0 { prev.bid_size / prev.price } else { 0.0 };
-                    let mut prev_ask_qty = if prev.price > 0.0 { prev.ask_size / prev.price } else { 0.0 };
-                    
-                    if let Some(s) = d["bid1Size"].as_str() { if let Ok(val) = s.parse() { prev_bid_qty = val; } }
-                    if let Some(s) = d["ask1Size"].as_str() { if let Ok(val) = s.parse() { prev_ask_qty = val; } }
+                    // Parse Best Ask from snapshot
+                    if let Some(a_arr_list) = d["a"].as_array() {
+                        if let Some(a_arr) = a_arr_list.first().and_then(|f| f.as_array()) {
+                            if let Some(p) = a_arr.get(0).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
+                                let qty = a_arr.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                                prev.ask = p;
+                                prev.ask_size = qty * p;
+                            }
+                        }
+                    }
 
-                    prev.bid_size = prev_bid_qty * prev.price;
-                    prev.ask_size = prev_ask_qty * prev.price;
+                    if prev.bid > 0.0 && prev.ask > 0.0 {
+                        prev.price = (prev.bid + prev.ask) / 2.0;
+                    }
                     prev.vol = price_map.get("bybit").and_then(|m| m.get(&sym).map(|x| x.vol)).unwrap_or(0.0);
                     
                     if prev.bid > 0.0 && prev.ask > 0.0 {
