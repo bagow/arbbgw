@@ -436,16 +436,13 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             continue; 
         }
 
-        // Leverage: pre-warmed so this returns instantly
+        // Leverage is pre-warmed asynchronously via `real.rs:warmup_leverages`.
+        // DO NOT call ensure_leverage here, it introduces 2+ seconds of latency!
+
         let (conn_ensure_a, conn_ensure_b) = (
             crate::engine::exchanges::get_connector(&exa).unwrap(),
             crate::engine::exchanges::get_connector(&exb).unwrap()
         );
-        tokio::join!(
-            conn_ensure_a.ensure_leverage(&http, &keys, &pair, settings.leverage as f64),
-            conn_ensure_b.ensure_leverage(&http, &keys, &pair, settings.leverage as f64)
-        );
-
         let t0 = std::time::Instant::now();
         let use_ioc = ts.entry_order_type == "ioc";
         let order_type_label = if use_ioc { "IOC" } else { "MKT" };
