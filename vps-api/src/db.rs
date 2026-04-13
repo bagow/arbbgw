@@ -41,7 +41,8 @@ pub async fn init_db(db: &Connection) -> Result<()> {
                 owner TEXT,
                 created_at INTEGER,
                 updated_at INTEGER,
-                disabled_exchanges TEXT DEFAULT '[]'
+                disabled_exchanges TEXT DEFAULT '[]',
+                min_depth_percent REAL DEFAULT 100.0
             );
             ",
         )?;
@@ -52,6 +53,7 @@ pub async fn init_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN leverage INTEGER DEFAULT 10", []);
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN margin_mode TEXT DEFAULT 'cross'", []);
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN min_structural_deviation REAL DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN min_depth_percent REAL DEFAULT 100.0", []);
 
         // ── Technical settings table (global engine params) ──
         conn.execute_batch("
@@ -182,8 +184,8 @@ pub async fn init_db(db: &Connection) -> Result<()> {
                 (id,name,mode,is_active,min_entry_spread,max_entry_spread,
                  trade_volume,take_profit_percent,trailing_stop_percent,max_active_trades,
                  commission_rate,slippage_percent,funding_rate_8h,min_volume_millions,
-                 collector_interval_secs,created_at,updated_at,disabled_exchanges)
-            VALUES ('real-default','Real Trading','real',0,1.0,10.0,100.0,0.2,0.3,3,0.05,0.05,0.01,10.0,5,?,?,'[]')",
+                 collector_interval_secs,created_at,updated_at,disabled_exchanges,min_depth_percent)
+            VALUES ('real-default','Real Trading','real',0,1.0,10.0,100.0,0.2,0.3,3,0.05,0.05,0.01,10.0,5,?,?,'[]',100.0)",
             params![now, now],
         )?;
         Ok(())
@@ -282,6 +284,7 @@ pub fn row_to_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradingProfil
         leverage: row.get::<_, Option<i64>>(20).unwrap_or(Some(10)).unwrap_or(10),
         margin_mode: row.get::<_, Option<String>>(21).unwrap_or(Some("cross".into())).unwrap_or_else(|| "cross".into()),
         min_structural_deviation: row.get::<_, Option<f64>>(22).unwrap_or(Some(0.0)).unwrap_or(0.0),
+        min_depth_percent: row.get::<_, Option<f64>>(23).unwrap_or(Some(100.0)).unwrap_or(100.0),
     })
 }
 

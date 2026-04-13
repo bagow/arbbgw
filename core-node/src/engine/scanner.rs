@@ -143,9 +143,23 @@ pub fn generate_signals(
             let slippage_frac = profile.slippage_percent / 100.0;
             let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
 
-            // NOTE: depth filter removed — IOC orders with slippage tolerance
-            // naturally reject fills beyond the price band, making pre-entry
-            // depth checks redundant. Delta trimming handles partial fills.
+            // ── L1 DEPTH FILTER (Zero-Latency Fake Liquidity Protection) ──
+            // Uses exact websocket Bid/Ask volume received in the same tick as the price.
+            if profile.min_depth_percent > 0.0 {
+                let min_depth_usd = profile.trade_volume * (profile.min_depth_percent / 100.0);
+                
+                // If A is higher, we SELL A (hit bid) and BUY B (hit ask).
+                let depth_a_usd = if is_a_higher { data_a.bid_size } else { data_a.ask_size };
+                let depth_b_usd = if is_a_higher { data_b.ask_size } else { data_b.bid_size };
+                
+                if depth_a_usd < min_depth_usd || depth_b_usd < min_depth_usd {
+                    if let Some(p) = &diag_prefix { 
+                        tracing::info!("{} -> L1 depth shallow: A_USD={:.2}, B_USD={:.2} < REQUIRED={:.2}", 
+                            p, depth_a_usd, depth_b_usd, min_depth_usd); 
+                    }
+                    continue; // Skip spread, orderbook is too thin to absorb full IOC cleanly
+                }
+            }
 
             // ENSURE PERFECT PHYSICAL BALANCE (0.0% COIN DUST)
             let big_step = mult_a.max(mult_b);

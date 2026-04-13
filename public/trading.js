@@ -663,6 +663,10 @@ function renderSettingsForm(profile) {
                     <label>Slippage / IOC Tolerance (%)</label>
                     <input type="number" id="sf-slip-${p.id}" step="0.01" value="${p.slippage_percent??0.3}" />
                 </div>
+                <div class="form-group">
+                    <label>L1 Orderbook Depth (%)</label>
+                    <input type="number" id="sf-depth-${p.id}" step="1" title="Minimum L1 volume required relative to Trade Volume" value="${p.min_depth_percent??100}" />
+                </div>
 
                 <div class="form-group">
                     <label>Min Volume (M$)</label>
@@ -1473,6 +1477,7 @@ window.saveSettings = async function (profileId) {
         take_profit_percent:   parseFloat(g(`sf-tp-${profileId}`)),
         trailing_stop_percent: parseFloat(g(`sf-trail-${profileId}`)),
         slippage_percent:      parseFloat(g(`sf-slip-${profileId}`)),
+        min_depth_percent:     parseFloat(g(`sf-depth-${profileId}`)),
 
         min_volume_millions:   parseFloat(g(`sf-minvol-${profileId}`)),
         collector_interval_secs: parseInt(g(`sf-interval-${profileId}`)),

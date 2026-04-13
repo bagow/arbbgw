@@ -134,6 +134,7 @@ pub struct TradingSettings {
     /// Minimum structural deviation (spread - structural_spread) to allow entry.
     /// If 0.0, falls back to min_entry_spread for backward compatibility.
     pub min_structural_deviation: f64,
+    pub min_depth_percent: f64,
     pub min_volume_millions: f64,
     pub collector_interval_secs: i64,
     pub pending_commands: Option<String>,
@@ -157,6 +158,7 @@ impl Default for TradingSettings {
             slippage_percent: 0.05,
             funding_rate_8h: 0.01,
             min_structural_deviation: 0.0,
+            min_depth_percent: 100.0,
             min_volume_millions: 10.0,
             collector_interval_secs: 5,
             pending_commands: None,

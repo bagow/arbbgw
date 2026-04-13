@@ -35,7 +35,8 @@ const PROFILE_SELECT: &str = "
         disabled_exchanges,
         leverage,
         margin_mode,
-        min_structural_deviation
+        min_structural_deviation,
+        min_depth_percent
     FROM trading_profiles
 ";
 
@@ -105,9 +106,10 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
         collector_interval_secs: get_i64(row, 14).unwrap_or(5),
         pending_commands:        row.get(15).ok().flatten(),
         disabled_exchanges,
-        leverage:                get_i64(row, 17).unwrap_or(10),
-        margin_mode:             row.get::<_, Option<String>>(18).ok().flatten().unwrap_or_else(|| "cross".to_string()),
-        min_structural_deviation: get_f64(row, 19).unwrap_or(0.0),
+        leverage: row.get("leverage").unwrap_or(Some(10)).unwrap_or(10),
+        margin_mode: row.get("margin_mode").unwrap_or(Some("cross".into())).unwrap_or_else(|| "cross".into()),
+        min_structural_deviation: row.get("min_structural_deviation").unwrap_or(Some(0.0)).unwrap_or(0.0),
+        min_depth_percent: row.get("min_depth_percent").unwrap_or(Some(100.0)).unwrap_or(100.0),
     }
 }
 

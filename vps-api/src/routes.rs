@@ -490,8 +490,8 @@ pub async fn handle_post_profile(
                 (id,name,mode,is_active,min_entry_spread,max_entry_spread,trade_volume,
                  take_profit_percent,trailing_stop_percent,max_active_trades,commission_rate,
                  slippage_percent,funding_rate_8h,min_volume_millions,collector_interval_secs,
-                 owner,created_at,updated_at,disabled_exchanges)
-            VALUES (?,?,?,0,1.0,10.0,?,?,?,?,0.05,0.05,0.01,10.0,5,?,?,?,'[]')",
+                 owner,created_at,updated_at,disabled_exchanges,min_depth_percent)
+            VALUES (?,?,?,0,1.0,10.0,?,?,?,?,0.05,0.05,0.01,10.0,5,?,?,?,'[]',100.0)",
             params![
                 id_clone, name, mode, default_vol,
                 default_tp, default_stop, default_max_trades,
@@ -544,7 +544,7 @@ pub async fn handle_patch_profile(
                     params_vec.push(rusqlite::types::Value::Integer(if active { 1 } else { 0 }));
                 },
                 "min_entry_spread" | "max_entry_spread" | "trade_volume" | "take_profit_percent" | 
-                "trailing_stop_percent" | "commission_rate" | "slippage_percent" | "funding_rate_8h" | "min_volume_millions" | "min_structural_deviation" => {
+                "trailing_stop_percent" | "commission_rate" | "slippage_percent" | "funding_rate_8h" | "min_volume_millions" | "min_structural_deviation" | "min_depth_percent" => {
                     if let Some(f) = v.as_f64() {
                         sets.push(format!("{}=?", k));
                         params_vec.push(rusqlite::types::Value::Real(f));
