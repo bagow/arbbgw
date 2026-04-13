@@ -120,16 +120,16 @@ impl ExchangeConnector for BinanceConnector {
             .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
 
-        // Check order status — if EXPIRED/CANCELED/REJECTED, no fill will ever come
-        let status = v["status"].as_str().unwrap_or("");
-        if status == "EXPIRED" || status == "CANCELED" || status == "REJECTED" {
-            tracing::warn!("[binance] fetch_order {} status={} — definitively unfilled", order_id, status);
-            return Ok((0.0, 0.0, 0.0));
-        }
-
-        // Check executedQty — if 0, order didn't fill
         let exec_qty: f64 = v["executedQty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        let status = v["status"].as_str().unwrap_or("");
+
+        // IMPORTANT: Binance marks IOC orders that partially fill as "EXPIRED".
+        // We MUST verify executedQty first before blindly assuming the order was un-filled.
         if exec_qty < 1e-12 {
+            if status == "EXPIRED" || status == "CANCELED" || status == "REJECTED" {
+                tracing::warn!("[binance] fetch_order {} status={} — definitively unfilled", order_id, status);
+                return Ok((0.0, 0.0, 0.0));
+            }
             // Order exists but hasn't filled yet (or was partially cancelled)
             return Ok((0.0, 0.0, 0.0));
         }
