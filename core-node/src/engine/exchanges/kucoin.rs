@@ -6,7 +6,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::engine::real::{ExchangeKeys, now_ms, kucoin_sign};
-use super::traits::ExchangeConnector;
+use super::traits::{ExchangeConnector, CloseReceipt, PositionInfo};
 
 pub struct KucoinConnector;
 
@@ -16,7 +16,7 @@ impl ExchangeConnector for KucoinConnector {
         "kucoin"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, price: f64, use_ioc: bool, leverage: f64, multiplier: f64) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
         let sym = format!("{}M", pair);
         let ts = now_ms().to_string(); 
         let path = "/api/v1/orders";
@@ -24,11 +24,14 @@ impl ExchangeConnector for KucoinConnector {
         
         let lev_str = (leverage.max(1.0) as i64).to_string();
 
-        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+        let rounded_price = (price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+
+        let mut price_str = format!("{:.8}", rounded_price).trim_end_matches('0').to_string();
         if price_str.ends_with('.') { price_str.pop(); }
         if price_str.is_empty() { price_str = "0".to_string(); }
 
-        let body_json = if use_ioc && price > 0.0 {
+        let body_json = if use_ioc && target_price > 0.0 {
             json!({
                 "clientOid": Uuid::new_v4().to_string(),
                 "symbol": sym,
@@ -56,7 +59,7 @@ impl ExchangeConnector for KucoinConnector {
 
         let body_str = body_json.to_string();
 
-        if dry_run { return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), price)); }
+        if dry_run { return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), target_price, 0.0)); }
 
         let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "POST", path, &body_str);
 
@@ -79,24 +82,30 @@ impl ExchangeConnector for KucoinConnector {
 
         let order_id = v["data"]["orderId"].as_str().map(|s| s.to_string());
         if order_id.is_some() {
-            Ok((order_id, 0.0))
+            Ok((order_id, 0.0, 0.0))
         } else {
             Err("KuCoin failed to return orderId".to_string())
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool, multiplier: f64) -> Result<String, String> {
+    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
         let sym = format!("{}M", pair);
-        let ts = now_ms().to_string(); 
         let path = "/api/v1/orders";
         let side = if is_buy { "buy" } else { "sell" };
 
         let lev_str = (leverage.max(1.0) as i64).to_string();
-        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        
+        let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+        let rounded_price = (price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+        
+        let mut price_str = format!("{:.8}", rounded_price).trim_end_matches('0').to_string();
         if price_str.ends_with('.') { price_str.pop(); }
         if price_str.is_empty() { price_str = "0".to_string(); }
 
-        let body_json = if use_ioc && price > 0.0 {
+        let req_size = if multiplier == 0.0 { phys_amount.round() as i64 } else { (phys_amount / multiplier.max(1e-12)).round() as i64 };
+        if req_size == 0 { return Err("Amount too small to close".to_string()); }
+
+        let body_json = if use_ioc && target_price > 0.0 {
             json!({
                 "clientOid": Uuid::new_v4().to_string(),
                 "symbol": sym,
@@ -104,7 +113,7 @@ impl ExchangeConnector for KucoinConnector {
                 "type": "limit",
                 "timeInForce": "IOC",
                 "price": price_str,
-                "size": if multiplier == 0.0 { phys_amount.round() as i64 } else { (phys_amount / multiplier.max(1e-12)).round() as i64 },
+                "size": req_size,
                 "leverage": lev_str,
                 "marginMode": "CROSS",
                 "reduceOnly": true
@@ -115,7 +124,7 @@ impl ExchangeConnector for KucoinConnector {
                 "symbol": sym,
                 "side": side,
                 "type": "market",
-                "size": if multiplier == 0.0 { phys_amount.round() as i64 } else { (phys_amount / multiplier.max(1e-12)).round() as i64 },
+                "size": req_size,
                 "leverage": lev_str,
                 "marginMode": "CROSS",
                 "reduceOnly": true
@@ -124,8 +133,9 @@ impl ExchangeConnector for KucoinConnector {
 
         let body_str = body_json.to_string();
 
-        if dry_run { return Ok(format!("dry_close_{}_{}", self.name(), now_ms())); }
+        if dry_run { return Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount }); }
 
+        let ts = now_ms().to_string(); 
         let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "POST", path, &body_str);
 
         let resp = http.post(format!("https://api-futures.kucoin.com{}", path))
@@ -139,14 +149,76 @@ impl ExchangeConnector for KucoinConnector {
             .timeout(Duration::from_secs(10))
             .send().await.map_err(|e| e.to_string())?;
 
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let v_resp: Value = resp.json().await.map_err(|e| e.to_string())?;
         
-        if v["code"].as_str() != Some("200000") {
-            return Err(format!("KuCoin Close API Error: {}", v));
+        if v_resp["code"].as_str() != Some("200000") {
+            tracing::error!("[kucoin] close rejected: {}", v_resp);
         }
 
-        v["data"]["orderId"].as_str().map(|s| s.to_string())
-            .ok_or_else(|| "KuCoin failed to return orderId on close".to_string())
+        let order_id = v_resp["data"]["orderId"].as_str().map(|s| s.to_string());
+        if let Some(ref oid) = order_id {
+            for _ in 0..retries {
+                if let Ok((p, f, _)) = self.fetch_order(http, keys, pair, oid, multiplier).await {
+                    if p > 0.0 {
+                        return Ok(CloseReceipt { final_price: p, total_fee: f, closed_volume: phys_amount });
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+        
+        tracing::error!("[kucoin] fallback market close triggered for {} (qty {})", pair, phys_amount);
+        let fb_body = json!({
+            "clientOid": Uuid::new_v4().to_string(),
+            "symbol": sym,
+            "side": side,
+            "type": "market",
+            "size": req_size,
+            "leverage": lev_str,
+            "marginMode": "CROSS",
+            "reduceOnly": true
+        });
+        let fb_str = fb_body.to_string();
+        let ts_fb = now_ms().to_string();
+        let (sig_fb, pass_sig_fb) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts_fb, "POST", path, &fb_str);
+        
+        let resp_fb = http.post(format!("https://api-futures.kucoin.com{}", path))
+            .header("KC-API-KEY", &keys.kucoin_key)
+            .header("KC-API-SIGN", sig_fb)
+            .header("KC-API-TIMESTAMP", &ts_fb)
+            .header("KC-API-PASSPHRASE", pass_sig_fb)
+            .header("KC-API-KEY-VERSION", "2")
+            .header("Content-Type", "application/json")
+            .body(fb_str)
+            .timeout(Duration::from_secs(10))
+            .send().await.map_err(|e| e.to_string())?;
+            
+        let v_fb: Value = resp_fb.json().await.map_err(|e| e.to_string())?;
+        let oid_fb = v_fb["data"]["orderId"].as_str().map(|s| s.to_string()).ok_or_else(|| "Kucoin Fallback rejected".to_string())?;
+        
+        for _ in 0..5 {
+            if let Ok((p, f, _)) = self.fetch_order(http, keys, pair, &oid_fb, multiplier).await {
+                if p > 0.0 {
+                    return Ok(CloseReceipt { final_price: p, total_fee: f, closed_volume: phys_amount });
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let pos = self.fetch_positions(http, keys).await.unwrap_or_else(|_| vec![]);
+        let mut std_sym = sym.replace("USDTM", "USDT");
+        if std_sym == "XBTUSDT" { std_sym = "BTCUSDT".to_string(); }
+        let still_has = pos.iter().any(|p| p.symbol == std_sym && p.size.abs() > 1e-12);
+        if !still_has {
+            Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount })
+        } else {
+            Err("Kucoin close unverified, position still active".to_string())
+        }
+    }
+
+    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, fallback_price: f64) -> Result<CloseReceipt, String> {
+        // Drop excess using market order natively via close_position signature
+        self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, false, 0.0, multiplier, tick_size, 5, 20).await
     }
 
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, _pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
@@ -280,7 +352,7 @@ impl ExchangeConnector for KucoinConnector {
         Err("KuCoin funding rate fetch failed".to_string())
     }
 
-    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<super::traits::PositionInfo>, String> {
+    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {
         let ts = now_ms().to_string();
         let path = "/api/v1/positions";
         let (sig, pass_sig) = kucoin_sign(&keys.kucoin_secret, &keys.kucoin_passphrase, &ts, "GET", path, "");
@@ -316,7 +388,8 @@ impl ExchangeConnector for KucoinConnector {
                 let raw_sym = p["symbol"].as_str().unwrap_or("");
                 let mut std_sym = raw_sym.replace("USDTM", "USDT").replace("USDM", "USDT");
                 if std_sym == "XBTUSDT" { std_sym = "BTCUSDT".to_string(); }
-                positions.push(super::traits::PositionInfo {
+                let realized = p["realisedPnl"].as_f64().or_else(|| p["realisedPnl"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+                positions.push(PositionInfo {
                     symbol: std_sym,
                     size: qty,
                     entry_price: p["avgEntryPrice"].as_f64()
@@ -325,6 +398,9 @@ impl ExchangeConnector for KucoinConnector {
                     unrealized_pnl: p["unrealisedPnl"].as_f64()
                         .or_else(|| p["unrealisedPnl"].as_str().and_then(|s| s.parse().ok()))
                         .unwrap_or(0.0),
+                    realized_pnl: realized,
+                    accumulated_fee: 0.0,
+                    accumulated_funding: 0.0,
                 });
             }
         }

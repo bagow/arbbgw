@@ -7,8 +7,8 @@ use std::time::Duration;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::engine::real::{ExchangeKeys, gate_sign};
-use super::traits::ExchangeConnector;
+use crate::engine::real::{ExchangeKeys, gate_sign, now_ms};
+use super::traits::{ExchangeConnector, CloseReceipt, PositionInfo};
 
 pub struct GateConnector;
 
@@ -30,16 +30,19 @@ impl ExchangeConnector for GateConnector {
         "gate"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64, multiplier: f64) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if is_buy { (phys_amount / multiplier.max(1e-12)).round() as i64 } else { -((phys_amount / multiplier.max(1e-12)).round() as i64) };
         let path = "/api/v4/futures/usdt/orders";
         
-        let mut raw_price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+        let rounded_price = (price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+
+        let mut raw_price_str = format!("{:.8}", rounded_price).trim_end_matches('0').to_string();
         if raw_price_str.ends_with('.') { raw_price_str.pop(); }
         if raw_price_str.is_empty() { raw_price_str = "0".to_string(); }
-        let price_str = if use_ioc && price > 0.0 { raw_price_str } else { "0".to_string() };
-        let tif = if use_ioc && price > 0.0 { "ioc" } else { "gtc" };
+        let price_str = if use_ioc && target_price > 0.0 { raw_price_str } else { "0".to_string() };
+        let tif = if use_ioc && target_price > 0.0 { "ioc" } else { "gtc" };
         
         let body = json!({
             "contract": contract,
@@ -52,7 +55,7 @@ impl ExchangeConnector for GateConnector {
         });
         let body_str = body.to_string();
 
-        if dry_run { return Ok((Some(format!("dry_{}", Uuid::new_v4())), 0.0)); }
+        if dry_run { return Ok((Some(format!("dry_{}", Uuid::new_v4())), target_price, 0.0)); }
 
         let resp = http.post(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &body_str))
@@ -68,26 +71,29 @@ impl ExchangeConnector for GateConnector {
 
         let order_id = v["id"].as_i64().map(|i| i.to_string()).or_else(|| v["id"].as_str().map(|s| s.to_string()));
         if order_id.is_some() {
-            Ok((order_id, 0.0))
+            Ok((order_id, 0.0, 0.0))
         } else {
             Err("Gate failed to return order ID".to_string())
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool, multiplier: f64) -> Result<String, String> {
+    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if multiplier == 0.0 {
             if is_buy { phys_amount.round() as i64 } else { -(phys_amount.round() as i64) }
         } else {
             if is_buy { (phys_amount / multiplier.max(1e-12)).round() as i64 } else { -((phys_amount / multiplier.max(1e-12)).round() as i64) }
         };
+        if size == 0 { return Err("Amount too small to close".to_string()); }
         let path = "/api/v4/futures/usdt/orders";
         
-        let mut final_price = price;
-        // Gate API completely forbids `close: true` Market Orders on Dual-Mode accounts.
-        // Therefore, any "Market Order" (price = 0.0) requested by the core engine
-        // MUST be securely intercepted here and converted to a deeply penetrating Limit Order (IOC).
-        if final_price == 0.0 {
+        if dry_run { return Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount }); }
+
+        let mut final_price = target_price;
+        if final_price > 0.0 {
+            final_price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+            final_price = (final_price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+        } else {
             let ticker_url = format!("https://api.gateio.ws/api/v4/futures/usdt/tickers?contract={}", contract);
             if let Ok(resp) = http.get(&ticker_url).send().await {
                 if let Ok(v) = resp.json::<Vec<serde_json::Value>>().await {
@@ -95,6 +101,7 @@ impl ExchangeConnector for GateConnector {
                         let mark: f64 = t["mark_price"].as_str().unwrap_or("0").parse().unwrap_or(0.0);
                         if mark > 0.0 {
                             final_price = if is_buy { mark * 1.05 } else { mark * 0.95 };
+                            final_price = (final_price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
                         }
                     }
                 }
@@ -105,12 +112,10 @@ impl ExchangeConnector for GateConnector {
         if raw_price_str.ends_with('.') { raw_price_str.pop(); }
         if raw_price_str.is_empty() { raw_price_str = "0".to_string(); }
         
-        // If final_price > 0.0, we ALWAYS force Limit IOC behavior to avert Dual-Mode crash
         let use_limit_ioc = final_price > 0.0;
         let price_str = if use_limit_ioc { raw_price_str } else { "0".to_string() };
         let tif = if price_str == "0" || use_limit_ioc { "ioc" } else { "gtc" };
         
-        // ONLY trigger native close-order if absolutely no price could be resolved (which will likely fail on hedge mode, but serves as ultimate fallback)
         let is_market_close = price_str == "0";
         let final_size = if is_market_close { 0 } else { size };
         
@@ -124,10 +129,6 @@ impl ExchangeConnector for GateConnector {
             "text": "t-corenode-close"
         });
         let body_str = body.to_string();
-        tracing::error!("[gate-debug] close_order payload: {}", body_str);
-
-        if dry_run { return Ok(format!("dry_close_{}", Uuid::new_v4())); }
-
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
 
         let resp = http.post(format!("https://api.gateio.ws{}", path))
@@ -136,14 +137,37 @@ impl ExchangeConnector for GateConnector {
             .timeout(Duration::from_secs(10))
             .send().await.map_err(|e| e.to_string())?;
 
-        let status = resp.status();
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        if !status.is_success() { 
-            return Err(format!("Gate API Close Error: {}", v)); 
+        let v_resp: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if let Some(msg) = v_resp["label"].as_str() {
+            tracing::error!("[gate] close rejected: {}", msg);
         }
+        
+        let order_id = v_resp["id"].as_i64().map(|i| i.to_string()).or_else(|| v_resp["id"].as_str().map(|s| s.to_string()));
+        
+        if let Some(ref oid) = order_id {
+            for _ in 0..retries {
+                if let Ok((p, f, _)) = self.fetch_order(http, keys, pair, oid, multiplier).await {
+                    if p > 0.0 {
+                        return Ok(CloseReceipt { final_price: p, total_fee: f, closed_volume: phys_amount });
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+        
+        // Deep verification fallback
+        let pos = self.fetch_positions(http, keys).await.unwrap_or_else(|_| vec![]);
+        let still_has = pos.iter().any(|p| p.symbol == contract.replace("_", "") && p.size.abs() > 1e-12);
+        if !still_has {
+            Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount })
+        } else {
+            Err("Gate close unverified, position still active".to_string())
+        }
+    }
 
-        v["id"].as_i64().map(|i| i.to_string()).or_else(|| v["id"].as_str().map(|s| s.to_string()))
-            .ok_or_else(|| "Gate failed to return order ID on close".to_string())
+    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, fallback_price: f64) -> Result<CloseReceipt, String> {
+        // Just call close_position utilizing Gate's default logic (where price=0 -> deep limit fallback)
+        self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, true, 0.0, multiplier, tick_size, 5, 20).await
     }
 
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
@@ -245,7 +269,7 @@ impl ExchangeConnector for GateConnector {
         Err("Gate funding rate fetch failed".to_string())
     }
 
-    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<super::traits::PositionInfo>, String> {
+    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {
         let path = "/api/v4/futures/usdt/positions";
         let resp = http.get(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, ""))
@@ -265,13 +289,17 @@ impl ExchangeConnector for GateConnector {
                 if size.abs() < 1e-12 { continue; }
                 // Gate symbol: "BTC_USDT" → "BTCUSDT"
                 let contract = p["contract"].as_str().unwrap_or("").replace("_", "");
-                positions.push(super::traits::PositionInfo {
+                let realized = p["realised_pnl"].as_str().and_then(|s| s.parse().ok()).or_else(|| p["realised_pnl"].as_f64()).unwrap_or(0.0);
+                positions.push(PositionInfo {
                     symbol: contract,
                     size,
                     entry_price: p["entry_price"].as_str().and_then(|s| s.parse().ok())
                         .or_else(|| p["entry_price"].as_f64()).unwrap_or(0.0),
                     unrealized_pnl: p["unrealised_pnl"].as_str().and_then(|s| s.parse().ok())
                         .or_else(|| p["unrealised_pnl"].as_f64()).unwrap_or(0.0),
+                    realized_pnl: realized,
+                    accumulated_fee: 0.0,
+                    accumulated_funding: 0.0,
                 });
             }
         }

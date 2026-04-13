@@ -8,7 +8,7 @@ use serde_json::json;
 
 
 use crate::engine::real::{ExchangeKeys, now_ms, bybit_sign};
-use super::traits::ExchangeConnector;
+use super::traits::{ExchangeConnector, CloseReceipt, PositionInfo};
 
 pub struct BybitConnector;
 
@@ -18,7 +18,7 @@ impl ExchangeConnector for BybitConnector {
         "bybit"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64, multiplier: f64) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, _leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let side_str = if is_buy { "Buy" } else { "Sell" };
@@ -27,11 +27,14 @@ impl ExchangeConnector for BybitConnector {
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
 
-        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+        let rounded_price = (price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+
+        let mut price_str = format!("{:.8}", rounded_price).trim_end_matches('0').to_string();
         if price_str.ends_with('.') { price_str.pop(); }
         if price_str.is_empty() { price_str = "0".to_string(); }
 
-        let body = if use_ioc && price > 0.0 {
+        let body = if use_ioc && target_price > 0.0 {
             json!({
                 "category": "linear",
                 "symbol": pair,
@@ -55,7 +58,7 @@ impl ExchangeConnector for BybitConnector {
         
         let body_str = body.to_string();
         
-        if dry_run { return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), price)); }
+        if dry_run { return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), target_price, 0.0)); }
         
         let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &body_str);
         
@@ -76,13 +79,13 @@ impl ExchangeConnector for BybitConnector {
 
         let order_id = v["result"]["orderId"].as_str().map(|s| s.to_string());
         if order_id.is_some() {
-            Ok((order_id, 0.0)) // Note: limit price returned, actual fill price requires fetch
+            Ok((order_id, 0.0, 0.0)) 
         } else {
             Err("Bybit failed to return orderId".to_string())
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool, multiplier: f64) -> Result<String, String> {
+    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let side_str = if is_buy { "Buy" } else { "Sell" };
@@ -94,12 +97,16 @@ impl ExchangeConnector for BybitConnector {
         };
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
+        if qty_str == "0" { return Err("Amount too small to close".to_string()); }
 
-        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+        let rounded_price = (price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+
+        let mut price_str = format!("{:.8}", rounded_price).trim_end_matches('0').to_string();
         if price_str.ends_with('.') { price_str.pop(); }
         if price_str.is_empty() { price_str = "0".to_string(); }
 
-        let body = if use_ioc && price > 0.0 {
+        let body = if use_ioc && target_price > 0.0 {
             json!({
                 "category": "linear",
                 "symbol": pair,
@@ -123,7 +130,7 @@ impl ExchangeConnector for BybitConnector {
         
         let body_str = body.to_string();
 
-        if dry_run { return Ok(format!("dry_close_{}_{}", self.name(), now_ms())); }
+        if dry_run { return Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount }); }
 
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
 
@@ -141,11 +148,67 @@ impl ExchangeConnector for BybitConnector {
 
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         if v["retCode"].as_i64() != Some(0) { 
-            return Err(format!("Bybit close API Error: {}", v)); 
+            tracing::error!("[bybit] close rejected: {}", v);
         }
 
-        v["result"]["orderId"].as_str().map(|s| s.to_string())
-            .ok_or_else(|| "Bybit return no orderId on close".to_string())
+        let order_id = v["result"]["orderId"].as_str().map(|s| s.to_string());
+        if let Some(ref oid) = order_id {
+            for _ in 0..retries {
+                if let Ok((p, f, _)) = self.fetch_order(http, keys, pair, oid, multiplier).await {
+                    if p > 0.0 {
+                        return Ok(CloseReceipt { final_price: p, total_fee: f, closed_volume: phys_amount });
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+        
+        tracing::error!("[bybit] fallback market close triggered for {} (qty {})", pair, phys_amount);
+        let fb_body = json!({
+            "category": "linear",
+            "symbol": pair,
+            "side": side_str,
+            "orderType": "Market",
+            "qty": qty_str,
+            "reduceOnly": true
+        });
+        let fb_str = fb_body.to_string();
+        let ts_fb = now_ms().to_string();
+        let sig_fb = bybit_sign(&keys.bybit_secret, &ts_fb, &keys.bybit_key, recv, &fb_str);
+        
+        let resp_fb = http.post("https://api.bybit.com/v5/order/create")
+            .header("X-BAPI-API-KEY", &keys.bybit_key)
+            .header("X-BAPI-SIGN", &sig_fb)
+            .header("X-BAPI-TIMESTAMP", &ts_fb)
+            .header("X-BAPI-RECV-WINDOW", recv)
+            .header("Content-Type", "application/json")
+            .body(fb_str)
+            .timeout(Duration::from_secs(10))
+            .send().await.map_err(|e| e.to_string())?;
+            
+        let v_fb: Value = resp_fb.json().await.map_err(|e| e.to_string())?;
+        let oid_fb = v_fb["result"]["orderId"].as_str().map(|s| s.to_string()).ok_or_else(|| "Bybit fallack rejected".to_string())?;
+        
+        for _ in 0..5 {
+            if let Ok((p, f, _)) = self.fetch_order(http, keys, pair, &oid_fb, multiplier).await {
+                if p > 0.0 {
+                    return Ok(CloseReceipt { final_price: p, total_fee: f, closed_volume: phys_amount });
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let pos = self.fetch_positions(http, keys).await.unwrap_or_else(|_| vec![]);
+        let still_has = pos.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12);
+        if !still_has {
+            Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount })
+        } else {
+            Err("Bybit close unverified, position still active".to_string())
+        }
+    }
+
+    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, fallback_price: f64) -> Result<CloseReceipt, String> {
+        self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, false, 0.0, multiplier, tick_size, 5, 20).await
     }
 
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
@@ -308,7 +371,7 @@ impl ExchangeConnector for BybitConnector {
         Err("Bybit funding rate fetch failed".to_string())
     }
 
-    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<super::traits::PositionInfo>, String> {
+    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let qs = "category=linear&settleCoin=USDT";
@@ -339,11 +402,15 @@ impl ExchangeConnector for BybitConnector {
                 if size.abs() < 1e-12 { continue; }
                 let side = p["side"].as_str().unwrap_or("");
                 let signed_size = if side == "Sell" { -size } else { size };
-                positions.push(super::traits::PositionInfo {
+                let realized = p["cumRealisedPnl"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                positions.push(PositionInfo {
                     symbol: p["symbol"].as_str().unwrap_or("").to_string(),
                     size: signed_size,
                     entry_price: p["avgPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
                     unrealized_pnl: p["unrealisedPnl"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    realized_pnl: realized,
+                    accumulated_fee: 0.0,
+                    accumulated_funding: 0.0,
                 });
             }
         }

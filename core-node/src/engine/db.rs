@@ -139,7 +139,7 @@ impl TradeRepository {
                      last_price_a=?, last_price_b=?, last_spread=?, curr_gross_pnl=?, \
                      funding_rate_a=?, funding_rate_b=?, funding_next_ts=?, \
                      funding_cost=?, pnl_a=?, pnl_b=? \
-                     WHERE id=?"
+                     WHERE id=? AND status='OPEN'"
                 )?;
                 for (id, pa, pb, cs, pnl, fra, frb, fnt, fund_cost, pnl_a, pnl_b) in live_updates {
                     stmt.execute(params![pa, pb, cs, pnl, fra, frb, fnt, fund_cost, pnl_a, pnl_b, id])?;

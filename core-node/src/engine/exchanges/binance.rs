@@ -5,9 +5,8 @@ use serde::Deserialize;
 use serde_json::Value; // We will replace these with strict DTOs
 use std::time::Duration;
 
-use crate::engine::real::{ExchangeKeys, now_ms};
-use super::traits::ExchangeConnector;
-use crate::engine::real::binance_sign;
+use crate::engine::real::{ExchangeKeys, now_ms, binance_sign};
+use super::traits::{ExchangeConnector, CloseReceipt, PositionInfo};
 
 pub struct BinanceConnector;
 
@@ -30,10 +29,10 @@ impl ExchangeConnector for BinanceConnector {
         "binance"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, price: f64, use_ioc: bool, _leverage: f64, multiplier: f64) -> Result<(Option<String>, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run {
-            return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), price));
+            return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), target_price, 0.0));
         }
 
         let ts = now_ms();
@@ -41,9 +40,12 @@ impl ExchangeConnector for BinanceConnector {
         if qty_str.ends_with('.') { qty_str.pop(); }
         if qty_str.is_empty() { qty_str = "0".to_string(); }
         
-        // MARKET vs IOC LIMIT — previously always used LIMIT even for market orders
-        let qs = if use_ioc && price > 0.0 {
-            let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+        let rounded_price = (price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+
+        // MARKET vs IOC LIMIT
+        let qs = if use_ioc && target_price > 0.0 {
+            let mut price_str = format!("{:.8}", rounded_price).trim_end_matches('0').to_string();
             if price_str.ends_with('.') { price_str.pop(); }
             if price_str.is_empty() { price_str = "0".to_string(); }
             format!("symbol={}&side={}&type=LIMIT&timeInForce=IOC&quantity={}&price={}&timestamp={}", 
@@ -64,50 +66,115 @@ impl ExchangeConnector for BinanceConnector {
 
         let order_id = v["orderId"].as_i64().map(|id| id.to_string());
         if order_id.is_some() {
-            Ok((order_id, 0.0))
+            Ok((order_id, 0.0, 0.0))
         } else {
             Err("Binance failed to return orderId".to_string())
         }
     }
 
-    async fn close_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, price: f64, use_ioc: bool, multiplier: f64) -> Result<String, String> {
+    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
         let side = if is_buy { "BUY" } else { "SELL" };
-        if dry_run { return Ok(format!("dry_close_{}_{}", self.name(), now_ms())); }
+        if dry_run { return Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount }); }
 
-        let ts = now_ms();
         let mut qty_str = if multiplier == 0.0 {
             format!("{:.8}", phys_amount).trim_end_matches('0').to_string()
         } else {
             format!("{:.8}", (phys_amount / multiplier.max(1e-12)).round() * multiplier.max(1e-12)).trim_end_matches('0').to_string()
         };
         if qty_str.ends_with('.') { qty_str.pop(); }
-        if qty_str.is_empty() { qty_str = "0".to_string(); }
+        if qty_str.is_empty() || phys_amount < 1e-12 { return Err("Amounts too small to close".to_string()); }
         
-        let mut price_str = format!("{:.8}", price).trim_end_matches('0').to_string();
+        let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+        let rounded_price = (price / tick_size.max(1e-8)).round() * tick_size.max(1e-8);
+        
+        let mut price_str = format!("{:.8}", rounded_price).trim_end_matches('0').to_string();
         if price_str.ends_with('.') { price_str.pop(); }
         if price_str.is_empty() { price_str = "0".to_string(); }
         
-        let type_str = if use_ioc && price > 0.0 { "LIMIT" } else { "MARKET" };
-        let tif_str = if use_ioc && price > 0.0 { "&timeInForce=IOC" } else { "" };
-        let price_param = if use_ioc && price > 0.0 { format!("&price={}", price_str) } else { "".to_string() };
+        let type_str = if use_ioc && target_price > 0.0 { "LIMIT" } else { "MARKET" };
+        let tif_str = if use_ioc && target_price > 0.0 { "&timeInForce=IOC" } else { "" };
+        let price_param = if use_ioc && target_price > 0.0 { format!("&price={}", price_str) } else { "".to_string() };
 
-        let qs = format!("symbol={}&side={}&type={}&quantity={}&reduceOnly=true{}{}&timestamp={}", pair, side, type_str, qty_str, tif_str, price_param, ts);
+        let qs = format!("symbol={}&side={}&type={}&quantity={}&reduceOnly=true{}{}&timestamp={}", pair, side, type_str, qty_str, tif_str, price_param, now_ms());
         let sig = binance_sign(&keys.binance_secret, &qs);
         let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
-        
-        // Ensure leverage before closing on Binance (sometimes needed if leverage drifted)
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
 
         let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
             .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
         
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        if let Some(msg) = v["msg"].as_str() {
-            return Err(format!("Binance API Close Error: {}", msg));
+        let v_resp: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if let Some(msg) = v_resp["msg"].as_str() {
+            tracing::error!("[binance] normal close rejected: {}", msg);
+        }
+        let order_id = v_resp["orderId"].as_i64().map(|id| id.to_string());
+        
+        // Polling loop inside connector
+        if let Some(ref oid) = order_id {
+            for _ in 0..retries {
+                if let Ok((p, f, _)) = self.fetch_order(http, keys, pair, oid, multiplier).await {
+                    if p > 0.0 {
+                        return Ok(CloseReceipt { final_price: p, total_fee: f, closed_volume: phys_amount });
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
         }
 
-        v["orderId"].as_i64().map(|id| id.to_string())
-            .ok_or_else(|| "Binance failed to return orderId on close".to_string())
+        // Fallback market close if IOC or limit failed/unverified
+        tracing::error!("[binance] fallback market close triggered for {} (qty {})", pair, phys_amount);
+        let qs_fb = format!("symbol={}&side={}&type=MARKET&quantity={}&reduceOnly=true&timestamp={}", pair, side, qty_str, now_ms());
+        let sig_fb = binance_sign(&keys.binance_secret, &qs_fb);
+        let url_fb = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs_fb, sig_fb);
+        let resp_fb = http.post(&url_fb).header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+            
+        let v_fb: Value = resp_fb.json().await.map_err(|e| e.to_string())?;
+        let oid_fb = v_fb["orderId"].as_i64().map(|id| id.to_string()).ok_or_else(|| "Fallback close rejected".to_string())?;
+        
+        for _ in 0..5 {
+            if let Ok((p, f, _)) = self.fetch_order(http, keys, pair, &oid_fb, multiplier).await {
+                if p > 0.0 {
+                    return Ok(CloseReceipt { final_price: p, total_fee: f, closed_volume: phys_amount });
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Deep verification
+        let pos = self.fetch_positions(http, keys).await.unwrap_or_else(|_| vec![]);
+        let still_has = pos.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12);
+        if !still_has {
+            Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount })
+        } else {
+            Err("Failed to verify close on Binance despite fallback".to_string())
+        }
+    }
+
+    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, fallback_price: f64) -> Result<CloseReceipt, String> {
+        let side = if is_buy { "BUY" } else { "SELL" };
+        if dry_run { return Ok(CloseReceipt { final_price: fallback_price, total_fee: 0.0, closed_volume: phys_excess }); }
+        
+        // We drop excess at market
+        let qs = format!("symbol={}&side={}&type=MARKET&quantity={:.8}&reduceOnly=true&timestamp={}", pair, side, phys_excess, now_ms());
+        let sig = binance_sign(&keys.binance_secret, &qs);
+        let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
+        
+        let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+        
+        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let order_id = v["orderId"].as_i64().map(|id| id.to_string()).ok_or_else(|| "Trim rejected".to_string())?;
+        
+        for _ in 0..6 {
+            if let Ok((p, f, _)) = self.fetch_order(http, keys, pair, &order_id, multiplier).await {
+                if p > 0.0 {
+                    return Ok(CloseReceipt { final_price: p, total_fee: f, closed_volume: phys_excess });
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Err("Trim market order timed out".to_string())
     }
 
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
@@ -234,7 +301,7 @@ impl ExchangeConnector for BinanceConnector {
         Err("Binance funding rate fetch failed".to_string())
     }
 
-    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<super::traits::PositionInfo>, String> {
+    async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {
         let ts = now_ms();
         let qs = format!("timestamp={}", ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
@@ -253,11 +320,14 @@ impl ExchangeConnector for BinanceConnector {
             for p in arr {
                 let amt: f64 = p["positionAmt"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                 if amt.abs() < 1e-12 { continue; }
-                positions.push(super::traits::PositionInfo {
+                positions.push(PositionInfo {
                     symbol: p["symbol"].as_str().unwrap_or("").to_string(),
                     size: amt,
                     entry_price: p["entryPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
                     unrealized_pnl: p["unRealizedProfit"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    realized_pnl: 0.0,
+                    accumulated_fee: 0.0,
+                    accumulated_funding: 0.0,
                 });
             }
         }

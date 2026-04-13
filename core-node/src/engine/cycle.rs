@@ -169,137 +169,32 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             tokio::spawn(async move {
                 let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
-                // Place close orders in parallel
+                // Place close orders in parallel (Connectors handle limit projection, retries & fallback native)
                 let (ra, rb) = tokio::join!(
-                    conn_a.close_order(&h, &k, &pair, is_a_higher, q_a, dry_run, lev as f64, limit_close_a, use_ioc, mult_a),
-                    conn_b.close_order(&h, &k, &pair, !is_a_higher, q_b, dry_run, lev as f64, limit_close_b, use_ioc, mult_b)
+                    conn_a.close_position(&h, &k, &pair, is_a_higher, q_a, dry_run, lev as f64, exit_price_a, use_ioc, settings.slippage_percent, mult_a, tick_a, close_verify_retries, close_verify_delay),
+                    conn_b.close_position(&h, &k, &pair, !is_a_higher, q_b, dry_run, lev as f64, exit_price_b, use_ioc, settings.slippage_percent, mult_b, tick_b, close_verify_retries, close_verify_delay)
                 );
-                let oid_close_a = match &ra { Ok(oid) => Some(oid.clone()), Err(e) => { error!("[real] ❌ Close order A failed: {}", e); None } };
-                let oid_close_b = match &rb { Ok(oid) => Some(oid.clone()), Err(e) => { error!("[real] ❌ Close order B failed: {}", e); None } };
 
-                // ── VERIFY FILLS BEFORE MARKING CLOSED ───────────────────────
-                let mut real_exit_a = 0.0_f64;
-                let mut real_exit_b = 0.0_f64;
+                let mut real_exit_a = 0.0;
+                let mut real_exit_b = 0.0;
                 let mut exit_fee = 0.0;
-                let mut verified_a = false;
-                let mut verified_b = false;
+                let mut error_msg = String::new();
 
-                for _ in 0..close_verify_retries {
-                    if verified_a && verified_b { break; }
-                    if !verified_a {
-                        if let Some(ref oid) = oid_close_a {
-                            if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
-                                if p > 0.0 {
-                                    real_exit_a = p;
-                                    let actual_f = if f > 1e-9 { f.abs() } else { 0.0 };
-                                    if actual_f < 1e-9 { tracing::warn!("[real] [EXCHANGE_VERIFIED] Exit fee=0 from {} for {} leg A", exa, pair); }
-                                    exit_fee += actual_f; verified_a = true;
-                                }
-                            }
-                        }
-                    }
-                    if !verified_b {
-                        if let Some(ref oid) = oid_close_b {
-                            if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid, mult_b).await {
-                                if p > 0.0 {
-                                    real_exit_b = p;
-                                    let actual_f = if f > 1e-9 { f.abs() } else { 0.0 };
-                                    if actual_f < 1e-9 { tracing::warn!("[real] [EXCHANGE_VERIFIED] Exit fee=0 from {} for {} leg B", exb, pair); }
-                                    exit_fee += actual_f; verified_b = true;
-                                }
-                            }
-                        }
-                    }
-                    if verified_a && verified_b { break; }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(close_verify_delay)).await;
+                match ra {
+                    Ok(rc) => { real_exit_a = rc.final_price; exit_fee += rc.total_fee; }
+                    Err(e) => { error_msg.push_str(&format!("Leg A close failed: {} ", e)); }
                 }
+                match rb {
+                    Ok(rc) => { real_exit_b = rc.final_price; exit_fee += rc.total_fee; }
+                    Err(e) => { error_msg.push_str(&format!("Leg B close failed: {}", e)); }
+                }
+                
                 let repo_close = TradeRepository::new(db_c.clone());
 
-                if !verified_a || !verified_b {
-                    // ❌ Close fill NOT confirmed — do NOT mark as closed.
-                    error!("[real] ⚠️ CLOSE UNCONFIRMED id={} {} verified_a={} verified_b={} — keeping OPEN, will try market close fallback",
-                        id, pair, verified_a, verified_b);
+                if real_exit_a <= 0.0 || real_exit_b <= 0.0 {
+                    tracing::error!("[real] ⚠️ CLOSE FAILED OR UNVERIFIED id={} {}. Error: {}", id, pair, error_msg);
                     repo_close.revert_to_open(id).await;
-
-                    // Fallback: fire a market close to ensure position is actually closed
-                    error!("[real] 🔄 FALLBACK MARKET CLOSE id={} {}", id, pair);
-                    let conn_a2 = crate::engine::exchanges::get_connector(&exa).unwrap();
-                    let conn_b2 = crate::engine::exchanges::get_connector(&exb).unwrap();
-                    let (fa, fb) = tokio::join!(
-                        conn_a2.close_order(&h, &k, &pair, is_a_higher, q_a, false, lev as f64, 0.0, false, mult_a),
-                        conn_b2.close_order(&h, &k, &pair, !is_a_higher, q_b, false, lev as f64, 0.0, false, mult_b)
-                    );
-                    let oid_fb_a = match &fa { Ok(oid) => Some(oid.clone()), Err(e) => { error!("[real] ❌ Fallback close A failed: {}", e); None } };
-                    let oid_fb_b = match &fb { Ok(oid) => Some(oid.clone()), Err(e) => { error!("[real] ❌ Fallback close B failed: {}", e); None } };
-                    
-                    // Verify fallback fills from exchange - NO WS FALLBACKS
-                    let mut fb_exit_a = 0.0;
-                    let mut fb_exit_b = 0.0;
-                    let mut fb_fee = 0.0;
-                    
-                    for _ in 0..5 {
-                        if fb_exit_a == 0.0 {
-                            if let Some(ref oid) = oid_fb_a {
-                                if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&h, &k, &pair, oid, mult_a).await {
-                                    if p > 0.0 { fb_exit_a = p; fb_fee += if f > 1e-9 { f.abs() } else { 0.0 }; }
-                                }
-                            }
-                        }
-                        if fb_exit_b == 0.0 {
-                            if let Some(ref oid) = oid_fb_b {
-                                if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&h, &k, &pair, oid, mult_b).await {
-                                    if p > 0.0 { fb_exit_b = p; fb_fee += if f > 1e-9 { f.abs() } else { 0.0 }; }
-                                }
-                            }
-                        }
-                        if fb_exit_a > 0.0 && fb_exit_b > 0.0 { break; }
-                        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
-                    }
-
-                    if fb_exit_a > 0.0 && fb_exit_b > 0.0 {
-                        let fb_pna = if is_a_higher { (entry_a - fb_exit_a) * (vol / entry_a) } else { (fb_exit_a - entry_a) * (vol / entry_a) };
-                        let fb_pnb = if is_a_higher { (fb_exit_b - entry_b) * (vol / entry_b) } else { (entry_b - fb_exit_b) * (vol / entry_b) };
-                        error!("[real] ✅ FALLBACK MARKET CLOSE fired id={} {} exit_a={:.6} exit_b={:.6}", id, pair, fb_exit_a, fb_exit_b);
-                        repo_close.mark_trade_closed_confirmed(
-                            id, fb_exit_a, fb_exit_b, exit_spread,
-                            fb_pna + fb_pnb, fb_pna, fb_pnb,
-                            &format!("{}_FALLBACK", r), fund_cost, fb_fee, 0.0
-                        ).await;
-                    } else {
-                        // Fallback fills not confirmed. Check actual positions on exchanges
-                        // before deciding whether to force-close or leave open.
-                        let pos_a = crate::engine::exchanges::get_connector(&exa).unwrap()
-                            .fetch_positions(&h, &k).await;
-                        let pos_b = crate::engine::exchanges::get_connector(&exb).unwrap()
-                            .fetch_positions(&h, &k).await;
-                        let still_has_a = pos_a.as_ref().ok()
-                            .map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12))
-                            .unwrap_or(true); // conservative: if API fails, assume position exists
-                        let still_has_b = pos_b.as_ref().ok()
-                            .map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12))
-                            .unwrap_or(true);
-
-                        if !still_has_a && !still_has_b {
-                            // Positions are GONE on both exchanges — orders did execute,
-                            // we just couldn't verify via fetch_order. Safe to close in DB.
-                            error!("[real] 🚨 FALLBACK verification failed but positions are GONE on exchanges. Force-closing id={} {} in DB", id, pair);
-                            repo_close.mark_trade_closed_confirmed(
-                                id, 0.0, 0.0, 0.0,
-                                0.0, 0.0, 0.0,
-                                &format!("{}_FORCE_CLOSED", r), fund_cost, 0.0, 0.0
-                            ).await;
-                        } else {
-                            // Positions STILL EXIST on at least one exchange.
-                            // Do NOT close in DB — leave OPEN so next cycle retries.
-                            error!("[real] 🚨 FALLBACK FAILED id={} {} — positions still on exchange (a={} b={})! Keeping OPEN for retry.",
-                                id, pair, still_has_a, still_has_b);
-                            // revert_to_open clears close_reason so the cycle can re-trigger
-                            repo_close.revert_to_open(id).await;
-                            
-                            // ANTI-SPAM GUARD: Suspend flight guard removal for 15 seconds!
-                            tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
-                        }
-                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     closing_guard.remove(&trade_id_for_guard);
                     return;
                 }
@@ -453,16 +348,19 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
         let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
         
+        let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
+        let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
+
         let (result_a, result_b) = tokio::join!(
-            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0, settings.leverage as f64, mult_a),
-            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0, settings.leverage as f64, mult_b)
+            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0, settings.leverage as f64, mult_a, settings.slippage_percent, tick_a),
+            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0, settings.leverage as f64, mult_b, settings.slippage_percent, tick_b)
         );
 
         let order_ms = t0.elapsed().as_millis();
 
         // Destructure (order_id, inline_fill_price, inline_fill_fee)
         let (oid_a, inline_fill_a, inline_fee_a) = match result_a {
-            Ok(t) => (t.0, t.1, 0.0),
+            Ok(t) => (t.0, t.1, t.2),
             Err(e) => {
                 let es = e.to_string();
                 error!("[real] LEG_A reject {}/{}: {} ({}ms)", exa, pair, es, order_ms);
@@ -476,7 +374,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             }
         };
         let (oid_b, inline_fill_b, inline_fee_b) = match result_b {
-            Ok(t) => (t.0, t.1, 0.0),
+            Ok(t) => (t.0, t.1, t.2),
             Err(e) => {
                 let es = e.to_string();
                 error!("[real] LEG_B reject {}/{}: {} ({}ms)", exb, pair, es, order_ms);
@@ -558,26 +456,12 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 let is_buy = is_a_higher; // If we entered A by Selling (!is_a_higher), we exit A by Buying (is_a_higher)
                 error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys", pair, phys_to_dump);
                 
-                // Fire MARKET CLOSE instantly!
-                let dump_price = if is_buy { fill_a * 1.05 } else { fill_a * 0.95 }; // Deep market limit for safety
                 let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
-                let rounded_safe_limit_price = (dump_price / tick_for_close).round() * tick_for_close;
-                
-                // MUST PASS false to use_ioc to ensure exchange completes the market dump deeply
-                match crate::engine::exchanges::get_connector(&exa).unwrap().close_order(&hc, &kc, &fp, is_buy, phys_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, false, mult_a).await {
-                    Ok(close_oid) => {
-                        for attempt in 0..5 {
-                            if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&hc, &kc, &fp, close_oid.as_str(), mult_a).await {
-                                if p > 0.0 { 
-                                    trimming_fee += if f > 1e-9 { f.abs() } else { 0.0 };
-                                    // Original was entry_a, close is p. We dumped delta_a coins.
-                                    let gross_loss = if is_buy { (fill_a - p) * delta_a } else { (p - fill_a) * delta_a };
-                                    trimming_loss += gross_loss.min(0.0).abs(); // Only penalize if it's a loss
-                                    break; 
-                                }
-                            }
-                            tokio::time::sleep(Duration::from_millis(15 * (attempt + 1) as u64)).await;
-                        }
+                match crate::engine::exchanges::get_connector(&exa).unwrap().trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_a, tick_for_close, fill_a).await {
+                    Ok(rc) => {
+                        trimming_fee += rc.total_fee;
+                        let gross_loss = if is_buy { (fill_a - rc.final_price) * delta_a } else { (rc.final_price - fill_a) * delta_a };
+                        trimming_loss += gross_loss.min(0.0).abs(); 
                     }
                     Err(e) => { error!("[real] Failed to trim DELTA A: {}", e); }
                 }
@@ -590,24 +474,12 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 let is_buy = !is_a_higher; // Opposite of entry B
                 error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys", pair, phys_to_dump);
                 
-                let dump_price = if is_buy { fill_b * 1.05 } else { fill_b * 0.95 };
                 let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
-                let rounded_safe_limit_price = (dump_price / tick_for_close).round() * tick_for_close;
-                
-                // MUST PASS false to use_ioc to ensure exchange completes the market dump deeply
-                match crate::engine::exchanges::get_connector(&exb).unwrap().close_order(&hc, &kc, &fp, is_buy, phys_to_dump, false, settings.leverage as f64, rounded_safe_limit_price, false, mult_b).await {
-                    Ok(close_oid) => {
-                        for attempt in 0..5 {
-                            if let Ok::<(f64, f64, f64), String>((p, f, _ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&hc, &kc, &fp, close_oid.as_str(), mult_b).await {
-                                if p > 0.0 { 
-                                    trimming_fee += if f > 1e-9 { f.abs() } else { 0.0 };
-                                    let gross_loss = if is_buy { (fill_b - p) * delta_b } else { (p - fill_b) * delta_b };
-                                    trimming_loss += gross_loss.min(0.0).abs();
-                                    break; 
-                                }
-                            }
-                            tokio::time::sleep(Duration::from_millis(15 * (attempt + 1) as u64)).await;
-                        }
+                match crate::engine::exchanges::get_connector(&exb).unwrap().trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_b, tick_for_close, fill_b).await {
+                    Ok(rc) => {
+                        trimming_fee += rc.total_fee;
+                        let gross_loss = if is_buy { (fill_b - rc.final_price) * delta_b } else { (rc.final_price - fill_b) * delta_b };
+                        trimming_loss += gross_loss.min(0.0).abs(); 
                     }
                     Err(e) => { error!("[real] Failed to trim DELTA B: {}", e); }
                 }
