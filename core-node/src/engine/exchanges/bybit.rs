@@ -25,7 +25,9 @@ impl ExchangeConnector for BybitConnector {
 
         let mut qty_str = format!("{:.8}", (phys_amount / multiplier.max(1e-12)).round() * multiplier.max(1e-12)).trim_end_matches('0').to_string();
         if qty_str.ends_with('.') { qty_str.pop(); }
-        if qty_str.is_empty() { qty_str = "0".to_string(); }
+        if qty_str.is_empty() || qty_str == "0" { 
+            return Err(format!("Calculated quantity is 0 for amt={} mult={}, check multiplier mismatch", phys_amount, multiplier));
+        }
 
         let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
         let rounded_price = if is_buy {
@@ -223,28 +225,52 @@ impl ExchangeConnector for BybitConnector {
         let ts = now_ms().to_string();
         let recv = "5000";
         let qs = format!("category=linear&orderId={}", order_id);
-        let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
         
-        // Changed to /history to see filled/cancelled IOC orders
-        let resp = http.get(format!("https://api.bybit.com/v5/order/history?{}", qs))
+        // 1. Check REALTIME first (often holds recent active/filled orders)
+        let sig_rt = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
+        let resp_rt = http.get(format!("https://api.bybit.com/v5/order/realtime?{}", qs))
             .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-SIGN", &sig)
+            .header("X-BAPI-SIGN", &sig_rt)
             .header("X-BAPI-TIMESTAMP", &ts)
             .header("X-BAPI-RECV-WINDOW", recv)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(5))
             .send().await.map_err(|e| e.to_string())?;
             
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let order = &v["result"]["list"][0];
+        let v_rt: Value = resp_rt.json().await.map_err(|e| e.to_string())?;
+        let mut order = v_rt["result"]["list"].as_array().and_then(|a| a.first()).cloned();
 
-        // Check order status — if Cancelled/Rejected/Deactivated, no fill
-        let status = order["orderStatus"].as_str().unwrap_or("");
-        if status == "Cancelled" || status == "Rejected" || status == "Deactivated" {
-            tracing::warn!("[bybit] fetch_order {} status={} — definitively unfilled", order_id, status);
-            return Ok((0.0, 0.0, 0.0));
+        // 2. Fallback to HISTORY if not in realtime (e.g. dropped from active orders list)
+        if order.is_none() {
+            let ts_h = now_ms().to_string();
+            let sig_h = bybit_sign(&keys.bybit_secret, &ts_h, &keys.bybit_key, recv, &qs);
+            let resp_h = http.get(format!("https://api.bybit.com/v5/order/history?{}", qs))
+                .header("X-BAPI-API-KEY", &keys.bybit_key)
+                .header("X-BAPI-SIGN", &sig_h)
+                .header("X-BAPI-TIMESTAMP", &ts_h)
+                .header("X-BAPI-RECV-WINDOW", recv)
+                .timeout(Duration::from_secs(5))
+                .send().await.map_err(|e| e.to_string())?;
+                
+            let v_h: Value = resp_h.json().await.map_err(|e| e.to_string())?;
+            order = v_h["result"]["list"].as_array().and_then(|a| a.first()).cloned();
         }
 
-        // Check cumExecQty — if 0, order didn't fill
+        let order = match order {
+            Some(o) => o,
+            None => return Ok((0.0, 0.0, 0.0)),
+        };
+
+        // Check order status — if Cancelled/Rejected/Deactivated, but might have partial fill!
+        let status = order["orderStatus"].as_str().unwrap_or("");
+        if status == "Cancelled" || status == "Rejected" || status == "Deactivated" {
+            let exec_qty: f64 = order["cumExecQty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            if exec_qty < 1e-12 {
+                tracing::warn!("[bybit] fetch_order {} status={} — definitively unfilled", order_id, status);
+                return Ok((0.0, 0.0, 0.0));
+            }
+        }
+
+        // Check cumExecQty
         let exec_qty: f64 = order["cumExecQty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
         if exec_qty < 1e-12 {
             return Ok((0.0, 0.0, 0.0));

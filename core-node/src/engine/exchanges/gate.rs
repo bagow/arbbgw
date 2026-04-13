@@ -33,6 +33,9 @@ impl ExchangeConnector for GateConnector {
     async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, _leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if is_buy { (phys_amount / multiplier.max(1e-12)).round() as i64 } else { -((phys_amount / multiplier.max(1e-12)).round() as i64) };
+        if size == 0 {
+            return Err(format!("Computed order size is 0 for amt={} mult={}", phys_amount, multiplier));
+        }
         let path = "/api/v4/futures/usdt/orders";
         
         let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };

@@ -38,7 +38,9 @@ impl ExchangeConnector for BinanceConnector {
         let ts = now_ms();
         let mut qty_str = format!("{:.8}", (phys_amount / multiplier.max(1e-12)).round() * multiplier.max(1e-12)).trim_end_matches('0').to_string();
         if qty_str.ends_with('.') { qty_str.pop(); }
-        if qty_str.is_empty() { qty_str = "0".to_string(); }
+        if qty_str.is_empty() || qty_str == "0" { 
+            return Err(format!("Calculated quantity is 0 for amt={} mult={}, check multiplier mismatch", phys_amount, multiplier));
+        }
         
         let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
         let rounded_price = if is_buy {
@@ -245,14 +247,15 @@ impl ExchangeConnector for BinanceConnector {
                                     _ => if price > 0.0 { comm * price } else { comm },
                                 }
                             })
+                        // Replace only if the userTrades endpoint yielded a real fee
+                        // Note: For Binance USDT-M, executedQty is physical coin volume, DO NOT divide by multiplier!
                     })
                     .unwrap_or(0.0),
                 Err(_) => 0.0,
             },
             Err(_) => 0.0,
         };
-        let exec_contracts = exec_qty / multiplier.max(1e-12);
-        Ok((price, fee, exec_contracts))
+        Ok((price, fee, exec_qty))
     }
 
     async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {

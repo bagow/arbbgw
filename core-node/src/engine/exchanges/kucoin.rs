@@ -35,6 +35,11 @@ impl ExchangeConnector for KucoinConnector {
         if price_str.ends_with('.') { price_str.pop(); }
         if price_str.is_empty() { price_str = "0".to_string(); }
 
+        let req_size = (phys_amount / multiplier.max(1e-12)).round() as i64;
+        if req_size <= 0 {
+            return Err(format!("Computed order size is 0 for amt={} mult={}", phys_amount, multiplier));
+        }
+
         let body_json = if use_ioc && target_price > 0.0 {
             json!({
                 "clientOid": Uuid::new_v4().to_string(),
@@ -43,7 +48,7 @@ impl ExchangeConnector for KucoinConnector {
                 "type": "limit",
                 "timeInForce": "IOC",
                 "price": price_str,
-                "size": (phys_amount / multiplier.max(1e-12)).round() as i64,
+                "size": req_size,
                 "leverage": lev_str,
                 "marginMode": "CROSS",
                 "reduceOnly": false
@@ -54,7 +59,7 @@ impl ExchangeConnector for KucoinConnector {
                 "symbol": sym,
                 "side": side,
                 "type": "market",
-                "size": (phys_amount / multiplier.max(1e-12)).round() as i64,
+                "size": req_size,
                 "leverage": lev_str,
                 "marginMode": "CROSS",
                 "reduceOnly": false
