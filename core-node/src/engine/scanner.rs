@@ -111,8 +111,7 @@ pub fn generate_signals(
         let fee_a = crate::engine::real::get_exchange_fee(&row.exchange_a, ts.default_fee_rate, e_ctx);
         let fee_b = crate::engine::real::get_exchange_fee(&row.exchange_b, ts.default_fee_rate, e_ctx);
 
-        let is_qty_based_a = row.exchange_a == "binance" || row.exchange_a == "bybit";
-        let is_qty_based_b = row.exchange_b == "binance" || row.exchange_b == "bybit";
+        // (Qty basis is now handled universally by sending phys_amount to exchange connectors)
 
         // ── PROFILE EVALUATION ──
         for profile in profiles {
@@ -188,8 +187,8 @@ pub fn generate_signals(
             }
             if phys_qty <= 0.0 { continue; } // Couldn't fit
 
-            let contracts_a = phys_qty;
-            let contracts_b = phys_qty;
+            let contracts_a = (phys_qty / mult_a).round();
+            let contracts_b = (phys_qty / mult_b).round();
             
 
             
@@ -222,8 +221,9 @@ pub fn generate_signals(
                 (0.0, 0.0)
             };
 
-            let target_qty_a = if is_qty_based_a { contracts_a * mult_a } else { contracts_a };
-            let target_qty_b = if is_qty_based_b { contracts_b * mult_b } else { contracts_b };
+            // All exchanges now uniformly expect `phys_amount` for `place_order`.
+            let target_qty_a = phys_qty;
+            let target_qty_b = phys_qty;
 
             signals.push(TradeSignal {
                 profile_id: profile.id.clone(),
