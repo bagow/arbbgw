@@ -384,6 +384,14 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         };
 
         let pair_cd = &e_ctx.pair_cooldown;
+        let ex_cd = &e_ctx.exchange_cooldown;
+
+        // ── SET COOLDOWNS IMMEDIATELY AFTER ORDER ATTEMPT ──
+        // Prevents the same pair/exchange from being spammed regardless of fill outcome.
+        pair_cd.insert(pair.clone(), now_ms());
+        ex_cd.insert(exa.clone(), now_ms());
+        ex_cd.insert(exb.clone(), now_ms());
+
         if oid_a.is_none() && oid_b.is_none() { continue; }
 
         let mult_a = sig.mult_a;
