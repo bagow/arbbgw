@@ -325,6 +325,16 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         // Leverage is pre-warmed asynchronously via `real.rs:warmup_leverages`.
         // DO NOT call ensure_leverage here, it introduces 2+ seconds of latency!
 
+        // ── PAIR COOLDOWN RE-CHECK (defense-in-depth) ──
+        // Scanner checks cooldown too, but signals are batched — a second signal for
+        // the same pair could sneak through the same scan cycle. Block it here.
+        {
+            let cd_val = e_ctx.pair_cooldown.get(&pair).map(|v| *v).unwrap_or(0);
+            if now - cd_val < ts.pair_cooldown_ms {
+                continue;
+            }
+        }
+
         let (conn_ensure_a, conn_ensure_b) = (
             crate::engine::exchanges::get_connector(&exa).unwrap(),
             crate::engine::exchanges::get_connector(&exb).unwrap()

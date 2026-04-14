@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::collections::HashSet;
 use shared::{SpreadRow, TradingSettings, TechnicalSettings, TradeSignal};
 use crate::state::{EngineContext, PriceMap};
 use crate::engine::real::{now_ms, now_secs, ExchangeKeys};
@@ -15,6 +16,7 @@ pub fn generate_signals(
     ts: &TechnicalSettings,
 ) -> Vec<TradeSignal> {
     let mut signals = Vec::new();
+    let mut emitted_pairs: HashSet<String> = HashSet::new();
     let now = now_ms();
     let now_s = now_secs();
 
@@ -43,6 +45,9 @@ pub fn generate_signals(
         if now - cd_pair < ts.pair_cooldown_ms { 
             continue; 
         }
+
+        // Only 1 signal per pair per scan cycle (prevents duplicate exchange combos)
+        if emitted_pairs.contains(&row.pair) { continue; }
 
         // ── BALANCE LOW GUARD (zero-latency) ──
         if e_ctx.balance_low.get(&row.exchange_a).map(|v| *v).unwrap_or(false) ||
@@ -287,6 +292,7 @@ pub fn generate_signals(
                 mult_a,
                 mult_b,
             });
+            emitted_pairs.insert(row.pair.clone());
         }
     }
     signals
