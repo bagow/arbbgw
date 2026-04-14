@@ -237,31 +237,9 @@ pub fn generate_signals(
 
             let use_ioc = ts.entry_order_type == "ioc";
             let (limit_price_a, limit_price_b) = if use_ioc {
-                // ── DYNAMIC IOC BUDGET (Spread-Boundary Limit Pricing) ──
-                // Budget = available profit margin after structural spread and fees.
-                // When structural is reliable: budget = spread - structural - BE
-                // When structural is unknown:  budget = spread - BE (conservative, structural=0)
-                let effective_structural = if row.has_structural_spread {
-                    row.structural_spread
-                } else {
-                    0.0
-                };
-                let budget_pct = (row.spread - effective_structural - break_even_pct).max(0.0);
-                let per_leg = budget_pct / 2.0 / 100.0; // fraction
-
-                // Sell-leg: willing to sell cheaper (below bid) → price × (1 - per_leg)
-                // Buy-leg:  willing to buy higher (above ask)  → price × (1 + per_leg)
-                let lp_a = if is_a_higher {
-                    entry_a * (1.0 - per_leg) // SELL A
-                } else {
-                    entry_a * (1.0 + per_leg) // BUY A
-                };
-                let lp_b = if is_a_higher {
-                    entry_b * (1.0 + per_leg) // BUY B
-                } else {
-                    entry_b * (1.0 - per_leg) // SELL B
-                };
-                (lp_a, lp_b)
+                // Pass raw entry prices to the engine. Slippage and rounding are handled
+                // by the exchange-specific connectors (place_order) using settings.slippage_percent.
+                (entry_a, entry_b)
             } else {
                 (0.0, 0.0)
             };

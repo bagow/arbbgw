@@ -342,13 +342,9 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
         let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
 
-        // For IOC entries, the dynamic budget is already baked into limit_price by scanner.
-        // Do NOT double-apply slippage in the connector. For market orders, use profile slippage.
-        let entry_slippage = if limit_price_a > 0.0 { 0.0 } else { settings.slippage_percent };
-
         let (result_a, result_b) = tokio::join!(
-            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0, settings.leverage as f64, mult_a, entry_slippage, tick_a),
-            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0, settings.leverage as f64, mult_b, entry_slippage, tick_b)
+            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0, settings.leverage as f64, mult_a, settings.slippage_percent, tick_a),
+            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0, settings.leverage as f64, mult_b, settings.slippage_percent, tick_b)
         );
 
         let order_ms = t0.elapsed().as_millis();
