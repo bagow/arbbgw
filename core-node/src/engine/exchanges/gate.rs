@@ -170,6 +170,39 @@ impl ExchangeConnector for GateConnector {
             }
         }
         
+        tracing::error!("[gate] fallback market close triggered for {} (qty {})", pair, phys_amount);
+        let fb_body = json!({
+            "contract": contract,
+            "size": size,
+            "price": "0",
+            "tif": "ioc",
+            "reduce_only": true,
+            "close": false,
+            "text": "t-corenode-fb"
+        });
+        let fb_str = fb_body.to_string();
+        
+        if let Ok(resp_fb) = http.post(format!("https://api.gateio.ws{}", path))
+            .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &fb_str))
+            .body(fb_str)
+            .timeout(Duration::from_secs(10))
+            .send().await
+        {
+            if let Ok(v_fb) = resp_fb.json::<Value>().await {
+                let oid_fb = v_fb["id"].as_i64().map(|i| i.to_string()).or_else(|| v_fb["id"].as_str().map(|s| s.to_string()));
+                if let Some(fb_id) = oid_fb {
+                    for _ in 0..5 {
+                        if let Ok((p, f, _)) = self.fetch_order(http, keys, pair, &fb_id, multiplier).await {
+                            if p > 0.0 {
+                                return Ok(CloseReceipt { final_price: p, total_fee: f, closed_volume: phys_amount });
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        }
+        
         // Deep verification fallback
         let pos = self.fetch_positions(http, keys).await.unwrap_or_else(|_| vec![]);
         let still_has = pos.iter().any(|p| p.symbol == contract.replace("_", "") && p.size.abs() > 1e-12);

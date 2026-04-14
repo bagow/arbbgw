@@ -412,8 +412,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             if got_a && got_b && actual_vol_phys_a.is_some() && actual_vol_phys_b.is_some() { break; }
             if attempt > 0 { tokio::time::sleep(Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
             let (fa, fb) = tokio::join!(
-                async { if !got_a || actual_vol_phys_a.is_none() { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } } None },
-                async { if !got_b || actual_vol_phys_b.is_none() { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { if p > 0.0 { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } } None }
+                async { if !got_a || actual_vol_phys_a.is_none() { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } None },
+                async { if !got_b || actual_vol_phys_b.is_none() { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } None }
             );
             if let Some((p, f, ev)) = fa { fill_a = p; fee_a_val = f; actual_vol_phys_a = Some(ev); got_a = true; }
             if let Some((p, f, ev)) = fb { fill_b = p; fee_b_val = f; actual_vol_phys_b = Some(ev); got_b = true; }
@@ -421,8 +421,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
         // NO WS FALLBACK for entry fills! If fetch_order couldn't verify the fill
         // after all retries, the order is treated as UNFILLED (ghost trade prevention).
-        // Previous code used WS prices here, creating trades that didn't exist on exchanges.
-        if oid_a.is_some() && fill_a <= 0.0 {
+        if oid_a.is_some() && actual_vol_phys_a.is_none() {
             error!("[real] ❌ ENTRY FILL UNVERIFIED for {} leg A after {} retries — treating as UNFILLED", pair, ts.fill_verify_retries);
             tokio::spawn({
                 let hc = http.clone(); let kc = keys.clone(); let p = pair.clone(); let ex = exa.clone(); let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
@@ -433,7 +432,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 }
             });
         }
-        if oid_b.is_some() && fill_b <= 0.0 {
+        if oid_b.is_some() && actual_vol_phys_b.is_none() {
             error!("[real] ❌ ENTRY FILL UNVERIFIED for {} leg B after {} retries — treating as UNFILLED", pair, ts.fill_verify_retries);
             tokio::spawn({
                 let hc = http.clone(); let kc = keys.clone(); let p = pair.clone(); let ex = exb.clone(); let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
@@ -462,7 +461,13 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             continue;
         }
 
-        let matched_phys = phys_a.min(phys_b);
+        let min_phys = phys_a.min(phys_b);
+        let step_a = mult_a.max(1e-12);
+        let step_b = mult_b.max(1e-12);
+        let valid_a = (min_phys / step_a).floor() * step_a;
+        let valid_b = (min_phys / step_b).floor() * step_b;
+        let matched_phys = valid_a.min(valid_b);
+
         let delta_a = phys_a - matched_phys;
         let delta_b = phys_b - matched_phys;
         
