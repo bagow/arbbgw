@@ -143,6 +143,21 @@ pub fn generate_signals(
             let slippage_frac = profile.slippage_percent / 100.0;
             let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
 
+            // ── ABSOLUTE STRUCTURAL GUARD ──
+            // Active ONLY when structural spread is reliable (legs did NOT swap in 24h+).
+            // If has_structural_spread=false (premium crossed 0 within 24h) — this is a
+            // normal volatile pair, guard is disabled, evaluation is purely by raw spread.
+            if row.has_structural_spread {
+                let profit_potential = row.spread - row.structural_spread - break_even_pct;
+                if profit_potential <= 0.0 {
+                    if let Some(p) = &diag_prefix {
+                        tracing::info!("{} -> structural_guard: profit impossible (spread={:.4}% - structural={:.4}% - BE={:.4}% = {:.4}%)",
+                            p, row.spread, row.structural_spread, break_even_pct, profit_potential);
+                    }
+                    continue;
+                }
+            }
+
             // ── L1 DEPTH FILTER (Zero-Latency Fake Liquidity Protection) ──
             // Uses exact websocket Bid/Ask volume received in the same tick as the price.
             if profile.min_depth_percent > 0.0 {
