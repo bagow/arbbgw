@@ -164,6 +164,7 @@ function startPoll() {
 }
 
 async function refreshActiveTab() {
+    window.lastPollTime = Date.now();
     try {
         const profile = profiles.find(p => p.id === activeTabId);
         const profileParam = profile ? `&profile_id=${encodeURIComponent(profile.id)}` : '';
@@ -509,7 +510,14 @@ function renderCexTab(profile, exchangesData) {
         disabledRaw.forEach(ex => disabledMap[ex] = true);
     }
 
-    let html = `<div class="cex-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px;">`;
+    let html = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:20px;">
+            <div style="color:var(--text-sub);font-size:0.85rem;font-family:var(--font-mono);margin-left:auto;">
+                Updating in: <span id="poll-countdown" style="font-weight:600;color:var(--text);">10s</span>
+            </div>
+        </div>
+        <div class="cex-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px;">
+    `;
     
     for (const exA of exNames) {
         let pairsList = '';
@@ -1685,6 +1693,15 @@ window.addEventListener('DOMContentLoaded', boot);
 // Funding countdown updater — uses real exchange timestamp when available
 setInterval(() => {
     const now = Date.now();
+    
+    const pollEl = document.getElementById('poll-countdown');
+    if (pollEl) {
+        if (!window.lastPollTime) window.lastPollTime = now;
+        let diff = 10 - Math.floor((now - window.lastPollTime) / 1000);
+        if (diff < 0) diff = 0;
+        pollEl.textContent = diff + 's';
+    }
+
     // Fallback: next 8h UTC mark
     let fallbackTarget = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate(), 0, 0, 0));
     while (fallbackTarget.getTime() <= now) {
