@@ -273,7 +273,7 @@ impl ExchangeConnector for BybitConnector {
         // Check cumExecQty
         let exec_qty: f64 = order["cumExecQty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
         if exec_qty < 1e-12 {
-            return Ok((0.0, 0.0, 0.0));
+            return Err("Not filled yet".to_string());
         }
 
         let price = order["avgPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);

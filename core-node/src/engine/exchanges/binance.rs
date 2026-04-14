@@ -208,7 +208,7 @@ impl ExchangeConnector for BinanceConnector {
                 return Ok((0.0, 0.0, 0.0));
             }
             // Order exists but hasn't filled yet (or was partially cancelled)
-            return Ok((0.0, 0.0, 0.0));
+            return Err("Not filled yet".to_string());
         }
 
         let price = v["avgPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);

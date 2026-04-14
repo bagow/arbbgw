@@ -255,8 +255,11 @@ impl ExchangeConnector for KucoinConnector {
         let fee  = v["data"]["fee"].as_f64().or_else(|| v["data"]["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
         
         let status = v["data"]["status"].as_str().unwrap_or("");
-        if status == "done" && size <= 0.0 {
-            return Ok((0.0, 0.0, 0.0));
+        if size <= 0.0 {
+            if status == "done" || status == "match" {
+                return Ok((0.0, 0.0, 0.0));
+            }
+            return Err("Not filled yet".to_string());
         }
         
         // Note: KuCoin multiplier is dynamically passed to correctly compute price

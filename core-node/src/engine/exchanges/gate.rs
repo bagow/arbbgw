@@ -239,6 +239,13 @@ impl ExchangeConnector for GateConnector {
         let left = v["left"].as_f64().or_else(|| v["left"].as_i64().map(|i| i as f64)).unwrap_or(0.0).abs();
         let exec_contracts = (size - left).max(0.0);
 
+        if exec_contracts <= 0.0 {
+            if status == "finished" {
+                return Ok((0.0, 0.0, 0.0));
+            }
+            return Err("Not filled yet".to_string());
+        }
+
         // Fetch real commission from my_trades endpoint since orders endpoint fee is often 0 or delayed
         if exec_contracts > 0.0 {
             let contract = pair.replace("USDT", "_USDT");
