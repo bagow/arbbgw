@@ -82,7 +82,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     ).await.context("Binance WS connect failed")?;
     info!("[binance] Connected");
 
-    while let Some(msg) = ws.next().await {
+    while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
         if let Ok(Message::Text(text)) = msg {
             let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             let sym = v["s"].as_str().unwrap_or("");

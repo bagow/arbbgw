@@ -30,7 +30,7 @@ impl ExchangeConnector for GateConnector {
         "gate"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, _leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, _leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64, api_timeout_ms: u64) -> Result<(Option<String>, f64, f64), String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if is_buy { (phys_amount / multiplier.max(1e-12)).round() as i64 } else { -((phys_amount / multiplier.max(1e-12)).round() as i64) };
         if size == 0 {
@@ -67,7 +67,7 @@ impl ExchangeConnector for GateConnector {
         let resp = http.post(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &body_str))
             .body(body_str.clone())
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_millis(api_timeout_ms))
             .send().await.map_err(|e| e.to_string())?;
 
         let status = resp.status();
@@ -94,7 +94,7 @@ impl ExchangeConnector for GateConnector {
         }
     }
 
-    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, _use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
+    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, _use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64, api_timeout_ms: u64) -> Result<CloseReceipt, String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if multiplier == 0.0 {
             if is_buy { phys_amount.round() as i64 } else { -(phys_amount.round() as i64) }
@@ -159,7 +159,7 @@ impl ExchangeConnector for GateConnector {
         let resp = http.post(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &body_str))
             .body(body_str)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_millis(api_timeout_ms))
             .send().await.map_err(|e| e.to_string())?;
 
         let v_resp: Value = resp.json().await.map_err(|e| e.to_string())?;
@@ -187,7 +187,7 @@ impl ExchangeConnector for GateConnector {
             "price": "0",
             "tif": "ioc",
             "reduce_only": true,
-            "close": false,
+            "close": true,
             "text": "t-corenode-fb"
         });
         let fb_str = fb_body.to_string();
@@ -195,7 +195,7 @@ impl ExchangeConnector for GateConnector {
         if let Ok(resp_fb) = http.post(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &fb_str))
             .body(fb_str)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_millis(api_timeout_ms))
             .send().await
         {
             if let Ok(v_fb) = resp_fb.json::<Value>().await {
@@ -223,9 +223,9 @@ impl ExchangeConnector for GateConnector {
         }
     }
 
-    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, _fallback_price: f64) -> Result<CloseReceipt, String> {
+    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, _fallback_price: f64, api_timeout_ms: u64) -> Result<CloseReceipt, String> {
         // Just call close_position utilizing Gate's default logic (where price=0 -> deep limit fallback)
-        self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, true, 0.0, multiplier, tick_size, 15, 100).await
+        self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, true, 0.0, multiplier, tick_size, 15, 100, api_timeout_ms).await
     }
 
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {

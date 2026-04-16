@@ -16,7 +16,7 @@ impl ExchangeConnector for KucoinConnector {
         "kucoin"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64, api_timeout_ms: u64) -> Result<(Option<String>, f64, f64), String> {
         let sym = format!("{}M", pair);
         let ts = now_ms().to_string(); 
         let path = "/api/v1/orders";
@@ -80,7 +80,7 @@ impl ExchangeConnector for KucoinConnector {
             .header("KC-API-KEY-VERSION", "2")
             .header("Content-Type", "application/json")
             .body(body_str.clone())
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_millis(api_timeout_ms))
             .send().await.map_err(|e| e.to_string())?;
 
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
@@ -102,7 +102,7 @@ impl ExchangeConnector for KucoinConnector {
         }
     }
 
-    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
+    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64, api_timeout_ms: u64) -> Result<CloseReceipt, String> {
         let sym = format!("{}M", pair);
         let path = "/api/v1/orders";
         let side = if is_buy { "buy" } else { "sell" };
@@ -164,7 +164,7 @@ impl ExchangeConnector for KucoinConnector {
             .header("KC-API-KEY-VERSION", "2")
             .header("Content-Type", "application/json")
             .body(body_str)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_millis(api_timeout_ms))
             .send().await.map_err(|e| e.to_string())?;
 
         let v_resp: Value = resp.json().await.map_err(|e| e.to_string())?;
@@ -208,7 +208,7 @@ impl ExchangeConnector for KucoinConnector {
             .header("KC-API-KEY-VERSION", "2")
             .header("Content-Type", "application/json")
             .body(fb_str)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_millis(api_timeout_ms))
             .send().await.map_err(|e| e.to_string())?;
             
         let v_fb: Value = resp_fb.json().await.map_err(|e| e.to_string())?;
@@ -234,9 +234,9 @@ impl ExchangeConnector for KucoinConnector {
         }
     }
 
-    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, _fallback_price: f64) -> Result<CloseReceipt, String> {
+    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, _fallback_price: f64, api_timeout_ms: u64) -> Result<CloseReceipt, String> {
         // Drop excess using market order natively via close_position signature
-        self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, false, 0.0, multiplier, tick_size, 15, 100).await
+        self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, false, 0.0, multiplier, tick_size, 15, 100, api_timeout_ms).await
     }
 
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, _pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {

@@ -225,6 +225,7 @@ pub struct TechnicalSettings {
     pub close_verify_delay_ms: i64,
     pub emergency_close_retries: i64,
     pub exit_sanity_pct: f64,
+    pub api_timeout_ms: u64,
 
     // ── Refresh intervals ──
     pub balance_refresh_secs: i64,
@@ -266,6 +267,7 @@ impl Default for TechnicalSettings {
             close_verify_delay_ms: 25,
             emergency_close_retries: 3,
             exit_sanity_pct: 0.20,
+            api_timeout_ms: 2000,
 
             balance_refresh_secs: 60,
             multiplier_refresh_secs: 3600,
@@ -308,6 +310,7 @@ impl TechnicalSettings {
                 "close_verify_delay_ms"    => { if let Ok(x) = v.parse() { ts.close_verify_delay_ms = x; } }
                 "emergency_close_retries"  => { if let Ok(x) = v.parse() { ts.emergency_close_retries = x; } }
                 "exit_sanity_pct"          => { if let Ok(x) = v.parse() { ts.exit_sanity_pct = x; } }
+                "api_timeout_ms"           => { if let Ok(x) = v.parse() { ts.api_timeout_ms = x; } }
                 "balance_refresh_secs"     => { if let Ok(x) = v.parse() { ts.balance_refresh_secs = x; } }
                 "multiplier_refresh_secs"  => { if let Ok(x) = v.parse() { ts.multiplier_refresh_secs = x; } }
                 "funding_cache_secs"       => { if let Ok(x) = v.parse() { ts.funding_cache_secs = x; } }

@@ -41,14 +41,14 @@ pub trait ExchangeConnector: Send + Sync {
     /// Connects to the exchange and opens a new order.
     /// The connector itself computes the final limit price using `target_price` and `slippage_percent`.
     /// Returns (order_id, executed_price, executed_fee)
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String>;
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64, api_timeout_ms: u64) -> Result<(Option<String>, f64, f64), String>;
 
     /// Connects to the exchange and closes an existing position smartly.
     /// The connector itself handles the delay, verification, and fallback market logic.
-    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String>;
+    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64, api_timeout_ms: u64) -> Result<CloseReceipt, String>;
 
     /// Adjusts position to drop excess volume (trimming). Returns the loss and fee incurred.
-    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, fallback_price: f64) -> Result<CloseReceipt, String>;
+    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, fallback_price: f64, api_timeout_ms: u64) -> Result<CloseReceipt, String>;
 
     /// Fetches the order details. Returns (executed_price, absolute_fee, executed_physical_qty)
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String>;

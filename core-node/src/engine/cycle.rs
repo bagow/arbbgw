@@ -144,6 +144,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             let _exit_sanity = ts.exit_sanity_pct;
             let close_verify_delay = ts.close_verify_delay_ms as u64;
             let close_verify_retries = ts.close_verify_retries;
+            let api_timeout_ms = ts.api_timeout_ms;
 
             let use_ioc = ts.entry_order_type == "ioc" && !manual_close;
             let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
@@ -162,8 +163,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
                 // Place close orders in parallel (Connectors handle limit projection, retries & fallback native)
                 let (ra, rb) = tokio::join!(
-                    conn_a.close_position(&h, &k, &pair, is_a_higher, q_a, dry_run, lev as f64, exit_price_a, use_ioc, settings.slippage_percent, mult_a, tick_a, close_verify_retries as u32, close_verify_delay),
-                    conn_b.close_position(&h, &k, &pair, !is_a_higher, q_b, dry_run, lev as f64, exit_price_b, use_ioc, settings.slippage_percent, mult_b, tick_b, close_verify_retries as u32, close_verify_delay)
+                    conn_a.close_position(&h, &k, &pair, is_a_higher, q_a, dry_run, lev as f64, exit_price_a, use_ioc, settings.slippage_percent, mult_a, tick_a, close_verify_retries as u32, close_verify_delay, api_timeout_ms),
+                    conn_b.close_position(&h, &k, &pair, !is_a_higher, q_b, dry_run, lev as f64, exit_price_b, use_ioc, settings.slippage_percent, mult_b, tick_b, close_verify_retries as u32, close_verify_delay, api_timeout_ms)
                 );
 
                 let mut real_exit_a = 0.0;
@@ -353,8 +354,8 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
 
         let (result_a, result_b) = tokio::join!(
-            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0, settings.leverage as f64, mult_a, settings.slippage_percent, tick_a),
-            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0, settings.leverage as f64, mult_b, settings.slippage_percent, tick_b)
+            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0, settings.leverage as f64, mult_a, settings.slippage_percent, tick_a, ts.api_timeout_ms),
+            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0, settings.leverage as f64, mult_b, settings.slippage_percent, tick_b, ts.api_timeout_ms)
         );
 
         let order_ms = t0.elapsed().as_millis();
@@ -421,6 +422,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
         // NO WS FALLBACK for entry fills! If fetch_order couldn't verify the fill
         // after all retries, the order is treated as UNFILLED (ghost trade prevention).
+        let api_timeout = ts.api_timeout_ms;
         if oid_a.is_some() && actual_vol_phys_a.is_none() {
             error!("[real] ❌ ENTRY FILL UNVERIFIED for {} leg A after {} retries — treating as UNFILLED", pair, ts.fill_verify_retries);
             tokio::spawn({
@@ -428,7 +430,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 let is_buy = !is_a_higher; let fallback = sig.entry_a;
                 async move {
                     error!("[real] 🚨 GHOST PREVENTION: Blind trimming {} on {} to drop unverified orphaned position", p, ex);
-                    let _ = conn.trim_position(&hc, &kc, &p, !is_buy, qty_a, dry_run, mult_a, tick_a, fallback).await;
+                    let _ = conn.trim_position(&hc, &kc, &p, !is_buy, qty_a, dry_run, mult_a, tick_a, fallback, api_timeout).await;
                 }
             });
         }
@@ -439,7 +441,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 let is_buy = is_a_higher; let fallback = sig.entry_b;
                 async move {
                     error!("[real] 🚨 GHOST PREVENTION: Blind trimming {} on {} to drop unverified orphaned position", p, ex);
-                    let _ = conn.trim_position(&hc, &kc, &p, !is_buy, qty_b, dry_run, mult_b, tick_b, fallback).await;
+                    let _ = conn.trim_position(&hc, &kc, &p, !is_buy, qty_b, dry_run, mult_b, tick_b, fallback, api_timeout).await;
                 }
             });
         }
@@ -484,7 +486,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys", pair, phys_to_dump);
                 
                 let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
-                match crate::engine::exchanges::get_connector(&exa).unwrap().trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_a, tick_for_close, fill_a).await {
+                match crate::engine::exchanges::get_connector(&exa).unwrap().trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_a, tick_for_close, fill_a, ts.api_timeout_ms).await {
                     Ok(rc) => {
                         trimming_fee += rc.total_fee;
                         let gross_loss = if is_buy { (fill_a - rc.final_price) * delta_a } else { (rc.final_price - fill_a) * delta_a };
@@ -502,7 +504,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys", pair, phys_to_dump);
                 
                 let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
-                match crate::engine::exchanges::get_connector(&exb).unwrap().trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_b, tick_for_close, fill_b).await {
+                match crate::engine::exchanges::get_connector(&exb).unwrap().trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_b, tick_for_close, fill_b, ts.api_timeout_ms).await {
                     Ok(rc) => {
                         trimming_fee += rc.total_fee;
                         let gross_loss = if is_buy { (fill_b - rc.final_price) * delta_b } else { (rc.final_price - fill_b) * delta_b };

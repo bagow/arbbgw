@@ -91,7 +91,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     let mut ping = tokio::time::interval(Duration::from_secs(20));
     loop {
         tokio::select! {
-            msg = ws.next() => match msg {
+            msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
                     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
                     if v["type"].as_str() != Some("message") { continue; }

@@ -29,7 +29,7 @@ impl ExchangeConnector for BinanceConnector {
         "binance"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, _leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, _leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64, api_timeout_ms: u64) -> Result<(Option<String>, f64, f64), String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run {
             return Ok((Some(format!("dry_{}_{}", self.name(), now_ms())), target_price, 0.0));
@@ -63,7 +63,7 @@ impl ExchangeConnector for BinanceConnector {
         let sig = binance_sign(&keys.binance_secret, &qs);
         let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
         let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+            .timeout(Duration::from_millis(api_timeout_ms)).send().await.map_err(|e| e.to_string())?;
 
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         
@@ -85,7 +85,7 @@ impl ExchangeConnector for BinanceConnector {
         }
     }
 
-    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
+    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64, api_timeout_ms: u64) -> Result<CloseReceipt, String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run { return Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount }); }
 
@@ -118,7 +118,7 @@ impl ExchangeConnector for BinanceConnector {
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
 
         let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+            .timeout(Duration::from_millis(api_timeout_ms)).send().await.map_err(|e| e.to_string())?;
         
         let v_resp: Value = resp.json().await.map_err(|e| e.to_string())?;
         if let Some(msg) = v_resp["msg"].as_str() {
@@ -144,7 +144,7 @@ impl ExchangeConnector for BinanceConnector {
         let sig_fb = binance_sign(&keys.binance_secret, &qs_fb);
         let url_fb = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs_fb, sig_fb);
         let resp_fb = http.post(&url_fb).header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+            .timeout(Duration::from_millis(api_timeout_ms)).send().await.map_err(|e| e.to_string())?;
             
         let v_fb: Value = resp_fb.json().await.map_err(|e| e.to_string())?;
         let oid_fb = v_fb["orderId"].as_i64().map(|id| id.to_string()).ok_or_else(|| "Fallback close rejected".to_string())?;
@@ -168,7 +168,7 @@ impl ExchangeConnector for BinanceConnector {
         }
     }
 
-    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, _tick_size: f64, fallback_price: f64) -> Result<CloseReceipt, String> {
+    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, _tick_size: f64, fallback_price: f64, api_timeout_ms: u64) -> Result<CloseReceipt, String> {
         let side = if is_buy { "BUY" } else { "SELL" };
         if dry_run { return Ok(CloseReceipt { final_price: fallback_price, total_fee: 0.0, closed_volume: phys_excess }); }
         
@@ -178,7 +178,7 @@ impl ExchangeConnector for BinanceConnector {
         let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
         
         let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
+            .timeout(Duration::from_millis(api_timeout_ms)).send().await.map_err(|e| e.to_string())?;
         
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         let order_id = v["orderId"].as_i64().map(|id| id.to_string()).ok_or_else(|| "Trim rejected".to_string())?;

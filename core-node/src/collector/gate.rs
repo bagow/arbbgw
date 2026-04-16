@@ -185,7 +185,7 @@ async fn ws_shard(idx: usize, symbols: Vec<String>, price_map: &PriceMap, signal
 
     loop {
         tokio::select! {
-            msg = ws.next() => match msg {
+            msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
                     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
                     if v.get("error").is_some() {

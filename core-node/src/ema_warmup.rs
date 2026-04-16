@@ -1,10 +1,9 @@
-//! EMA Warmup — fetches 24h of historical 1-min candles from Gate, KuCoin and HTX
+//! EMA Warmup — fetches 24h of historical 15-min candles from exchanges
 //! on startup, reconstructs historical spreads for every tradeable pair combination,
 //! and pre-initialises the STRUCTURAL_EMA cache so the engine can trade immediately
 //! without waiting for a cold-start accumulation period.
 //!
-//! Uses parallel fetching (~20 concurrent requests) to complete warmup in ~30-60s
-//! instead of ~16 minutes sequentially.
+//! Uses parallel fetching (~20 concurrent requests) to complete warmup quickly.
 
 use reqwest::Client;
 use serde_json::Value;
@@ -18,14 +17,14 @@ use crate::spreads::warmup_ema_from_premiums;
 const LOOKBACK_SECS: u64 = 86_400; // 24 hours
 const MAX_CONCURRENT: usize = 20;  // Max parallel REST requests (avoid rate limits)
 
-// ─── Gate.io: fetch 1-min candles for a USDT perp ────────────────────────────
+// ─── Gate.io: fetch 15-min candles for a USDT perp ────────────────────────────
 
 async fn fetch_gate_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
     // Gate contract name: BTCUSDT → BTC_USDT
     let contract = pair.replace("USDT", "_USDT");
     let from = now_secs() - LOOKBACK_SECS;
     let url = format!(
-        "https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={}&interval=1m&from={}&limit=1440",
+        "https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={}&interval=15m&from={}&limit=100",
         contract, from
     );
     let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
@@ -41,14 +40,14 @@ async fn fetch_gate_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
     }).collect()
 }
 
-// ─── KuCoin Futures: fetch 1-min klines ──────────────────────────────────────
+// ─── KuCoin Futures: fetch 15-min klines ──────────────────────────────────────
 
 async fn fetch_kucoin_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
     // KuCoin symbol: XBTUSDTM or BTCUSDTM pattern — pair ends with USDT → add M
     let sym = format!("{}M", pair);
     let from = now_secs() - LOOKBACK_SECS;
     let url = format!(
-        "https://api-futures.kucoin.com/api/v1/kline/query?symbol={}&granularity=1&from={}&to={}",
+        "https://api-futures.kucoin.com/api/v1/kline/query?symbol={}&granularity=15&from={}&to={}",
         sym, from * 1000, now_secs() * 1000
     );
     let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
@@ -64,13 +63,13 @@ async fn fetch_kucoin_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
     }).collect()
 }
 
-// ─── HTX: fetch 1-min klines ─────────────────────────────────────────────────
+// ─── HTX: fetch 15-min klines ─────────────────────────────────────────────────
 
 async fn fetch_htx_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
     // HTX linear-swap symbol: BTCUSDT → BTC-USDT
     let sym = format!("{}-{}", &pair[..pair.len()-4], &pair[pair.len()-4..]);
     let url = format!(
-        "https://api.hbdm.com/linear-swap-ex/market/history/kline?contract_code={}&period=1min&size=1440",
+        "https://api.hbdm.com/linear-swap-ex/market/history/kline?contract_code={}&period=15min&size=100",
         sym
     );
     let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
@@ -85,12 +84,12 @@ async fn fetch_htx_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
     }).collect()
 }
 
-// ─── Binance: fetch 1-min klines ─────────────────────────────────────────────
+// ─── Binance: fetch 15-min klines ─────────────────────────────────────────────
 
 async fn fetch_binance_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
     let from = now_secs() - LOOKBACK_SECS;
     let url = format!(
-        "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval=1m&startTime={}&limit=1440",
+        "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval=15m&startTime={}&limit=100",
         pair, from * 1000
     );
     let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
@@ -106,12 +105,12 @@ async fn fetch_binance_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
     }).collect()
 }
 
-// ─── Bybit: fetch 1-min klines ───────────────────────────────────────────────
+// ─── Bybit: fetch 15-min klines ───────────────────────────────────────────────
 
 async fn fetch_bybit_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
     let from = now_secs() - LOOKBACK_SECS;
     let url = format!(
-        "https://api.bybit.com/v5/market/kline?category=linear&symbol={}&interval=1&start={}&limit=1440",
+        "https://api.bybit.com/v5/market/kline?category=linear&symbol={}&interval=15&start={}&limit=100",
         pair, from * 1000
     );
     let v: Value = match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
@@ -175,7 +174,7 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
 
                     if candles_a.is_empty() || candles_b.is_empty() { return 0usize; }
 
-                    // Merge by timestamp (align to 1-min buckets)
+                    // Merge by timestamp (align to 15-min buckets)
                     let merged = merge_candles(&candles_a, &candles_b);
                     if merged.len() < 10 { return 0; }
 
@@ -233,16 +232,16 @@ async fn fetch_candles_for(http: &Client, exchange: &str, pair: &str) -> Vec<(f6
     }
 }
 
-// ─── Merge two (timestamp, price) series by nearest minute ──────────────────
+// ─── Merge two (timestamp, price) series by nearest 15-minute ──────────────────
 
 fn merge_candles(a: &[(f64, f64)], b: &[(f64, f64)]) -> Vec<(f64, f64, f64)> {
     use std::collections::HashMap;
     let map_b: HashMap<i64, f64> = b.iter()
-        .map(|(ts, p)| ((*ts / 60.0).round() as i64, *p))
+        .map(|(ts, p)| ((*ts / 900.0).round() as i64, *p))
         .collect();
 
     a.iter().filter_map(|(ts, pa)| {
-        let bucket = (*ts / 60.0).round() as i64;
+        let bucket = (*ts / 900.0).round() as i64;
         map_b.get(&bucket).map(|pb| (*ts, *pa, *pb))
     }).collect()
 }

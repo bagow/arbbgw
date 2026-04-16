@@ -18,7 +18,7 @@ impl ExchangeConnector for BybitConnector {
         "bybit"
     }
 
-    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, _leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64) -> Result<(Option<String>, f64, f64), String> {
+    async fn place_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, target_price: f64, use_ioc: bool, _leverage: f64, multiplier: f64, slippage_percent: f64, tick_size: f64, api_timeout_ms: u64) -> Result<(Option<String>, f64, f64), String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let side_str = if is_buy { "Buy" } else { "Sell" };
@@ -75,7 +75,7 @@ impl ExchangeConnector for BybitConnector {
             .header("X-BAPI-RECV-WINDOW", recv)
             .header("Content-Type", "application/json")
             .body(body_str.clone())
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_millis(api_timeout_ms))
             .send().await.map_err(|e| e.to_string())?;
 
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
@@ -97,7 +97,7 @@ impl ExchangeConnector for BybitConnector {
         }
     }
 
-    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64) -> Result<CloseReceipt, String> {
+    async fn close_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_amount: f64, dry_run: bool, leverage: f64, target_price: f64, use_ioc: bool, slippage_percent: f64, multiplier: f64, tick_size: f64, retries: u32, delay_ms: u64, api_timeout_ms: u64) -> Result<CloseReceipt, String> {
         let ts = now_ms().to_string();
         let recv = "5000";
         let side_str = if is_buy { "Buy" } else { "Sell" };
@@ -159,7 +159,7 @@ impl ExchangeConnector for BybitConnector {
             .header("X-BAPI-RECV-WINDOW", recv)
             .header("Content-Type", "application/json")
             .body(body_str)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_millis(api_timeout_ms))
             .send().await.map_err(|e| e.to_string())?;
 
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
@@ -199,7 +199,7 @@ impl ExchangeConnector for BybitConnector {
             .header("X-BAPI-RECV-WINDOW", recv)
             .header("Content-Type", "application/json")
             .body(fb_str)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_millis(api_timeout_ms))
             .send().await.map_err(|e| e.to_string())?;
             
         let v_fb: Value = resp_fb.json().await.map_err(|e| e.to_string())?;
@@ -223,8 +223,8 @@ impl ExchangeConnector for BybitConnector {
         }
     }
 
-    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, _fallback_price: f64) -> Result<CloseReceipt, String> {
-        self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, false, 0.0, multiplier, tick_size, 15, 100).await
+    async fn trim_position(&self, http: &Client, keys: &ExchangeKeys, pair: &str, is_buy: bool, phys_excess: f64, dry_run: bool, multiplier: f64, tick_size: f64, _fallback_price: f64, api_timeout_ms: u64) -> Result<CloseReceipt, String> {
+        self.close_position(http, keys, pair, is_buy, phys_excess, dry_run, 1.0, 0.0, false, 0.0, multiplier, tick_size, 15, 100, api_timeout_ms).await
     }
 
     async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, _pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64, f64), String> {
