@@ -479,6 +479,10 @@ window.openModal = async function(row) {
     scannerState.activeRow = row;
     scannerState.klines = {};
     scannerState.liveTicks = {};
+    // Ensure the row's exchanges are in KNOWN_EXCHANGES (critical when opening
+    // from Active Trades without ever visiting the Scanner tab)
+    if (row.exchangeA && !KNOWN_EXCHANGES.includes(row.exchangeA)) KNOWN_EXCHANGES.push(row.exchangeA);
+    if (row.exchangeB && !KNOWN_EXCHANGES.includes(row.exchangeB)) KNOWN_EXCHANGES.push(row.exchangeB);
     // By default show only the pair's two exchanges; hide all others among enabled
     const enabledEx = getEnabledExchanges();
     scannerState.hiddenExchanges = new Set(
