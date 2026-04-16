@@ -38,7 +38,12 @@ impl ExchangeConnector for GateConnector {
         }
         let path = "/api/v4/futures/usdt/orders";
         
-        let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+        // For IOC orders, use aggressive slippage buffer (2%) to guarantee fill.
+        // The actual fill price is determined by the order book — the limit just
+        // prevents catastrophic fills. Profile slippage (0.05%) was too tight and
+        // caused 100% of Gate IOC orders to expire unfilled.
+        let ioc_slippage = if use_ioc { 2.0 } else { slippage_percent };
+        let price = if is_buy { target_price * (1.0 + ioc_slippage / 100.0) } else { target_price * (1.0 - ioc_slippage / 100.0) };
         let rounded_price = if is_buy {
             (price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
         } else {

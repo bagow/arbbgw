@@ -24,7 +24,8 @@ impl ExchangeConnector for KucoinConnector {
         
         let lev_str = (leverage.max(1.0) as i64).to_string();
 
-        let price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+        let ioc_slippage = if use_ioc { 2.0 } else { slippage_percent };
+        let price = if is_buy { target_price * (1.0 + ioc_slippage / 100.0) } else { target_price * (1.0 - ioc_slippage / 100.0) };
         let rounded_price = if is_buy {
             (price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
         } else {
