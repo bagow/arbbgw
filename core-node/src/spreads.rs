@@ -97,8 +97,11 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
                         *entry = (new_12, new_21, new_max_12, new_min_12, new_max_21, new_min_21, old_cross_12, old_cross_21, now_f64);
                         (new_12, new_21, new_max_12, new_min_12, new_max_21, new_min_21, old_cross_12, old_cross_21)
                     } else {
-                        let cross_12 = if premium_1_over_2 <= 0.0 { now_f64 } else { 0.0 };
-                        let cross_21 = if premium_2_over_1 <= 0.0 { now_f64 } else { 0.0 };
+                        // Default cross to NOW — conservative: assume NO structural spread
+                        // until proven by 24h of no zero-crossing. Old default (0.0) caused
+                        // every new pair to immediately have has_structural_spread=true.
+                        let cross_12 = now_f64;
+                        let cross_21 = now_f64;
                         ema_map.insert(ema_key, (premium_1_over_2, premium_2_over_1, premium_1_over_2, premium_1_over_2, premium_2_over_1, premium_2_over_1, cross_12, cross_21, now_f64));
                         (premium_1_over_2, premium_2_over_1, premium_1_over_2, premium_1_over_2, premium_2_over_1, premium_2_over_1, cross_12, cross_21)
                     };
@@ -156,7 +159,8 @@ pub fn warmup_ema_from_premiums(history: &[(f64, f64, f64, String, String, Strin
 
     for (ts_val, premium_12, premium_21, pair, name1, name2) in &sorted {
         let key = format!("{}|{}|{}", pair, name1, name2);
-        let mut entry = ema_map.entry(key).or_insert((*premium_12, *premium_21, *premium_12, *premium_12, *premium_21, *premium_21, 0.0, 0.0, *ts_val));
+        // Default cross to first candle ts (not 0.0) — prevents false has_structural_spread
+        let mut entry = ema_map.entry(key).or_insert((*premium_12, *premium_21, *premium_12, *premium_12, *premium_21, *premium_21, *ts_val, *ts_val, *ts_val));
         let (old_12, old_21, old_max_12, old_min_12, old_max_21, old_min_21, mut old_cross_12, mut old_cross_21, last_ts) = *entry;
         let dt = (ts_val - last_ts).max(0.0);
         let alpha = if dt > 0.0 { 1.0 - (-dt / tau).exp() } else { 0.0 };
