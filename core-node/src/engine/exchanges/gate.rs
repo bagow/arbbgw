@@ -66,12 +66,21 @@ impl ExchangeConnector for GateConnector {
 
         let resp = http.post(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &body_str))
-            .body(body_str)
+            .body(body_str.clone())
             .timeout(Duration::from_secs(10))
             .send().await.map_err(|e| e.to_string())?;
 
         let status = resp.status();
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        
+        // Diagnostic: log full order request and response for debugging IOC fill issues
+        let resp_status = v["status"].as_str().unwrap_or("?");
+        let resp_size = v["size"].as_i64().unwrap_or(0);
+        let resp_left = v["left"].as_i64().unwrap_or(0);
+        let resp_fill = v["fill_price"].as_str().unwrap_or("0");
+        tracing::info!("[gate] place_order {} req={} → http={} status={} size={} left={} fill_price={}", 
+            pair, body_str, status, resp_status, resp_size, resp_left, resp_fill);
+        
         if !status.is_success() { 
             return Err(format!("Gate API Error: {}", v)); 
         }
