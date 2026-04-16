@@ -1,12 +1,12 @@
 //! Gate.io Futures WebSocket collector
 //! Uses multiple parallel WS connections (~100 symbols each) to avoid
 //! Gate resetting connections due to too many subscriptions per socket.
-use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
 
@@ -15,12 +15,18 @@ use crate::state::{PriceMap, UpdateSignal};
 /// Max symbols per single WS connection — keeps well under Gate's implicit limit.
 const SYMBOLS_PER_WS: usize = 100;
 
-pub async fn run(prices: PriceMap, signal: UpdateSignal, settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>) {
+pub async fn run(
+    prices: PriceMap,
+    signal: UpdateSignal,
+    settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
+) {
     let mut backoff = Duration::from_secs(1);
     loop {
         let is_disabled = {
             let p = settings.read().await;
-            !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"gate".to_string()))
+            !p.is_empty()
+                && p.iter()
+                    .all(|x| x.disabled_exchanges.contains(&"gate".to_string()))
         };
         if is_disabled {
             if backoff == Duration::from_secs(1) {
@@ -32,15 +38,19 @@ pub async fn run(prices: PriceMap, signal: UpdateSignal, settings: std::sync::Ar
         }
 
         info!("[gate] Starting...");
-        
+
         let disable_watcher = async {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 let is_disabled = {
                     let p = settings.read().await;
-                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"gate".to_string()))
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"gate".to_string()))
                 };
-                if is_disabled { break; }
+                if is_disabled {
+                    break;
+                }
             }
         };
 
@@ -66,21 +76,32 @@ pub async fn run(prices: PriceMap, signal: UpdateSignal, settings: std::sync::Ar
 /// cancelled and the whole orchestrator returns (triggering full reconnect).
 async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     let client = reqwest::Client::new();
-    let res = client.get("https://api.gateio.ws/api/v4/futures/usdt/contracts")
-        .send().await.context("Gate REST failed")?
-        .json::<Vec<serde_json::Value>>().await.context("Gate JSON parse failed")?;
-    
+    let res = client
+        .get("https://api.gateio.ws/api/v4/futures/usdt/contracts")
+        .send()
+        .await
+        .context("Gate REST failed")?
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .context("Gate JSON parse failed")?;
+
     let mut symbols = Vec::new();
     let mut sym_map = std::collections::HashMap::new();
     for c in res {
         if let Some(name) = c["name"].as_str() {
-            if c["in_delisting"].as_bool().unwrap_or(false) { continue; }
+            if c["in_delisting"].as_bool().unwrap_or(false) {
+                continue;
+            }
             symbols.push(name.to_string());
-            
+
             let sym = name.replace('_', "");
             if sym.ends_with("USDT") {
                 sym_map.insert(name.to_string(), sym.clone());
-                price_map.entry("gate".to_string()).or_default().entry(sym).or_default();
+                price_map
+                    .entry("gate".to_string())
+                    .or_default()
+                    .entry(sym)
+                    .or_default();
             }
         }
     }
@@ -88,33 +109,51 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()>
     info!("[gate] Fetched {} symbols from REST", symbols.len());
 
     // Seed volume + funding from REST tickers
-    if let Ok(tickers_resp) = client.get("https://api.gateio.ws/api/v4/futures/usdt/tickers")
+    if let Ok(tickers_resp) = client
+        .get("https://api.gateio.ws/api/v4/futures/usdt/tickers")
         .timeout(Duration::from_secs(15))
-        .send().await
+        .send()
+        .await
     {
         if let Ok(tickers) = tickers_resp.json::<Vec<Value>>().await {
             let mut seeded = 0usize;
             for t in &tickers {
                 let name = t["contract"].as_str().unwrap_or("").replace('_', "");
-                if !name.ends_with("USDT") { continue; }
-                let vol: f64 = t["volume_24h_quote"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let funding: f64 = t["funding_rate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let price: f64 = t["last"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                if !name.ends_with("USDT") {
+                    continue;
+                }
+                let vol: f64 = t["volume_24h_quote"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                let funding: f64 = t["funding_rate"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                let price: f64 = t["last"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
                 if vol > 0.0 || price > 0.0 {
                     upsert_tickers(price_map, signal, name, price, vol, funding);
                     seeded += 1;
                 }
             }
-            info!("[gate] Seeded {}/{} tickers from REST (vol+funding)", seeded, tickers.len());
+            info!(
+                "[gate] Seeded {}/{} tickers from REST (vol+funding)",
+                seeded,
+                tickers.len()
+            );
         }
     }
 
     // Split symbols into chunks for parallel WS connections
-    let sym_chunks: Vec<Vec<String>> = symbols.chunks(SYMBOLS_PER_WS)
-        .map(|c| c.to_vec())
-        .collect();
+    let sym_chunks: Vec<Vec<String>> = symbols.chunks(SYMBOLS_PER_WS).map(|c| c.to_vec()).collect();
     let n_conns = sym_chunks.len();
-    info!("[gate] Spawning {} parallel WS connections (~{} symbols each)", n_conns, SYMBOLS_PER_WS);
+    info!(
+        "[gate] Spawning {} parallel WS connections (~{} symbols each)",
+        n_conns, SYMBOLS_PER_WS
+    );
 
     // Spawn one WS handler per chunk. If any one dies, we cancel all and restart.
     let mut handles = Vec::with_capacity(n_conns);
@@ -136,17 +175,30 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()>
         loop {
             interval.tick().await;
             let c = reqwest::Client::new();
-            if let Ok(resp) = c.get("https://api.gateio.ws/api/v4/futures/usdt/tickers")
+            if let Ok(resp) = c
+                .get("https://api.gateio.ws/api/v4/futures/usdt/tickers")
                 .timeout(Duration::from_secs(10))
-                .send().await
+                .send()
+                .await
             {
                 if let Ok(tickers) = resp.json::<Vec<Value>>().await {
                     for t in &tickers {
                         let name = t["contract"].as_str().unwrap_or("").replace('_', "");
-                        if !name.ends_with("USDT") { continue; }
-                        let vol: f64 = t["volume_24h_quote"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                        let funding: f64 = t["funding_rate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                        let price: f64 = t["last"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                        if !name.ends_with("USDT") {
+                            continue;
+                        }
+                        let vol: f64 = t["volume_24h_quote"]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0);
+                        let funding: f64 = t["funding_rate"]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0);
+                        let price: f64 = t["last"]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0);
                         if vol > 0.0 || price > 0.0 {
                             upsert_tickers(&pm_refresh, &sig_refresh, name, price, vol, funding);
                         }
@@ -159,7 +211,9 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()>
     // Wait for ANY handle to complete (= die). Then cancel all others.
     let (result, _idx, remaining) = futures_util::future::select_all(handles).await;
     refresh_handle.abort();
-    for h in remaining { h.abort(); }
+    for h in remaining {
+        h.abort();
+    }
 
     match result {
         Ok(Ok(())) => Ok(()),
@@ -192,10 +246,15 @@ struct GateData<'a> {
 }
 
 fn de_opt_f64_or_str<'de, D>(deserializer: D) -> std::result::Result<Option<f64>, D::Error>
-where D: serde::Deserializer<'de> {
+where
+    D: serde::Deserializer<'de>,
+{
     #[derive(Deserialize)]
     #[serde(untagged)]
-    enum Any<'a> { Float(f64), Str(&'a str) }
+    enum Any<'a> {
+        Float(f64),
+        Str(&'a str),
+    }
     Ok(match Option::<Any>::deserialize(deserializer)? {
         Some(Any::Float(f)) => Some(f),
         Some(Any::Str(s)) => s.parse().ok(),
@@ -204,20 +263,36 @@ where D: serde::Deserializer<'de> {
 }
 
 /// A single WS shard handling a subset of symbols.
-async fn ws_shard(idx: usize, symbols: Vec<String>, price_map: &PriceMap, signal: &UpdateSignal, sym_map: Arc<std::collections::HashMap<String, String>>) -> Result<()> {
-    let (mut ws, _) = connect_async_tls_with_config(
-        "wss://fx-ws.gateio.ws/v4/ws/usdt", None, false, None,
-    ).await.context(format!("Gate WS shard {} connect failed", idx))?;
+async fn ws_shard(
+    idx: usize,
+    symbols: Vec<String>,
+    price_map: &PriceMap,
+    signal: &UpdateSignal,
+    sym_map: Arc<std::collections::HashMap<String, String>>,
+) -> Result<()> {
+    let (mut ws, _) =
+        connect_async_tls_with_config("wss://fx-ws.gateio.ws/v4/ws/usdt", None, false, None)
+            .await
+            .context(format!("Gate WS shard {} connect failed", idx))?;
 
-    info!("[gate] Shard {} connected, subscribing to {} symbols", idx, symbols.len());
+    info!(
+        "[gate] Shard {} connected, subscribing to {} symbols",
+        idx,
+        symbols.len()
+    );
 
     // Subscribe in chunks of 50 (Gate protocol limit per message)
     for chunk in symbols.chunks(50) {
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         ws.send(Message::Text(
             json!({"time":ts,"channel":"futures.book_ticker","event":"subscribe","payload": chunk})
-                .to_string().into()
-        )).await?;
+                .to_string()
+                .into(),
+        ))
+        .await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     info!("[gate] Shard {} subscribed OK", idx);
@@ -283,8 +358,18 @@ async fn ws_shard(idx: usize, symbols: Vec<String>, price_map: &PriceMap, signal
     Ok(())
 }
 
-fn upsert_tickers(price_map: &PriceMap, signal: &UpdateSignal, sym: String, price: f64, vol: f64, funding: f64) {
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+fn upsert_tickers(
+    price_map: &PriceMap,
+    signal: &UpdateSignal,
+    sym: String,
+    price: f64,
+    vol: f64,
+    funding: f64,
+) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     if let Some(mut gate_map) = price_map.get_mut("gate") {
         if let Some(entry) = gate_map.get_mut(&sym) {
             entry.price = price;

@@ -15,8 +15,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Connection,           // vps-api.db — profiles + server_cache
-    pub real_db: Connection,      // real-trader.db  — real trades only
+    pub db: Connection,      // vps-api.db — profiles + server_cache
+    pub real_db: Connection, // real-trader.db  — real trades only
     pub collector_token: String,
     pub pass_dima: String,
     pub pass_sergei: String,
@@ -35,19 +35,18 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
     let collector_token = env::var("COLLECTOR_TOKEN").unwrap_or_else(|_| "secret_token_123".into());
-    let pass_dima       = env::var("PASS_DIMA").unwrap_or_else(|_| "pass_dima".into());
-    let pass_sergei     = env::var("PASS_SERGEI").unwrap_or_else(|_| "pass_sergei".into());
+    let pass_dima = env::var("PASS_DIMA").unwrap_or_else(|_| "pass_dima".into());
+    let pass_sergei = env::var("PASS_SERGEI").unwrap_or_else(|_| "pass_sergei".into());
 
-    let db_path    = env::var("PROFILES_DB_PATH")
+    let db_path = env::var("PROFILES_DB_PATH")
         .unwrap_or_else(|_| "/home/opc/core-node/vps-api.db".to_string());
-    let real_path  = env::var("REAL_DB_PATH")
+    let real_path = env::var("REAL_DB_PATH")
         .unwrap_or_else(|_| "/home/opc/core-node/real-trader.db".to_string());
 
     // ── Profiles DB (vps-api.db) ──────────────────────────────────────────────
     tracing::info!("Profiles DB: {}", db_path);
     let db = Connection::open(&db_path).await?;
     db::init_db(&db).await?;
-
 
     // ── Real trades DB ────────────────────────────────────────────────────────
     tracing::info!("Real DB:     {}", real_path);

@@ -1,6 +1,6 @@
-pub mod real;
 pub mod cycle;
-pub mod scanner;
-pub mod exchanges;
 pub mod db;
+pub mod exchanges;
 pub mod fetcher;
+pub mod real;
+pub mod scanner;

@@ -1,25 +1,36 @@
+use crate::engine::db::TradeRepository;
+use reqwest::Client;
 use std::sync::Arc;
 use tokio::time::Duration;
-use reqwest::Client;
-use tracing::{info, error};
 use tokio_rusqlite::Connection;
-use crate::engine::db::TradeRepository;
+use tracing::{error, info};
 
-use shared::{TradingSettings, TechnicalSettings, SpreadRow};
-use crate::engine::real::{ExchangeKeys, now_ms, has_sufficient_margin, mark_balance_low};
+use crate::engine::real::{has_sufficient_margin, mark_balance_low, now_ms, ExchangeKeys};
+use shared::{SpreadRow, TechnicalSettings, TradingSettings};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 static LAST_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
 
 // NOTE: LAST_LIVE_FLUSH is declared as a function-local static inside run_cycle below.
 
-pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow>, prices: crate::state::PriceMap, settings: TradingSettings, http: Client, db: Connection, keys: Arc<ExchangeKeys>, ts: &TechnicalSettings, e_ctx: Arc<crate::state::EngineContext>) {
+pub async fn run_cycle(
+    signals: Vec<shared::TradeSignal>,
+    spreads: Vec<SpreadRow>,
+    prices: crate::state::PriceMap,
+    settings: TradingSettings,
+    http: Client,
+    db: Connection,
+    keys: Arc<ExchangeKeys>,
+    ts: &TechnicalSettings,
+    e_ctx: Arc<crate::state::EngineContext>,
+) {
     let dry_run = false;
     let repo = TradeRepository::new(db.clone());
 
     let trades = repo.load_open_trades(&settings.id).await;
     let num_active = trades.len() as i64;
-    let open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
+    let open_pairs: std::collections::HashSet<String> =
+        trades.iter().map(|t| t.pair.clone()).collect();
     // funding_rate_8h setting is INTENTIONALLY not used here.
     // Real accumulated funding is read from trade.funding_cost (DB column updated from exchange API).
 
@@ -29,7 +40,11 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
     // ── Close qualifying trades ────────────────────────────────────────────────
     if !trades.is_empty() {
-        tracing::debug!("[real] Processing {} open trades for profile {}", trades.len(), settings.id);
+        tracing::debug!(
+            "[real] Processing {} open trades for profile {}",
+            trades.len(),
+            settings.id
+        );
     }
     // Tuple: (trade_id, price_a, price_b, spread, net_pnl, funding_rate_a, funding_rate_b, funding_next_ts, accumulated_funding_cost)
     let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)> = Vec::new();
@@ -39,21 +54,33 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
         let manual_close = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
         if manual_close {
-            info!("[real] MANUAL_CLOSE detected for trade {} {} on {}/{}", trade.id, trade.pair, trade.exchange_a, trade.exchange_b);
+            info!(
+                "[real] MANUAL_CLOSE detected for trade {} {} on {}/{}",
+                trade.id, trade.pair, trade.exchange_a, trade.exchange_b
+            );
         }
 
         // CRITICAL: skip trades where entry prices aren't confirmed yet (fast-poll pending)
         // Bypass this check if the user is forcing a manual close.
         if (trade.entry_price_a <= 0.0 || trade.entry_price_b <= 0.0) && !manual_close {
-            info!("[real] Skipping close for {} {} — entry prices not confirmed yet", trade.id, trade.pair);
+            info!(
+                "[real] Skipping close for {} {} — entry prices not confirmed yet",
+                trade.id, trade.pair
+            );
             continue;
         }
 
-        let data_a = prices.get(&trade.exchange_a).and_then(|m| m.get(&trade.pair).cloned());
-        let data_b = prices.get(&trade.exchange_b).and_then(|m| m.get(&trade.pair).cloned());
+        let data_a = prices
+            .get(&trade.exchange_a)
+            .and_then(|m| m.get(&trade.pair).cloned());
+        let data_b = prices
+            .get(&trade.exchange_b)
+            .and_then(|m| m.get(&trade.pair).cloned());
 
-        if (data_a.is_none() || data_b.is_none()) && !manual_close { continue; }
-        
+        if (data_a.is_none() || data_b.is_none()) && !manual_close {
+            continue;
+        }
+
         // Fallback prices in case of missing WebSocket data during a manual close
         let mut exit_price_a = trade.entry_price_a.max(1e-12);
         let mut exit_price_b = trade.entry_price_b.max(1e-12);
@@ -65,17 +92,27 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         if let (Some(da), Some(db)) = (&data_a, &data_b) {
             if da.bid <= 0.0 || da.ask <= 0.0 || db.bid <= 0.0 || db.ask <= 0.0 {
                 // If orderbook is completely empty or just preloaded (0 prices), fallback to entry prices for limit projection
-                c_price_a = if da.price > 0.0 { da.price } else { trade.entry_price_a };
-                c_price_b = if db.price > 0.0 { db.price } else { trade.entry_price_b };
+                c_price_a = if da.price > 0.0 {
+                    da.price
+                } else {
+                    trade.entry_price_a
+                };
+                c_price_b = if db.price > 0.0 {
+                    db.price
+                } else {
+                    trade.entry_price_b
+                };
                 exit_price_a = if is_a_higher { c_price_a } else { c_price_a };
                 exit_price_b = if is_a_higher { c_price_b } else { c_price_b };
-                if !manual_close { continue; }
+                if !manual_close {
+                    continue;
+                }
             } else {
                 c_price_a = da.price;
                 c_price_b = db.price;
                 exit_price_a = if is_a_higher { da.ask } else { da.bid };
                 exit_price_b = if is_a_higher { db.bid } else { db.ask };
-                
+
                 // Use absolute worst-case bid/ask for current spread so trailing stops trigger correctly on volatile orderbook spikes
                 // rather than lagging mark prices.
                 current_spread = if is_a_higher {
@@ -95,10 +132,16 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let _contracts_b = trade.contracts_b as f64;
 
         // PnL for DISPLAY (using mark/mid prices — matches exchange PnL)
-        let live_pnl_a = if is_a_higher { (trade.entry_price_a - c_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) }
-                    else { (c_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) };
-        let live_pnl_b = if is_a_higher { (c_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) }
-                    else { (trade.entry_price_b - c_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) };
+        let live_pnl_a = if is_a_higher {
+            (trade.entry_price_a - c_price_a) * (trade.volume / trade.entry_price_a.max(1e-12))
+        } else {
+            (c_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a.max(1e-12))
+        };
+        let live_pnl_b = if is_a_higher {
+            (c_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12))
+        } else {
+            (trade.entry_price_b - c_price_b) * (trade.volume / trade.entry_price_b.max(1e-12))
+        };
         let live_gross_pnl = live_pnl_a + live_pnl_b;
 
         // Use the accumulated real funding cost from DB (column updated every live-update cycle
@@ -107,10 +150,16 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let _live_net_pnl = live_gross_pnl - trade.commission_cost - fund_cost;
 
         // PnL for CLOSE TRIGGERS (using bid/ask — pessimistic, for safe execution)
-        let exec_pnl_a = if is_a_higher { (trade.entry_price_a - exit_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) }
-                    else { (exit_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a.max(1e-12)) };
-        let exec_pnl_b = if is_a_higher { (exit_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) }
-                    else { (trade.entry_price_b - exit_price_b) * (trade.volume / trade.entry_price_b.max(1e-12)) };
+        let exec_pnl_a = if is_a_higher {
+            (trade.entry_price_a - exit_price_a) * (trade.volume / trade.entry_price_a.max(1e-12))
+        } else {
+            (exit_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a.max(1e-12))
+        };
+        let exec_pnl_b = if is_a_higher {
+            (exit_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12))
+        } else {
+            (trade.entry_price_b - exit_price_b) * (trade.volume / trade.entry_price_b.max(1e-12))
+        };
         let exec_gross_pnl = exec_pnl_a + exec_pnl_b;
         let exec_net_pnl = exec_gross_pnl - trade.commission_cost - fund_cost;
         let exec_net_pct = exec_net_pnl / trade.volume * 100.0;
@@ -118,27 +167,62 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         let top_spread = trade.highest_spread.max(current_spread);
         let stop_limit = top_spread - settings.trailing_stop_percent;
 
-        let triggered_tp   = exec_net_pct >= settings.take_profit_percent;
+        let triggered_tp = exec_net_pct >= settings.take_profit_percent;
         let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
-        let zero_spread    = exit_spread <= 0.0 && exec_net_pnl >= 0.0;
+        let zero_spread = exit_spread <= 0.0 && exec_net_pnl >= 0.0;
 
         if manual_close || triggered_tp || triggered_stop || zero_spread {
             // Guard: skip if this trade is already being closed by a previous spawn
-            if e_ctx.closing_in_flight.get(&trade.id).map(|v| *v).unwrap_or(false) {
-                tracing::debug!("[real] Close already in-flight for id={} {}, skipping", trade.id, trade.pair);
+            if e_ctx
+                .closing_in_flight
+                .get(&trade.id)
+                .map(|v| *v)
+                .unwrap_or(false)
+            {
+                tracing::debug!(
+                    "[real] Close already in-flight for id={} {}, skipping",
+                    trade.id,
+                    trade.pair
+                );
                 continue;
             }
             e_ctx.closing_in_flight.insert(trade.id, true);
 
-            let reason = if manual_close { "MANUAL" } else if triggered_tp { "TP" } else if zero_spread { "ZERO_SPREAD" } else { "STOP" };
-            info!("[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4} norm={:.4}", trade.id, trade.pair, reason, exec_net_pct, exit_spread,
-                spreads.iter().find(|s| s.pair == trade.pair && s.direction == trade.direction).map(|s| s.structural_spread).unwrap_or(0.0));
+            let reason = if manual_close {
+                "MANUAL"
+            } else if triggered_tp {
+                "TP"
+            } else if zero_spread {
+                "ZERO_SPREAD"
+            } else {
+                "STOP"
+            };
+            info!(
+                "[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4} norm={:.4}",
+                trade.id,
+                trade.pair,
+                reason,
+                exec_net_pct,
+                exit_spread,
+                spreads
+                    .iter()
+                    .find(|s| s.pair == trade.pair && s.direction == trade.direction)
+                    .map(|s| s.structural_spread)
+                    .unwrap_or(0.0)
+            );
 
-            let exa = trade.exchange_a.clone(); let exb = trade.exchange_b.clone(); let pair = trade.pair.clone();
-            let c_a = trade.contracts_a; let c_b = trade.contracts_b;
-            let id = trade.id; let vol = trade.volume;
-            let entry_a = trade.entry_price_a; let entry_b = trade.entry_price_b;
-            let h = http.clone(); let k = Arc::clone(&keys); let db_c = db.clone();
+            let exa = trade.exchange_a.clone();
+            let exb = trade.exchange_b.clone();
+            let pair = trade.pair.clone();
+            let c_a = trade.contracts_a;
+            let c_b = trade.contracts_b;
+            let id = trade.id;
+            let vol = trade.volume;
+            let entry_a = trade.entry_price_a;
+            let entry_b = trade.entry_price_b;
+            let h = http.clone();
+            let k = Arc::clone(&keys);
+            let db_c = db.clone();
             let r = reason.to_string();
             let lev = settings.leverage;
             let _exit_sanity = ts.exit_sanity_pct;
@@ -147,10 +231,26 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             let api_timeout_ms = ts.api_timeout_ms;
 
             let use_ioc = ts.entry_order_type == "ioc" && !manual_close;
-            let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
-            let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
-            let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
-            let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
+            let tick_a = e_ctx
+                .tick_sizes
+                .get(&format!("{}:{}", exa, pair))
+                .map(|v| *v)
+                .unwrap_or(0.000001);
+            let tick_b = e_ctx
+                .tick_sizes
+                .get(&format!("{}:{}", exb, pair))
+                .map(|v| *v)
+                .unwrap_or(0.000001);
+            let mult_a = e_ctx
+                .multipliers
+                .get(&format!("{}:{}", exa, pair))
+                .map(|v| *v)
+                .unwrap_or(1.0);
+            let mult_b = e_ctx
+                .multipliers
+                .get(&format!("{}:{}", exb, pair))
+                .map(|v| *v)
+                .unwrap_or(1.0);
 
             let q_a = c_a as f64 * mult_a;
             let q_b = c_b as f64 * mult_b;
@@ -163,8 +263,40 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
                 // Place close orders in parallel (Connectors handle limit projection, retries & fallback native)
                 let (ra, rb) = tokio::join!(
-                    conn_a.close_position(&h, &k, &pair, is_a_higher, q_a, dry_run, lev as f64, exit_price_a, use_ioc, settings.slippage_percent, mult_a, tick_a, close_verify_retries as u32, close_verify_delay, api_timeout_ms),
-                    conn_b.close_position(&h, &k, &pair, !is_a_higher, q_b, dry_run, lev as f64, exit_price_b, use_ioc, settings.slippage_percent, mult_b, tick_b, close_verify_retries as u32, close_verify_delay, api_timeout_ms)
+                    conn_a.close_position(
+                        &h,
+                        &k,
+                        &pair,
+                        is_a_higher,
+                        q_a,
+                        dry_run,
+                        lev as f64,
+                        exit_price_a,
+                        use_ioc,
+                        settings.slippage_percent,
+                        mult_a,
+                        tick_a,
+                        close_verify_retries as u32,
+                        close_verify_delay,
+                        api_timeout_ms
+                    ),
+                    conn_b.close_position(
+                        &h,
+                        &k,
+                        &pair,
+                        !is_a_higher,
+                        q_b,
+                        dry_run,
+                        lev as f64,
+                        exit_price_b,
+                        use_ioc,
+                        settings.slippage_percent,
+                        mult_b,
+                        tick_b,
+                        close_verify_retries as u32,
+                        close_verify_delay,
+                        api_timeout_ms
+                    )
                 );
 
                 let mut real_exit_a = 0.0;
@@ -173,18 +305,33 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 let mut error_msg = String::new();
 
                 match ra {
-                    Ok(rc) => { real_exit_a = rc.final_price; exit_fee += rc.total_fee; }
-                    Err(e) => { error_msg.push_str(&format!("Leg A close failed: {} ", e)); }
+                    Ok(rc) => {
+                        real_exit_a = rc.final_price;
+                        exit_fee += rc.total_fee;
+                    }
+                    Err(e) => {
+                        error_msg.push_str(&format!("Leg A close failed: {} ", e));
+                    }
                 }
                 match rb {
-                    Ok(rc) => { real_exit_b = rc.final_price; exit_fee += rc.total_fee; }
-                    Err(e) => { error_msg.push_str(&format!("Leg B close failed: {}", e)); }
+                    Ok(rc) => {
+                        real_exit_b = rc.final_price;
+                        exit_fee += rc.total_fee;
+                    }
+                    Err(e) => {
+                        error_msg.push_str(&format!("Leg B close failed: {}", e));
+                    }
                 }
-                
+
                 let repo_close = TradeRepository::new(db_c.clone());
 
                 if real_exit_a <= 0.0 || real_exit_b <= 0.0 {
-                    tracing::error!("[real] ⚠️ CLOSE FAILED OR UNVERIFIED id={} {}. Error: {}", id, pair, error_msg);
+                    tracing::error!(
+                        "[real] ⚠️ CLOSE FAILED OR UNVERIFIED id={} {}. Error: {}",
+                        id,
+                        pair,
+                        error_msg
+                    );
                     repo_close.revert_to_open(id).await;
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     closing_guard.remove(&trade_id_for_guard);
@@ -192,43 +339,92 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
                 }
 
                 // ✅ Fill confirmed — compute real PnL and mark CLOSED
-                let real_pna = if is_a_higher { (entry_a - real_exit_a) * (vol / entry_a) } else { (real_exit_a - entry_a) * (vol / entry_a) };
-                let real_pnb = if is_a_higher { (real_exit_b - entry_b) * (vol / entry_b) } else { (entry_b - real_exit_b) * (vol / entry_b) };
-                let real_gp  = real_pna + real_pnb;
+                let real_pna = if is_a_higher {
+                    (entry_a - real_exit_a) * (vol / entry_a)
+                } else {
+                    (real_exit_a - entry_a) * (vol / entry_a)
+                };
+                let real_pnb = if is_a_higher {
+                    (real_exit_b - entry_b) * (vol / entry_b)
+                } else {
+                    (entry_b - real_exit_b) * (vol / entry_b)
+                };
+                let real_gp = real_pna + real_pnb;
 
                 let slip_cost_exit_a = if real_exit_a > 0.0 {
-                    if is_a_higher { ((real_exit_a - exit_price_a) * (vol / entry_a)).max(0.0) }
-                    else           { ((exit_price_a - real_exit_a) * (vol / entry_a)).max(0.0) }
-                } else { 0.0 };
+                    if is_a_higher {
+                        ((real_exit_a - exit_price_a) * (vol / entry_a)).max(0.0)
+                    } else {
+                        ((exit_price_a - real_exit_a) * (vol / entry_a)).max(0.0)
+                    }
+                } else {
+                    0.0
+                };
                 let slip_cost_exit_b = if real_exit_b > 0.0 {
-                    if !is_a_higher { ((real_exit_b - exit_price_b) * (vol / entry_b)).max(0.0) }
-                    else            { ((exit_price_b - real_exit_b) * (vol / entry_b)).max(0.0) }
-                } else { 0.0 };
+                    if !is_a_higher {
+                        ((real_exit_b - exit_price_b) * (vol / entry_b)).max(0.0)
+                    } else {
+                        ((exit_price_b - real_exit_b) * (vol / entry_b)).max(0.0)
+                    }
+                } else {
+                    0.0
+                };
                 let exit_slip = slip_cost_exit_a + slip_cost_exit_b;
 
                 info!("[real] [EXCHANGE_VERIFIED] PnL id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", id, real_pna, real_pnb, real_gp, exit_fee, exit_slip);
 
                 // Verify positions are actually gone from both exchanges
-                let pos_check_a = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_positions(&h, &k).await;
-                let pos_check_b = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_positions(&h, &k).await;
-                let still_a = pos_check_a.as_ref().ok().map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12)).unwrap_or(false);
-                let still_b = pos_check_b.as_ref().ok().map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12)).unwrap_or(false);
+                let pos_check_a = crate::engine::exchanges::get_connector(&exa)
+                    .unwrap()
+                    .fetch_positions(&h, &k)
+                    .await;
+                let pos_check_b = crate::engine::exchanges::get_connector(&exb)
+                    .unwrap()
+                    .fetch_positions(&h, &k)
+                    .await;
+                let still_a = pos_check_a
+                    .as_ref()
+                    .ok()
+                    .map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12))
+                    .unwrap_or(false);
+                let still_b = pos_check_b
+                    .as_ref()
+                    .ok()
+                    .map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12))
+                    .unwrap_or(false);
                 if still_a || still_b {
                     error!("[real] ⚠️ POSITION STILL EXISTS after close id={} {} still_a={} still_b={} — marking closed but position may be orphaned", id, pair, still_a, still_b);
                 }
 
-                repo_close.mark_trade_closed_confirmed(
-                    id, real_exit_a, real_exit_b, exit_spread,
-                    real_gp, real_pna, real_pnb,
-                    &r, fund_cost, exit_fee, exit_slip
-                ).await;
+                repo_close
+                    .mark_trade_closed_confirmed(
+                        id,
+                        real_exit_a,
+                        real_exit_b,
+                        exit_spread,
+                        real_gp,
+                        real_pna,
+                        real_pnb,
+                        &r,
+                        fund_cost,
+                        exit_fee,
+                        exit_slip,
+                    )
+                    .await;
                 closing_guard.remove(&trade_id_for_guard);
             });
-
         } else {
             // Fetch real funding rates from exchange APIs (cached 5 min)
-            let (fr_a, next_a) = crate::engine::exchanges::get_connector(&trade.exchange_a).unwrap().get_funding_rate(&http, &trade.pair).await.unwrap_or((0.0, 0));
-            let (fr_b, next_b) = crate::engine::exchanges::get_connector(&trade.exchange_b).unwrap().get_funding_rate(&http, &trade.pair).await.unwrap_or((0.0, 0));
+            let (fr_a, next_a) = crate::engine::exchanges::get_connector(&trade.exchange_a)
+                .unwrap()
+                .get_funding_rate(&http, &trade.pair)
+                .await
+                .unwrap_or((0.0, 0));
+            let (fr_b, next_b) = crate::engine::exchanges::get_connector(&trade.exchange_b)
+                .unwrap()
+                .get_funding_rate(&http, &trade.pair)
+                .await
+                .unwrap_or((0.0, 0));
             let fund_next = next_a.min(next_b); // nearest funding event
 
             // Replace momentary funding projection map with predictable smooth funding cost estimation (using settings parameter).
@@ -243,20 +439,35 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             // in the DB reflects the true net position (gross - commission - real_funding).
             let real_live_net_pnl = live_gross_pnl - trade.commission_cost - acc_fund_cost;
 
-            live_updates.push((trade.id, c_price_a, c_price_b, current_spread, real_live_net_pnl, fr_a, fr_b, fund_next, acc_fund_cost, live_pnl_a, live_pnl_b));
+            live_updates.push((
+                trade.id,
+                c_price_a,
+                c_price_b,
+                current_spread,
+                real_live_net_pnl,
+                fr_a,
+                fr_b,
+                fund_next,
+                acc_fund_cost,
+                live_pnl_a,
+                live_pnl_b,
+            ));
             if top_spread > trade.highest_spread {
                 let id = trade.id;
                 // Wait, need await here, earlier it was synchronous?
                 // The original code was synchronous `db.call` which returns a Future but was not awaited! I will await it!
                 let rb = repo.clone();
-                tokio::spawn(async move { rb.update_highest_spread(id, top_spread).await; });
+                tokio::spawn(async move {
+                    rb.update_highest_spread(id, top_spread).await;
+                });
             }
         }
     }
 
     static LAST_LIVE_FLUSH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let current_ms = now_ms() as u64;
-    let elapsed = current_ms.saturating_sub(LAST_LIVE_FLUSH.load(std::sync::atomic::Ordering::Relaxed));
+    let elapsed =
+        current_ms.saturating_sub(LAST_LIVE_FLUSH.load(std::sync::atomic::Ordering::Relaxed));
     if elapsed > ts.live_update_throttle_ms as u64 && !live_updates.is_empty() {
         LAST_LIVE_FLUSH.store(current_ms, std::sync::atomic::Ordering::Relaxed);
         let db_clone = db.clone();
@@ -269,23 +480,73 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
     // ── Open new real trades ──────────────────────────────────────────────────
     // KEY PRINCIPLE: We do NOT write to DB until BOTH legs are confirmed filled.
     // This eliminates phantom trades, $0 PnL records, and immediate open/close chaos.
-    if !settings.is_active { return; } // only block NEW entries, not closes above
-    if num_active >= settings.max_active_trades { return; }
+    if !settings.is_active {
+        return;
+    } // only block NEW entries, not closes above
+    if num_active >= settings.max_active_trades {
+        return;
+    }
+
+    if e_ctx.is_killed.load(std::sync::atomic::Ordering::Relaxed) {
+        if current_ms % 10000 < 500 {
+            error!("[real] 🚨 RISK KILL-SWITCH IS ACTIVE. Engine will not open new trades until restarted.");
+        }
+        return;
+    }
 
     // Only open ONE trade per engine cycle to prevent burst-opening
     let mut opened_this_cycle = false;
 
     // Filter signals meant for current profile
-    let profile_signals: Vec<_> = signals.into_iter().filter(|s| s.profile_id == settings.id).collect();
+    let profile_signals: Vec<_> = signals
+        .into_iter()
+        .filter(|s| s.profile_id == settings.id)
+        .collect();
 
     for sig in profile_signals {
-        if opened_this_cycle { break; }
-        if open_pairs.contains(&sig.pair) { continue; }
+        if opened_this_cycle {
+            break;
+        }
+        if open_pairs.contains(&sig.pair) {
+            continue;
+        }
 
         let exa = sig.exchange_a.clone();
         let exb = sig.exchange_b.clone();
         let pair = sig.pair.clone();
-        
+
+        let current_price = sig.entry_a;
+        if current_price > 0.0 {
+            let entry = e_ctx.price_history.get(&pair).map(|v| *v);
+            match entry {
+                Some((old_price, old_ts)) => {
+                    let elapsed_ms = current_ms.saturating_sub(old_ts as u64);
+                    if elapsed_ms > 2000 {
+                        let velocity = (current_price - old_price).abs() / old_price;
+                        if velocity > 0.003 && elapsed_ms < 10000 {
+                            // >0.3% move inside 10s
+                            e_ctx
+                                .pair_cooldown
+                                .insert(pair.clone(), current_ms as i64 + 15000);
+                            error!("[real] 🌪️ MARKET REGIME ALERT: {} velocity {:.2}% in {}ms. Pausing pair for 15s to avoid volatile slippage.", pair, velocity*100.0, elapsed_ms);
+                            e_ctx
+                                .price_history
+                                .insert(pair.clone(), (current_price, current_ms as i64));
+                            continue;
+                        }
+                        e_ctx
+                            .price_history
+                            .insert(pair.clone(), (current_price, current_ms as i64));
+                    }
+                }
+                None => {
+                    e_ctx
+                        .price_history
+                        .insert(pair.clone(), (current_price, current_ms as i64));
+                }
+            }
+        }
+
         let actual_vol_a = sig.actual_vol_a_usd;
         let actual_vol_b = sig.actual_vol_b_usd;
 
@@ -296,31 +557,31 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
         let limit_price_a = sig.limit_price_a;
         let limit_price_b = sig.limit_price_b;
-        
+
         let entry_a = sig.entry_a;
         let entry_b = sig.entry_b;
-        
+
         let break_even_pct = sig.break_even_pct;
         let is_a_higher = sig.is_a_higher;
 
         let now = now_ms();
 
         // ── BALANCE LOW GUARD (zero-latency) ─────────────────────────────────
-        if !has_sufficient_margin(&exa, actual_vol_a, settings.leverage as f64, &e_ctx) { 
+        if !has_sufficient_margin(&exa, actual_vol_a, settings.leverage as f64, &e_ctx) {
             let now_m = now_ms() as i64;
             if now_m - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
                 info!("[real] SKIP {}: insufficient margin {}", pair, exa);
                 LAST_MARGIN_LOG.store(now_m, Ordering::Relaxed);
             }
-            continue; 
+            continue;
         }
-        if !has_sufficient_margin(&exb, actual_vol_b, settings.leverage as f64, &e_ctx) { 
+        if !has_sufficient_margin(&exb, actual_vol_b, settings.leverage as f64, &e_ctx) {
             let now_m = now_ms() as i64;
             if now_m - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
                 info!("[real] SKIP {}: insufficient margin {}", pair, exb);
                 LAST_MARGIN_LOG.store(now_m, Ordering::Relaxed);
             }
-            continue; 
+            continue;
         }
 
         // Leverage is pre-warmed asynchronously via `real.rs:warmup_leverages`.
@@ -338,52 +599,185 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
         let (conn_ensure_a, conn_ensure_b) = (
             crate::engine::exchanges::get_connector(&exa).unwrap(),
-            crate::engine::exchanges::get_connector(&exb).unwrap()
+            crate::engine::exchanges::get_connector(&exb).unwrap(),
         );
         let t0 = std::time::Instant::now();
         let use_ioc = ts.entry_order_type == "ioc";
         let order_type_label = if use_ioc { "IOC" } else { "MKT" };
-        info!("[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}%",
-            pair, order_type_label, exa, contracts_a, limit_price_a, exb, contracts_b, limit_price_b, sig.spread, break_even_pct);
+        info!(
+            "[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}%",
+            pair,
+            order_type_label,
+            exa,
+            contracts_a,
+            limit_price_a,
+            exb,
+            contracts_b,
+            limit_price_b,
+            sig.spread,
+            break_even_pct
+        );
+
+        let snapshot = serde_json::json!({
+            "bid_a": sig.entry_a, // Best approximation since we don't carry full orderbook here
+            "bid_b": sig.entry_b,
+            "ask_a": sig.entry_a,
+            "ask_b": sig.entry_b,
+            "spread": sig.spread,
+            "latency": 0
+        })
+        .to_string();
+        tokio::spawn({
+            let snap_repo = TradeRepository::new(db.clone());
+            let sp_pair = pair.clone();
+            let sp_exa = exa.clone();
+            let sp_exb = exb.clone();
+            let ts_ms = current_ms as i64;
+            async move {
+                snap_repo
+                    .insert_snapshot(sp_pair, sp_exa, sp_exb, snapshot, ts_ms)
+                    .await;
+            }
+        });
 
         // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
-        let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
-        let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
-        
-        let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
-        let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
+        let mult_a = e_ctx
+            .multipliers
+            .get(&format!("{}:{}", exa, pair))
+            .map(|v| *v)
+            .unwrap_or(1.0);
+        let mult_b = e_ctx
+            .multipliers
+            .get(&format!("{}:{}", exb, pair))
+            .map(|v| *v)
+            .unwrap_or(1.0);
+
+        let tick_a = e_ctx
+            .tick_sizes
+            .get(&format!("{}:{}", exa, pair))
+            .map(|v| *v)
+            .unwrap_or(0.000001);
+        let tick_b = e_ctx
+            .tick_sizes
+            .get(&format!("{}:{}", exb, pair))
+            .map(|v| *v)
+            .unwrap_or(0.000001);
 
         let (result_a, result_b) = tokio::join!(
-            conn_ensure_a.place_order(&http, &keys, &pair, !is_a_higher, qty_a, dry_run, limit_price_a, limit_price_a > 0.0, settings.leverage as f64, mult_a, settings.slippage_percent, tick_a, ts.api_timeout_ms),
-            conn_ensure_b.place_order(&http, &keys, &pair, is_a_higher, qty_b, dry_run, limit_price_b, limit_price_b > 0.0, settings.leverage as f64, mult_b, settings.slippage_percent, tick_b, ts.api_timeout_ms)
+            async {
+                let t_a = std::time::Instant::now();
+                let res = conn_ensure_a
+                    .place_order(
+                        &http,
+                        &keys,
+                        &pair,
+                        !is_a_higher,
+                        qty_a,
+                        dry_run,
+                        limit_price_a,
+                        limit_price_a > 0.0,
+                        settings.leverage as f64,
+                        mult_a,
+                        settings.slippage_percent,
+                        tick_a,
+                        ts.api_timeout_ms,
+                    )
+                    .await;
+                (res, t_a.elapsed().as_millis())
+            },
+            async {
+                let t_b = std::time::Instant::now();
+                let res = conn_ensure_b
+                    .place_order(
+                        &http,
+                        &keys,
+                        &pair,
+                        is_a_higher,
+                        qty_b,
+                        dry_run,
+                        limit_price_b,
+                        limit_price_b > 0.0,
+                        settings.leverage as f64,
+                        mult_b,
+                        settings.slippage_percent,
+                        tick_b,
+                        ts.api_timeout_ms,
+                    )
+                    .await;
+                (res, t_b.elapsed().as_millis())
+            }
         );
 
         let order_ms = t0.elapsed().as_millis();
 
+        let (res_a, ms_a) = result_a;
+        if ms_a > 500 {
+            let mut strikes = e_ctx.high_latency_strikes.entry(exa.clone()).or_insert(0);
+            *strikes += 1;
+            if *strikes >= 3 {
+                e_ctx
+                    .exchange_cooldown
+                    .insert(exa.clone(), now_ms() + 60_000); // 1 minute cooldown
+                error!("[real] 🐢 LATENCY ALERT: {} RTT is {}ms (>500ms). Exchange put on COOLDOWN for 1 minute.", exa, ms_a);
+                *strikes = 0;
+            }
+        } else {
+            e_ctx.high_latency_strikes.insert(exa.clone(), 0);
+        }
+
+        let (res_b, ms_b) = result_b;
+        if ms_b > 500 {
+            let mut strikes = e_ctx.high_latency_strikes.entry(exb.clone()).or_insert(0);
+            *strikes += 1;
+            if *strikes >= 3 {
+                e_ctx
+                    .exchange_cooldown
+                    .insert(exb.clone(), now_ms() + 60_000); // 1 minute cooldown
+                error!("[real] 🐢 LATENCY ALERT: {} RTT is {}ms (>500ms). Exchange put on COOLDOWN for 1 minute.", exb, ms_b);
+                *strikes = 0;
+            }
+        } else {
+            e_ctx.high_latency_strikes.insert(exb.clone(), 0);
+        }
+
+        let order_ms = t0.elapsed().as_millis();
+
         // Destructure (order_id, inline_fill_price, inline_fill_fee)
-        let (oid_a, inline_fill_a, inline_fee_a) = match result_a {
+        let (oid_a, inline_fill_a, inline_fee_a) = match res_a {
             Ok(t) => (t.0, t.1, t.2),
             Err(e) => {
                 let es = e.to_string();
-                error!("[real] LEG_A reject {}/{}: {} ({}ms)", exa, pair, es, order_ms);
+                error!(
+                    "[real] LEG_A reject {}/{}: {} ({}ms)",
+                    exa, pair, es, order_ms
+                );
                 let esl = es.to_lowercase();
-                if esl.contains("insufficient") || esl.contains("balance") ||
-                   esl.contains("margin") || esl.contains("exceed") ||
-                   esl.contains("not enough") {
+                if esl.contains("insufficient")
+                    || esl.contains("balance")
+                    || esl.contains("margin")
+                    || esl.contains("exceed")
+                    || esl.contains("not enough")
+                {
                     mark_balance_low(&exa, &e_ctx);
                 }
                 (None, 0.0, 0.0)
             }
         };
-        let (oid_b, inline_fill_b, inline_fee_b) = match result_b {
+        let (oid_b, inline_fill_b, inline_fee_b) = match res_b {
             Ok(t) => (t.0, t.1, t.2),
             Err(e) => {
                 let es = e.to_string();
-                error!("[real] LEG_B reject {}/{}: {} ({}ms)", exb, pair, es, order_ms);
+                error!(
+                    "[real] LEG_B reject {}/{}: {} ({}ms)",
+                    exb, pair, es, order_ms
+                );
                 let esl = es.to_lowercase();
-                if esl.contains("insufficient") || esl.contains("balance") ||
-                   esl.contains("margin") || esl.contains("exceed") ||
-                   esl.contains("not enough") {
+                if esl.contains("insufficient")
+                    || esl.contains("balance")
+                    || esl.contains("margin")
+                    || esl.contains("exceed")
+                    || esl.contains("not enough")
+                {
                     mark_balance_low(&exb, &e_ctx);
                 }
                 (None, 0.0, 0.0)
@@ -396,7 +790,9 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         // Prevents the same pair from being spammed regardless of fill outcome.
         pair_cd.insert(pair.clone(), now_ms());
 
-        if oid_a.is_none() && oid_b.is_none() { continue; }
+        if oid_a.is_none() && oid_b.is_none() {
+            continue;
+        }
 
         let mult_a = sig.mult_a;
         let mult_b = sig.mult_b;
@@ -404,54 +800,187 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         // ── PARALLEL FILL VERIFICATION ───────────────────────────────────────
         // ALL order types (market + IOC) MUST be verified via fetch_order.
         // No WS price fallbacks — only exchange-confirmed fill prices.
-        let mut fill_a = inline_fill_a; let mut fee_a_val = inline_fee_a; let mut actual_vol_phys_a = None;
-        let mut fill_b = inline_fill_b; let mut fee_b_val = inline_fee_b; let mut actual_vol_phys_b = None;
+        let mut fill_a = inline_fill_a;
+        let mut fee_a_val = inline_fee_a;
+        let mut actual_vol_phys_a = None;
+        let mut fill_b = inline_fill_b;
+        let mut fee_b_val = inline_fee_b;
+        let mut actual_vol_phys_b = None;
         let mut got_a = oid_a.is_none() || dry_run || fill_a > 0.0;
         let mut got_b = oid_b.is_none() || dry_run || fill_b > 0.0;
 
         for attempt in 0..ts.fill_verify_retries {
-            if got_a && got_b && actual_vol_phys_a.is_some() && actual_vol_phys_b.is_some() { break; }
-            if attempt > 0 { tokio::time::sleep(Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
+            if got_a && got_b && actual_vol_phys_a.is_some() && actual_vol_phys_b.is_some() {
+                break;
+            }
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(ts.fill_verify_delay_ms as u64)).await;
+            }
             let (fa, fb) = tokio::join!(
-                async { if !got_a || actual_vol_phys_a.is_none() { if let Some(ref oid) = oid_a { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exa).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_a).await { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } None },
-                async { if !got_b || actual_vol_phys_b.is_none() { if let Some(ref oid) = oid_b { if let Ok::<(f64, f64, f64), String>((p, f, ev)) = crate::engine::exchanges::get_connector(&exb).unwrap().fetch_order(&http, &keys, &pair, oid.as_str(), mult_b).await { let af = if f > 1e-9 { f.abs() } else { 0.0 }; return Some((p, af, ev)); } } } None }
+                async {
+                    if !got_a || actual_vol_phys_a.is_none() {
+                        if let Some(ref oid) = oid_a {
+                            if let Ok::<(f64, f64, f64), String>((p, f, ev)) =
+                                crate::engine::exchanges::get_connector(&exa)
+                                    .unwrap()
+                                    .fetch_order(&http, &keys, &pair, oid.as_str(), mult_a)
+                                    .await
+                            {
+                                let af = if f > 1e-9 { f.abs() } else { 0.0 };
+                                return Some((p, af, ev));
+                            }
+                        }
+                    }
+                    None
+                },
+                async {
+                    if !got_b || actual_vol_phys_b.is_none() {
+                        if let Some(ref oid) = oid_b {
+                            if let Ok::<(f64, f64, f64), String>((p, f, ev)) =
+                                crate::engine::exchanges::get_connector(&exb)
+                                    .unwrap()
+                                    .fetch_order(&http, &keys, &pair, oid.as_str(), mult_b)
+                                    .await
+                            {
+                                let af = if f > 1e-9 { f.abs() } else { 0.0 };
+                                return Some((p, af, ev));
+                            }
+                        }
+                    }
+                    None
+                }
             );
-            if let Some((p, f, ev)) = fa { fill_a = p; fee_a_val = f; actual_vol_phys_a = Some(ev); got_a = true; }
-            if let Some((p, f, ev)) = fb { fill_b = p; fee_b_val = f; actual_vol_phys_b = Some(ev); got_b = true; }
+            if let Some((p, f, ev)) = fa {
+                fill_a = p;
+                fee_a_val = f;
+                actual_vol_phys_a = Some(ev);
+                got_a = true;
+            }
+            if let Some((p, f, ev)) = fb {
+                fill_b = p;
+                fee_b_val = f;
+                actual_vol_phys_b = Some(ev);
+                got_b = true;
+            }
         }
 
         // NO WS FALLBACK for entry fills! If fetch_order couldn't verify the fill
-        // after all retries, the order is treated as UNFILLED (ghost trade prevention).
+        // after all retries, the order is treated as UNFILLED in first pass.
+        // --- 🛡️ NEW: POSITIONS FALLBACK ---
+        // But before we treat it as UNFILLED, we check `fetch_positions` directly.
+        // If the position exists, it means the API reported 0 fill but the position was actually created (Ghost position).
         let api_timeout = ts.api_timeout_ms;
+        if oid_a.is_some() && actual_vol_phys_a.is_none() && !dry_run {
+            if let Ok(pos_res) = crate::engine::exchanges::get_connector(&exa)
+                .unwrap()
+                .fetch_positions(&http, &keys)
+                .await
+            {
+                if let Some(pos) = pos_res
+                    .iter()
+                    .find(|p| p.symbol == pair && p.size.abs() > 1e-12)
+                {
+                    actual_vol_phys_a = Some(pos.size.abs());
+                    fill_a = if pos.entry_price > 0.0 {
+                        pos.entry_price
+                    } else {
+                        sig.entry_a
+                    };
+                    fee_a_val = 0.0;
+                    info!("[real] 🛡️ POSITION FALLBACK for {}: fetch_order failed, but position {} exists (size: {})", exa, pair, pos.size.abs());
+                }
+            }
+        }
         if oid_a.is_some() && actual_vol_phys_a.is_none() {
             error!("[real] ❌ ENTRY FILL UNVERIFIED for {} leg A after {} retries — treating as UNFILLED", pair, ts.fill_verify_retries);
             tokio::spawn({
-                let hc = http.clone(); let kc = keys.clone(); let p = pair.clone(); let ex = exa.clone(); let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
-                let is_buy = !is_a_higher; let fallback = sig.entry_a;
+                let hc = http.clone();
+                let kc = Arc::clone(&keys);
+                let p = pair.clone();
+                let ex = exa.clone();
+                let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
+                let is_buy = !is_a_higher;
+                let fallback = sig.entry_a;
                 async move {
                     error!("[real] 🚨 GHOST PREVENTION: Blind trimming {} on {} to drop unverified orphaned position", p, ex);
-                    let _ = conn.trim_position(&hc, &kc, &p, !is_buy, qty_a, dry_run, mult_a, tick_a, fallback, api_timeout).await;
+                    let _ = conn
+                        .trim_position(
+                            &hc,
+                            &kc,
+                            &p,
+                            !is_buy,
+                            qty_a,
+                            dry_run,
+                            mult_a,
+                            tick_a,
+                            fallback,
+                            api_timeout,
+                        )
+                        .await;
                 }
             });
+        }
+
+        if oid_b.is_some() && actual_vol_phys_b.is_none() && !dry_run {
+            if let Ok(pos_res) = crate::engine::exchanges::get_connector(&exb)
+                .unwrap()
+                .fetch_positions(&http, &keys)
+                .await
+            {
+                if let Some(pos) = pos_res
+                    .iter()
+                    .find(|p| p.symbol == pair && p.size.abs() > 1e-12)
+                {
+                    actual_vol_phys_b = Some(pos.size.abs());
+                    fill_b = if pos.entry_price > 0.0 {
+                        pos.entry_price
+                    } else {
+                        sig.entry_b
+                    };
+                    fee_b_val = 0.0;
+                    info!("[real] 🛡️ POSITION FALLBACK for {}: fetch_order failed, but position {} exists (size: {})", exb, pair, pos.size.abs());
+                }
+            }
         }
         if oid_b.is_some() && actual_vol_phys_b.is_none() {
             error!("[real] ❌ ENTRY FILL UNVERIFIED for {} leg B after {} retries — treating as UNFILLED", pair, ts.fill_verify_retries);
             tokio::spawn({
-                let hc = http.clone(); let kc = keys.clone(); let p = pair.clone(); let ex = exb.clone(); let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
-                let is_buy = is_a_higher; let fallback = sig.entry_b;
+                let hc = http.clone();
+                let kc = Arc::clone(&keys);
+                let p = pair.clone();
+                let ex = exb.clone();
+                let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
+                let is_buy = is_a_higher;
+                let fallback = sig.entry_b;
                 async move {
                     error!("[real] 🚨 GHOST PREVENTION: Blind trimming {} on {} to drop unverified orphaned position", p, ex);
-                    let _ = conn.trim_position(&hc, &kc, &p, !is_buy, qty_b, dry_run, mult_b, tick_b, fallback, api_timeout).await;
+                    let _ = conn
+                        .trim_position(
+                            &hc,
+                            &kc,
+                            &p,
+                            !is_buy,
+                            qty_b,
+                            dry_run,
+                            mult_b,
+                            tick_b,
+                            fallback,
+                            api_timeout,
+                        )
+                        .await;
                 }
             });
         }
 
         let total_ms = t0.elapsed().as_millis();
-        if dry_run { fill_a = entry_a; fill_b = entry_b; }
+        if dry_run {
+            fill_a = entry_a;
+            fill_b = entry_b;
+        }
 
         let phys_a = actual_vol_phys_a.unwrap_or(0.0);
         let phys_b = actual_vol_phys_b.unwrap_or(0.0);
-        
+
         let a_filled = oid_a.is_some() && phys_a > 0.0;
         let b_filled = oid_b.is_some() && phys_b > 0.0;
 
@@ -459,7 +988,20 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             pair, a_filled, b_filled, phys_a, phys_b, fill_a, fill_b, total_ms);
 
         if !a_filled && !b_filled {
-            info!("[real] Both IOC unfilled {} — no exposure ({}ms)", pair, total_ms);
+            info!(
+                "[real] Both IOC unfilled {} — no exposure ({}ms)",
+                pair, total_ms
+            );
+            let fails = e_ctx
+                .consecutive_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            if fails >= 5 {
+                e_ctx
+                    .is_killed
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                error!("[real] 💀 KILL-SWITCH TRIGGERED: 5 consecutive IOC failures. Suspending new entries.");
+            }
             continue;
         }
 
@@ -472,7 +1014,7 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
 
         let delta_a = phys_a - matched_phys;
         let delta_b = phys_b - matched_phys;
-        
+
         // ── DELTA TRIMMING (Phase 3) ──
         let mut trimming_loss = 0.0;
         let mut trimming_fee = 0.0;
@@ -483,68 +1025,182 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             let phys_to_dump = delta_a; // Pass physical volume directly
             if phys_to_dump >= mult_a.min(1e-8) {
                 let is_buy = is_a_higher; // If we entered A by Selling (!is_a_higher), we exit A by Buying (is_a_higher)
-                error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys", pair, phys_to_dump);
-                
-                let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
-                match crate::engine::exchanges::get_connector(&exa).unwrap().trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_a, tick_for_close, fill_a, ts.api_timeout_ms).await {
+                error!(
+                    "[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys",
+                    pair, phys_to_dump
+                );
+
+                let tick_for_close = e_ctx
+                    .tick_sizes
+                    .get(&format!("{}:{}", exa, pair))
+                    .map(|v| *v)
+                    .unwrap_or(0.000001);
+                match crate::engine::exchanges::get_connector(&exa)
+                    .unwrap()
+                    .trim_position(
+                        &hc,
+                        &kc,
+                        &fp,
+                        is_buy,
+                        phys_to_dump,
+                        false,
+                        mult_a,
+                        tick_for_close,
+                        fill_a,
+                        ts.api_timeout_ms,
+                    )
+                    .await
+                {
                     Ok(rc) => {
                         trimming_fee += rc.total_fee;
-                        let gross_loss = if is_buy { (fill_a - rc.final_price) * delta_a } else { (rc.final_price - fill_a) * delta_a };
-                        trimming_loss += gross_loss.min(0.0).abs(); 
+                        let gross_loss = if is_buy {
+                            (fill_a - rc.final_price) * delta_a
+                        } else {
+                            (rc.final_price - fill_a) * delta_a
+                        };
+                        trimming_loss += gross_loss.min(0.0).abs();
                     }
-                    Err(e) => { error!("[real] Failed to trim DELTA A: {}", e); }
+                    Err(e) => {
+                        error!("[real] Failed to trim DELTA A: {}", e);
+                    }
                 }
             }
         }
-        
+
         if delta_b > 1e-12 {
             let phys_to_dump = delta_b; // Use physical coin volume
             if phys_to_dump >= mult_b.min(1e-8) {
                 let is_buy = !is_a_higher; // Opposite of entry B
-                error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys", pair, phys_to_dump);
-                
-                let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
-                match crate::engine::exchanges::get_connector(&exb).unwrap().trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_b, tick_for_close, fill_b, ts.api_timeout_ms).await {
+                error!(
+                    "[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys",
+                    pair, phys_to_dump
+                );
+
+                let tick_for_close = e_ctx
+                    .tick_sizes
+                    .get(&format!("{}:{}", exb, pair))
+                    .map(|v| *v)
+                    .unwrap_or(0.000001);
+                match crate::engine::exchanges::get_connector(&exb)
+                    .unwrap()
+                    .trim_position(
+                        &hc,
+                        &kc,
+                        &fp,
+                        is_buy,
+                        phys_to_dump,
+                        false,
+                        mult_b,
+                        tick_for_close,
+                        fill_b,
+                        ts.api_timeout_ms,
+                    )
+                    .await
+                {
                     Ok(rc) => {
                         trimming_fee += rc.total_fee;
-                        let gross_loss = if is_buy { (fill_b - rc.final_price) * delta_b } else { (rc.final_price - fill_b) * delta_b };
-                        trimming_loss += gross_loss.min(0.0).abs(); 
+                        let gross_loss = if is_buy {
+                            (fill_b - rc.final_price) * delta_b
+                        } else {
+                            (rc.final_price - fill_b) * delta_b
+                        };
+                        trimming_loss += gross_loss.min(0.0).abs();
                     }
-                    Err(e) => { error!("[real] Failed to trim DELTA B: {}", e); }
+                    Err(e) => {
+                        error!("[real] Failed to trim DELTA B: {}", e);
+                    }
                 }
             }
         }
 
         // ── TRADE BOOKING (Phase 4) ──
         if matched_phys < 1e-12 {
+            let trims = e_ctx
+                .consecutive_trims
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            if trims >= 3 {
+                e_ctx
+                    .is_killed
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                error!("[real] 💀 KILL-SWITCH TRIGGERED: 3 consecutive FULL TRIMS (total asymmetry). Suspending new entries.");
+            }
             // Nothing survived the trim (e.g. one leg didn't fill at all, and we dumped the other)
             let total_fee = fee_a_val + fee_b_val + trimming_fee;
             error!("[real] ❌ FULL ASYMMETRY DUMPED {}. Trade canceled. Trimming Loss: {:.4}, Trimming Fee: {:.4}", pair, trimming_loss, trimming_fee);
             pair_cd.insert(pair.clone(), now + ts.asymmetric_cooldown_ms);
-            
+
             // Record failed asymmetrical trade into database...
-            let (ea_s, eb_s, d, sp, pid) = (exa.clone(), exb.clone(), sig.direction.clone(), sig.spread, settings.id.clone());
-            let (ent_a, ent_b) = if a_filled { (fill_a, 0.0) } else { (0.0, fill_b) };
-            let fv_usd = if a_filled { delta_a * fill_a } else { delta_b * fill_b };
+            let (ea_s, eb_s, d, sp, pid) = (
+                exa.clone(),
+                exb.clone(),
+                sig.direction.clone(),
+                sig.spread,
+                settings.id.clone(),
+            );
+            let (ent_a, ent_b) = if a_filled {
+                (fill_a, 0.0)
+            } else {
+                (0.0, fill_b)
+            };
+            let fv_usd = if a_filled {
+                delta_a * fill_a
+            } else {
+                delta_b * fill_b
+            };
             let gross_pnl = -trimming_loss;
             let net_pnl = gross_pnl - total_fee;
-            
+
             let pnl_a_val = if a_filled { gross_pnl } else { 0.0 };
             let pnl_b_val = if !a_filled { gross_pnl } else { 0.0 };
-            
+
             let repo_close = TradeRepository::new(db.clone());
             // slip is 0.0 for cancelled trades, loss comes from gross_pnl / pnl_x
-            repo_close.append_asymmetric_close(
-                pair.clone(), ea_s, eb_s, d, fv_usd, ent_a, ent_b, sp, now_ms(), 
-                pnl_a_val, pnl_b_val, pid, total_fee, 0.0, net_pnl, gross_pnl, 0.0, 0.0
-            ).await;
+            repo_close
+                .append_asymmetric_close(
+                    pair.clone(),
+                    ea_s,
+                    eb_s,
+                    d,
+                    fv_usd,
+                    ent_a,
+                    ent_b,
+                    sp,
+                    now_ms(),
+                    pnl_a_val,
+                    pnl_b_val,
+                    pid,
+                    total_fee,
+                    0.0,
+                    net_pnl,
+                    gross_pnl,
+                    0.0,
+                    0.0,
+                )
+                .await;
             continue;
         }
 
         // We have a VALID matching volume! Calculate final trading volume
+        e_ctx
+            .consecutive_failures
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        e_ctx
+            .consecutive_trims
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         let final_vol_usd = matched_phys * entry_a;
-        crate::engine::real::deduct_cached_balance(&exa, final_vol_usd, settings.leverage as f64, &e_ctx);
-        crate::engine::real::deduct_cached_balance(&exb, final_vol_usd, settings.leverage as f64, &e_ctx);
+        crate::engine::real::deduct_cached_balance(
+            &exa,
+            final_vol_usd,
+            settings.leverage as f64,
+            &e_ctx,
+        );
+        crate::engine::real::deduct_cached_balance(
+            &exb,
+            final_vol_usd,
+            settings.leverage as f64,
+            &e_ctx,
+        );
         opened_this_cycle = true;
 
         let dir = sig.direction.clone();
@@ -559,12 +1215,28 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
         };
 
         let entry_comm = fee_a_val + fee_b_val + trimming_fee; // Add trimming fees to the opening fees
-        let slip_a = if fill_a > 0.0 { if is_a_higher { ((entry_a - fill_a) * matched_phys).max(0.0) } else { ((fill_a - entry_a) * matched_phys).max(0.0) } } else { 0.0 };
-        let slip_b = if fill_b > 0.0 { if !is_a_higher { ((entry_b - fill_b) * matched_phys).max(0.0) } else { ((fill_b - entry_b) * matched_phys).max(0.0) } } else { 0.0 };
-        
+        let slip_a = if fill_a > 0.0 {
+            if is_a_higher {
+                ((entry_a - fill_a) * matched_phys).max(0.0)
+            } else {
+                ((fill_a - entry_a) * matched_phys).max(0.0)
+            }
+        } else {
+            0.0
+        };
+        let slip_b = if fill_b > 0.0 {
+            if !is_a_higher {
+                ((entry_b - fill_b) * matched_phys).max(0.0)
+            } else {
+                ((fill_b - entry_b) * matched_phys).max(0.0)
+            }
+        } else {
+            0.0
+        };
+
         // Trimming loss is baked into the entry slippage curve (as it was an immediate loss to enter the market symmetrically)
-        let entry_slip = slip_a + slip_b + trimming_loss; 
-        
+        let entry_slip = slip_a + slip_b + trimming_loss;
+
         let contracts_a_db = matched_phys / mult_a;
         let contracts_b_db = matched_phys / mult_b;
 
@@ -572,10 +1244,23 @@ pub async fn run_cycle(signals: Vec<shared::TradeSignal>, spreads: Vec<SpreadRow
             pair, matched_phys, trimming_loss, fill_a, fill_b, entry_comm, entry_slip, actual_entry_spread);
 
         repo.insert_new_entry(
-            pair.clone(), exa.clone(), exb.clone(), dir.clone(), final_vol_usd, 
-            fill_a, fill_b, actual_entry_spread, now_ms(), settings.id.clone(), 
-            entry_comm, entry_slip, oid_a.unwrap_or_default(), oid_b.unwrap_or_default(), 
-            contracts_a_db, contracts_b_db
-        ).await;
+            pair.clone(),
+            exa.clone(),
+            exb.clone(),
+            dir.clone(),
+            final_vol_usd,
+            fill_a,
+            fill_b,
+            actual_entry_spread,
+            now_ms(),
+            settings.id.clone(),
+            entry_comm,
+            entry_slip,
+            oid_a.unwrap_or_default(),
+            oid_b.unwrap_or_default(),
+            contracts_a_db,
+            contracts_b_db,
+        )
+        .await;
     }
 }

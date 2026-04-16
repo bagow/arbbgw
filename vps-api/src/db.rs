@@ -283,11 +283,25 @@ pub fn row_to_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradingProfil
         owner: row.get(16)?,
         created_at: row.get(17)?,
         updated_at: row.get(18)?,
-        disabled_exchanges: row.get::<_, Option<String>>(19).unwrap_or(Some("[]".into())),
-        leverage: row.get::<_, Option<i64>>(20).unwrap_or(Some(10)).unwrap_or(10),
-        margin_mode: row.get::<_, Option<String>>(21).unwrap_or(Some("cross".into())).unwrap_or_else(|| "cross".into()),
-        min_structural_deviation: row.get::<_, Option<f64>>(22).unwrap_or(Some(0.0)).unwrap_or(0.0),
-        min_depth_percent: row.get::<_, Option<f64>>(23).unwrap_or(Some(100.0)).unwrap_or(100.0),
+        disabled_exchanges: row
+            .get::<_, Option<String>>(19)
+            .unwrap_or(Some("[]".into())),
+        leverage: row
+            .get::<_, Option<i64>>(20)
+            .unwrap_or(Some(10))
+            .unwrap_or(10),
+        margin_mode: row
+            .get::<_, Option<String>>(21)
+            .unwrap_or(Some("cross".into()))
+            .unwrap_or_else(|| "cross".into()),
+        min_structural_deviation: row
+            .get::<_, Option<f64>>(22)
+            .unwrap_or(Some(0.0))
+            .unwrap_or(0.0),
+        min_depth_percent: row
+            .get::<_, Option<f64>>(23)
+            .unwrap_or(Some(100.0))
+            .unwrap_or(100.0),
     })
 }
 
@@ -333,4 +347,3 @@ pub fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
         funding_next_ts: row.get("funding_next_ts").unwrap_or(None),
     })
 }
- 

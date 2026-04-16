@@ -10,7 +10,7 @@ use rusqlite::params;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH, Instant};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::AppState;
 
@@ -61,16 +61,19 @@ pub async fn handle_update(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    
+
     // Save snapshot
     let snapshot_val = json!({ "ts": now, "data": payload.spreads }).to_string();
-    let _ = state.db.call(move |conn| {
-        Ok(conn.execute(
-            "INSERT INTO server_cache (key, value, expires_at) VALUES ('snapshot', ?, ?)
+    let _ = state
+        .db
+        .call(move |conn| {
+            Ok(conn.execute(
+                "INSERT INTO server_cache (key, value, expires_at) VALUES ('snapshot', ?, ?)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
-            params![snapshot_val, now + 180_000],
-        )?)
-    }).await;
+                params![snapshot_val, now + 180_000],
+            )?)
+        })
+        .await;
 
     // Save maps summary
     let mut map_summaries: HashMap<String, Vec<String>> = HashMap::new();
@@ -78,31 +81,43 @@ pub async fn handle_update(
         let keys = if let Some(obj) = data.as_object() {
             obj.keys().cloned().collect()
         } else if let Some(arr) = data.as_array() {
-            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
         } else {
             vec![]
         };
         map_summaries.insert(ex.clone(), keys);
     }
     let map_val = json!({ "ts": now, "data": map_summaries }).to_string();
-    let _ = state.db.call(move |conn| {
-        Ok(conn.execute(
-            "INSERT INTO server_cache (key, value, expires_at) VALUES ('exchange_maps', ?, ?)
+    let _ = state
+        .db
+        .call(move |conn| {
+            Ok(conn.execute(
+                "INSERT INTO server_cache (key, value, expires_at) VALUES ('exchange_maps', ?, ?)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
-            params![map_val, now + 180_000],
-        )?)
-    }).await;
+                params![map_val, now + 180_000],
+            )?)
+        })
+        .await;
 
     (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
 }
 
 // ─── GET /api/trading/settings/all ───
 pub async fn handle_get_all_settings(State(state): State<AppState>) -> Response {
-    let profiles = match state.db.call(|conn| {
-        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE mode = 'real'")?;
-        let items: Vec<_> = stmt.query_map([], row_to_profile)?.filter_map(|r| r.ok()).collect();
-        Ok(items)
-    }).await {
+    let profiles = match state
+        .db
+        .call(|conn| {
+            let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE mode = 'real'")?;
+            let items: Vec<_> = stmt
+                .query_map([], row_to_profile)?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(items)
+        })
+        .await
+    {
         Ok(p) => p,
         Err(_) => vec![],
     };
@@ -112,11 +127,24 @@ pub async fn handle_get_all_settings(State(state): State<AppState>) -> Response 
 // ─── GET /api/logs/core-node ───
 pub async fn handle_get_logs(State(_state): State<AppState>, headers: HeaderMap) -> Response {
     if check_basic_auth(&headers, &_state).is_none() {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"Unauthorized"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"Unauthorized"})),
+        )
+            .into_response();
     }
     match tokio::process::Command::new("sudo")
-        .args(["journalctl", "-u", "core-node", "-n", "3000", "-r", "--no-pager"])
-        .output().await 
+        .args([
+            "journalctl",
+            "-u",
+            "core-node",
+            "-n",
+            "3000",
+            "-r",
+            "--no-pager",
+        ])
+        .output()
+        .await
     {
         Ok(out) => {
             let mut s = String::from_utf8_lossy(&out.stdout).to_string();
@@ -125,7 +153,7 @@ pub async fn handle_get_logs(State(_state): State<AppState>, headers: HeaderMap)
             }
             (StatusCode::OK, s).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
@@ -144,7 +172,7 @@ pub async fn handle_get_profiles(State(state): State<AppState>, headers: HeaderM
         Ok(p) => p,
         Err(_) => vec![],
     };
-    
+
     (StatusCode::OK, Json(profiles)).into_response()
 }
 
@@ -165,19 +193,46 @@ pub async fn handle_get_unified(
     };
 
     // 1. Get Snapshot and Exchange Maps
-    let snapshot = state.real_db.call(|conn| {
-        let row: Result<String, rusqlite::Error> = conn.query_row("SELECT value FROM server_cache WHERE key = 'snapshot'", [], |r| r.get(0));
-        let val: serde_json::Value = if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) };
-        Ok::<serde_json::Value, tokio_rusqlite::Error>(val)
-    }).await.unwrap_or(json!({}));
+    let snapshot = state
+        .real_db
+        .call(|conn| {
+            let row: Result<String, rusqlite::Error> = conn.query_row(
+                "SELECT value FROM server_cache WHERE key = 'snapshot'",
+                [],
+                |r| r.get(0),
+            );
+            let val: serde_json::Value = if let Ok(v) = row {
+                serde_json::from_str(&v).unwrap_or(json!({}))
+            } else {
+                json!({})
+            };
+            Ok::<serde_json::Value, tokio_rusqlite::Error>(val)
+        })
+        .await
+        .unwrap_or(json!({}));
 
-    let exchanges_raw = state.real_db.call(|conn| {
-        let row: Result<String, rusqlite::Error> = conn.query_row("SELECT value FROM server_cache WHERE key = 'exchange_maps'", [], |r| r.get(0));
-        let val: serde_json::Value = if let Ok(v) = row { serde_json::from_str(&v).unwrap_or(json!({})) } else { json!({}) };
-        Ok::<serde_json::Value, tokio_rusqlite::Error>(val)
-    }).await.unwrap_or(json!({}));
+    let exchanges_raw = state
+        .real_db
+        .call(|conn| {
+            let row: Result<String, rusqlite::Error> = conn.query_row(
+                "SELECT value FROM server_cache WHERE key = 'exchange_maps'",
+                [],
+                |r| r.get(0),
+            );
+            let val: serde_json::Value = if let Ok(v) = row {
+                serde_json::from_str(&v).unwrap_or(json!({}))
+            } else {
+                json!({})
+            };
+            Ok::<serde_json::Value, tokio_rusqlite::Error>(val)
+        })
+        .await
+        .unwrap_or(json!({}));
 
-    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
     let today_midnight_ms = now_ms - (now_ms % 86_400_000); // Rounds down to midnight UTC
     let daily_exch_stats = state.real_db.call(move |conn| {
         let mut map: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
@@ -210,7 +265,7 @@ pub async fn handle_get_unified(
         let mut daily_pnl_map = serde_json::Map::new();
         let mut daily_pct_map = serde_json::Map::new();
         let balances = obj.get("balances").and_then(|b| b.as_object());
-        
+
         for (ex, pnl) in daily_exch_stats {
             daily_pnl_map.insert(ex.clone(), json!(pnl));
             if let Some(bals) = balances {
@@ -232,48 +287,76 @@ pub async fn handle_get_unified(
         Ok(items)
     }).await.unwrap_or_else(|_| vec![]);
 
-    let pid = query.profile_id.unwrap_or_else(|| "real-default".to_string());
-    let _profile_mode = profiles.iter()
+    let pid = query
+        .profile_id
+        .unwrap_or_else(|| "real-default".to_string());
+    let _profile_mode = profiles
+        .iter()
         .find(|p| p.id == pid)
         .map(|p| p.mode.clone())
         .unwrap_or_else(|| "real".into());
     let trade_db = state.real_db.clone();
 
-    let active_trades = trade_db.call({
-        let p = pid.clone();
-        move |conn| {
-            let mut stmt = conn.prepare("SELECT * FROM trades WHERE status='OPEN' AND profile_id=?")?;
-            let items: Vec<_> = stmt.query_map([p], row_to_trade)?.filter_map(|r| r.ok()).collect();
-            Ok(items)
-        }
-    }).await.unwrap_or_else(|_| vec![]);
+    let active_trades = trade_db
+        .call({
+            let p = pid.clone();
+            move |conn| {
+                let mut stmt =
+                    conn.prepare("SELECT * FROM trades WHERE status='OPEN' AND profile_id=?")?;
+                let items: Vec<_> = stmt
+                    .query_map([p], row_to_trade)?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                Ok(items)
+            }
+        })
+        .await
+        .unwrap_or_else(|_| vec![]);
 
     // Enrich active trades with live data from DB columns written by core-node.
     // STRICT RULE: We trust ALL values from DB — core-node writes them from exchange API.
     // NO local PnL recalculation — dashboard is a pure DB mirror.
-    let active_enriched: Vec<serde_json::Value> = active_trades.iter().map(|t| {
-        let mut v = serde_json::to_value(t).unwrap_or_default();
-        if let Some(obj) = v.as_object_mut() {
-            // Current prices from DB (written by core-node's live_update loop)
-            obj.insert("current_price_a".into(), json!(t.last_price_a.unwrap_or(t.entry_price_a)));
-            obj.insert("current_price_b".into(), json!(t.last_price_b.unwrap_or(t.entry_price_b)));
-            obj.insert("current_spread".into(), json!(t.last_spread.unwrap_or(0.0)));
-            // PnL: trust DB values computed by core-node from exchange API
-            let db_pnl_a = t.pnl_a.unwrap_or(0.0);
-            let db_pnl_b = t.pnl_b.unwrap_or(0.0);
-            let gross = db_pnl_a + db_pnl_b;
-            obj.insert("gross_pnl".into(), json!(gross));
-            obj.insert("pnl_a".into(), json!(db_pnl_a));
-            obj.insert("pnl_b".into(), json!(db_pnl_b));
-            // Net PnL: trust curr_gross_pnl from DB (= gross - commission - funding)
-            obj.insert("current_pnl".into(), json!(t.curr_gross_pnl.unwrap_or(gross)));
-            // Costs: directly from DB
-            obj.insert("commission_cost".into(), json!(t.commission_cost.unwrap_or(0.0)));
-            obj.insert("slippage_cost".into(), json!(t.slippage_cost.unwrap_or(0.0)));
-            obj.insert("funding_cost".into(), json!(t.funding_cost.unwrap_or(0.0)));
-        }
-        v
-    }).collect();
+    let active_enriched: Vec<serde_json::Value> = active_trades
+        .iter()
+        .map(|t| {
+            let mut v = serde_json::to_value(t).unwrap_or_default();
+            if let Some(obj) = v.as_object_mut() {
+                // Current prices from DB (written by core-node's live_update loop)
+                obj.insert(
+                    "current_price_a".into(),
+                    json!(t.last_price_a.unwrap_or(t.entry_price_a)),
+                );
+                obj.insert(
+                    "current_price_b".into(),
+                    json!(t.last_price_b.unwrap_or(t.entry_price_b)),
+                );
+                obj.insert("current_spread".into(), json!(t.last_spread.unwrap_or(0.0)));
+                // PnL: trust DB values computed by core-node from exchange API
+                let db_pnl_a = t.pnl_a.unwrap_or(0.0);
+                let db_pnl_b = t.pnl_b.unwrap_or(0.0);
+                let gross = db_pnl_a + db_pnl_b;
+                obj.insert("gross_pnl".into(), json!(gross));
+                obj.insert("pnl_a".into(), json!(db_pnl_a));
+                obj.insert("pnl_b".into(), json!(db_pnl_b));
+                // Net PnL: trust curr_gross_pnl from DB (= gross - commission - funding)
+                obj.insert(
+                    "current_pnl".into(),
+                    json!(t.curr_gross_pnl.unwrap_or(gross)),
+                );
+                // Costs: directly from DB
+                obj.insert(
+                    "commission_cost".into(),
+                    json!(t.commission_cost.unwrap_or(0.0)),
+                );
+                obj.insert(
+                    "slippage_cost".into(),
+                    json!(t.slippage_cost.unwrap_or(0.0)),
+                );
+                obj.insert("funding_cost".into(), json!(t.funding_cost.unwrap_or(0.0)));
+            }
+            v
+        })
+        .collect();
 
     let history_trades_raw = trade_db.call({
         let p = pid.clone();
@@ -289,18 +372,23 @@ pub async fn handle_get_unified(
         }
     }).await.unwrap_or_else(|_| vec![]);
 
-    let history_trades: Vec<serde_json::Value> = history_trades_raw.into_iter().map(|t| {
-        let mut v = serde_json::to_value(&t).unwrap_or_default();
-        let display_comm = t.commission_cost.unwrap_or(0.0);
-        let display_slip = t.slippage_cost.unwrap_or(0.0);
-        
-        if let Some(obj) = v.as_object_mut() {
-            obj.insert("commission_cost".into(), json!(display_comm));
-            obj.insert("slippage_cost".into(), json!(display_slip));
-            if t.funding_cost.is_none() { obj.insert("funding_cost".into(), json!(0.0)); }
-        }
-        v
-    }).collect();
+    let history_trades: Vec<serde_json::Value> = history_trades_raw
+        .into_iter()
+        .map(|t| {
+            let mut v = serde_json::to_value(&t).unwrap_or_default();
+            let display_comm = t.commission_cost.unwrap_or(0.0);
+            let display_slip = t.slippage_cost.unwrap_or(0.0);
+
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("commission_cost".into(), json!(display_comm));
+                obj.insert("slippage_cost".into(), json!(display_slip));
+                if t.funding_cost.is_none() {
+                    obj.insert("funding_cost".into(), json!(0.0));
+                }
+            }
+            v
+        })
+        .collect();
 
     // 4. Compute aggregate stats — cached for 30s to avoid 131K+ row scans every poll
     static STATS_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Value)>>> = OnceLock::new();
@@ -309,7 +397,11 @@ pub async fn handle_get_unified(
     let cached = {
         let lock = cache.lock().unwrap();
         lock.get(&cache_key).and_then(|(ts, v)| {
-            if ts.elapsed().as_secs() < 30 { Some(v.clone()) } else { None }
+            if ts.elapsed().as_secs() < 30 {
+                Some(v.clone())
+            } else {
+                None
+            }
         })
     };
     let stats = if let Some(v) = cached {
@@ -409,24 +501,31 @@ pub async fn handle_get_unified(
             "top_exchange_pairs": Vec::<serde_json::Value>::new()
         })
     });
-        cache.lock().unwrap().insert(cache_key, (Instant::now(), fresh.clone()));
+        cache
+            .lock()
+            .unwrap()
+            .insert(cache_key, (Instant::now(), fresh.clone()));
         fresh
     };
 
     // Return payload matching frontend expectations
-    (StatusCode::OK, Json(json!({
-        "snapshot": snapshot,
-        "exchanges": exchanges,
-        "profiles": profiles,
-        "trades": {
-            "active": active_enriched,
-            "history": history_trades,
-            "stats": stats
-        },
-        "profile_active": active_enriched,
-        "profile_history": history_trades,
-        "profile_stats": stats,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "snapshot": snapshot,
+            "exchanges": exchanges,
+            "profiles": profiles,
+            "trades": {
+                "active": active_enriched,
+                "history": history_trades,
+                "stats": stats
+            },
+            "profile_active": active_enriched,
+            "profile_history": history_trades,
+            "profile_stats": stats,
+        })),
+    )
+        .into_response()
 }
 
 // ─── GET /api/profiles/:id ───
@@ -440,17 +539,29 @@ pub async fn handle_get_profile(
         None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let (_maps_json, _) = state.real_db.call(move |conn| {
-        let mut stmt = conn.prepare("SELECT value FROM server_cache WHERE key='exchange_maps'")?;
-        let json_str: String = stmt.query_row([], |row| row.get(0))?;
-        Ok::<(String, ()), tokio_rusqlite::Error>((json_str, ()))
-    }).await.unwrap_or_else(|_| ("{}".to_string(), ()));
+    let (_maps_json, _) = state
+        .real_db
+        .call(move |conn| {
+            let mut stmt =
+                conn.prepare("SELECT value FROM server_cache WHERE key='exchange_maps'")?;
+            let json_str: String = stmt.query_row([], |row| row.get(0))?;
+            Ok::<(String, ()), tokio_rusqlite::Error>((json_str, ()))
+        })
+        .await
+        .unwrap_or_else(|_| ("{}".to_string(), ()));
 
-    let profile = state.db.call(move |conn| {
-        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE id = ?")?;
-        let items: Vec<_> = stmt.query_map([id], row_to_profile)?.filter_map(|r| r.ok()).collect();
-        Ok(items.into_iter().next())
-    }).await.unwrap_or(None);
+    let profile = state
+        .db
+        .call(move |conn| {
+            let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE id = ?")?;
+            let items: Vec<_> = stmt
+                .query_map([id], row_to_profile)?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(items.into_iter().next())
+        })
+        .await
+        .unwrap_or(None);
 
     match profile {
         Some(p) => (StatusCode::OK, Json(p)).into_response(),
@@ -469,12 +580,23 @@ pub async fn handle_post_profile(
         None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
     let new_id = uuid::Uuid::new_v4().to_string();
 
     // Extract only what the frontend sends — fill everything else with sensible defaults.
-    let name  = payload.get("name" ).and_then(|v| v.as_str()).unwrap_or("New Profile").to_string();
-    let mode  = payload.get("mode" ).and_then(|v| v.as_str()).unwrap_or("real").to_string();
+    let name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("New Profile")
+        .to_string();
+    let mode = payload
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("real")
+        .to_string();
 
     let (default_vol, default_tp, default_stop, default_max_trades) = if mode == "real" {
         (100.0_f64, 0.2_f64, 0.3_f64, 3_i64)
@@ -484,35 +606,56 @@ pub async fn handle_post_profile(
 
     let id_clone = new_id.clone();
     let un_clone = username.clone();
-    let res = state.db.call(move |conn| {
-        Ok(conn.execute(
-            "INSERT INTO trading_profiles
+    let res = state
+        .db
+        .call(move |conn| {
+            Ok(conn.execute(
+                "INSERT INTO trading_profiles
                 (id,name,mode,is_active,min_entry_spread,max_entry_spread,trade_volume,
                  take_profit_percent,trailing_stop_percent,max_active_trades,commission_rate,
                  slippage_percent,funding_rate_8h,min_volume_millions,collector_interval_secs,
                  owner,created_at,updated_at,disabled_exchanges,min_depth_percent)
             VALUES (?,?,?,0,1.0,10.0,?,?,?,?,0.05,0.05,0.01,10.0,5,?,?,?,'[]',100.0)",
-            params![
-                id_clone, name, mode, default_vol,
-                default_tp, default_stop, default_max_trades,
-                un_clone, now, now
-            ],
-        )?)
-    }).await;
+                params![
+                    id_clone,
+                    name,
+                    mode,
+                    default_vol,
+                    default_tp,
+                    default_stop,
+                    default_max_trades,
+                    un_clone,
+                    now,
+                    now
+                ],
+            )?)
+        })
+        .await;
 
     if let Err(e) = res {
         return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
 
     // Return the freshly-inserted row from DB so the frontend gets accurate data.
-    let profile = state.db.call(move |conn| {
-        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE id=?")?;
-        Ok(stmt.query_row([new_id], row_to_profile).ok())
-    }).await.unwrap_or(None);
+    let profile = state
+        .db
+        .call(move |conn| {
+            let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE id=?")?;
+            Ok(stmt.query_row([new_id], row_to_profile).ok())
+        })
+        .await
+        .unwrap_or(None);
 
     match profile {
-        Some(p) => (StatusCode::CREATED, Json(serde_json::to_value(p).unwrap_or_default())).into_response(),
-        None    => json_err(StatusCode::INTERNAL_SERVER_ERROR, "Profile created but could not be fetched"),
+        Some(p) => (
+            StatusCode::CREATED,
+            Json(serde_json::to_value(p).unwrap_or_default()),
+        )
+            .into_response(),
+        None => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Profile created but could not be fetched",
+        ),
     }
 }
 
@@ -529,77 +672,104 @@ pub async fn handle_patch_profile(
     };
 
     // simplified update loop
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
-    
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
     // We update is_active, min_entry_spread, max_entry_spread etc
     if let Some(obj) = payload.as_object() {
         let mut sets: Vec<String> = vec![];
         let mut params_vec: Vec<rusqlite::types::Value> = vec![];
-        
+
         for (k, v) in obj {
             match k.as_str() {
                 "is_active" => {
                     sets.push("is_active=?".to_string());
                     let active = v.as_bool().unwrap_or(v.as_i64().unwrap_or(0) > 0);
                     params_vec.push(rusqlite::types::Value::Integer(if active { 1 } else { 0 }));
-                },
-                "min_entry_spread" | "max_entry_spread" | "trade_volume" | "take_profit_percent" | 
-                "trailing_stop_percent" | "commission_rate" | "slippage_percent" | "funding_rate_8h" | "min_volume_millions" | "min_structural_deviation" | "min_depth_percent" => {
+                }
+                "min_entry_spread"
+                | "max_entry_spread"
+                | "trade_volume"
+                | "take_profit_percent"
+                | "trailing_stop_percent"
+                | "commission_rate"
+                | "slippage_percent"
+                | "funding_rate_8h"
+                | "min_volume_millions"
+                | "min_structural_deviation"
+                | "min_depth_percent" => {
                     if let Some(f) = v.as_f64() {
                         sets.push(format!("{}=?", k));
                         params_vec.push(rusqlite::types::Value::Real(f));
                     }
-                },
+                }
                 "max_active_trades" | "collector_interval_secs" | "leverage" => {
                     if let Some(i) = v.as_i64() {
                         sets.push(format!("{}=?", k));
                         params_vec.push(rusqlite::types::Value::Integer(i));
                     }
-                },
+                }
                 "name" | "mode" | "pending_commands" | "margin_mode" => {
                     if let Some(s) = v.as_str() {
                         sets.push(format!("{}=?", k));
                         params_vec.push(rusqlite::types::Value::Text(s.to_string()));
                     }
-                },
+                }
                 "disabled_exchanges" => {
-                    let s = if v.is_array() { serde_json::to_string(v).unwrap_or("[]".into()) } else { v.as_str().unwrap_or("[]").to_string() };
+                    let s = if v.is_array() {
+                        serde_json::to_string(v).unwrap_or("[]".into())
+                    } else {
+                        v.as_str().unwrap_or("[]").to_string()
+                    };
                     sets.push(format!("{}=?", k));
                     params_vec.push(rusqlite::types::Value::Text(s));
-                },
+                }
                 _ => {}
             }
         }
-        
+
         if sets.is_empty() {
             return json_err(StatusCode::BAD_REQUEST, "No valid fields");
         }
-        
+
         sets.push("updated_at=?".to_string());
         params_vec.push(rusqlite::types::Value::Integer(now));
-        
+
         let id_clone = id.clone();
         let query = format!("UPDATE trading_profiles SET {} WHERE id=? AND (owner IS NULL OR owner=? OR id = 'real-default')", sets.join(", "));
-        
+
         // Push final params
         params_vec.push(rusqlite::types::Value::Text(id_clone));
         params_vec.push(rusqlite::types::Value::Text(username));
 
-        if let Err(e) = state.db.call(move |conn| {
-            let mut stmt = conn.prepare(&query)?;
-            stmt.execute(rusqlite::params_from_iter(params_vec))?;
-            Ok(())
-        }).await {
+        if let Err(e) = state
+            .db
+            .call(move |conn| {
+                let mut stmt = conn.prepare(&query)?;
+                stmt.execute(rusqlite::params_from_iter(params_vec))?;
+                Ok(())
+            })
+            .await
+        {
             tracing::error!("Failed to update profile {}: {:?}", id, e);
-            return json_err(StatusCode::INTERNAL_SERVER_ERROR, "Failed to update profile in database");
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to update profile in database",
+            );
         }
     }
 
     // Return updated profile
-    let profile = state.db.call(move |conn| {
-        let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE id=?")?;
-        Ok(stmt.query_row([id], row_to_profile).ok())
-    }).await.unwrap_or(None);
+    let profile = state
+        .db
+        .call(move |conn| {
+            let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE id=?")?;
+            Ok(stmt.query_row([id], row_to_profile).ok())
+        })
+        .await
+        .unwrap_or(None);
 
     match profile {
         Some(p) => (StatusCode::OK, Json(p)).into_response(),
@@ -622,16 +792,26 @@ pub async fn handle_delete_profile(
         return json_err(StatusCode::BAD_REQUEST, "Cannot delete default profiles");
     }
 
-    let _id2 = id.clone(); let id3 = id.clone();
-    let _ = state.db.call(move |conn| {
-        conn.execute("DELETE FROM trading_profiles WHERE id=? AND owner=?", params![id.clone(), username])?;
-        Ok(())
-    }).await;
+    let _id2 = id.clone();
+    let id3 = id.clone();
+    let _ = state
+        .db
+        .call(move |conn| {
+            conn.execute(
+                "DELETE FROM trading_profiles WHERE id=? AND owner=?",
+                params![id.clone(), username],
+            )?;
+            Ok(())
+        })
+        .await;
     // Clear trades from DB
-    let _ = state.real_db.call(move |conn| {
-        conn.execute("DELETE FROM trades WHERE profile_id=?", params![id3])?;
-        Ok(())
-    }).await;
+    let _ = state
+        .real_db
+        .call(move |conn| {
+            conn.execute("DELETE FROM trades WHERE profile_id=?", params![id3])?;
+            Ok(())
+        })
+        .await;
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
@@ -646,15 +826,25 @@ pub async fn handle_clear_trades(
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
     }
 
-    let _id2 = id.clone(); let id3 = id.clone();
-    let _ = state.db.call(move |conn| {
-        conn.execute("UPDATE trading_profiles SET pending_commands='CLEAR_TRADES' WHERE id=?", params![id])?;
-        Ok(())
-    }).await;
-    let _ = state.real_db.call(move |conn| {
-        conn.execute("DELETE FROM trades WHERE profile_id=?", params![id3])?;
-        Ok(())
-    }).await;
+    let _id2 = id.clone();
+    let id3 = id.clone();
+    let _ = state
+        .db
+        .call(move |conn| {
+            conn.execute(
+                "UPDATE trading_profiles SET pending_commands='CLEAR_TRADES' WHERE id=?",
+                params![id],
+            )?;
+            Ok(())
+        })
+        .await;
+    let _ = state
+        .real_db
+        .call(move |conn| {
+            conn.execute("DELETE FROM trades WHERE profile_id=?", params![id3])?;
+            Ok(())
+        })
+        .await;
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
@@ -674,8 +864,10 @@ pub async fn handle_market_close_all(
         conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status='OPEN'", params![id])?;
         Ok(())
     }).await;
-    
-    if let Err(e) = r1 { tracing::error!("Failed to close all on real DB: {:?}", e); }
+
+    if let Err(e) = r1 {
+        tracing::error!("Failed to close all on real DB: {:?}", e);
+    }
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
@@ -690,12 +882,20 @@ pub async fn handle_market_close_trade(
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
     }
 
-    let r1 = state.real_db.call(move |conn| {
-        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status='OPEN'", params![trade_id])?;
-        Ok(())
-    }).await;
-    
-    if let Err(e) = r1 { tracing::error!("Failed to close trade {} on real DB: {:?}", trade_id, e); }
+    let r1 = state
+        .real_db
+        .call(move |conn| {
+            conn.execute(
+                "UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status='OPEN'",
+                params![trade_id],
+            )?;
+            Ok(())
+        })
+        .await;
+
+    if let Err(e) = r1 {
+        tracing::error!("Failed to close trade {} on real DB: {:?}", trade_id, e);
+    }
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
@@ -737,26 +937,34 @@ pub async fn handle_patch_technical_settings(
 
     let obj = match payload.as_object() {
         Some(o) => o.clone(),
-        None => return json_err(StatusCode::BAD_REQUEST, "Expected JSON object { key: value, ... }"),
+        None => {
+            return json_err(
+                StatusCode::BAD_REQUEST,
+                "Expected JSON object { key: value, ... }",
+            )
+        }
     };
 
-    let result = state.db.call(move |conn| {
-        let tx = conn.transaction()?;
-        for (key, value) in &obj {
-            let val_str = match value {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                Value::Bool(b) => b.to_string(),
-                _ => value.to_string(),
-            };
-            tx.execute(
-                "UPDATE technical_settings SET value = ? WHERE key = ?",
-                params![val_str, key],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }).await;
+    let result = state
+        .db
+        .call(move |conn| {
+            let tx = conn.transaction()?;
+            for (key, value) in &obj {
+                let val_str = match value {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    _ => value.to_string(),
+                };
+                tx.execute(
+                    "UPDATE technical_settings SET value = ? WHERE key = ?",
+                    params![val_str, key],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await;
 
     match result {
         Ok(_) => (StatusCode::OK, Json(json!({ "success": true }))).into_response(),
@@ -776,11 +984,12 @@ pub async fn handle_close_exchange_position(
     axum::Json(payload): axum::Json<PositionCloseReq>,
 ) -> impl axum::response::IntoResponse {
     let client = reqwest::Client::new();
-    let res = client.post("http://127.0.0.1:3003/api/positions/close")
+    let res = client
+        .post("http://127.0.0.1:3003/api/positions/close")
         .json(&payload)
         .send()
         .await;
-        
+
     match res {
         Ok(resp) => {
             if resp.status().is_success() {
@@ -788,7 +997,7 @@ pub async fn handle_close_exchange_position(
             } else {
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR
             }
-        },
+        }
         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

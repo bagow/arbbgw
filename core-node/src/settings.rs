@@ -3,8 +3,8 @@
 //! The canonical TradingSettings struct lives in the `shared` crate.
 //! This module only handles SQLite ↔ struct mapping.
 
-pub use shared::TradingSettings;
 pub use shared::TechnicalSettings;
+pub use shared::TradingSettings;
 
 use tokio_rusqlite::Connection;
 
@@ -44,10 +44,15 @@ const PROFILE_SELECT: &str = "
 pub async fn load_settings(db: &Connection, mode: &str) -> TradingSettings {
     let mode = mode.to_string();
     db.call(move |conn| {
-        let sql = format!("{} WHERE mode=? ORDER BY is_active DESC LIMIT 1", PROFILE_SELECT);
+        let sql = format!(
+            "{} WHERE mode=? ORDER BY is_active DESC LIMIT 1",
+            PROFILE_SELECT
+        );
         let result = conn.query_row(&sql, rusqlite::params![mode], |row| Ok(parse_row(row)));
         Ok(result.unwrap_or_default())
-    }).await.unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Load ALL profiles for a given mode — used to run a trade engine cycle per profile.
@@ -56,11 +61,14 @@ pub async fn load_all_settings(db: &Connection, mode: &str) -> Vec<TradingSettin
     db.call(move |conn| {
         let sql = format!("{} WHERE mode=?", PROFILE_SELECT);
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params![mode], |row| Ok(parse_row(row)))?
+        let rows = stmt
+            .query_map(rusqlite::params![mode], |row| Ok(parse_row(row)))?
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
-    }).await.unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 fn get_f64(row: &rusqlite::Row, idx: usize) -> Option<f64> {
@@ -89,28 +97,37 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
         .unwrap_or_default();
 
     TradingSettings {
-        id:                      row.get(0).unwrap_or_else(|_| "default".to_string()),
+        id: row.get(0).unwrap_or_else(|_| "default".to_string()),
         // col 1 = name (unused in TradingSettings)
         // col 2 = mode (unused in TradingSettings)
-        is_active:               get_i64(row, 3).unwrap_or(0) != 0,
-        min_entry_spread:        get_f64(row, 4).unwrap_or(0.5),
-        max_entry_spread:        get_f64(row, 5).unwrap_or(10.0),
-        trade_volume:            get_f64(row, 6).unwrap_or(10.0),
-        min_trade_volume:        5.0, // No DB column — use fixed default
-        take_profit_percent:     get_f64(row, 7).unwrap_or(0.2),
-        trailing_stop_percent:   get_f64(row, 8).unwrap_or(0.3),
-        max_active_trades:       get_i64(row, 9).unwrap_or(3),
-        commission_rate:         get_f64(row, 10).unwrap_or(0.05),
-        slippage_percent:        get_f64(row, 11).unwrap_or(0.05),
-        funding_rate_8h:         get_f64(row, 12).unwrap_or(0.01),
-        min_volume_millions:     get_f64(row, 13).unwrap_or(10.0),
+        is_active: get_i64(row, 3).unwrap_or(0) != 0,
+        min_entry_spread: get_f64(row, 4).unwrap_or(0.5),
+        max_entry_spread: get_f64(row, 5).unwrap_or(10.0),
+        trade_volume: get_f64(row, 6).unwrap_or(10.0),
+        min_trade_volume: 5.0, // No DB column — use fixed default
+        take_profit_percent: get_f64(row, 7).unwrap_or(0.2),
+        trailing_stop_percent: get_f64(row, 8).unwrap_or(0.3),
+        max_active_trades: get_i64(row, 9).unwrap_or(3),
+        commission_rate: get_f64(row, 10).unwrap_or(0.05),
+        slippage_percent: get_f64(row, 11).unwrap_or(0.05),
+        funding_rate_8h: get_f64(row, 12).unwrap_or(0.01),
+        min_volume_millions: get_f64(row, 13).unwrap_or(10.0),
         collector_interval_secs: get_i64(row, 14).unwrap_or(5),
-        pending_commands:        row.get(15).ok().flatten(),
+        pending_commands: row.get(15).ok().flatten(),
         disabled_exchanges,
         leverage: row.get("leverage").unwrap_or(Some(10)).unwrap_or(10),
-        margin_mode: row.get("margin_mode").unwrap_or(Some("cross".into())).unwrap_or_else(|| "cross".into()),
-        min_structural_deviation: row.get("min_structural_deviation").unwrap_or(Some(0.0)).unwrap_or(0.0),
-        min_depth_percent: row.get("min_depth_percent").unwrap_or(Some(100.0)).unwrap_or(100.0),
+        margin_mode: row
+            .get("margin_mode")
+            .unwrap_or(Some("cross".into()))
+            .unwrap_or_else(|| "cross".into()),
+        min_structural_deviation: row
+            .get("min_structural_deviation")
+            .unwrap_or(Some(0.0))
+            .unwrap_or(0.0),
+        min_depth_percent: row
+            .get("min_depth_percent")
+            .unwrap_or(Some(100.0))
+            .unwrap_or(100.0),
     }
 }
 
@@ -133,13 +150,17 @@ pub fn spawn_all_settings_refresher(
 
 /// Load global technical settings from DB.
 pub async fn load_technical_settings(db: &Connection) -> TechnicalSettings {
-    let rows = db.call(|conn| {
-        let mut stmt = conn.prepare("SELECT key, value FROM technical_settings")?;
-        let rows: Vec<(String, String)> = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?.filter_map(|r| r.ok()).collect();
-        Ok(rows)
-    }).await.unwrap_or_default();
+    let rows = db
+        .call(|conn| {
+            let mut stmt = conn.prepare("SELECT key, value FROM technical_settings")?;
+            let rows: Vec<(String, String)> = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .await
+        .unwrap_or_default();
     TechnicalSettings::from_db_rows(&rows)
 }
 

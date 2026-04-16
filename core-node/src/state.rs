@@ -6,8 +6,8 @@
 //! Движок читает PriceMap без блокировок (DashMap = concurrent RwLock per shard)
 //! и ждёт `signal.notified()` вместо polling — нулевой overhead в idle.
 
-use std::{collections::HashMap, sync::Arc};
 use dashmap::DashMap;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Notify;
 
 // Re-export canonical types from shared crate —
@@ -22,9 +22,9 @@ pub type UpdateSignal = Arc<Notify>;
 
 #[derive(Clone, Debug)]
 pub struct FundingInfo {
-    pub rate: f64,        // current funding rate (e.g. 0.0001 = 0.01%)
-    pub next_ts: i64,     // unix timestamp (ms) of next funding apply
-    pub fetched_at: i64,  // when this was cached
+    pub rate: f64,       // current funding rate (e.g. 0.0001 = 0.01%)
+    pub next_ts: i64,    // unix timestamp (ms) of next funding apply
+    pub fetched_at: i64, // when this was cached
 }
 
 #[derive(Clone)]
@@ -47,6 +47,16 @@ pub struct EngineContext {
     /// Guard against parallel close attempts on the same trade_id.
     /// Set to true when a close is in-flight; cleared when the spawn finishes.
     pub closing_in_flight: Arc<DashMap<i64, bool>>,
+    /// Risk Kill-Switch: Number of consecutive delta trims. Reset on successful symmetric execution.
+    pub consecutive_trims: Arc<std::sync::atomic::AtomicU32>,
+    /// Risk Kill-Switch: Number of consecutive entry failures. Reset on successful entry.
+    pub consecutive_failures: Arc<std::sync::atomic::AtomicU32>,
+    /// Risk Kill-Switch: If true, engine stops opening new trades until manual reset.
+    pub is_killed: Arc<std::sync::atomic::AtomicBool>,
+    /// Tracks consecutive high-latency occurrences for an exchange.
+    pub high_latency_strikes: Arc<DashMap<String, u32>>,
+    /// Market Regime Tracker: pair -> (price, timestamp_ms). Used to calculate spread velocity.
+    pub price_history: Arc<DashMap<String, (f64, i64)>>,
 }
 
 impl Default for EngineContext {
@@ -65,6 +75,11 @@ impl Default for EngineContext {
             margin_balances: Arc::new(DashMap::new()),
             positions: Arc::new(DashMap::new()),
             closing_in_flight: Arc::new(DashMap::new()),
+            consecutive_trims: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            consecutive_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            is_killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            high_latency_strikes: Arc::new(DashMap::new()),
+            price_history: Arc::new(DashMap::new()),
         }
     }
 }

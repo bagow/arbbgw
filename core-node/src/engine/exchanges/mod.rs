@@ -1,12 +1,12 @@
-pub mod traits;
 pub mod binance;
-pub mod gate;
 pub mod bybit;
+pub mod gate;
 pub mod kucoin;
+pub mod traits;
 // pub mod context; // We'll put EngineContext here instead of state.rs if needed, or re-export
 
-use traits::ExchangeConnector;
 use std::sync::Arc;
+use traits::ExchangeConnector;
 
 pub fn get_connector(exchange: &str) -> Option<Arc<dyn ExchangeConnector>> {
     match exchange {
@@ -17,4 +17,3 @@ pub fn get_connector(exchange: &str) -> Option<Arc<dyn ExchangeConnector>> {
         _ => None,
     }
 }
-

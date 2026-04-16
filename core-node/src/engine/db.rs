@@ -1,8 +1,8 @@
-use tokio_rusqlite::{Connection, params};
+use tokio_rusqlite::{params, Connection};
 use tracing::info;
 
-use crate::engine::real::Trade;
 use crate::engine::real::now_ms;
+use crate::engine::real::Trade;
 
 #[derive(Clone)]
 pub struct TradeRepository {
@@ -12,6 +12,23 @@ pub struct TradeRepository {
 impl TradeRepository {
     pub fn new(db: Connection) -> Self {
         Self { db }
+    }
+
+    pub async fn insert_snapshot(
+        &self,
+        pair: String,
+        exa: String,
+        exb: String,
+        snapshot_json: String,
+        timestamp: i64,
+    ) {
+        let _ = self.db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO decision_snapshots (timestamp, pair, exchange_a, exchange_b, snapshot_json) VALUES (?,?,?,?,?)",
+                params![timestamp, pair, exa, exb, snapshot_json]
+            )?;
+            Ok(())
+        }).await;
     }
 
     pub async fn load_open_trades(&self, profile_id: &str) -> Vec<Trade> {
@@ -121,33 +138,49 @@ impl TradeRepository {
     }
 
     pub async fn update_highest_spread(&self, id: i64, top_spread: f64) {
-        let _ = self.db.call(move |conn| {
-            conn.execute("UPDATE trades SET highest_spread_reached=? WHERE id=?", params![top_spread, id])?;
-            Ok(())
-        }).await;
+        let _ = self
+            .db
+            .call(move |conn| {
+                conn.execute(
+                    "UPDATE trades SET highest_spread_reached=? WHERE id=?",
+                    params![top_spread, id],
+                )?;
+                Ok(())
+            })
+            .await;
     }
 
     /// Update open trade live state in a single batched transaction.
     /// Persists real-time prices, net PnL, per-leg PnL, real funding rates,
     /// and the accumulated funding cost.
-    pub async fn flush_live_updates(&self, live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)>) {
-        let _ = self.db.call(move |conn| {
-            let tx = conn.transaction()?;
-            {
-                let mut stmt = tx.prepare_cached(
-                    "UPDATE trades SET \
+    pub async fn flush_live_updates(
+        &self,
+        live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)>,
+    ) {
+        let _ = self
+            .db
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                {
+                    let mut stmt = tx.prepare_cached(
+                        "UPDATE trades SET \
                      last_price_a=?, last_price_b=?, last_spread=?, curr_gross_pnl=?, \
                      funding_rate_a=?, funding_rate_b=?, funding_next_ts=?, \
                      funding_cost=?, pnl_a=?, pnl_b=? \
-                     WHERE id=? AND status='OPEN'"
-                )?;
-                for (id, pa, pb, cs, pnl, fra, frb, fnt, fund_cost, pnl_a, pnl_b) in live_updates {
-                    stmt.execute(params![pa, pb, cs, pnl, fra, frb, fnt, fund_cost, pnl_a, pnl_b, id])?;
+                     WHERE id=? AND status='OPEN'",
+                    )?;
+                    for (id, pa, pb, cs, pnl, fra, frb, fnt, fund_cost, pnl_a, pnl_b) in
+                        live_updates
+                    {
+                        stmt.execute(params![
+                            pa, pb, cs, pnl, fra, frb, fnt, fund_cost, pnl_a, pnl_b, id
+                        ])?;
+                    }
                 }
-            }
-            tx.commit()?;
-            Ok(())
-        }).await;
+                tx.commit()?;
+                Ok(())
+            })
+            .await;
     }
 
     pub async fn correct_entry_prices(
@@ -158,24 +191,45 @@ impl TradeRepository {
         real_b: f64,
         total_fee: f64,
     ) {
-        let _ = self.db.call(move |conn| {
-            if real_a > 0.0 { let _ = conn.execute("UPDATE trades SET entry_price_a=? WHERE order_id_a=? AND status='OPEN'", params![real_a, oid_a2]); }
-            if real_b > 0.0 { let _ = conn.execute("UPDATE trades SET entry_price_b=? WHERE order_id_b=? AND status='OPEN'", params![real_b, oid_b2]); }
-            if total_fee > 1e-9 { let _ = conn.execute("UPDATE trades SET commission_cost=? WHERE order_id_a=? AND status='OPEN'", params![total_fee, oid_a2]); }
-            Ok(())
-        }).await;
+        let _ = self
+            .db
+            .call(move |conn| {
+                if real_a > 0.0 {
+                    let _ = conn.execute(
+                        "UPDATE trades SET entry_price_a=? WHERE order_id_a=? AND status='OPEN'",
+                        params![real_a, oid_a2],
+                    );
+                }
+                if real_b > 0.0 {
+                    let _ = conn.execute(
+                        "UPDATE trades SET entry_price_b=? WHERE order_id_b=? AND status='OPEN'",
+                        params![real_b, oid_b2],
+                    );
+                }
+                if total_fee > 1e-9 {
+                    let _ = conn.execute(
+                        "UPDATE trades SET commission_cost=? WHERE order_id_a=? AND status='OPEN'",
+                        params![total_fee, oid_a2],
+                    );
+                }
+                Ok(())
+            })
+            .await;
     }
 
     /// Revert a trade back to OPEN state when a close order fails to fill.
     /// Clears close_reason so the engine can re-trigger on the next cycle.
     pub async fn revert_to_open(&self, id: i64) {
-        let _ = self.db.call(move |conn| {
-            conn.execute(
-                "UPDATE trades SET close_reason=NULL WHERE id=? AND status='OPEN'",
-                params![id]
-            )?;
-            Ok(())
-        }).await;
+        let _ = self
+            .db
+            .call(move |conn| {
+                conn.execute(
+                    "UPDATE trades SET close_reason=NULL WHERE id=? AND status='OPEN'",
+                    params![id],
+                )?;
+                Ok(())
+            })
+            .await;
     }
 
     /// Atomically mark trade as CLOSED with real fill prices.
@@ -229,8 +283,9 @@ impl TradeRepository {
             )?;
             Ok(())
         }).await;
-        info!("[db] CLOSED CONFIRMED id={} reason={} gross={:.4} fee={:.4} slip={:.4} fund={:.4}",
-            id, r, gross_pnl, exit_fee, exit_slip, fund_cost);
+        info!(
+            "[db] CLOSED CONFIRMED id={} reason={} gross={:.4} fee={:.4} slip={:.4} fund={:.4}",
+            id, r, gross_pnl, exit_fee, exit_slip, fund_cost
+        );
     }
 }
-

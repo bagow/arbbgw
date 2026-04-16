@@ -36,18 +36,30 @@ pub struct TickerData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpreadRow {
     pub pair: String,
-    #[serde(rename = "exchangeA")]  pub exchange_a: String,
-    #[serde(rename = "exchangeB")]  pub exchange_b: String,
-    #[serde(rename = "priceA")]     pub price_a: f64,
-    #[serde(rename = "priceB")]     pub price_b: f64,
-    #[serde(rename = "bidA")]       pub bid_a: f64,
-    #[serde(rename = "askA")]       pub ask_a: f64,
-    #[serde(rename = "bidB")]       pub bid_b: f64,
-    #[serde(rename = "askB")]       pub ask_b: f64,
-    #[serde(rename = "volA", default)] pub vol_a: f64,
-    #[serde(rename = "volB", default)] pub vol_b: f64,
-    #[serde(rename = "fundingA", default)] pub funding_a: f64,
-    #[serde(rename = "fundingB", default)] pub funding_b: f64,
+    #[serde(rename = "exchangeA")]
+    pub exchange_a: String,
+    #[serde(rename = "exchangeB")]
+    pub exchange_b: String,
+    #[serde(rename = "priceA")]
+    pub price_a: f64,
+    #[serde(rename = "priceB")]
+    pub price_b: f64,
+    #[serde(rename = "bidA")]
+    pub bid_a: f64,
+    #[serde(rename = "askA")]
+    pub ask_a: f64,
+    #[serde(rename = "bidB")]
+    pub bid_b: f64,
+    #[serde(rename = "askB")]
+    pub ask_b: f64,
+    #[serde(rename = "volA", default)]
+    pub vol_a: f64,
+    #[serde(rename = "volB", default)]
+    pub vol_b: f64,
+    #[serde(rename = "fundingA", default)]
+    pub funding_a: f64,
+    #[serde(rename = "fundingB", default)]
+    pub funding_b: f64,
     /// Structural mean spread over the last 24h (Time-decay EMA).
     pub structural_spread: f64,
     /// Maximum observed spread since tracking began (all-time high for this pair/direction).
@@ -83,7 +95,7 @@ pub struct TradeSignal {
     pub target_qty_b: f64,
     pub limit_price_a: f64,
     pub limit_price_b: f64,
-    
+
     // Core validation metrics
     pub entry_a: f64,
     pub entry_b: f64,
@@ -286,37 +298,157 @@ impl TechnicalSettings {
         let mut ts = Self::default();
         for (k, v) in rows {
             match k.as_str() {
-                "spread_threshold"         => { if let Ok(x) = v.parse() { ts.spread_threshold = x; } }
-                "spread_max"               => { if let Ok(x) = v.parse() { ts.spread_max = x; } }
-                "stale_secs"               => { if let Ok(x) = v.parse() { ts.stale_secs = x; } }
-                "intra_spread_limit"       => { if let Ok(x) = v.parse() { ts.intra_spread_limit = x; } }
-                "ema_tau_secs"             => { if let Ok(x) = v.parse() { ts.ema_tau_secs = x; } }
-                "blacklist"                => { ts.blacklist = v.clone(); }
-                "intra_spread_max_pct"     => { if let Ok(x) = v.parse() { ts.intra_spread_max_pct = x; } }
-                "depth_multiplier"         => { if let Ok(x) = v.parse() { ts.depth_multiplier = x; } }
-                "vol_diff_max_pct"         => { if let Ok(x) = v.parse() { ts.vol_diff_max_pct = x; } }
-                "vol_tolerance_pct"        => { if let Ok(x) = v.parse() { ts.vol_tolerance_pct = x; } }
-                "min_listing_age_days"     => { if let Ok(x) = v.parse() { ts.min_listing_age_days = x; } }
-                "binance_min_notional"     => { if let Ok(x) = v.parse() { ts.binance_min_notional = x; } }
-                "margin_check_multiplier"  => { if let Ok(x) = v.parse() { ts.margin_check_multiplier = x; } }
-                "max_spreads_per_cycle"    => { if let Ok(x) = v.parse() { ts.max_spreads_per_cycle = x; } }
-                "default_fee_rate"         => { if let Ok(x) = v.parse() { ts.default_fee_rate = x; } }
-                "exchange_cooldown_ms"     => { if let Ok(x) = v.parse() { ts.exchange_cooldown_ms = x; } }
-                "pair_cooldown_ms"         => { if let Ok(x) = v.parse() { ts.pair_cooldown_ms = x; } }
-                "asymmetric_cooldown_ms"   => { if let Ok(x) = v.parse() { ts.asymmetric_cooldown_ms = x; } }
-                "fill_verify_retries"      => { if let Ok(x) = v.parse() { ts.fill_verify_retries = x; } }
-                "fill_verify_delay_ms"     => { if let Ok(x) = v.parse() { ts.fill_verify_delay_ms = x; } }
-                "close_verify_retries"     => { if let Ok(x) = v.parse() { ts.close_verify_retries = x; } }
-                "close_verify_delay_ms"    => { if let Ok(x) = v.parse() { ts.close_verify_delay_ms = x; } }
-                "emergency_close_retries"  => { if let Ok(x) = v.parse() { ts.emergency_close_retries = x; } }
-                "exit_sanity_pct"          => { if let Ok(x) = v.parse() { ts.exit_sanity_pct = x; } }
-                "api_timeout_ms"           => { if let Ok(x) = v.parse() { ts.api_timeout_ms = x; } }
-                "balance_refresh_secs"     => { if let Ok(x) = v.parse() { ts.balance_refresh_secs = x; } }
-                "multiplier_refresh_secs"  => { if let Ok(x) = v.parse() { ts.multiplier_refresh_secs = x; } }
-                "funding_cache_secs"       => { if let Ok(x) = v.parse() { ts.funding_cache_secs = x; } }
-                "diag_log_interval"        => { if let Ok(x) = v.parse() { ts.diag_log_interval = x; } }
-                "live_update_throttle_ms"  => { if let Ok(x) = v.parse() { ts.live_update_throttle_ms = x; } }
-                "entry_order_type"         => { ts.entry_order_type = v.clone(); }
+                "spread_threshold" => {
+                    if let Ok(x) = v.parse() {
+                        ts.spread_threshold = x;
+                    }
+                }
+                "spread_max" => {
+                    if let Ok(x) = v.parse() {
+                        ts.spread_max = x;
+                    }
+                }
+                "stale_secs" => {
+                    if let Ok(x) = v.parse() {
+                        ts.stale_secs = x;
+                    }
+                }
+                "intra_spread_limit" => {
+                    if let Ok(x) = v.parse() {
+                        ts.intra_spread_limit = x;
+                    }
+                }
+                "ema_tau_secs" => {
+                    if let Ok(x) = v.parse() {
+                        ts.ema_tau_secs = x;
+                    }
+                }
+                "blacklist" => {
+                    ts.blacklist = v.clone();
+                }
+                "intra_spread_max_pct" => {
+                    if let Ok(x) = v.parse() {
+                        ts.intra_spread_max_pct = x;
+                    }
+                }
+                "depth_multiplier" => {
+                    if let Ok(x) = v.parse() {
+                        ts.depth_multiplier = x;
+                    }
+                }
+                "vol_diff_max_pct" => {
+                    if let Ok(x) = v.parse() {
+                        ts.vol_diff_max_pct = x;
+                    }
+                }
+                "vol_tolerance_pct" => {
+                    if let Ok(x) = v.parse() {
+                        ts.vol_tolerance_pct = x;
+                    }
+                }
+                "min_listing_age_days" => {
+                    if let Ok(x) = v.parse() {
+                        ts.min_listing_age_days = x;
+                    }
+                }
+                "binance_min_notional" => {
+                    if let Ok(x) = v.parse() {
+                        ts.binance_min_notional = x;
+                    }
+                }
+                "margin_check_multiplier" => {
+                    if let Ok(x) = v.parse() {
+                        ts.margin_check_multiplier = x;
+                    }
+                }
+                "max_spreads_per_cycle" => {
+                    if let Ok(x) = v.parse() {
+                        ts.max_spreads_per_cycle = x;
+                    }
+                }
+                "default_fee_rate" => {
+                    if let Ok(x) = v.parse() {
+                        ts.default_fee_rate = x;
+                    }
+                }
+                "exchange_cooldown_ms" => {
+                    if let Ok(x) = v.parse() {
+                        ts.exchange_cooldown_ms = x;
+                    }
+                }
+                "pair_cooldown_ms" => {
+                    if let Ok(x) = v.parse() {
+                        ts.pair_cooldown_ms = x;
+                    }
+                }
+                "asymmetric_cooldown_ms" => {
+                    if let Ok(x) = v.parse() {
+                        ts.asymmetric_cooldown_ms = x;
+                    }
+                }
+                "fill_verify_retries" => {
+                    if let Ok(x) = v.parse() {
+                        ts.fill_verify_retries = x;
+                    }
+                }
+                "fill_verify_delay_ms" => {
+                    if let Ok(x) = v.parse() {
+                        ts.fill_verify_delay_ms = x;
+                    }
+                }
+                "close_verify_retries" => {
+                    if let Ok(x) = v.parse() {
+                        ts.close_verify_retries = x;
+                    }
+                }
+                "close_verify_delay_ms" => {
+                    if let Ok(x) = v.parse() {
+                        ts.close_verify_delay_ms = x;
+                    }
+                }
+                "emergency_close_retries" => {
+                    if let Ok(x) = v.parse() {
+                        ts.emergency_close_retries = x;
+                    }
+                }
+                "exit_sanity_pct" => {
+                    if let Ok(x) = v.parse() {
+                        ts.exit_sanity_pct = x;
+                    }
+                }
+                "api_timeout_ms" => {
+                    if let Ok(x) = v.parse() {
+                        ts.api_timeout_ms = x;
+                    }
+                }
+                "balance_refresh_secs" => {
+                    if let Ok(x) = v.parse() {
+                        ts.balance_refresh_secs = x;
+                    }
+                }
+                "multiplier_refresh_secs" => {
+                    if let Ok(x) = v.parse() {
+                        ts.multiplier_refresh_secs = x;
+                    }
+                }
+                "funding_cache_secs" => {
+                    if let Ok(x) = v.parse() {
+                        ts.funding_cache_secs = x;
+                    }
+                }
+                "diag_log_interval" => {
+                    if let Ok(x) = v.parse() {
+                        ts.diag_log_interval = x;
+                    }
+                }
+                "live_update_throttle_ms" => {
+                    if let Ok(x) = v.parse() {
+                        ts.live_update_throttle_ms = x;
+                    }
+                }
+                "entry_order_type" => {
+                    ts.entry_order_type = v.clone();
+                }
                 _ => {}
             }
         }
@@ -325,7 +457,11 @@ impl TechnicalSettings {
 
     /// Get blacklist as a Vec of uppercase strings
     pub fn blacklist_vec(&self) -> Vec<String> {
-        self.blacklist.split(',').map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty()).collect()
+        self.blacklist
+            .split(',')
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 }
 

@@ -1,21 +1,27 @@
 //! KuCoin Futures WebSocket collector
-use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
 
 use crate::state::{PriceMap, TickerData, UpdateSignal};
 
-pub async fn run(prices: PriceMap, signal: UpdateSignal, settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>) {
+pub async fn run(
+    prices: PriceMap,
+    signal: UpdateSignal,
+    settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
+) {
     let mut backoff = Duration::from_secs(1);
     loop {
         let is_disabled = {
             let p = settings.read().await;
-            !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"kucoin".to_string()))
+            !p.is_empty()
+                && p.iter()
+                    .all(|x| x.disabled_exchanges.contains(&"kucoin".to_string()))
         };
         if is_disabled {
             if backoff == Duration::from_secs(1) {
@@ -27,15 +33,19 @@ pub async fn run(prices: PriceMap, signal: UpdateSignal, settings: std::sync::Ar
         }
 
         info!("[kucoin] Connecting...");
-        
+
         let disable_watcher = async {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 let is_disabled = {
                     let p = settings.read().await;
-                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"kucoin".to_string()))
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"kucoin".to_string()))
                 };
-                if is_disabled { break; }
+                if is_disabled {
+                    break;
+                }
             }
         };
 
@@ -58,8 +68,13 @@ pub async fn run(prices: PriceMap, signal: UpdateSignal, settings: std::sync::Ar
 
 async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     let http = Client::new();
-    let contracts: Value = http.get("https://api-futures.kucoin.com/api/v1/contracts/active")
-        .timeout(Duration::from_secs(10)).send().await?.json().await?;
+    let contracts: Value = http
+        .get("https://api-futures.kucoin.com/api/v1/contracts/active")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?
+        .json()
+        .await?;
     let mut symbols: Vec<String> = Vec::new();
     let mut sym_map = std::collections::HashMap::new();
 
@@ -69,23 +84,46 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                 symbols.push(s.to_string());
                 let normalized = s.replace("XBTUSDTM", "BTCUSDT").replace("USDTM", "USDT");
                 sym_map.insert(s.to_string(), normalized.clone());
-                
+
                 let vol_usd = c["turnoverOf24h"].as_f64().unwrap_or(0.0);
                 if vol_usd > 0.0 {
                     let mut entry = price_map.entry("kucoin".to_string()).or_default();
-                    entry.entry(normalized).or_insert_with(|| TickerData { vol: vol_usd, ..Default::default() }).vol = vol_usd;
+                    entry
+                        .entry(normalized)
+                        .or_insert_with(|| TickerData {
+                            vol: vol_usd,
+                            ..Default::default()
+                        })
+                        .vol = vol_usd;
                 }
             }
         }
     }
-    info!("[kucoin] Found {} USDT-M contracts (volumes seeded)", symbols.len());
+    info!(
+        "[kucoin] Found {} USDT-M contracts (volumes seeded)",
+        symbols.len()
+    );
 
-    let resp: Value = http.post("https://api-futures.kucoin.com/api/v1/bullet-public").send().await?.json().await?;
-    let token    = resp["data"]["token"].as_str().ok_or_else(|| anyhow!("No KuCoin WS token"))?;
-    let endpoint = resp["data"]["instanceServers"][0]["endpoint"].as_str().unwrap_or("wss://ws-api-futures.kucoin.com");
+    let resp: Value = http
+        .post("https://api-futures.kucoin.com/api/v1/bullet-public")
+        .send()
+        .await?
+        .json()
+        .await?;
+    let token = resp["data"]["token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("No KuCoin WS token"))?;
+    let endpoint = resp["data"]["instanceServers"][0]["endpoint"]
+        .as_str()
+        .unwrap_or("wss://ws-api-futures.kucoin.com");
     let (mut ws, _) = connect_async_tls_with_config(
-        &format!("{}?token={}&connectId=corenode", endpoint, token), None, false, None,
-    ).await.context("KuCoin WS connect failed")?;
+        &format!("{}?token={}&connectId=corenode", endpoint, token),
+        None,
+        false,
+        None,
+    )
+    .await
+    .context("KuCoin WS connect failed")?;
     info!("[kucoin] Connected, subscribing...");
 
     for chunk in symbols.chunks(100) {
@@ -93,40 +131,61 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
         ws.send(Message::Text(json!({"id":"sub","type":"subscribe","topic":topic,"privateChannel":false,"response":true}).to_string().into())).await?;
     }
 
-#[derive(Deserialize)]
-struct KucoinMsg<'a> {
-    #[serde(rename = "type")]
-    msg_type: &'a str,
-    #[serde(borrow)]
-    data: Option<KucoinData<'a>>,
-}
-
-#[derive(Deserialize)]
-struct KucoinData<'a> {
-    symbol: Option<&'a str>,
-    #[serde(deserialize_with = "de_opt_f64_or_str", rename = "bestBidPrice", default)]
-    bid: Option<f64>,
-    #[serde(deserialize_with = "de_opt_f64_or_str", rename = "bestAskPrice", default)]
-    ask: Option<f64>,
-    #[serde(deserialize_with = "de_opt_f64_or_str", rename = "bestBidSize", default)]
-    bid_qty: Option<f64>,
-    #[serde(deserialize_with = "de_opt_f64_or_str", rename = "bestAskSize", default)]
-    ask_qty: Option<f64>,
-    #[serde(deserialize_with = "de_opt_f64_or_str", default)]
-    price: Option<f64>,
-}
-
-fn de_opt_f64_or_str<'de, D>(deserializer: D) -> std::result::Result<Option<f64>, D::Error>
-where D: serde::Deserializer<'de> {
     #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Any<'a> { Float(f64), Str(&'a str) }
-    Ok(match Option::<Any>::deserialize(deserializer)? {
-        Some(Any::Float(f)) => Some(f),
-        Some(Any::Str(s)) => s.parse().ok(),
-        None => None,
-    })
-}
+    struct KucoinMsg<'a> {
+        #[serde(rename = "type")]
+        msg_type: &'a str,
+        #[serde(borrow)]
+        data: Option<KucoinData<'a>>,
+    }
+
+    #[derive(Deserialize)]
+    struct KucoinData<'a> {
+        symbol: Option<&'a str>,
+        #[serde(
+            deserialize_with = "de_opt_f64_or_str",
+            rename = "bestBidPrice",
+            default
+        )]
+        bid: Option<f64>,
+        #[serde(
+            deserialize_with = "de_opt_f64_or_str",
+            rename = "bestAskPrice",
+            default
+        )]
+        ask: Option<f64>,
+        #[serde(
+            deserialize_with = "de_opt_f64_or_str",
+            rename = "bestBidSize",
+            default
+        )]
+        bid_qty: Option<f64>,
+        #[serde(
+            deserialize_with = "de_opt_f64_or_str",
+            rename = "bestAskSize",
+            default
+        )]
+        ask_qty: Option<f64>,
+        #[serde(deserialize_with = "de_opt_f64_or_str", default)]
+        price: Option<f64>,
+    }
+
+    fn de_opt_f64_or_str<'de, D>(deserializer: D) -> std::result::Result<Option<f64>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Any<'a> {
+            Float(f64),
+            Str(&'a str),
+        }
+        Ok(match Option::<Any>::deserialize(deserializer)? {
+            Some(Any::Float(f)) => Some(f),
+            Some(Any::Str(s)) => s.parse().ok(),
+            None => None,
+        })
+    }
 
     // Ensure kucoin map exists for mutably getting later
     price_map.entry("kucoin".to_string()).or_default();

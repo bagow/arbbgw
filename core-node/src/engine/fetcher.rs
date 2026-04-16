@@ -1,7 +1,7 @@
+use reqwest::Client;
 use std::sync::Arc;
 use tokio::time::Duration;
-use reqwest::Client;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::engine::real::ExchangeKeys;
 
@@ -10,12 +10,17 @@ use crate::engine::real::ExchangeKeys;
 ///   - Normal mode : every 25s — full refresh (balance + fee rates) for all exchanges
 ///   - Recovery mode: every 2s  — balance ONLY for the exchange(s) with balance_low=true
 ///     Fee rates are NOT re-fetched in recovery mode to avoid rate limits.
-pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<crate::state::EngineContext>, settings: Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>) {
+pub fn start_balance_fetcher(
+    http: Client,
+    keys: Arc<ExchangeKeys>,
+    e_ctx: Arc<crate::state::EngineContext>,
+    settings: Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
+) {
     tokio::spawn(async move {
-        let fast_interval_ms  = 2_000u64;
+        let fast_interval_ms = 2_000u64;
         let normal_interval_s = 25u64;
         let all_exchanges = ["binance", "gate", "kucoin", "bybit"];
-        
+
         let binance = crate::engine::exchanges::binance::BinanceConnector;
         let gate = crate::engine::exchanges::gate::GateConnector;
         let kucoin = crate::engine::exchanges::kucoin::KucoinConnector;
@@ -26,27 +31,52 @@ pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<c
             // Check which exchanges are explicitly enabled
             let active_exchanges: Vec<&str> = {
                 let p = settings.read().await;
-                all_exchanges.into_iter().filter(|ex| {
-                    p.is_empty() || !p.iter().all(|x| x.disabled_exchanges.contains(&ex.to_string()))
-                }).collect()
+                all_exchanges
+                    .into_iter()
+                    .filter(|ex| {
+                        p.is_empty()
+                            || !p
+                                .iter()
+                                .all(|x| x.disabled_exchanges.contains(&ex.to_string()))
+                    })
+                    .collect()
             };
 
             // Determine which exchanges have balance_low set
-            let low_exchanges: Vec<&str> = active_exchanges.iter()
+            let low_exchanges: Vec<&str> = active_exchanges
+                .iter()
                 .copied()
-                .filter(|ex| keys.supports(ex) && e_ctx.balance_low.get(*ex).map(|v| *v).unwrap_or(false))
+                .filter(|ex| {
+                    keys.supports(ex) && e_ctx.balance_low.get(*ex).map(|v| *v).unwrap_or(false)
+                })
                 .collect();
 
             if !low_exchanges.is_empty() {
                 for ex in &low_exchanges {
                     let fetch_res = match *ex {
-                        "binance" => binance.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "gate" => gate.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "kucoin" => kucoin.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "bybit" => bybit.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "binance" => binance
+                            .fetch_balances(&http, &keys)
+                            .await
+                            .map(|(w, _a)| w)
+                            .map_err(|e| e.to_string()),
+                        "gate" => gate
+                            .fetch_balances(&http, &keys)
+                            .await
+                            .map(|(w, _a)| w)
+                            .map_err(|e| e.to_string()),
+                        "kucoin" => kucoin
+                            .fetch_balances(&http, &keys)
+                            .await
+                            .map(|(w, _a)| w)
+                            .map_err(|e| e.to_string()),
+                        "bybit" => bybit
+                            .fetch_balances(&http, &keys)
+                            .await
+                            .map(|(w, _a)| w)
+                            .map_err(|e| e.to_string()),
                         _ => Err("Unknown exchange".to_string()),
                     };
-                    
+
                     match fetch_res {
                         Ok(bal) => {
                             e_ctx.balances.insert(ex.to_string(), bal);
@@ -54,7 +84,10 @@ pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<c
                                 info!("[balance] {} recovered (${:.2}) — clearing balance_low flag, trades unblocked", ex, bal);
                                 e_ctx.balance_low.insert(ex.to_string(), false);
                             } else {
-                                warn!("[balance] {} still balance_low (${:.2}) — retry in {}ms", ex, bal, fast_interval_ms);
+                                warn!(
+                                    "[balance] {} still balance_low (${:.2}) — retry in {}ms",
+                                    ex, bal, fast_interval_ms
+                                );
                             }
                         }
                         Err(e) => error!("[balance] {} fetch error (recovery mode): {}", ex, e),
@@ -63,7 +96,9 @@ pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<c
                 tokio::time::sleep(Duration::from_millis(fast_interval_ms)).await;
             } else {
                 for ex in &active_exchanges {
-                    if !keys.supports(ex) { continue; }
+                    if !keys.supports(ex) {
+                        continue;
+                    }
                     match *ex {
                         "binance" => {
                             if let Ok((w, a)) = binance.fetch_balances(&http, &keys).await {

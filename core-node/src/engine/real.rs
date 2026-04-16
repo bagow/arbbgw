@@ -4,17 +4,15 @@
 //! Order placement, Leg Fallback, and Partial Fill Guard are all here.
 //! Exchange signing is done inline following the same pattern as real-trader.
 
-use std::{sync::Arc, time::Duration};
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
+use std::{sync::Arc, time::Duration};
 
 use serde_json::Value;
 use sha2::Sha256;
 use tokio_rusqlite::Connection;
 use tracing::{error, info};
-
-
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -22,32 +20,37 @@ type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone)]
 pub struct ExchangeKeys {
-    pub gate_key:    String, pub gate_secret:    String,
-    pub kucoin_key:  String, pub kucoin_secret:  String, pub kucoin_passphrase: String,
-    pub binance_key: String, pub binance_secret: String,
-    pub bybit_key:   String, pub bybit_secret:   String,
+    pub gate_key: String,
+    pub gate_secret: String,
+    pub kucoin_key: String,
+    pub kucoin_secret: String,
+    pub kucoin_passphrase: String,
+    pub binance_key: String,
+    pub binance_secret: String,
+    pub bybit_key: String,
+    pub bybit_secret: String,
 }
 
 impl ExchangeKeys {
     pub fn from_env() -> Self {
         Self {
-            gate_key:    std::env::var("GATE_KEY").unwrap_or_default(),
+            gate_key: std::env::var("GATE_KEY").unwrap_or_default(),
             gate_secret: std::env::var("GATE_SECRET").unwrap_or_default(),
-            kucoin_key:         std::env::var("KUCOIN_KEY").unwrap_or_default(),
-            kucoin_secret:      std::env::var("KUCOIN_SECRET").unwrap_or_default(),
-            kucoin_passphrase:  std::env::var("KUCOIN_PASSPHRASE").unwrap_or_default(),
-            binance_key:        std::env::var("BINANCE_KEY").unwrap_or_default(),
-            binance_secret:     std::env::var("BINANCE_SECRET").unwrap_or_default(),
-            bybit_key:          std::env::var("BYBIT_KEY").unwrap_or_default(),
-            bybit_secret:       std::env::var("BYBIT_SECRET").unwrap_or_default(),
+            kucoin_key: std::env::var("KUCOIN_KEY").unwrap_or_default(),
+            kucoin_secret: std::env::var("KUCOIN_SECRET").unwrap_or_default(),
+            kucoin_passphrase: std::env::var("KUCOIN_PASSPHRASE").unwrap_or_default(),
+            binance_key: std::env::var("BINANCE_KEY").unwrap_or_default(),
+            binance_secret: std::env::var("BINANCE_SECRET").unwrap_or_default(),
+            bybit_key: std::env::var("BYBIT_KEY").unwrap_or_default(),
+            bybit_secret: std::env::var("BYBIT_SECRET").unwrap_or_default(),
         }
     }
     pub fn supports(&self, ex: &str) -> bool {
         match ex {
-            "gate"    => !self.gate_key.is_empty(),
-            "kucoin"  => !self.kucoin_key.is_empty(),
+            "gate" => !self.gate_key.is_empty(),
+            "kucoin" => !self.kucoin_key.is_empty(),
             "binance" => !self.binance_key.is_empty(),
-            "bybit"   => !self.bybit_key.is_empty(),
+            "bybit" => !self.bybit_key.is_empty(),
             _ => false,
         }
     }
@@ -56,28 +59,55 @@ impl ExchangeKeys {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 pub fn now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 /// Round price to the nearest valid tick size for the given exchange:pair.
 /// If tick size is unknown, rounds to 8 decimal places (safe fallback).
-pub fn round_to_tick(price: f64, exchange: &str, pair: &str, e_ctx: &crate::state::EngineContext) -> f64 {
+pub fn round_to_tick(
+    price: f64,
+    exchange: &str,
+    pair: &str,
+    e_ctx: &crate::state::EngineContext,
+) -> f64 {
     let key = format!("{}:{}", exchange, pair);
     let tick = e_ctx.tick_sizes.get(&key).map(|v| *v).unwrap_or(0.0);
     if tick > 0.0 {
         (price / tick).round() * tick
     } else {
         // Fallback: round based on price magnitude
-        if price > 1000.0 { (price * 100.0).round() / 100.0 }       // 0.01
-        else if price > 10.0 { (price * 1000.0).round() / 1000.0 }  // 0.001
-        else if price > 0.1 { (price * 10000.0).round() / 10000.0 } // 0.0001
-        else { (price * 100000.0).round() / 100000.0 }              // 0.00001
+        if price > 1000.0 {
+            (price * 100.0).round() / 100.0
+        }
+        // 0.01
+        else if price > 10.0 {
+            (price * 1000.0).round() / 1000.0
+        }
+        // 0.001
+        else if price > 0.1 {
+            (price * 10000.0).round() / 10000.0
+        }
+        // 0.0001
+        else {
+            (price * 100000.0).round() / 100000.0
+        } // 0.00001
     }
 }
 
 /// Get cached taker fee rate for an exchange (as fraction, e.g. 0.0005 = 0.05%).
-pub fn get_exchange_fee(exchange: &str, default_fee: f64, e_ctx: &crate::state::EngineContext) -> f64 {
-    e_ctx.fee_rates.get(exchange).map(|v| *v).unwrap_or(default_fee)
+pub fn get_exchange_fee(
+    exchange: &str,
+    default_fee: f64,
+    e_ctx: &crate::state::EngineContext,
+) -> f64 {
+    e_ctx
+        .fee_rates
+        .get(exchange)
+        .map(|v| *v)
+        .unwrap_or(default_fee)
 }
 
 /// Immediately mark an exchange as balance-low.
@@ -128,7 +158,9 @@ pub fn start_position_sync(
                 Ok(trades)
             }).await.unwrap_or_default();
 
-            if open_trades.is_empty() { continue; }
+            if open_trades.is_empty() {
+                continue;
+            }
 
             // 2. Collect which exchanges have open trades
             let mut exchanges_in_use = std::collections::HashSet::new();
@@ -138,24 +170,45 @@ pub fn start_position_sync(
             }
 
             // 3. Fetch positions from each exchange (1 API call per exchange)
-            let mut all_positions: std::collections::HashMap<String, Vec<super::exchanges::traits::PositionInfo>> = std::collections::HashMap::new();
+            let mut all_positions: std::collections::HashMap<
+                String,
+                Vec<super::exchanges::traits::PositionInfo>,
+            > = std::collections::HashMap::new();
             for ex in &exchanges_in_use {
-                if !keys.supports(ex) { continue; }
+                if !keys.supports(ex) {
+                    continue;
+                }
                 if let Some(conn) = super::exchanges::get_connector(ex) {
                     match conn.fetch_positions(&http, &keys).await {
-                        Ok(positions) => { all_positions.insert(ex.clone(), positions); }
-                        Err(e) => { tracing::warn!("[pos_sync] Failed to fetch positions from {}: {}", ex, e); }
+                        Ok(positions) => {
+                            all_positions.insert(ex.clone(), positions);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "[pos_sync] Failed to fetch positions from {}: {}",
+                                ex,
+                                e
+                            );
+                        }
                     }
                 }
             }
 
             // 4. Check each open trade against exchange positions
             for trade in &open_trades {
-                let has_pos_a = all_positions.get(&trade.exchange_a)
-                    .map(|ps| ps.iter().any(|p| p.symbol == trade.pair && p.size.abs() > 1e-12))
+                let has_pos_a = all_positions
+                    .get(&trade.exchange_a)
+                    .map(|ps| {
+                        ps.iter()
+                            .any(|p| p.symbol == trade.pair && p.size.abs() > 1e-12)
+                    })
                     .unwrap_or(true); // conservative: if can't check, assume exists
-                let has_pos_b = all_positions.get(&trade.exchange_b)
-                    .map(|ps| ps.iter().any(|p| p.symbol == trade.pair && p.size.abs() > 1e-12))
+                let has_pos_b = all_positions
+                    .get(&trade.exchange_b)
+                    .map(|ps| {
+                        ps.iter()
+                            .any(|p| p.symbol == trade.pair && p.size.abs() > 1e-12)
+                    })
                     .unwrap_or(true); // conservative
 
                 if has_pos_a && has_pos_b {
@@ -164,7 +217,10 @@ pub fn start_position_sync(
 
                 if !has_pos_a && !has_pos_b {
                     // BOTH positions gone externally
-                    error!("[pos_sync] Trade id={} {} — BOTH positions gone! Marking EXTERNAL_CLOSE", trade.id, trade.pair);
+                    error!(
+                        "[pos_sync] Trade id={} {} — BOTH positions gone! Marking EXTERNAL_CLOSE",
+                        trade.id, trade.pair
+                    );
                     let id = trade.id;
                     let fund_cost = trade.funding_cost;
                     let _ = db.call(move |conn| {
@@ -185,19 +241,56 @@ pub fn start_position_sync(
                 } else {
                     (&trade.exchange_b, &trade.exchange_a)
                 };
-                error!("[pos_sync] Trade id={} {} — {} gone, {} still open! Emergency closing",
-                    trade.id, trade.pair, missing_ex, remaining_ex);
+                error!(
+                    "[pos_sync] Trade id={} {} — {} gone, {} still open! Emergency closing",
+                    trade.id, trade.pair, missing_ex, remaining_ex
+                );
 
                 let is_a_higher = trade.direction == "A>B";
                 let remaining_is_a = remaining_ex == &trade.exchange_a;
-                let close_is_buy = if remaining_is_a { is_a_higher } else { !is_a_higher };
-                let contracts = if remaining_is_a { trade.contracts_a } else { trade.contracts_b };
-                let mult = e_ctx.multipliers.get(&format!("{}:{}", remaining_ex, trade.pair)).map(|v| *v).unwrap_or(1.0);
+                let close_is_buy = if remaining_is_a {
+                    is_a_higher
+                } else {
+                    !is_a_higher
+                };
+                let contracts = if remaining_is_a {
+                    trade.contracts_a
+                } else {
+                    trade.contracts_b
+                };
+                let mult = e_ctx
+                    .multipliers
+                    .get(&format!("{}:{}", remaining_ex, trade.pair))
+                    .map(|v| *v)
+                    .unwrap_or(1.0);
                 let q_qty = contracts;
-                let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", remaining_ex, trade.pair)).map(|v| *v).unwrap_or(0.000001);
-                
+                let tick_for_close = e_ctx
+                    .tick_sizes
+                    .get(&format!("{}:{}", remaining_ex, trade.pair))
+                    .map(|v| *v)
+                    .unwrap_or(0.000001);
+
                 if let Some(conn) = super::exchanges::get_connector(remaining_ex) {
-                    match conn.close_position(&http, &keys, &trade.pair, close_is_buy, q_qty, false, 10.0, 0.0, false, 0.0, mult, tick_for_close, 5, 25, 5000).await {
+                    match conn
+                        .close_position(
+                            &http,
+                            &keys,
+                            &trade.pair,
+                            close_is_buy,
+                            q_qty,
+                            false,
+                            10.0,
+                            0.0,
+                            false,
+                            0.0,
+                            mult,
+                            tick_for_close,
+                            5,
+                            25,
+                            5000,
+                        )
+                        .await
+                    {
                         Ok(rc) => {
                             let close_fill = rc.final_price;
                             let close_fee = rc.total_fee;
@@ -218,8 +311,10 @@ pub fn start_position_sync(
                             }).await;
                         }
                         Err(e) => {
-                            error!("[pos_sync] Emergency close FAILED id={} {} on {}: {}",
-                                trade.id, trade.pair, remaining_ex, e);
+                            error!(
+                                "[pos_sync] Emergency close FAILED id={} {} on {}: {}",
+                                trade.id, trade.pair, remaining_ex, e
+                            );
                         }
                     }
                 }
@@ -228,7 +323,12 @@ pub fn start_position_sync(
     });
 }
 
-pub fn has_sufficient_margin(exchange: &str, notional_usd: f64, leverage: f64, e_ctx: &crate::state::EngineContext) -> bool {
+pub fn has_sufficient_margin(
+    exchange: &str,
+    notional_usd: f64,
+    leverage: f64,
+    e_ctx: &crate::state::EngineContext,
+) -> bool {
     match e_ctx.margin_balances.get(exchange) {
         Some(margin) => {
             let available = *margin;
@@ -243,7 +343,12 @@ pub fn has_sufficient_margin(exchange: &str, notional_usd: f64, leverage: f64, e
 
 /// Deduct notional from cached margin balance after a successful trade open.
 /// Prevents the engine from over-committing margin between balance refresh cycles (25s).
-pub fn deduct_cached_balance(exchange: &str, notional_usd: f64, leverage: f64, e_ctx: &crate::state::EngineContext) {
+pub fn deduct_cached_balance(
+    exchange: &str,
+    notional_usd: f64,
+    leverage: f64,
+    e_ctx: &crate::state::EngineContext,
+) {
     let required_margin = notional_usd / leverage.max(1.0);
     if let Some(mut bal) = e_ctx.margin_balances.get_mut(exchange) {
         *bal -= required_margin;
@@ -266,7 +371,11 @@ pub fn is_margin_error(err: &str) -> bool {
         || s.contains("balance not enough")
 }
 
-pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineContext>, settings: Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>) {
+pub fn start_multiplier_fetcher(
+    http: Client,
+    e_ctx: Arc<crate::state::EngineContext>,
+    settings: Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
+) {
     // Gate.io
     tokio::spawn({
         let http = http.clone();
@@ -277,21 +386,28 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                 // Check if gate is enabled
                 let is_disabled = {
                     let p = settings.read().await;
-                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"gate".to_string()))
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"gate".to_string()))
                 };
                 if is_disabled {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     continue;
                 }
 
-                if let Ok(resp) = http.get("https://api.gateio.ws/api/v4/futures/usdt/contracts").send().await {
+                if let Ok(resp) = http
+                    .get("https://api.gateio.ws/api/v4/futures/usdt/contracts")
+                    .send()
+                    .await
+                {
                     if let Ok(json) = resp.json::<Value>().await {
                         if let Some(arr) = json.as_array() {
                             let map = &e_ctx.multipliers;
                             let lmap = &e_ctx.launch_times;
                             let tmap = &e_ctx.tick_sizes;
                             for c in arr {
-                                let name_stripped = c["name"].as_str().unwrap_or("").replace("_", "");
+                                let name_stripped =
+                                    c["name"].as_str().unwrap_or("").replace("_", "");
                                 if let Some(mult_str) = c["quanto_multiplier"].as_str() {
                                     if let Ok(m) = mult_str.parse::<f64>() {
                                         map.insert(format!("gate:{}", name_stripped), m);
@@ -303,14 +419,20 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                                 // Gate: order_price_round is the price tick size string
                                 if let Some(pr) = c["order_price_round"].as_str() {
                                     if let Ok(tick) = pr.parse::<f64>() {
-                                        if tick > 0.0 { tmap.insert(format!("gate:{}", name_stripped), tick); }
+                                        if tick > 0.0 {
+                                            tmap.insert(format!("gate:{}", name_stripped), tick);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-                let loaded = e_ctx.multipliers.iter().filter(|e| e.key().starts_with("gate:")).count();
+                let loaded = e_ctx
+                    .multipliers
+                    .iter()
+                    .filter(|e| e.key().starts_with("gate:"))
+                    .count();
                 if loaded > 0 {
                     info!("[multipliers] Gate: loaded {} symbols", loaded);
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
@@ -332,14 +454,20 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                 // Check if kucoin is enabled
                 let is_disabled = {
                     let p = settings.read().await;
-                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"kucoin".to_string()))
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"kucoin".to_string()))
                 };
                 if is_disabled {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     continue;
                 }
 
-                if let Ok(resp) = http.get("https://api-futures.kucoin.com/api/v1/contracts/active").send().await {
+                if let Ok(resp) = http
+                    .get("https://api-futures.kucoin.com/api/v1/contracts/active")
+                    .send()
+                    .await
+                {
                     if let Ok(json) = resp.json::<Value>().await {
                         if let Some(arr) = json["data"].as_array() {
                             let map = &e_ctx.multipliers;
@@ -347,16 +475,21 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                             let tmap = &e_ctx.tick_sizes;
                             for c in arr {
                                 if let Some(name) = c["symbol"].as_str() {
-                                    let mut std_name = name.replace("USDTM", "USDT").replace("USDM", "USDT");
-                                    if std_name == "XBTUSDT" { std_name = "BTCUSDT".to_string(); }
+                                    let mut std_name =
+                                        name.replace("USDTM", "USDT").replace("USDM", "USDT");
+                                    if std_name == "XBTUSDT" {
+                                        std_name = "BTCUSDT".to_string();
+                                    }
                                     let full_name = format!("kucoin:{}", std_name);
-                                    
+
                                     if let Some(mult) = c["multiplier"].as_f64() {
                                         map.insert(full_name.clone(), mult);
                                     }
                                     // KuCoin: tickSize is the price increment
                                     if let Some(tick) = c["tickSize"].as_f64() {
-                                        if tick > 0.0 { tmap.insert(full_name.clone(), tick); }
+                                        if tick > 0.0 {
+                                            tmap.insert(full_name.clone(), tick);
+                                        }
                                     }
                                     if let Some(lt) = c["firstOpenDate"].as_i64() {
                                         lmap.insert(full_name, lt / 1000);
@@ -366,7 +499,11 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                         }
                     }
                 }
-                let loaded = e_ctx.multipliers.iter().filter(|e| e.key().starts_with("kucoin:")).count();
+                let loaded = e_ctx
+                    .multipliers
+                    .iter()
+                    .filter(|e| e.key().starts_with("kucoin:"))
+                    .count();
                 if loaded > 0 {
                     info!("[multipliers] KuCoin: loaded {} symbols", loaded);
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
@@ -389,16 +526,21 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                 // Check if binance is enabled
                 let is_disabled = {
                     let p = settings.read().await;
-                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"binance".to_string()))
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"binance".to_string()))
                 };
                 if is_disabled {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     continue;
                 }
 
-                match http.get("https://fapi.binance.com/fapi/v1/exchangeInfo")
+                match http
+                    .get("https://fapi.binance.com/fapi/v1/exchangeInfo")
                     .timeout(Duration::from_secs(15))
-                    .send().await {
+                    .send()
+                    .await
+                {
                     Ok(resp) => {
                         let status = resp.status();
                         last_http_status = status.as_u16();
@@ -411,25 +553,38 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                                     let mut count = 0u32;
                                     for s in symbols {
                                         let sym = s["symbol"].as_str().unwrap_or("");
-                                        if !sym.ends_with("USDT") { continue; }
+                                        if !sym.ends_with("USDT") {
+                                            continue;
+                                        }
                                         let ct = s["contractType"].as_str().unwrap_or("");
-                                        if ct != "PERPETUAL" && ct != "TRADIFI_PERPETUAL" { continue; }
+                                        if ct != "PERPETUAL" && ct != "TRADIFI_PERPETUAL" {
+                                            continue;
+                                        }
                                         if let Some(filters) = s["filters"].as_array() {
                                             for f in filters {
                                                 if f["filterType"].as_str() == Some("LOT_SIZE") {
                                                     if let Some(ss) = f["stepSize"].as_str() {
                                                         if let Ok(step) = ss.parse::<f64>() {
                                                             if step > 0.0 {
-                                                                map.insert(format!("binance:{}", sym), step);
+                                                                map.insert(
+                                                                    format!("binance:{}", sym),
+                                                                    step,
+                                                                );
                                                                 count += 1;
                                                             }
                                                         }
                                                     }
                                                 }
-                                                if f["filterType"].as_str() == Some("PRICE_FILTER") {
+                                                if f["filterType"].as_str() == Some("PRICE_FILTER")
+                                                {
                                                     if let Some(ts) = f["tickSize"].as_str() {
                                                         if let Ok(tick) = ts.parse::<f64>() {
-                                                            if tick > 0.0 { tmap.insert(format!("binance:{}", sym), tick); }
+                                                            if tick > 0.0 {
+                                                                tmap.insert(
+                                                                    format!("binance:{}", sym),
+                                                                    tick,
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -445,7 +600,11 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("[multipliers] Binance: JSON parse failed http={}: {}", status, e);
+                                tracing::error!(
+                                    "[multipliers] Binance: JSON parse failed http={}: {}",
+                                    status,
+                                    e
+                                );
                             }
                         }
                     }
@@ -453,11 +612,15 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                         tracing::error!("[multipliers] Binance: HTTP request failed: {}", e);
                     }
                 }
-                let loaded = e_ctx.multipliers.iter().filter(|e| e.key().starts_with("binance:")).count();
+                let loaded = e_ctx
+                    .multipliers
+                    .iter()
+                    .filter(|e| e.key().starts_with("binance:"))
+                    .count();
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else if last_http_status == 418 {
-                    // IP ban scales from 2min to 3 DAYS for repeat offenders. 
+                    // IP ban scales from 2min to 3 DAYS for repeat offenders.
                     // Do NOT retry frequently — it prolongs the ban.
                     tracing::error!("[multipliers] Binance: IP BANNED (418). Backing off 1 HOUR. Binance pairs disabled until ban expires.");
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
@@ -465,13 +628,15 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                     tracing::warn!("[multipliers] Binance: rate limited (429), backing off 5min");
                     tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 } else {
-                    tracing::warn!("[multipliers] Binance: FAILED to load (http={}), retrying in 30s", last_http_status);
+                    tracing::warn!(
+                        "[multipliers] Binance: FAILED to load (http={}), retrying in 30s",
+                        last_http_status
+                    );
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 }
             }
         }
     });
-
 
     // Bybit USDT-M Linear Futures
     tokio::spawn({
@@ -483,7 +648,9 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                 // Check if bybit is enabled
                 let is_disabled = {
                     let p = settings.read().await;
-                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"bybit".to_string()))
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"bybit".to_string()))
                 };
                 if is_disabled {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -528,7 +695,11 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                         }
                     }
                 }
-                let loaded = e_ctx.multipliers.iter().filter(|e| e.key().starts_with("bybit:")).count();
+                let loaded = e_ctx
+                    .multipliers
+                    .iter()
+                    .filter(|e| e.key().starts_with("bybit:"))
+                    .count();
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
@@ -540,48 +711,92 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
     });
 }
 
-
 pub fn now_secs() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn hmac_sha256_hex(secret: &[u8], data: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC any key");
-    mac.update(data.as_bytes()); hex::encode(mac.finalize().into_bytes())
+    mac.update(data.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 fn hmac_sha256_b64(secret: &[u8], data: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC any key");
-    mac.update(data.as_bytes()); base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+    mac.update(data.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
 }
-pub fn kucoin_sign(secret: &str, passphrase: &str, ts: &str, method: &str, path: &str, body: &str) -> (String, String) {
-    (hmac_sha256_b64(secret.as_bytes(), &format!("{}{}{}{}", ts, method, path, body)),
-     hmac_sha256_b64(secret.as_bytes(), passphrase))
+pub fn kucoin_sign(
+    secret: &str,
+    passphrase: &str,
+    ts: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> (String, String) {
+    (
+        hmac_sha256_b64(
+            secret.as_bytes(),
+            &format!("{}{}{}{}", ts, method, path, body),
+        ),
+        hmac_sha256_b64(secret.as_bytes(), passphrase),
+    )
 }
-pub fn gate_sign(key: &str, secret: &str, method: &str, path: &str, body: &str) -> reqwest::header::HeaderMap {
+pub fn gate_sign(
+    key: &str,
+    secret: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> reqwest::header::HeaderMap {
     use sha2::Digest;
     let ts = now_secs().to_string();
     let body_hash = hex::encode(sha2::Sha512::digest(body.as_bytes()));
     let sign_str = format!("{}\n{}\n\n{}\n{}", method, path, body_hash, ts);
-    let sig = { let mut mac = Hmac::<sha2::Sha512>::new_from_slice(secret.as_bytes()).unwrap(); mac.update(sign_str.as_bytes()); hex::encode(mac.finalize().into_bytes()) };
+    let sig = {
+        let mut mac = Hmac::<sha2::Sha512>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(sign_str.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    };
     let mut h = reqwest::header::HeaderMap::new();
-    h.insert("KEY", key.parse().unwrap()); h.insert("SIGN", sig.parse().unwrap());
-    h.insert("Timestamp", ts.parse().unwrap()); h.insert("Content-Type", "application/json".parse().unwrap());
+    h.insert("KEY", key.parse().unwrap());
+    h.insert("SIGN", sig.parse().unwrap());
+    h.insert("Timestamp", ts.parse().unwrap());
+    h.insert("Content-Type", "application/json".parse().unwrap());
     h
 }
 pub fn binance_sign(secret: &str, qs: &str) -> String {
     hmac_sha256_hex(secret.as_bytes(), qs)
 }
 pub fn bybit_sign(secret: &str, ts: &str, api_key: &str, recv_window: &str, body: &str) -> String {
-    hmac_sha256_hex(secret.as_bytes(), &format!("{}{}{}{}", ts, api_key, recv_window, body))
+    hmac_sha256_hex(
+        secret.as_bytes(),
+        &format!("{}{}{}{}", ts, api_key, recv_window, body),
+    )
 }
 
 #[derive(Debug, Clone)]
 pub struct Trade {
-    pub id: i64, pub pair: String, pub exchange_a: String, pub exchange_b: String, pub direction: String,
-    pub volume: f64, pub entry_price_a: f64, pub entry_price_b: f64, pub entry_spread: f64,
-    pub entry_time: i64, pub highest_spread: f64, pub pnl_a: f64, pub pnl_b: f64,
-    pub close_reason: Option<String>, pub contracts_a: f64, pub contracts_b: f64,
-    pub commission_cost: f64, pub slippage_cost: f64,
+    pub id: i64,
+    pub pair: String,
+    pub exchange_a: String,
+    pub exchange_b: String,
+    pub direction: String,
+    pub volume: f64,
+    pub entry_price_a: f64,
+    pub entry_price_b: f64,
+    pub entry_spread: f64,
+    pub entry_time: i64,
+    pub highest_spread: f64,
+    pub pnl_a: f64,
+    pub pnl_b: f64,
+    pub close_reason: Option<String>,
+    pub contracts_a: f64,
+    pub contracts_b: f64,
+    pub commission_cost: f64,
+    pub slippage_cost: f64,
     /// Accumulated real funding cost since entry (updated every live-update cycle from exchange API).
     /// Positive = we net-paid funding; negative = we net-received funding.
     pub funding_cost: f64,
@@ -595,21 +810,42 @@ pub async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
              entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, \
              pnl_a, pnl_b, close_reason, contracts_a, contracts_b, commission_cost, slippage_cost, \
              COALESCE(funding_cost, 0.0) \
-             FROM trades WHERE status='OPEN' AND profile_id=?"
+             FROM trades WHERE status='OPEN' AND profile_id=?",
         )?;
-        let trades = stmt.query_map([p_id_clone], |row| Ok(Trade {
-            id: row.get(0)?, pair: row.get(1)?, exchange_a: row.get(2)?, exchange_b: row.get(3)?,
-            direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?,
-            entry_spread: row.get(8)?, entry_time: row.get(9)?, highest_spread: row.get(10)?,
-            pnl_a: row.get(11)?, pnl_b: row.get(12)?, close_reason: row.get(13)?,
-            contracts_a: row.get::<_, Option<f64>>(14)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(6)?.max(1e-12)).round()),
-            contracts_b: row.get::<_, Option<f64>>(15)?.unwrap_or((row.get::<_, f64>(5)? / row.get::<_, f64>(7)?.max(1e-12)).round()),
-            commission_cost: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
-            slippage_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
-            funding_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
-        }))?.filter_map(|t| t.ok()).collect::<Vec<_>>();
+        let trades = stmt
+            .query_map([p_id_clone], |row| {
+                Ok(Trade {
+                    id: row.get(0)?,
+                    pair: row.get(1)?,
+                    exchange_a: row.get(2)?,
+                    exchange_b: row.get(3)?,
+                    direction: row.get(4)?,
+                    volume: row.get(5)?,
+                    entry_price_a: row.get(6)?,
+                    entry_price_b: row.get(7)?,
+                    entry_spread: row.get(8)?,
+                    entry_time: row.get(9)?,
+                    highest_spread: row.get(10)?,
+                    pnl_a: row.get(11)?,
+                    pnl_b: row.get(12)?,
+                    close_reason: row.get(13)?,
+                    contracts_a: row.get::<_, Option<f64>>(14)?.unwrap_or(
+                        (row.get::<_, f64>(5)? / row.get::<_, f64>(6)?.max(1e-12)).round(),
+                    ),
+                    contracts_b: row.get::<_, Option<f64>>(15)?.unwrap_or(
+                        (row.get::<_, f64>(5)? / row.get::<_, f64>(7)?.max(1e-12)).round(),
+                    ),
+                    commission_cost: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+                    slippage_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
+                    funding_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
+                })
+            })?
+            .filter_map(|t| t.ok())
+            .collect::<Vec<_>>();
         Ok(trades)
-    }).await.unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Asynchronously preemptively initialize leverage for spreads that are nearing their entry criteria.
@@ -618,22 +854,32 @@ pub fn warmup_leverages(
     spreads: &[shared::SpreadRow],
     profiles: &[shared::TradingSettings],
     http: Client,
-    keys: Arc<ExchangeKeys>
+    keys: Arc<ExchangeKeys>,
 ) {
     let mut pairs_to_warm = Vec::new();
 
     // Find pairs that are close to breaking entry threshold
     for profile in profiles {
-        if !profile.is_active { continue; }
+        if !profile.is_active {
+            continue;
+        }
         for row in spreads.iter().take(50) {
             // A heuristic: if spread is at least 80% of config min_entry_spread we warm it up
             if row.spread >= profile.min_entry_spread * 0.8 {
-                pairs_to_warm.push((row.exchange_a.clone(), row.exchange_b.clone(), row.pair.clone(), profile.leverage as f64, profile.margin_mode.clone()));
+                pairs_to_warm.push((
+                    row.exchange_a.clone(),
+                    row.exchange_b.clone(),
+                    row.pair.clone(),
+                    profile.leverage as f64,
+                    profile.margin_mode.clone(),
+                ));
             }
         }
     }
 
-    if pairs_to_warm.is_empty() { return; }
+    if pairs_to_warm.is_empty() {
+        return;
+    }
 
     tokio::spawn(async move {
         for (exa, exb, pair, lev, _margin) in pairs_to_warm {
@@ -646,5 +892,3 @@ pub fn warmup_leverages(
         }
     });
 }
-
-
