@@ -96,6 +96,7 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
         min_entry_spread:        get_f64(row, 4).unwrap_or(0.5),
         max_entry_spread:        get_f64(row, 5).unwrap_or(10.0),
         trade_volume:            get_f64(row, 6).unwrap_or(10.0),
+        min_trade_volume:        5.0, // No DB column — use fixed default
         take_profit_percent:     get_f64(row, 7).unwrap_or(0.2),
         trailing_stop_percent:   get_f64(row, 8).unwrap_or(0.3),
         max_active_trades:       get_i64(row, 9).unwrap_or(3),

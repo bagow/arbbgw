@@ -187,7 +187,7 @@ impl ExchangeConnector for BinanceConnector {
         Err("Trim market order timed out".to_string())
     }
 
-    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, multiplier: f64) -> Result<(f64, f64, f64), String> {
+    async fn fetch_order(&self, http: &Client, keys: &ExchangeKeys, pair: &str, order_id: &str, _multiplier: f64) -> Result<(f64, f64, f64), String> {
         if order_id.starts_with("dry_") { return Ok((0.0, 0.0, 0.0)); }
         let ts = now_ms();
         let qs = format!("symbol={}&orderId={}&timestamp={}", pair, order_id, ts);
