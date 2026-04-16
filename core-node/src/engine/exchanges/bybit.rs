@@ -79,6 +79,11 @@ impl ExchangeConnector for BybitConnector {
             .send().await.map_err(|e| e.to_string())?;
 
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        
+        // Diagnostic: log order request and response
+        tracing::info!("[bybit] place_order {} req={} → retCode={} orderId={}", 
+            pair, body_str, v["retCode"], v["result"]["orderId"]);
+        
         if v["retCode"].as_i64() != Some(0) { 
             return Err(format!("Bybit API Error: {}", v)); 
         }

@@ -85,6 +85,10 @@ impl ExchangeConnector for KucoinConnector {
 
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         
+        // Diagnostic: log order request and response
+        tracing::info!("[kucoin] place_order {} req={} → code={} orderId={}", 
+            pair, body_str, v["code"], v["data"]["orderId"]);
+        
         if v["code"].as_str() != Some("200000") {
             return Err(format!("KuCoin API Error: {}", v));
         }

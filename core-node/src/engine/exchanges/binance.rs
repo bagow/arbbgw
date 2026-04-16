@@ -66,6 +66,11 @@ impl ExchangeConnector for BinanceConnector {
             .timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
 
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        
+        // Diagnostic: log order request and response
+        tracing::info!("[binance] place_order {} side={} qty={} → orderId={} status={}", 
+            pair, side, qty_str, v["orderId"], v["status"]);
+        
         if let Some(msg) = v["msg"].as_str() {
             return Err(format!("Binance API Error: {}", msg));
         }
