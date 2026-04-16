@@ -694,10 +694,18 @@ function drawPricePanel(klines, live, minT, maxT, row, dataMinT) {
 
     // Highlighted exchanges (from the selected row) — already computed above
 
-    // Draw non-highlighted first (background), highlighted on top
+    // Draw non-highlighted first (background), then highlighted on top.
+    // For the pair's two highlighted exchanges: draw exchangeB first, exchangeA last (on top)
+    // with slightly different stroke-widths so both lines are visible even when prices overlap.
+    const highlightedSorted = allEx.filter(ex => highlight.has(ex)).sort((a, b) => {
+        // exchangeA should be drawn LAST (on top)
+        if (a === row.exchangeA) return 1;
+        if (b === row.exchangeA) return -1;
+        return 0;
+    });
     const drawOrder = [
         ...allEx.filter(ex => !highlight.has(ex)),
-        ...allEx.filter(ex => highlight.has(ex)),
+        ...highlightedSorted,
     ];
 
     for (const ex of drawOrder) {
@@ -705,8 +713,17 @@ function drawPricePanel(klines, live, minT, maxT, row, dataMinT) {
         const lk = live[ex] || [];
         const color = EXCHANGE_COLORS[ex] || '#94a3b8';
         const isHL = highlight.has(ex);
-        const sw = isHL ? 2.0 : 1.2;
-        const opac = isHL ? '1' : '0.45';
+        // For the pair's two exchanges: use different stroke-widths so both are visible
+        // when prices overlap. exchangeB (drawn first) is thicker + semi-transparent,
+        // exchangeA (drawn on top) is thinner + fully opaque.
+        let sw, opac;
+        if (!isHL) {
+            sw = 1.2; opac = '0.45';
+        } else if (ex === row.exchangeB) {
+            sw = 2.8; opac = '0.7';  // thicker, semi-transparent (drawn first / behind)
+        } else {
+            sw = 1.8; opac = '1';    // thinner, fully opaque (drawn on top)
+        }
 
         // History line
         const ptHist = kl.filter(p => p.close > 0)
