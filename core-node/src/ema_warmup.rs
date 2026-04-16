@@ -2,15 +2,21 @@
 //! on startup, reconstructs historical spreads for every tradeable pair combination,
 //! and pre-initialises the STRUCTURAL_EMA cache so the engine can trade immediately
 //! without waiting for a cold-start accumulation period.
+//!
+//! Uses parallel fetching (~20 concurrent requests) to complete warmup in ~30-60s
+//! instead of ~16 minutes sequentially.
 
 use reqwest::Client;
 use serde_json::Value;
 use tracing::info;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use crate::state::PriceMap;
 use crate::spreads::warmup_ema_from_premiums;
 
 const LOOKBACK_SECS: u64 = 86_400; // 24 hours
+const MAX_CONCURRENT: usize = 20;  // Max parallel REST requests (avoid rate limits)
 
 // ─── Gate.io: fetch 1-min candles for a USDT perp ────────────────────────────
 
@@ -134,12 +140,13 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
     let exchanges: Vec<String> = prices.iter().map(|e| e.key().clone()).collect();
     info!("[ema_warmup] Starting EMA warmup with {} exchanges (tau={}s)", exchanges.len(), ts.ema_tau_secs);
 
-    let mut warmed = 0usize;
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
+    let mut handles = Vec::new();
 
     for i in 0..exchanges.len() {
         for j in (i + 1)..exchanges.len() {
-            let ex_a = &exchanges[i];
-            let ex_b = &exchanges[j];
+            let ex_a = exchanges[i].clone();
+            let ex_b = exchanges[j].clone();
 
             let pairs: Vec<String> = {
                 let map_a = match prices.get(ex_a.as_str()) { Some(m) => m, None => continue };
@@ -152,43 +159,61 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
                     .collect()
             };
 
-            for pair in &pairs {
-                // Fetch candles from both exchanges
-                let candles_a = fetch_candles_for(&http, ex_a, pair).await;
-                let candles_b = fetch_candles_for(&http, ex_b, pair).await;
+            for pair in pairs {
+                let http = http.clone();
+                let ex_a = ex_a.clone();
+                let ex_b = ex_b.clone();
+                let ts = ts.clone();
+                let sem = semaphore.clone();
 
-                if candles_a.is_empty() || candles_b.is_empty() { continue; }
+                handles.push(tokio::spawn(async move {
+                    // Acquire semaphore permit — limits concurrent REST requests
+                    let _permit = sem.acquire().await.unwrap();
 
-                // Merge by timestamp (align to 1-min buckets)
-                let merged = merge_candles(&candles_a, &candles_b);
-                if merged.len() < 10 { continue; }
+                    let candles_a = fetch_candles_for(&http, &ex_a, &pair).await;
+                    let candles_b = fetch_candles_for(&http, &ex_b, &pair).await;
 
-                // Canonical order: name1 < name2 (matching live compute_spreads)
-                let is_a_first = ex_a < ex_b;
-                let (name1, name2) = if is_a_first {
-                    (ex_a.clone(), ex_b.clone())
-                } else {
-                    (ex_b.clone(), ex_a.clone())
-                };
+                    if candles_a.is_empty() || candles_b.is_empty() { return 0usize; }
 
-                // Calculate canonical premium at each historical point.
-                // Treat close price as mid-price proxy (candles don't have bid/ask).
-                let mut history = Vec::with_capacity(merged.len());
-                for (ts_val, price_a, price_b) in &merged {
-                    if *price_a <= 0.0 || *price_b <= 0.0 { continue; }
-                    let (close1, close2) = if is_a_first {
-                        (*price_a, *price_b)
+                    // Merge by timestamp (align to 1-min buckets)
+                    let merged = merge_candles(&candles_a, &candles_b);
+                    if merged.len() < 10 { return 0; }
+
+                    // Canonical order: name1 < name2 (matching live compute_spreads)
+                    let is_a_first = ex_a < ex_b;
+                    let (name1, name2) = if is_a_first {
+                        (ex_a.clone(), ex_b.clone())
                     } else {
-                        (*price_b, *price_a)
+                        (ex_b.clone(), ex_a.clone())
                     };
-                    let premium_12 = (close1 - close2) / close2 * 100.0;
-                    let premium_21 = (close2 - close1) / close1 * 100.0;
-                    history.push((*ts_val, premium_12, premium_21, pair.to_string(), name1.clone(), name2.clone()));
-                }
 
-                warmup_ema_from_premiums(&history, &ts);
-                warmed += 1;
+                    // Calculate canonical premium at each historical point.
+                    // Treat close price as mid-price proxy (candles don't have bid/ask).
+                    let mut history = Vec::with_capacity(merged.len());
+                    for (ts_val, price_a, price_b) in &merged {
+                        if *price_a <= 0.0 || *price_b <= 0.0 { continue; }
+                        let (close1, close2) = if is_a_first {
+                            (*price_a, *price_b)
+                        } else {
+                            (*price_b, *price_a)
+                        };
+                        let premium_12 = (close1 - close2) / close2 * 100.0;
+                        let premium_21 = (close2 - close1) / close1 * 100.0;
+                        history.push((*ts_val, premium_12, premium_21, pair.to_string(), name1.clone(), name2.clone()));
+                    }
+
+                    warmup_ema_from_premiums(&history, &ts);
+                    1usize
+                }));
             }
+        }
+    }
+
+    // Wait for all tasks to complete
+    let mut warmed = 0usize;
+    for h in handles {
+        if let Ok(count) = h.await {
+            warmed += count;
         }
     }
 
