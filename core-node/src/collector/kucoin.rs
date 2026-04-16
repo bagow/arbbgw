@@ -60,6 +60,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     let http = Client::new();
     let contracts: Value = http.get("https://api-futures.kucoin.com/api/v1/contracts/active")
         .timeout(Duration::from_secs(10)).send().await?.json().await?;
+    let mut symbols: Vec<String> = Vec::new();
     let mut sym_map = std::collections::HashMap::new();
 
     for c in contracts["data"].as_array().unwrap_or(&vec![]) {
@@ -148,7 +149,7 @@ where D: serde::Deserializer<'de> {
 
                                     if let Some(mut ex_map) = price_map.get_mut("kucoin") {
                                         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                                        if let Some(mut entry) = ex_map.get_mut(sym) {
+                                        if let Some(entry) = ex_map.get_mut(sym) {
                                             entry.bid = bid;
                                             entry.ask = ask;
                                             entry.price = price;

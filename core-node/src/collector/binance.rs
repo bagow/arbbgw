@@ -112,7 +112,7 @@ struct BinanceTicker<'a> {
 
                 if let Some(mut ex_map) = price_map.get_mut("binance") {
                     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                    if let Some(mut entry) = ex_map.get_mut(t.symbol) {
+                    if let Some(entry) = ex_map.get_mut(t.symbol) {
                         entry.bid = bid;
                         entry.ask = ask;
                         entry.price = mid;

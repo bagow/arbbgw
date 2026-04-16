@@ -74,7 +74,9 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             let ask_qty: f64 = t["ask1Size"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let price: f64 = t["lastPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or((bid+ask)/2.0);
             if bid > 0.0 && ask > 0.0 {
-                upsert(price_map, signal, sym.to_string(), TickerData { bid, ask, price, vol, funding_rate: 0.0, bid_size: bid_qty * price, ask_size: ask_qty * price, last_updated: 0 });
+                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                price_map.entry("bybit".to_string()).or_default().insert(sym.to_string(), TickerData { bid, ask, price, vol, funding_rate: 0.0, bid_size: bid_qty * price, ask_size: ask_qty * price, last_updated: ts });
+                signal.notify_one();
             }
             symbols.push(sym.to_string());
         }
@@ -97,7 +99,6 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     }
 
     let mut ping = tokio::time::interval(Duration::from_secs(20));
-    loop {
 #[derive(Deserialize)]
 struct BybitMsg<'a> {
     #[serde(borrow)]
@@ -132,7 +133,7 @@ struct BybitData<'a> {
                                 if let Some(mut ex_map) = price_map.get_mut("bybit") {
                                     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                                     
-                                    if let Some(mut prev) = ex_map.get_mut(sym) {
+                                    if let Some(prev) = ex_map.get_mut(sym) {
                                         if let Some(bids) = d.b {
                                             if let Some(&(p, q)) = bids.first() {
                                                 if let (Ok(p_f), Ok(q_f)) = (p.parse::<f64>(), q.parse::<f64>()) {

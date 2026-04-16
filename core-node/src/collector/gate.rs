@@ -243,7 +243,7 @@ async fn ws_shard(idx: usize, symbols: Vec<String>, price_map: &PriceMap, signal
 
                                     if let Some(mut ex_map) = price_map.get_mut("gate") {
                                         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                                        if let Some(mut entry) = ex_map.get_mut(sym) {
+                                        if let Some(entry) = ex_map.get_mut(sym) {
                                             entry.bid = bid;
                                             entry.ask = ask;
                                             entry.bid_size = item.bid_qty * mid;
@@ -286,7 +286,7 @@ async fn ws_shard(idx: usize, symbols: Vec<String>, price_map: &PriceMap, signal
 fn upsert_tickers(price_map: &PriceMap, signal: &UpdateSignal, sym: String, price: f64, vol: f64, funding: f64) {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     if let Some(mut gate_map) = price_map.get_mut("gate") {
-        if let Some(mut entry) = gate_map.get_mut(&sym) {
+        if let Some(entry) = gate_map.get_mut(&sym) {
             entry.price = price;
             entry.vol = vol;
             entry.funding_rate = funding;
