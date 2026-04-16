@@ -10,7 +10,7 @@ use crate::engine::real::ExchangeKeys;
 ///   - Normal mode : every 25s — full refresh (balance + fee rates) for all exchanges
 ///   - Recovery mode: every 2s  — balance ONLY for the exchange(s) with balance_low=true
 ///     Fee rates are NOT re-fetched in recovery mode to avoid rate limits.
-pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<crate::state::EngineContext>) {
+pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<crate::state::EngineContext>, settings: Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>) {
     tokio::spawn(async move {
         let fast_interval_ms  = 2_000u64;
         let normal_interval_s = 25u64;
@@ -23,8 +23,16 @@ pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<c
         use crate::engine::exchanges::traits::ExchangeConnector;
 
         loop {
+            // Check which exchanges are explicitly enabled
+            let active_exchanges: Vec<&str> = {
+                let p = settings.read().await;
+                all_exchanges.into_iter().filter(|ex| {
+                    p.is_empty() || !p.iter().all(|x| x.disabled_exchanges.contains(&ex.to_string()))
+                }).collect()
+            };
+
             // Determine which exchanges have balance_low set
-            let low_exchanges: Vec<&str> = all_exchanges.iter()
+            let low_exchanges: Vec<&str> = active_exchanges.iter()
                 .copied()
                 .filter(|ex| keys.supports(ex) && e_ctx.balance_low.get(*ex).map(|v| *v).unwrap_or(false))
                 .collect();
@@ -54,7 +62,7 @@ pub fn start_balance_fetcher(http: Client, keys: Arc<ExchangeKeys>, e_ctx: Arc<c
                 }
                 tokio::time::sleep(Duration::from_millis(fast_interval_ms)).await;
             } else {
-                for ex in &all_exchanges {
+                for ex in &active_exchanges {
                     if !keys.supports(ex) { continue; }
                     match *ex {
                         "binance" => {

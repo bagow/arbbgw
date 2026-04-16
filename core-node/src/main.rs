@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
 
     let engine_ctx = Arc::new(crate::state::EngineContext::default());
 
-    engine::real::start_multiplier_fetcher(http.clone(), engine_ctx.clone());
+    let engine_ctx = Arc::new(crate::state::EngineContext::default());
 
     // ── Profiles DB (settings) — open and ensure schema is current ───────────
     let profiles_db = Connection::open(&profiles_db_path).await
@@ -81,11 +81,7 @@ async fn main() -> Result<()> {
     let prices: PriceMap    = Arc::new(dashmap::DashMap::new());
     let signal: UpdateSignal = Arc::new(tokio::sync::Notify::new());
 
-    // ── Spawn collectors ─────────────────────────────────────────────────────
-    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::gate::run(p, s).await }); }
-    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::kucoin::run(p, s).await }); }
-    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::binance::run(p, s).await }); }
-    { let p = prices.clone(); let s = signal.clone(); tokio::spawn(async move { collector::bybit::run(p, s).await }); }
+    // Note: collectors are spawned later, after settings cache is initialized
 
     // ── Trade DBs ────────────────────────────────────────────────────────────
     let real_db = Connection::open(&real_db_path).await
@@ -145,8 +141,15 @@ async fn main() -> Result<()> {
         exchange_keys.supports("kucoin"), exchange_keys.supports("binance"),
         exchange_keys.supports("bybit"));
 
-    // ── Balance fetcher — refreshes available margin every 30s ────────────────
-    engine::fetcher::start_balance_fetcher(http.clone(), exchange_keys.clone(), engine_ctx.clone());
+    // ── Pre-warm and fetch loops ──────────────────────────────────────────────
+    engine::real::start_multiplier_fetcher(http.clone(), engine_ctx.clone(), real_settings_cache.clone());
+    engine::fetcher::start_balance_fetcher(http.clone(), exchange_keys.clone(), engine_ctx.clone(), real_settings_cache.clone());
+
+    // ── Spawn collectors ─────────────────────────────────────────────────────
+    { let p = prices.clone(); let s = signal.clone(); let sc = real_settings_cache.clone(); tokio::spawn(async move { collector::gate::run(p, s, sc).await }); }
+    { let p = prices.clone(); let s = signal.clone(); let sc = real_settings_cache.clone(); tokio::spawn(async move { collector::kucoin::run(p, s, sc).await }); }
+    { let p = prices.clone(); let s = signal.clone(); let sc = real_settings_cache.clone(); tokio::spawn(async move { collector::binance::run(p, s, sc).await }); }
+    { let p = prices.clone(); let s = signal.clone(); let sc = real_settings_cache.clone(); tokio::spawn(async move { collector::bybit::run(p, s, sc).await }); }
 
     // ── Position sync — DISABLED: caused false EXTERNAL_PARTIAL_CLOSE ──────────
     // Symbol format mismatch between DB (ARIAUSDT) and exchange API responses

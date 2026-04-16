@@ -266,13 +266,24 @@ pub fn is_margin_error(err: &str) -> bool {
         || s.contains("balance not enough")
 }
 
-pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineContext>) {
+pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineContext>, settings: Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>) {
     // Gate.io
     tokio::spawn({
         let http = http.clone();
         let e_ctx = e_ctx.clone();
+        let settings = settings.clone();
         async move {
             loop {
+                // Check if gate is enabled
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"gate".to_string()))
+                };
+                if is_disabled {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+
                 if let Ok(resp) = http.get("https://api.gateio.ws/api/v4/futures/usdt/contracts").send().await {
                     if let Ok(json) = resp.json::<Value>().await {
                         if let Some(arr) = json.as_array() {
@@ -315,8 +326,19 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
     tokio::spawn({
         let http = http.clone();
         let e_ctx = e_ctx.clone();
+        let settings = settings.clone();
         async move {
             loop {
+                // Check if kucoin is enabled
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"kucoin".to_string()))
+                };
+                if is_disabled {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+
                 if let Ok(resp) = http.get("https://api-futures.kucoin.com/api/v1/contracts/active").send().await {
                     if let Ok(json) = resp.json::<Value>().await {
                         if let Some(arr) = json["data"].as_array() {
@@ -360,9 +382,20 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
     tokio::spawn({
         let http = http.clone();
         let e_ctx = e_ctx.clone();
+        let settings = settings.clone();
         async move {
             let mut last_http_status: u16 = 0;
             loop {
+                // Check if binance is enabled
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"binance".to_string()))
+                };
+                if is_disabled {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+
                 match http.get("https://fapi.binance.com/fapi/v1/exchangeInfo")
                     .timeout(Duration::from_secs(15))
                     .send().await {
@@ -444,8 +477,19 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
     tokio::spawn({
         let http = http.clone();
         let e_ctx = e_ctx.clone();
+        let settings = settings.clone();
         async move {
             loop {
+                // Check if bybit is enabled
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"bybit".to_string()))
+                };
+                if is_disabled {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+
                 if let Ok(resp) = http.get("https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000").send().await {
                     if let Ok(json) = resp.json::<Value>().await {
                         if let Some(arr) = json["result"]["list"].as_array() {

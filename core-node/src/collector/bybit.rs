@@ -9,16 +9,49 @@ use tracing::{error, info, warn};
 
 use crate::state::{PriceMap, TickerData, UpdateSignal};
 
-pub async fn run(prices: PriceMap, signal: UpdateSignal) {
+pub async fn run(prices: PriceMap, signal: UpdateSignal, settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>) {
     let mut backoff = Duration::from_secs(1);
     loop {
-        info!("[bybit] Connecting...");
-        match handler(&prices, &signal).await {
-            Ok(_)  => { warn!("[bybit] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
-            Err(e) => error!("[bybit] Error: {}. Reconnecting in {:?}", e, backoff),
+        let is_disabled = {
+            let p = settings.read().await;
+            !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"bybit".to_string()))
+        };
+        if is_disabled {
+            if backoff == Duration::from_secs(1) {
+                info!("[bybit] Disabled globally in profiles. Sleeping...");
+            }
+            backoff = Duration::from_secs(5);
+            tokio::time::sleep(backoff).await;
+            continue;
         }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(60));
+
+        info!("[bybit] Connecting...");
+        
+        let disable_watcher = async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"bybit".to_string()))
+                };
+                if is_disabled { break; }
+            }
+        };
+
+        tokio::select! {
+            res = handler(&prices, &signal) => {
+                match res {
+                    Ok(_)  => { warn!("[bybit] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
+                    Err(e) => error!("[bybit] Error: {}. Reconnecting in {:?}", e, backoff),
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+            }
+            _ = disable_watcher => {
+                info!("[bybit] Exchange was disabled dynamically. Dropping connection.");
+                backoff = Duration::from_secs(1);
+            }
+        }
     }
 }
 

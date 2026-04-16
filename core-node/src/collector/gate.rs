@@ -13,16 +13,49 @@ use crate::state::{PriceMap, UpdateSignal};
 /// Max symbols per single WS connection — keeps well under Gate's implicit limit.
 const SYMBOLS_PER_WS: usize = 100;
 
-pub async fn run(prices: PriceMap, signal: UpdateSignal) {
+pub async fn run(prices: PriceMap, signal: UpdateSignal, settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>) {
     let mut backoff = Duration::from_secs(1);
     loop {
-        info!("[gate] Starting...");
-        match orchestrator(&prices, &signal).await {
-            Ok(_)  => { warn!("[gate] orchestrator returned, restarting..."); backoff = Duration::from_secs(1); }
-            Err(e) => error!("[gate] Error: {}. Reconnecting in {:?}", e, backoff),
+        let is_disabled = {
+            let p = settings.read().await;
+            !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"gate".to_string()))
+        };
+        if is_disabled {
+            if backoff == Duration::from_secs(1) {
+                info!("[gate] Disabled globally in profiles. Sleeping...");
+            }
+            backoff = Duration::from_secs(5);
+            tokio::time::sleep(backoff).await;
+            continue;
         }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(10));
+
+        info!("[gate] Starting...");
+        
+        let disable_watcher = async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"gate".to_string()))
+                };
+                if is_disabled { break; }
+            }
+        };
+
+        tokio::select! {
+            res = orchestrator(&prices, &signal) => {
+                match res {
+                    Ok(_)  => { warn!("[gate] orchestrator returned, restarting..."); backoff = Duration::from_secs(1); }
+                    Err(e) => error!("[gate] Error: {}. Reconnecting in {:?}", e, backoff),
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(10));
+            }
+            _ = disable_watcher => {
+                info!("[gate] Exchange was disabled dynamically. Dropping connections.");
+                backoff = Duration::from_secs(1);
+            }
+        }
     }
 }
 
