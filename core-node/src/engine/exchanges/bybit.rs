@@ -74,15 +74,16 @@ impl ExchangeConnector for BybitConnector {
             .header("X-BAPI-TIMESTAMP", &ts)
             .header("X-BAPI-RECV-WINDOW", recv)
             .header("Content-Type", "application/json")
-            .body(body_str)
+            .body(body_str.clone())
             .timeout(Duration::from_secs(10))
             .send().await.map_err(|e| e.to_string())?;
 
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         
         // Diagnostic: log order request and response
-        tracing::info!("[bybit] place_order {} req={} → retCode={} orderId={}", 
-            pair, body_str, v["retCode"], v["result"]["orderId"]);
+        let resp_oid = v["result"]["orderId"].as_str().unwrap_or("none");
+        tracing::info!("[bybit] place_order {} req={} → orderId={} retCode={}", 
+            pair, body_str, resp_oid, v["retCode"]);
         
         if v["retCode"].as_i64() != Some(0) { 
             return Err(format!("Bybit API Error: {}", v)); 

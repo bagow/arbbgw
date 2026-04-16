@@ -68,8 +68,10 @@ impl ExchangeConnector for BinanceConnector {
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         
         // Diagnostic: log order request and response
-        tracing::info!("[binance] place_order {} side={} qty={} → orderId={} status={}", 
-            pair, side, qty_str, v["orderId"], v["status"]);
+        let resp_oid = v["orderId"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "none".to_string());
+        let resp_status_str = v["status"].as_str().unwrap_or("?");
+        tracing::info!("[binance] place_order {} req={} → orderId={} status={}", 
+            pair, qs, resp_oid, resp_status_str);
         
         if let Some(msg) = v["msg"].as_str() {
             return Err(format!("Binance API Error: {}", msg));

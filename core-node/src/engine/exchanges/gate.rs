@@ -78,8 +78,9 @@ impl ExchangeConnector for GateConnector {
         let resp_size = v["size"].as_i64().unwrap_or(0);
         let resp_left = v["left"].as_i64().unwrap_or(0);
         let resp_fill = v["fill_price"].as_str().unwrap_or("0");
-        tracing::info!("[gate] place_order {} req={} → http={} status={} size={} left={} fill_price={}", 
-            pair, body_str, status, resp_status, resp_size, resp_left, resp_fill);
+        let resp_oid = v["id"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| "none".to_string());
+        tracing::info!("[gate] place_order {} req={} → orderId={} http={} status={} size={} left={} fill_price={}", 
+            pair, body_str, resp_oid, status, resp_status, resp_size, resp_left, resp_fill);
         
         if !status.is_success() { 
             return Err(format!("Gate API Error: {}", v)); 
