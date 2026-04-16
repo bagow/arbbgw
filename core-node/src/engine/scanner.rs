@@ -126,6 +126,15 @@ pub fn generate_signals(
 
             let diag_prefix = if log_diag && row.spread >= profile.min_entry_spread { Some(format!("[scanner] REJECT {} {}={:.4}%", row.pair, profile.id, row.spread)) } else { None };
 
+            // ── STRUCTURAL VERIFICATION GUARD ──
+            // Block entry until warmup has verified this pair from 24h historical data.
+            // Without verification we don't know if there's a structural spread — entering
+            // could be a guaranteed loss if the pair has a hidden structural premium.
+            if !row.structural_verified {
+                if let Some(p) = &diag_prefix { tracing::info!("{} -> structural NOT VERIFIED (awaiting warmup)", p); }
+                continue;
+            }
+
             let structural_deviation = row.spread - row.structural_spread;
             let mut dev_threshold = if profile.min_structural_deviation > 0.0 {
                 profile.min_structural_deviation

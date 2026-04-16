@@ -3,12 +3,16 @@
 
 use crate::state::PriceMap;
 use shared::{SpreadRow, TechnicalSettings};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// (ema_ab, ema_ba, max_ab, min_ab, max_ba, min_ba, last_cross_ab, last_cross_ba, last_ts_secs)
 static STRUCTURAL_EMA: OnceLock<DashMap<String, (f64, f64, f64, f64, f64, f64, f64, f64, f64)>> = OnceLock::new();
+
+/// Set of EMA keys that have been verified from 24h historical warmup data.
+/// Pairs NOT in this set are "on probation" — entry is blocked.
+static VERIFIED_KEYS: OnceLock<DashSet<String>> = OnceLock::new();
 
 /// Compute spread opportunities from PriceMap.
 /// Called directly by the engine loop — zero serialization/HTTP overhead.
@@ -29,6 +33,7 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
 
     let min_v = min_vol_m * 1_000_000.0;
     let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
+    let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
     let blacklist = ts.blacklist_vec();
     let mut rows = Vec::with_capacity(512);
 
@@ -77,6 +82,8 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
                 let premium_2_over_1 = (mid2 - mid1) / mid1 * 100.0;
                 
                 let ema_key = format!("{}|{}|{}", sym, name1, name2);
+                let is_verified = verified.contains(&ema_key);
+                
                 let (ema_12, ema_21, max_12, min_12, max_21, min_21, cross_12, cross_21) =
                     if let Some(mut entry) = ema_map.get_mut(&ema_key) {
                         let (old_12, old_21, old_max_12, old_min_12, old_max_21, old_min_21, mut old_cross_12, mut old_cross_21, last_updated) = *entry;
@@ -98,11 +105,10 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
                         (new_12, new_21, new_max_12, new_min_12, new_max_21, new_min_21, old_cross_12, old_cross_21)
                     } else {
                         // Default cross to NOW — conservative: assume NO structural spread
-                        // until proven by 24h of no zero-crossing. Old default (0.0) caused
-                        // every new pair to immediately have has_structural_spread=true.
+                        // until proven by 24h of no zero-crossing.
                         let cross_12 = now_f64;
                         let cross_21 = now_f64;
-                        ema_map.insert(ema_key, (premium_1_over_2, premium_2_over_1, premium_1_over_2, premium_1_over_2, premium_2_over_1, premium_2_over_1, cross_12, cross_21, now_f64));
+                        ema_map.insert(ema_key.clone(), (premium_1_over_2, premium_2_over_1, premium_1_over_2, premium_1_over_2, premium_2_over_1, premium_2_over_1, cross_12, cross_21, now_f64));
                         (premium_1_over_2, premium_2_over_1, premium_1_over_2, premium_1_over_2, premium_2_over_1, premium_2_over_1, cross_12, cross_21)
                     };
 
@@ -138,6 +144,7 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
                     spread: (spread * 10000.0).round() / 10000.0,
                     direction,
                     has_structural_spread,
+                    structural_verified: is_verified,
                 });
             }
         }
@@ -150,8 +157,10 @@ pub fn compute_spreads(price_map: &PriceMap, min_vol_m: f64, ts: &TechnicalSetti
 
 /// Pre-seed the STRUCTURAL_EMA from historical canonical premiums.
 /// Tuple: (timestamp_secs, premium_12, premium_21, pair, ex1_canonical, ex2_canonical)
+/// All keys seeded here are marked as VERIFIED — they have real 24h history.
 pub fn warmup_ema_from_premiums(history: &[(f64, f64, f64, String, String, String)], ts: &TechnicalSettings) {
     let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
+    let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
     let tau = ts.ema_tau_secs;
 
     let mut sorted = history.to_vec();
@@ -160,7 +169,7 @@ pub fn warmup_ema_from_premiums(history: &[(f64, f64, f64, String, String, Strin
     for (ts_val, premium_12, premium_21, pair, name1, name2) in &sorted {
         let key = format!("{}|{}|{}", pair, name1, name2);
         // Default cross to first candle ts (not 0.0) — prevents false has_structural_spread
-        let mut entry = ema_map.entry(key).or_insert((*premium_12, *premium_21, *premium_12, *premium_12, *premium_21, *premium_21, *ts_val, *ts_val, *ts_val));
+        let mut entry = ema_map.entry(key.clone()).or_insert((*premium_12, *premium_21, *premium_12, *premium_12, *premium_21, *premium_21, *ts_val, *ts_val, *ts_val));
         let (old_12, old_21, old_max_12, old_min_12, old_max_21, old_min_21, mut old_cross_12, mut old_cross_21, last_ts) = *entry;
         let dt = (ts_val - last_ts).max(0.0);
         let alpha = if dt > 0.0 { 1.0 - (-dt / tau).exp() } else { 0.0 };
@@ -177,5 +186,8 @@ pub fn warmup_ema_from_premiums(history: &[(f64, f64, f64, String, String, Strin
         if *premium_21 <= 0.0 { old_cross_21 = *ts_val; }
 
         *entry = (new_12, new_21, new_max_12, new_min_12, new_max_21, new_min_21, old_cross_12, old_cross_21, *ts_val);
+        
+        // Mark this pair as VERIFIED — it has real historical data
+        verified.insert(key);
     }
 }
