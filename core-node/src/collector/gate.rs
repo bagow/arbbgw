@@ -17,7 +17,8 @@ pub async fn run(prices: PriceMap, signal: UpdateSignal) {
             Err(e) => error!("[gate] Error: {}. Reconnecting in {:?}", e, backoff),
         }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(60));
+        // Cap backoff at 10s (was 60s) — stale Gate prices cause false spread signals
+        backoff = (backoff * 2).min(Duration::from_secs(10));
     }
 }
 
@@ -41,26 +42,53 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     }
     info!("[gate] Fetched {} symbols from REST", symbols.len());
 
+    // Seed volume + funding from REST tickers (so we don't need futures.tickers WS channel)
+    if let Ok(tickers_resp) = client.get("https://api.gateio.ws/api/v4/futures/usdt/tickers")
+        .timeout(Duration::from_secs(15))
+        .send().await
+    {
+        if let Ok(tickers) = tickers_resp.json::<Vec<Value>>().await {
+            let mut seeded = 0usize;
+            for t in &tickers {
+                let name = t["contract"].as_str().unwrap_or("").replace('_', "");
+                if !name.ends_with("USDT") { continue; }
+                let vol: f64 = t["volume_24h_quote"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let funding: f64 = t["funding_rate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let price: f64 = t["last"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                if vol > 0.0 || price > 0.0 {
+                    upsert_tickers(price_map, signal, name, price, vol, funding);
+                    seeded += 1;
+                }
+            }
+            info!("[gate] Seeded {}/{} tickers from REST (vol+funding)", seeded, tickers.len());
+        }
+    }
+
     let (mut ws, _) = connect_async_tls_with_config(
         "wss://fx-ws.gateio.ws/v4/ws/usdt", None, false, None,
     ).await.context("Gate.io WS connect failed")?;
 
     info!("[gate] Connected");
     
-    // Subscribe in chunks to avoid websocket payload limits
+    // Subscribe ONLY to book_ticker (bid/ask) — NOT futures.tickers.
+    // This halves subscription count (665 instead of 1330) and avoids Gate
+    // resetting the connection due to too many subscriptions.
+    // Volume and funding are seeded from REST above.
     for chunk in symbols.chunks(50) {
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-        ws.send(Message::Text(
-            json!({"time":ts,"channel":"futures.tickers","event":"subscribe","payload": chunk})
-                .to_string().into()
-        )).await?;
         ws.send(Message::Text(
             json!({"time":ts,"channel":"futures.book_ticker","event":"subscribe","payload": chunk})
                 .to_string().into()
         )).await?;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // 500ms between chunks (was 200ms) — reduces subscribe burst rate
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    info!("[gate] Subscribed to book_ticker for {} symbols ({} chunks)", symbols.len(), (symbols.len() + 49) / 50);
+
     let mut ping = tokio::time::interval(Duration::from_secs(20));
+    // Periodic REST refresh for volume/funding every 120s
+    let mut ticker_refresh = tokio::time::interval(Duration::from_secs(120));
+    ticker_refresh.tick().await; // skip immediate tick
 
     loop {
         tokio::select! {
@@ -72,33 +100,12 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                     }
                     let ch = v["channel"].as_str().unwrap_or("");
                     
-                    if ch == "futures.tickers" {
+                    if ch == "futures.book_ticker" {
                         let event = v["event"].as_str().unwrap_or("");
                         if event == "subscribe" {
-                            info!("[gate] Subscribe OK: {}", text);
+                            // Don't log every subscribe OK — too noisy with 14 chunks
                             continue;
                         }
-                        let items = if v["result"].is_array() {
-                            v["result"].as_array().unwrap().clone()
-                        } else if v["result"].is_object() {
-                            vec![v["result"].clone()]
-                        } else {
-                            vec![]
-                        };
-
-                        for item in &items {
-                            let sym = item["contract"].as_str().unwrap_or("").replace('_', "");
-                            if !sym.ends_with("USDT") { continue; }
-                            
-                            let price   = item["last"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                            let vol     = item["volume_24h_quote"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                            let funding = item["funding_rate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                            
-                            upsert_tickers(price_map, signal, sym, price, vol, funding);
-                        }
-                    } else if ch == "futures.book_ticker" {
-                        let event = v["event"].as_str().unwrap_or("");
-                        if event == "subscribe" { continue; }
                         let item = &v["result"];
                         if !item.is_object() { continue; }
                         let sym = item["s"].as_str().unwrap_or("").replace('_', "");
@@ -120,6 +127,27 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             _ = ping.tick() => {
                 let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                 ws.send(Message::Text(json!({"time":ts, "channel":"futures.ping"}).to_string().into())).await?;
+            },
+            _ = ticker_refresh.tick() => {
+                // Refresh volume + funding from REST every 120s
+                let c = reqwest::Client::new();
+                if let Ok(resp) = c.get("https://api.gateio.ws/api/v4/futures/usdt/tickers")
+                    .timeout(Duration::from_secs(10))
+                    .send().await
+                {
+                    if let Ok(tickers) = resp.json::<Vec<Value>>().await {
+                        for t in &tickers {
+                            let name = t["contract"].as_str().unwrap_or("").replace('_', "");
+                            if !name.ends_with("USDT") { continue; }
+                            let vol: f64 = t["volume_24h_quote"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            let funding: f64 = t["funding_rate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            let price: f64 = t["last"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            if vol > 0.0 || price > 0.0 {
+                                upsert_tickers(price_map, signal, name, price, vol, funding);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
