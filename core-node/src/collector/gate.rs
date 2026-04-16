@@ -4,6 +4,8 @@
 use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use std::sync::Arc;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
@@ -69,6 +71,7 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()>
         .json::<Vec<serde_json::Value>>().await.context("Gate JSON parse failed")?;
     
     let mut symbols = Vec::new();
+    let mut sym_map = std::collections::HashMap::new();
     for c in res {
         if let Some(name) = c["name"].as_str() {
             if c["in_delisting"].as_bool().unwrap_or(false) { continue; }
@@ -76,10 +79,12 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()>
             
             let sym = name.replace('_', "");
             if sym.ends_with("USDT") {
+                sym_map.insert(name.to_string(), sym.clone());
                 price_map.entry("gate".to_string()).or_default().entry(sym).or_default();
             }
         }
     }
+    let sym_map_arc = Arc::new(sym_map);
     info!("[gate] Fetched {} symbols from REST", symbols.len());
 
     // Seed volume + funding from REST tickers
@@ -116,8 +121,9 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()>
     for (idx, chunk) in sym_chunks.into_iter().enumerate() {
         let pm = price_map.clone();
         let sig = signal.clone();
+        let sm = sym_map_arc.clone();
         handles.push(tokio::spawn(async move {
-            ws_shard(idx, chunk, &pm, &sig).await
+            ws_shard(idx, chunk, &pm, &sig, sm).await
         }));
     }
 
@@ -162,8 +168,43 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()>
     }
 }
 
+#[derive(Deserialize)]
+struct GateMsg<'a> {
+    #[serde(borrow)]
+    channel: Option<&'a str>,
+    #[serde(borrow)]
+    event: Option<&'a str>,
+    #[serde(borrow)]
+    result: Option<GateData<'a>>,
+}
+
+#[derive(Deserialize)]
+struct GateData<'a> {
+    s: Option<&'a str>,
+    #[serde(deserialize_with = "de_opt_f64_or_str", default)]
+    b: Option<f64>,
+    #[serde(deserialize_with = "de_opt_f64_or_str", default)]
+    a: Option<f64>,
+    #[serde(rename = "B", default)]
+    bid_qty: f64,
+    #[serde(rename = "A", default)]
+    ask_qty: f64,
+}
+
+fn de_opt_f64_or_str<'de, D>(deserializer: D) -> std::result::Result<Option<f64>, D::Error>
+where D: serde::Deserializer<'de> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Any<'a> { Float(f64), Str(&'a str) }
+    Ok(match Option::<Any>::deserialize(deserializer)? {
+        Some(Any::Float(f)) => Some(f),
+        Some(Any::Str(s)) => s.parse().ok(),
+        None => None,
+    })
+}
+
 /// A single WS shard handling a subset of symbols.
-async fn ws_shard(idx: usize, symbols: Vec<String>, price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
+async fn ws_shard(idx: usize, symbols: Vec<String>, price_map: &PriceMap, signal: &UpdateSignal, sym_map: Arc<std::collections::HashMap<String, String>>) -> Result<()> {
     let (mut ws, _) = connect_async_tls_with_config(
         "wss://fx-ws.gateio.ws/v4/ws/usdt", None, false, None,
     ).await.context(format!("Gate WS shard {} connect failed", idx))?;
@@ -181,33 +222,52 @@ async fn ws_shard(idx: usize, symbols: Vec<String>, price_map: &PriceMap, signal
     }
     info!("[gate] Shard {} subscribed OK", idx);
 
+    // Ensure gate map exists for mutably getting later
+    price_map.entry("gate".to_string()).or_default();
+
     let mut ping = tokio::time::interval(Duration::from_secs(20));
 
     loop {
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
-                    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-                    if v.get("error").is_some() {
-                        warn!("[gate] Shard {} WS Error: {}", idx, text);
-                    }
-                    let ch = v["channel"].as_str().unwrap_or("");
-                    
-                    if ch == "futures.book_ticker" {
-                        let event = v["event"].as_str().unwrap_or("");
-                        if event == "subscribe" { continue; }
-                        let item = &v["result"];
-                        if !item.is_object() { continue; }
-                        let sym = item["s"].as_str().unwrap_or("").replace('_', "");
-                        if !sym.ends_with("USDT") { continue; }
-                        
-                        let bid: f64 = match item["b"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
-                        let ask: f64 = match item["a"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
-                        let bid_size: f64 = item["B"].as_i64().unwrap_or(0) as f64;
-                        let ask_size: f64 = item["A"].as_i64().unwrap_or(0) as f64;
-                        let mid = (bid + ask) / 2.0;
-                        
-                        upsert_book(price_map, signal, sym, bid, ask, bid_size * mid, ask_size * mid);
+                    if let Ok(v) = serde_json::from_str::<GateMsg>(&text) {
+                        if v.channel != Some("futures.book_ticker") { continue; }
+                        if v.event == Some("subscribe") { continue; }
+                        if let Some(item) = v.result {
+                            if let Some(raw_sym) = item.s {
+                                if let Some(sym) = sym_map.get(raw_sym) {
+                                    let bid = match item.b { Some(v) if v > 0.0 => v, _ => continue };
+                                    let ask = match item.a { Some(v) if v > 0.0 => v, _ => continue };
+                                    let mid = (bid + ask) / 2.0;
+
+                                    if let Some(mut ex_map) = price_map.get_mut("gate") {
+                                        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                        if let Some(mut entry) = ex_map.get_mut(sym) {
+                                            entry.bid = bid;
+                                            entry.ask = ask;
+                                            entry.bid_size = item.bid_qty * mid;
+                                            entry.ask_size = item.ask_qty * mid;
+                                            if entry.price == 0.0 { entry.price = mid; }
+                                            entry.last_updated = ts;
+                                        } else {
+                                            ex_map.insert(sym.to_string(), crate::state::TickerData {
+                                                bid, ask, price: mid, vol: 0.0, funding_rate: 0.0,
+                                                bid_size: item.bid_qty * mid, ask_size: item.ask_qty * mid,
+                                                last_updated: ts
+                                            });
+                                        }
+                                    }
+                                    signal.notify_one();
+                                }
+                            }
+                        }
+                    } else {
+                        // try to log error message if present (slow path)
+                        let v_err: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                        if v_err.get("error").is_some() {
+                            warn!("[gate] Shard {} WS Error: {}", idx, text);
+                        }
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
@@ -225,28 +285,13 @@ async fn ws_shard(idx: usize, symbols: Vec<String>, price_map: &PriceMap, signal
 
 fn upsert_tickers(price_map: &PriceMap, signal: &UpdateSignal, sym: String, price: f64, vol: f64, funding: f64) {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    {
-        let mut gate_map = price_map.entry("gate".to_string()).or_default();
-        let entry = gate_map.entry(sym).or_default();
-        entry.price = price;
-        entry.vol = vol;
-        entry.funding_rate = funding;
-        entry.last_updated = ts;
-    }
-    signal.notify_one();
-}
-
-fn upsert_book(price_map: &PriceMap, signal: &UpdateSignal, sym: String, bid: f64, ask: f64, bid_size_usd: f64, ask_size_usd: f64) {
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    {
-        let mut gate_map = price_map.entry("gate".to_string()).or_default();
-        let entry = gate_map.entry(sym).or_default();
-        entry.bid = bid;
-        entry.ask = ask;
-        entry.bid_size = bid_size_usd;
-        entry.ask_size = ask_size_usd;
-        if entry.price == 0.0 { entry.price = (bid + ask) / 2.0; }
-        entry.last_updated = ts;
+    if let Some(mut gate_map) = price_map.get_mut("gate") {
+        if let Some(mut entry) = gate_map.get_mut(&sym) {
+            entry.price = price;
+            entry.vol = vol;
+            entry.funding_rate = funding;
+            entry.last_updated = ts;
+        }
     }
     signal.notify_one();
 }

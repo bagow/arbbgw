@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::Value;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
@@ -82,26 +83,53 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     ).await.context("Binance WS connect failed")?;
     info!("[binance] Connected");
 
+#[derive(Deserialize)]
+struct BinanceTicker<'a> {
+    #[serde(rename = "s")]
+    symbol: &'a str,
+    #[serde(rename = "b")]
+    bid: &'a str,
+    #[serde(rename = "a")]
+    ask: &'a str,
+    #[serde(rename = "B")]
+    bid_qty: &'a str,
+    #[serde(rename = "A")]
+    ask_qty: &'a str,
+}
+
+    // Ensure binance map exists for getting mutably later
+    price_map.entry("binance".to_string()).or_default();
+
     while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
         if let Ok(Message::Text(text)) = msg {
-            let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            let sym = v["s"].as_str().unwrap_or("");
-            if !sym.ends_with("USDT") { continue; }
-            let bid: f64 = match v["b"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
-            let ask: f64 = match v["a"].as_str().and_then(|s| s.parse().ok()) { Some(v) if v > 0.0 => v, _ => continue };
-            let bid_qty: f64 = v["B"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let ask_qty: f64 = v["A"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let vol = price_map.get("binance").and_then(|m| m.get(sym).map(|d| d.vol)).unwrap_or(0.0);
-            let mid = (bid + ask) / 2.0;
-            upsert(price_map, signal, sym.to_string(), TickerData { bid, ask, price: mid, vol, funding_rate: 0.0, bid_size: bid_qty * mid, ask_size: ask_qty * mid, last_updated: 0 });
+            if let Ok(t) = serde_json::from_str::<BinanceTicker>(&text) {
+                if !t.symbol.ends_with("USDT") { continue; }
+                let bid: f64 = match t.bid.parse() { Ok(v) if v > 0.0 => v, _ => continue };
+                let ask: f64 = match t.ask.parse() { Ok(v) if v > 0.0 => v, _ => continue };
+                let bid_qty: f64 = t.bid_qty.parse().unwrap_or(0.0);
+                let ask_qty: f64 = t.ask_qty.parse().unwrap_or(0.0);
+                let mid = (bid + ask) / 2.0;
+
+                if let Some(mut ex_map) = price_map.get_mut("binance") {
+                    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    if let Some(mut entry) = ex_map.get_mut(t.symbol) {
+                        entry.bid = bid;
+                        entry.ask = ask;
+                        entry.price = mid;
+                        entry.bid_size = bid_qty * mid;
+                        entry.ask_size = ask_qty * mid;
+                        entry.last_updated = ts;
+                    } else {
+                        ex_map.insert(t.symbol.to_string(), TickerData {
+                            bid, ask, price: mid, vol: 0.0, funding_rate: 0.0,
+                            bid_size: bid_qty * mid, ask_size: ask_qty * mid,
+                            last_updated: ts
+                        });
+                    }
+                }
+                signal.notify_one();
+            }
         }
     }
     Ok(())
-}
-
-fn upsert(price_map: &PriceMap, signal: &UpdateSignal, sym: String, mut data: TickerData) {
-    data.last_updated = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    price_map.entry("binance".to_string()).or_default().insert(sym, data);
-    signal.notify_one();
 }

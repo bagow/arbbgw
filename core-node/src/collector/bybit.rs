@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
@@ -97,50 +98,88 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
 
     let mut ping = tokio::time::interval(Duration::from_secs(20));
     loop {
+#[derive(Deserialize)]
+struct BybitMsg<'a> {
+    #[serde(borrow)]
+    topic: Option<&'a str>,
+    #[serde(borrow)]
+    data: Option<BybitData<'a>>,
+}
+
+#[derive(Deserialize)]
+struct BybitData<'a> {
+    s: Option<&'a str>,
+    #[serde(borrow)]
+    b: Option<Vec<(&'a str, &'a str)>>,
+    #[serde(borrow)]
+    a: Option<Vec<(&'a str, &'a str)>>,
+}
+
+    // Ensure bybit map exists for getting mutably later
+    price_map.entry("bybit".to_string()).or_default();
+
+    let mut ping = tokio::time::interval(Duration::from_secs(20));
+    loop {
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
-                    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-                    if v["topic"].as_str().map(|t| !t.starts_with("orderbook.1.")).unwrap_or(true) { continue; }
-                    let d = &v["data"];
-                    
-                    // The symbol comes from the `s` field in orderbook data
-                    let sym = d["s"].as_str().unwrap_or("").to_string();
-                    if sym.is_empty() || !sym.ends_with("USDT") { continue; }
-                    
-                    let mut prev = price_map.get("bybit").and_then(|m| m.get(&sym).cloned()).unwrap_or_else(|| TickerData {
-                        bid: 0.0, ask: 0.0, price: 0.0, vol: 0.0, funding_rate: 0.0, bid_size: 0.0, ask_size: 0.0, last_updated: 0
-                    });
-
-                    // Parse Best Bid from snapshot
-                    if let Some(b_arr_list) = d["b"].as_array() {
-                        if let Some(b_arr) = b_arr_list.first().and_then(|f| f.as_array()) {
-                            if let Some(p) = b_arr.get(0).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
-                                let qty = b_arr.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                                prev.bid = p;
-                                prev.bid_size = qty * p; // Convert physical coins to USD equivalent
+                    if let Ok(v) = serde_json::from_str::<BybitMsg>(&text) {
+                        if v.topic.map(|t| !t.starts_with("orderbook.1.")).unwrap_or(true) { continue; }
+                        if let Some(d) = v.data {
+                            if let Some(sym) = d.s {
+                                if !sym.ends_with("USDT") { continue; }
+                                
+                                if let Some(mut ex_map) = price_map.get_mut("bybit") {
+                                    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                    
+                                    if let Some(mut prev) = ex_map.get_mut(sym) {
+                                        if let Some(bids) = d.b {
+                                            if let Some(&(p, q)) = bids.first() {
+                                                if let (Ok(p_f), Ok(q_f)) = (p.parse::<f64>(), q.parse::<f64>()) {
+                                                    prev.bid = p_f; prev.bid_size = q_f * p_f;
+                                                }
+                                            }
+                                        }
+                                        if let Some(asks) = d.a {
+                                            if let Some(&(p, q)) = asks.first() {
+                                                if let (Ok(p_f), Ok(q_f)) = (p.parse::<f64>(), q.parse::<f64>()) {
+                                                    prev.ask = p_f; prev.ask_size = q_f * p_f;
+                                                }
+                                            }
+                                        }
+                                        
+                                        if prev.bid > 0.0 && prev.ask > 0.0 {
+                                            prev.price = (prev.bid + prev.ask) / 2.0;
+                                            prev.last_updated = ts;
+                                            signal.notify_one();
+                                        }
+                                    } else {
+                                        // new entry creation logic
+                                        let mut b_p = 0.0; let mut b_q = 0.0;
+                                        let mut a_p = 0.0; let mut a_q = 0.0;
+                                        if let Some(bids) = d.b {
+                                            if let Some(&(p, q)) = bids.first() {
+                                                b_p = p.parse().unwrap_or(0.0); b_q = q.parse().unwrap_or(0.0);
+                                            }
+                                        }
+                                        if let Some(asks) = d.a {
+                                            if let Some(&(p, q)) = asks.first() {
+                                                a_p = p.parse().unwrap_or(0.0); a_q = q.parse().unwrap_or(0.0);
+                                            }
+                                        }
+                                        if b_p > 0.0 && a_p > 0.0 {
+                                            let mid = (b_p + a_p) / 2.0;
+                                            ex_map.insert(sym.to_string(), TickerData {
+                                                bid: b_p, ask: a_p, price: mid, vol: 0.0, funding_rate: 0.0,
+                                                bid_size: b_q * b_p, ask_size: a_q * a_p,
+                                                last_updated: ts
+                                            });
+                                            signal.notify_one();
+                                        }
+                                    }
+                                }
                             }
                         }
-                    }
-
-                    // Parse Best Ask from snapshot
-                    if let Some(a_arr_list) = d["a"].as_array() {
-                        if let Some(a_arr) = a_arr_list.first().and_then(|f| f.as_array()) {
-                            if let Some(p) = a_arr.get(0).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
-                                let qty = a_arr.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                                prev.ask = p;
-                                prev.ask_size = qty * p;
-                            }
-                        }
-                    }
-
-                    if prev.bid > 0.0 && prev.ask > 0.0 {
-                        prev.price = (prev.bid + prev.ask) / 2.0;
-                    }
-                    prev.vol = price_map.get("bybit").and_then(|m| m.get(&sym).map(|x| x.vol)).unwrap_or(0.0);
-                    
-                    if prev.bid > 0.0 && prev.ask > 0.0 {
-                        upsert(price_map, signal, sym, prev);
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
@@ -151,11 +190,4 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn upsert(price_map: &PriceMap, signal: &UpdateSignal, sym: String, mut data: TickerData) {
-    data.last_updated = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    price_map.entry("bybit".to_string()).or_default().insert(sym, data);
-    signal.notify_one();
 }

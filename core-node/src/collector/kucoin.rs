@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
@@ -59,12 +60,15 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     let http = Client::new();
     let contracts: Value = http.get("https://api-futures.kucoin.com/api/v1/contracts/active")
         .timeout(Duration::from_secs(10)).send().await?.json().await?;
-    let mut symbols = Vec::new();
+    let mut sym_map = std::collections::HashMap::new();
+
     for c in contracts["data"].as_array().unwrap_or(&vec![]) {
         if let Some(s) = c["symbol"].as_str() {
             if s.ends_with("USDTM") {
                 symbols.push(s.to_string());
                 let normalized = s.replace("XBTUSDTM", "BTCUSDT").replace("USDTM", "USDT");
+                sym_map.insert(s.to_string(), normalized.clone());
+                
                 let vol_usd = c["turnoverOf24h"].as_f64().unwrap_or(0.0);
                 if vol_usd > 0.0 {
                     let mut entry = price_map.entry("kucoin".to_string()).or_default();
@@ -88,30 +92,82 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
         ws.send(Message::Text(json!({"id":"sub","type":"subscribe","topic":topic,"privateChannel":false,"response":true}).to_string().into())).await?;
     }
 
+#[derive(Deserialize)]
+struct KucoinMsg<'a> {
+    #[serde(rename = "type")]
+    msg_type: &'a str,
+    #[serde(borrow)]
+    data: Option<KucoinData<'a>>,
+}
+
+#[derive(Deserialize)]
+struct KucoinData<'a> {
+    symbol: Option<&'a str>,
+    #[serde(deserialize_with = "de_opt_f64_or_str", rename = "bestBidPrice", default)]
+    bid: Option<f64>,
+    #[serde(deserialize_with = "de_opt_f64_or_str", rename = "bestAskPrice", default)]
+    ask: Option<f64>,
+    #[serde(deserialize_with = "de_opt_f64_or_str", rename = "bestBidSize", default)]
+    bid_qty: Option<f64>,
+    #[serde(deserialize_with = "de_opt_f64_or_str", rename = "bestAskSize", default)]
+    ask_qty: Option<f64>,
+    #[serde(deserialize_with = "de_opt_f64_or_str", default)]
+    price: Option<f64>,
+}
+
+fn de_opt_f64_or_str<'de, D>(deserializer: D) -> std::result::Result<Option<f64>, D::Error>
+where D: serde::Deserializer<'de> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Any<'a> { Float(f64), Str(&'a str) }
+    Ok(match Option::<Any>::deserialize(deserializer)? {
+        Some(Any::Float(f)) => Some(f),
+        Some(Any::Str(s)) => s.parse().ok(),
+        None => None,
+    })
+}
+
+    // Ensure kucoin map exists for mutably getting later
+    price_map.entry("kucoin".to_string()).or_default();
+
     let mut ping = tokio::time::interval(Duration::from_secs(20));
     loop {
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
-                    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-                    if v["type"].as_str() != Some("message") { continue; }
-                    let d = &v["data"];
-                    let raw_sym = d["symbol"].as_str().unwrap_or("").to_string();
-                    let raw = if raw_sym.is_empty() { v["topic"].as_str().unwrap_or("").replace("/contractMarket/tickerV2:", "") } else { raw_sym };
-                    let sym = raw.replace("XBTUSDTM", "BTCUSDT").replace("USDTM", "USDT");
-                    if sym.is_empty() || !sym.ends_with("USDT") { continue; }
-                    
-                    let parse_f64 = |val: &Value| -> Option<f64> {
-                        val.as_f64().or_else(|| val.as_str().and_then(|s| s.parse().ok()))
-                    };
-                    
-                    let bid: f64 = match parse_f64(&d["bestBidPrice"]) { Some(v) if v > 0.0 => v, _ => continue };
-                    let ask: f64 = match parse_f64(&d["bestAskPrice"]) { Some(v) if v > 0.0 => v, _ => continue };
-                    let bid_qty: f64 = parse_f64(&d["bestBidSize"]).unwrap_or(0.0);
-                    let ask_qty: f64 = parse_f64(&d["bestAskSize"]).unwrap_or(0.0);
-                    let price = parse_f64(&d["price"]).unwrap_or((bid+ask)/2.0);
-                    let ev = price_map.get("kucoin").and_then(|m| m.get(&sym).map(|d| d.vol)).unwrap_or(0.0);
-                    upsert(price_map, signal, sym, TickerData { bid, ask, price, vol: ev, funding_rate: 0.0, bid_size: bid_qty * price, ask_size: ask_qty * price, last_updated: 0 });
+                    if let Ok(v) = serde_json::from_str::<KucoinMsg>(&text) {
+                        if v.msg_type != "message" { continue; }
+                        if let Some(d) = v.data {
+                            if let Some(raw_sym) = d.symbol {
+                                if let Some(sym) = sym_map.get(raw_sym) {
+                                    let bid: f64 = match d.bid { Some(v) if v > 0.0 => v, _ => continue };
+                                    let ask: f64 = match d.ask { Some(v) if v > 0.0 => v, _ => continue };
+                                    let bid_qty = d.bid_qty.unwrap_or(0.0);
+                                    let ask_qty = d.ask_qty.unwrap_or(0.0);
+                                    let price = d.price.unwrap_or((bid+ask)/2.0);
+
+                                    if let Some(mut ex_map) = price_map.get_mut("kucoin") {
+                                        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                        if let Some(mut entry) = ex_map.get_mut(sym) {
+                                            entry.bid = bid;
+                                            entry.ask = ask;
+                                            entry.price = price;
+                                            entry.bid_size = bid_qty * price;
+                                            entry.ask_size = ask_qty * price;
+                                            entry.last_updated = ts;
+                                        } else {
+                                            ex_map.insert(sym.to_string(), TickerData {
+                                                bid, ask, price, vol: 0.0, funding_rate: 0.0,
+                                                bid_size: bid_qty * price, ask_size: ask_qty * price,
+                                                last_updated: ts
+                                            });
+                                        }
+                                    }
+                                    signal.notify_one();
+                                }
+                            }
+                        }
+                    }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Err(e)) => return Err(e.into()),
@@ -121,11 +177,4 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn upsert(price_map: &PriceMap, signal: &UpdateSignal, sym: String, mut data: TickerData) {
-    data.last_updated = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    price_map.entry("kucoin".to_string()).or_default().insert(sym, data);
-    signal.notify_one();
 }
