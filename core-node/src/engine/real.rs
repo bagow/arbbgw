@@ -362,47 +362,60 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
         let e_ctx = e_ctx.clone();
         async move {
             loop {
-                if let Ok(resp) = http.get("https://fapi.binance.com/fapi/v1/exchangeInfo").send().await {
-                    if let Ok(json) = resp.json::<Value>().await {
-                        if let Some(symbols) = json["symbols"].as_array() {
-                            let map = &e_ctx.multipliers;
-                            let lmap = &e_ctx.launch_times;
-                            let tmap = &e_ctx.tick_sizes;
-                            let mut count = 0u32;
-                            for s in symbols {
-                                let sym = s["symbol"].as_str().unwrap_or("");
-                                if !sym.ends_with("USDT") { continue; }
-                                let ct = s["contractType"].as_str().unwrap_or("");
-                                if ct != "PERPETUAL" && ct != "TRADIFI_PERPETUAL" { continue; }
-                                // Extract stepSize from LOT_SIZE filter as the multiplier
-                                if let Some(filters) = s["filters"].as_array() {
-                                    for f in filters {
-                                        if f["filterType"].as_str() == Some("LOT_SIZE") {
-                                            if let Some(ss) = f["stepSize"].as_str() {
-                                                if let Ok(step) = ss.parse::<f64>() {
-                                                    if step > 0.0 {
-                                                        map.insert(format!("binance:{}", sym), step);
-                                                        count += 1;
+                match http.get("https://fapi.binance.com/fapi/v1/exchangeInfo")
+                    .timeout(Duration::from_secs(15))
+                    .send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        match resp.json::<Value>().await {
+                            Ok(json) => {
+                                if let Some(symbols) = json["symbols"].as_array() {
+                                    let map = &e_ctx.multipliers;
+                                    let lmap = &e_ctx.launch_times;
+                                    let tmap = &e_ctx.tick_sizes;
+                                    let mut count = 0u32;
+                                    for s in symbols {
+                                        let sym = s["symbol"].as_str().unwrap_or("");
+                                        if !sym.ends_with("USDT") { continue; }
+                                        let ct = s["contractType"].as_str().unwrap_or("");
+                                        if ct != "PERPETUAL" && ct != "TRADIFI_PERPETUAL" { continue; }
+                                        if let Some(filters) = s["filters"].as_array() {
+                                            for f in filters {
+                                                if f["filterType"].as_str() == Some("LOT_SIZE") {
+                                                    if let Some(ss) = f["stepSize"].as_str() {
+                                                        if let Ok(step) = ss.parse::<f64>() {
+                                                            if step > 0.0 {
+                                                                map.insert(format!("binance:{}", sym), step);
+                                                                count += 1;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if f["filterType"].as_str() == Some("PRICE_FILTER") {
+                                                    if let Some(ts) = f["tickSize"].as_str() {
+                                                        if let Ok(tick) = ts.parse::<f64>() {
+                                                            if tick > 0.0 { tmap.insert(format!("binance:{}", sym), tick); }
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
-                                        // Binance: PRICE_FILTER.tickSize is the price step
-                                        if f["filterType"].as_str() == Some("PRICE_FILTER") {
-                                            if let Some(ts) = f["tickSize"].as_str() {
-                                                if let Ok(tick) = ts.parse::<f64>() {
-                                                    if tick > 0.0 { tmap.insert(format!("binance:{}", sym), tick); }
-                                                }
-                                            }
+                                        if let Some(ot) = s["onboardDate"].as_i64() {
+                                            lmap.insert(format!("binance:{}", sym), ot / 1000);
                                         }
                                     }
-                                }
-                                if let Some(ot) = s["onboardDate"].as_i64() {
-                                    lmap.insert(format!("binance:{}", sym), ot / 1000);
+                                    info!("[multipliers] Binance: loaded {} symbols", count);
+                                } else {
+                                    tracing::error!("[multipliers] Binance: 'symbols' field missing or not array. http={} keys={}", status, json.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>().join(",")).unwrap_or_default());
                                 }
                             }
-                            info!("[multipliers] Binance: loaded {} symbols", count);
+                            Err(e) => {
+                                tracing::error!("[multipliers] Binance: JSON parse failed http={}: {}", status, e);
+                            }
                         }
+                    }
+                    Err(e) => {
+                        tracing::error!("[multipliers] Binance: HTTP request failed: {}", e);
                     }
                 }
                 let loaded = e_ctx.multipliers.iter().filter(|e| e.key().starts_with("binance:")).count();
