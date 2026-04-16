@@ -422,8 +422,8 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!("[multipliers] Binance: FAILED to load, retrying in 30s");
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tracing::warn!("[multipliers] Binance: FAILED to load, retrying in 5min (backoff to avoid prolonging IP ban)");
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 }
             }
         }
