@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Duration::from_secs(30))
         .tcp_nodelay(true)                // Disable Nagle's for lower latency
+        .http1_only()                     // Force HTTP/1.1 — avoids H2 stream exhaustion (1024 limit)
         .build()?;
 
     let engine_ctx = Arc::new(crate::state::EngineContext::default());
