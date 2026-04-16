@@ -314,8 +314,13 @@ async function fetchSnapshot() {
         });
         
         // Also add from global unified state to ensure CEXes with 0 pairs are still recognized
+        // IMPORTANT: use .exchanges.data (the actual exchange map), NOT top-level .exchanges keys
+        // which include metadata like daily_pnl, daily_pnl_pct, margin_balances, balances, ts etc.
         if (typeof lastUnified !== 'undefined' && lastUnified && lastUnified.exchanges) {
-            Object.keys(lastUnified.exchanges).forEach(ex => {
+            const exData = lastUnified.exchanges.data || lastUnified.exchanges;
+            Object.keys(exData).forEach(ex => {
+                // Skip known metadata keys that are NOT exchange names
+                if (['data', 'ts', 'balances', 'margin_balances', 'daily_pnl', 'daily_pnl_pct', 'fees', 'positions'].includes(ex)) return;
                 if (!KNOWN_EXCHANGES.includes(ex)) KNOWN_EXCHANGES.push(ex);
             });
         }
