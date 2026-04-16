@@ -197,7 +197,7 @@ pub fn start_position_sync(
                 let tick_for_close = e_ctx.tick_sizes.get(&format!("{}:{}", remaining_ex, trade.pair)).map(|v| *v).unwrap_or(0.000001);
                 
                 if let Some(conn) = super::exchanges::get_connector(remaining_ex) {
-                    match conn.close_position(&http, &keys, &trade.pair, close_is_buy, q_qty, false, 10.0, 0.0, false, 0.0, mult, tick_for_close, 5, 25).await {
+                    match conn.close_position(&http, &keys, &trade.pair, close_is_buy, q_qty, false, 10.0, 0.0, false, 0.0, mult, tick_for_close, 5, 25, 5000).await {
                         Ok(rc) => {
                             let close_fill = rc.final_price;
                             let close_fee = rc.total_fee;
