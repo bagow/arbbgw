@@ -423,9 +423,14 @@ pub fn start_multiplier_fetcher(http: Client, e_ctx: Arc<crate::state::EngineCon
                 let loaded = e_ctx.multipliers.iter().filter(|e| e.key().starts_with("binance:")).count();
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-                } else if last_http_status == 418 || last_http_status == 429 {
-                    tracing::warn!("[multipliers] Binance: IP banned ({}), backing off 10min", last_http_status);
-                    tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                } else if last_http_status == 418 {
+                    // IP ban scales from 2min to 3 DAYS for repeat offenders. 
+                    // Do NOT retry frequently — it prolongs the ban.
+                    tracing::error!("[multipliers] Binance: IP BANNED (418). Backing off 1 HOUR. Binance pairs disabled until ban expires.");
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                } else if last_http_status == 429 {
+                    tracing::warn!("[multipliers] Binance: rate limited (429), backing off 5min");
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 } else {
                     tracing::warn!("[multipliers] Binance: FAILED to load (http={}), retrying in 30s", last_http_status);
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
