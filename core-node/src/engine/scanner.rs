@@ -197,8 +197,10 @@ pub fn generate_signals(
         {
             if worth_diag {
                 tracing::info!(
-                    "[scanner] REJECT {} spread={:.4}% -> listing too young",
+                    "[scanner] REJECT {} ({} vs {}) spread={:.4}% -> listing too young",
                     row.pair,
+                    row.exchange_a,
+                    row.exchange_b,
                     row.spread
                 );
             }
@@ -228,8 +230,8 @@ pub fn generate_signals(
 
             let diag_prefix = if log_diag && row.spread >= profile.min_entry_spread {
                 Some(format!(
-                    "[scanner] REJECT {} {}={:.4}%",
-                    row.pair, profile.id, row.spread
+                    "[scanner] REJECT {} ({} vs {}) {}={:.4}%",
+                    row.pair, row.exchange_a, row.exchange_b, profile.id, row.spread
                 ))
             } else {
                 None

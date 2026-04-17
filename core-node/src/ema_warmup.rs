@@ -253,8 +253,8 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
                     // Acquire semaphore permit — limits concurrent REST requests
                     let _permit = sem.acquire().await.unwrap();
 
-                    let candles_a = fetch_candles_for(&http, &ex_a, &pair).await;
-                    let candles_b = fetch_candles_for(&http, &ex_b, &pair).await;
+                    let candles_a = fetch_candles_for_with_retry(&http, &ex_a, &pair).await;
+                    let candles_b = fetch_candles_for_with_retry(&http, &ex_b, &pair).await;
 
                     if candles_a.is_empty() || candles_b.is_empty() {
                         return 0usize;
@@ -330,6 +330,20 @@ async fn fetch_candles_for(http: &Client, exchange: &str, pair: &str) -> Vec<(f6
         "bybit" => fetch_bybit_candles(http, pair).await,
         _ => vec![],
     }
+}
+
+async fn fetch_candles_for_with_retry(http: &Client, exchange: &str, pair: &str) -> Vec<(f64, f64)> {
+    for attempt in 1..=3 {
+        let res = fetch_candles_for(http, exchange, pair).await;
+        if !res.is_empty() {
+            return res;
+        }
+        // If it's empty, it might be an API error or rate limit. Backoff and retry.
+        if attempt < 3 {
+             tokio::time::sleep(std::time::Duration::from_millis(500 * attempt)).await;
+        }
+    }
+    vec![]
 }
 
 // ─── Merge two (timestamp, price) series by nearest 15-minute ──────────────────
