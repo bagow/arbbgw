@@ -192,9 +192,13 @@ pub fn generate_signals(
             .get(&format!("{}:{}", row.exchange_b, row.pair))
             .map(|r| *r)
             .unwrap_or(0);
-        if (age_a > 0 && now_s - age_a < min_age_secs)
-            || (age_b > 0 && now_s - age_b < min_age_secs)
-        {
+        
+        let elapsed_a = if age_a > 0 { now_s - age_a } else { u64::MAX };
+        let elapsed_b = if age_b > 0 { now_s - age_b } else { u64::MAX };
+        
+        let oldest_elapsed = elapsed_a.max(elapsed_b);
+
+        if oldest_elapsed < min_age_secs {
             if worth_diag {
                 tracing::info!(
                     "[scanner] REJECT {} ({} vs {}) spread={:.4}% -> listing too young",
