@@ -19,7 +19,7 @@ const MAX_CONCURRENT: usize = 20; // Max parallel REST requests (avoid rate limi
 
 // ─── Gate.io: fetch 15-min candles for a USDT perp ────────────────────────────
 
-async fn fetch_gate_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
+async fn fetch_gate_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
     // Gate contract name: BTCUSDT → BTC_USDT
     let contract = pair.replace("USDT", "_USDT");
     let from = now_secs() - LOOKBACK_SECS;
@@ -33,17 +33,17 @@ async fn fetch_gate_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
         .send()
         .await
     {
-        Ok(r) => match r.json().await {
+        Ok(r) if r.status().is_success() => match r.json().await {
             Ok(j) => j,
-            Err(_) => return vec![],
+            Err(_) => return None,
         },
-        Err(_) => return vec![],
+        _ => return None,
     };
     let arr = match v.as_array() {
         Some(a) => a,
-        None => return vec![],
+        None => return Some(vec![]),
     };
-    arr.iter()
+    let res: Vec<(f64, f64)> = arr.iter()
         .filter_map(|c| {
             // Gate candles: [{"t":ts,"o":open,"c":close,...}]
             let ts = c["t"].as_f64()?;
@@ -53,12 +53,13 @@ async fn fetch_gate_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
                 .or_else(|| c["c"].as_f64())?;
             Some((ts, close))
         })
-        .collect()
+        .collect();
+    Some(res)
 }
 
 // ─── KuCoin Futures: fetch 15-min klines ──────────────────────────────────────
 
-async fn fetch_kucoin_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
+async fn fetch_kucoin_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
     // KuCoin symbol: XBTUSDTM or BTCUSDTM pattern — pair ends with USDT → add M
     let sym = format!("{}M", pair);
     let from = now_secs() - LOOKBACK_SECS;
@@ -73,29 +74,30 @@ async fn fetch_kucoin_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
         .send()
         .await
     {
-        Ok(r) => match r.json().await {
+        Ok(r) if r.status().is_success() => match r.json().await {
             Ok(j) => j,
-            Err(_) => return vec![],
+            Err(_) => return None,
         },
-        Err(_) => return vec![],
+        _ => return None,
     };
     // KuCoin response: { "data": [[ts_ms, open, high, low, close, vol], ...] }
     let arr = match v["data"].as_array() {
         Some(a) => a,
-        None => return vec![],
+        None => return Some(vec![]),
     };
-    arr.iter()
+    let res: Vec<(f64, f64)> = arr.iter()
         .filter_map(|c| {
             let ts = c[0].as_f64()? / 1000.0; // ms → secs
             let close = c[4].as_f64()?;
             Some((ts, close))
         })
-        .collect()
+        .collect();
+    Some(res)
 }
 
 // ─── HTX: fetch 15-min klines ─────────────────────────────────────────────────
 
-async fn fetch_htx_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
+async fn fetch_htx_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
     // HTX linear-swap symbol: BTCUSDT → BTC-USDT
     let sym = format!("{}-{}", &pair[..pair.len() - 4], &pair[pair.len() - 4..]);
     let url = format!(
@@ -108,28 +110,29 @@ async fn fetch_htx_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
         .send()
         .await
     {
-        Ok(r) => match r.json().await {
+        Ok(r) if r.status().is_success() => match r.json().await {
             Ok(j) => j,
-            Err(_) => return vec![],
+            Err(_) => return None,
         },
-        Err(_) => return vec![],
+        _ => return None,
     };
     let arr = match v["data"].as_array() {
         Some(a) => a,
-        None => return vec![],
+        None => return Some(vec![]),
     };
-    arr.iter()
+    let res: Vec<(f64, f64)> = arr.iter()
         .filter_map(|c| {
             let ts = c["id"].as_f64()?;
             let close = c["close"].as_f64()?;
             Some((ts, close))
         })
-        .collect()
+        .collect();
+    Some(res)
 }
 
 // ─── Binance: fetch 15-min klines ─────────────────────────────────────────────
 
-async fn fetch_binance_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
+async fn fetch_binance_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
     let from = now_secs() - LOOKBACK_SECS;
     let url = format!(
         "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval=15m&startTime={}&limit=100",
@@ -142,17 +145,17 @@ async fn fetch_binance_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
         .send()
         .await
     {
-        Ok(r) => match r.json().await {
+        Ok(r) if r.status().is_success() => match r.json().await {
             Ok(j) => j,
-            Err(_) => return vec![],
+            Err(_) => return None,
         },
-        Err(_) => return vec![],
+        _ => return None,
     };
     let arr = match v.as_array() {
         Some(a) => a,
-        None => return vec![],
+        None => return Some(vec![]),
     };
-    arr.iter()
+    let res: Vec<(f64, f64)> = arr.iter()
         .filter_map(|c| {
             // Binance klines: [openTime, open, high, low, close, vol, closeTime, ...]
             let ts = c[0].as_f64()? / 1000.0; // ms → secs
@@ -162,12 +165,13 @@ async fn fetch_binance_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
                 .or_else(|| c[4].as_f64())?;
             Some((ts, close))
         })
-        .collect()
+        .collect();
+    Some(res)
 }
 
 // ─── Bybit: fetch 15-min klines ───────────────────────────────────────────────
 
-async fn fetch_bybit_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
+async fn fetch_bybit_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
     let from = now_secs() - LOOKBACK_SECS;
     let url = format!(
         "https://api.bybit.com/v5/market/kline?category=linear&symbol={}&interval=15&start={}&limit=100",
@@ -179,24 +183,25 @@ async fn fetch_bybit_candles(http: &Client, pair: &str) -> Vec<(f64, f64)> {
         .send()
         .await
     {
-        Ok(r) => match r.json().await {
+        Ok(r) if r.status().is_success() => match r.json().await {
             Ok(j) => j,
-            Err(_) => return vec![],
+            Err(_) => return None,
         },
-        Err(_) => return vec![],
+        _ => return None,
     };
     let arr = match v["result"]["list"].as_array() {
         Some(a) => a,
-        None => return vec![],
+        None => return Some(vec![]),
     };
-    arr.iter()
+    let res: Vec<(f64, f64)> = arr.iter()
         .filter_map(|c| {
             // Bybit klines: [startTime, open, high, low, close, vol, turnover]
             let ts = c[0].as_str().and_then(|s| s.parse::<f64>().ok())? / 1000.0;
             let close = c[4].as_str().and_then(|s| s.parse().ok())?;
             Some((ts, close))
         })
-        .collect()
+        .collect();
+    Some(res)
 }
 
 // ─── Main warmup function — called from main.rs after WS collectors start ────
@@ -321,27 +326,26 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
 
 // ─── Dispatch to the right exchange API ──────────────────────────────────────
 
-async fn fetch_candles_for(http: &Client, exchange: &str, pair: &str) -> Vec<(f64, f64)> {
+async fn fetch_candles_for(http: &Client, exchange: &str, pair: &str) -> Option<Vec<(f64, f64)>> {
     match exchange {
         "gate" => fetch_gate_candles(http, pair).await,
         "kucoin" => fetch_kucoin_candles(http, pair).await,
         "htx" => fetch_htx_candles(http, pair).await,
         "binance" => fetch_binance_candles(http, pair).await,
         "bybit" => fetch_bybit_candles(http, pair).await,
-        _ => vec![],
+        _ => Some(vec![]),
     }
 }
 
 async fn fetch_candles_for_with_retry(http: &Client, exchange: &str, pair: &str) -> Vec<(f64, f64)> {
-    for attempt in 1..=3 {
-        let res = fetch_candles_for(http, exchange, pair).await;
-        if !res.is_empty() {
+    // Retry indefinitely (or up to 100 times) until we get a successful HTTP 200 OK.
+    for attempt in 1..=100 {
+        if let Some(res) = fetch_candles_for(http, exchange, pair).await {
+            // Reached HTTP 200 OK. Even if empty, it's valid.
             return res;
         }
-        // If it's empty, it might be an API error or rate limit. Backoff and retry.
-        if attempt < 3 {
-             tokio::time::sleep(std::time::Duration::from_millis(500 * attempt)).await;
-        }
+        // If None, it is a Rate Limit or Server Error. Sleep and retry.
+        tokio::time::sleep(std::time::Duration::from_millis(500 * attempt)).await;
     }
     vec![]
 }
