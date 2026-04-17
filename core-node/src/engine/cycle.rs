@@ -171,49 +171,113 @@ pub async fn run_cycle(
         let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
         let zero_spread = exit_spread <= 0.0 && exec_net_pnl >= 0.0;
 
+        let mut reason_str = "";
+        if manual_close { reason_str = "MANUAL"; }
+        else if triggered_stop { reason_str = "STOP"; }
+        else if triggered_tp { reason_str = "TP"; }
+        else if zero_spread { reason_str = "ZERO_SPREAD"; }
+
         if manual_close || triggered_tp || triggered_stop || zero_spread {
-            // Guard: skip if this trade is already being closed by a previous spawn
-            if e_ctx
-                .closing_in_flight
-                .get(&trade.id)
-                .map(|v| *v)
-                .unwrap_or(false)
-            {
-                tracing::debug!(
-                    "[real] Close already in-flight for id={} {}, skipping",
-                    trade.id,
-                    trade.pair
-                );
+            if e_ctx.closing_in_flight.get(&trade.id).map(|v| *v).unwrap_or(false) {
+                tracing::debug!("[real] Close already in-flight for id={} {}, skipping", trade.id, trade.pair);
                 continue;
             }
-            e_ctx.closing_in_flight.insert(trade.id, true);
-
-            let reason = if manual_close {
-                "MANUAL"
-            } else if triggered_tp {
-                "TP"
-            } else if zero_spread {
-                "ZERO_SPREAD"
-            } else {
-                "STOP"
-            };
-            info!(
-                "[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4} norm={:.4}",
-                trade.id,
-                trade.pair,
-                reason,
-                exec_net_pct,
-                exit_spread,
-                spreads
-                    .iter()
-                    .find(|s| s.pair == trade.pair && s.direction == trade.direction)
-                    .map(|s| s.structural_spread)
-                    .unwrap_or(0.0)
-            );
 
             let exa = trade.exchange_a.clone();
             let exb = trade.exchange_b.clone();
             let pair = trade.pair.clone();
+            let vol = trade.volume;
+
+            let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
+            let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
+
+            // 🛡️ JIT L2/L3 VERIFICATION FOR EXITS (TP / ZERO_SPREAD) ───────────────────
+            if !manual_close && !triggered_stop && (reason_str == "TP" || reason_str == "ZERO_SPREAD") {
+                tracing::info!("[real] 🔍 JIT Exit Verification (VWAP) for {} on {}/{}...", pair, exa, exb);
+                let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
+                let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
+                
+                let (ob_a_res, ob_b_res) = tokio::join!(
+                    conn_a.fetch_orderbook(&http, &pair, 10),
+                    conn_b.fetch_orderbook(&http, &pair, 10)
+                );
+
+                let analyze_vwap = |ob_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>, is_buy: bool, required_vol: f64, m: f64| -> Option<f64> {
+                    if let Ok((bids, asks)) = ob_res {
+                        let levels = if is_buy { asks } else { bids };
+                        let mut cum_vol = 0.0;
+                        let mut cum_cost = 0.0;
+                        
+                        for (px, sz) in levels {
+                            let base_sz = if m > 0.0 && m != 1.0 { sz * m } else { sz };
+                            let remaining = required_vol - cum_vol;
+                            if remaining <= 0.0 { break; }
+                            
+                            let take = if base_sz > remaining { remaining } else { base_sz };
+                            cum_vol += take;
+                            cum_cost += take * px;
+                        }
+                        // We tolerate tiny floating point gap for full fill check
+                        if cum_vol >= required_vol * 0.99 { 
+                            Some(cum_cost / cum_vol)
+                        } else {
+                            None 
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                // Exit A requires us to do the OPPOSITE of entry. 
+                // If Entry A was Short (is_a_higher = true), we must BUY.
+                let vwap_a = analyze_vwap(ob_a_res, is_a_higher, vol, mult_a);
+                // If Entry B was Long (is_a_higher = true), we must SELL (is_buy = false).
+                let vwap_b = analyze_vwap(ob_b_res, !is_a_higher, vol, mult_b);
+
+                if let (Some(px_a), Some(px_b)) = (vwap_a, vwap_b) {
+                    let vwap_exec_pnl_a = if is_a_higher {
+                        (trade.entry_price_a - px_a) * (vol / trade.entry_price_a.max(1e-12))
+                    } else {
+                        (px_a - trade.entry_price_a) * (vol / trade.entry_price_a.max(1e-12))
+                    };
+                    let vwap_exec_pnl_b = if is_a_higher {
+                        (px_b - trade.entry_price_b) * (vol / trade.entry_price_b.max(1e-12))
+                    } else {
+                        (trade.entry_price_b - px_b) * (vol / trade.entry_price_b.max(1e-12))
+                    };
+                    let vwap_gross_pnl = vwap_exec_pnl_a + vwap_exec_pnl_b;
+                    let vwap_net_pnl = vwap_gross_pnl - trade.commission_cost - trade.funding_cost;
+                    let vwap_net_pct = vwap_net_pnl / vol * 100.0;
+
+                    let vwap_exit_spread = if is_a_higher {
+                        (px_a - px_b) / px_b.max(1e-12) * 100.0
+                    } else {
+                        (px_b - px_a) / px_a.max(1e-12) * 100.0
+                    };
+
+                    let still_tp = reason_str == "TP" && vwap_net_pct >= settings.take_profit_percent;
+                    let still_zero = reason_str == "ZERO_SPREAD" && vwap_exit_spread <= 0.0 && vwap_net_pnl >= 0.0;
+
+                    if !still_tp && !still_zero {
+                        tracing::warn!("[real] 🛑 MIRAGE DETECTED ({}): L1 spread={:.2}%, VWAP spread={:.2}%, L1 PnL={:.2}%, VWAP PnL={:.2}%. Aborting close.", 
+                            reason_str, exit_spread, vwap_exit_spread, exec_net_pct, vwap_net_pct);
+                        continue;
+                    } else {
+                        tracing::info!("[real] ✅ VWAP Confirmed: VWAP spread={:.2}%, VWAP PnL={:.2}%", vwap_exit_spread, vwap_net_pct);
+                        exit_price_a = px_a;
+                        exit_price_b = px_b;
+                    }
+                } else {
+                    tracing::warn!("[real] 🛑 MIRAGE DETECTED ({}): Insufficient L2 depth for {:.4} volume on {}/{}. Aborting close.", reason_str, vol, exa, exb);
+                    continue;
+                }
+            }
+
+            e_ctx.closing_in_flight.insert(trade.id, true);
+
+            let reason = reason_str;
+            info!("[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4}", trade.id, pair, reason, exec_net_pct, exit_spread);
+
             let c_a = trade.contracts_a;
             let c_b = trade.contracts_b;
             let id = trade.id;
