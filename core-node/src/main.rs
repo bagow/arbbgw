@@ -293,7 +293,7 @@ async fn main() -> Result<()> {
 
                 let spreads = compute_spreads(&prices, min_vol, &ts);
 
-                // Writes to real_db (server_cache) to avoid locking profiles_db
+                // Writes to profiles_db since vps-api reads from it
                 static LAST_SNAP: std::sync::atomic::AtomicU64 =
                     std::sync::atomic::AtomicU64::new(0);
                 let now_ms = std::time::SystemTime::now()
@@ -308,7 +308,7 @@ async fn main() -> Result<()> {
                     let snapshot_val =
                         serde_json::json!({ "ts": now_ms as i64, "data": snapshot_spreads })
                             .to_string();
-                    let cache_db = real_db.clone();
+                    let cache_db = profiles_db.clone();
                     tokio::spawn(async move {
                         let _ = cache_db.call(move |conn| {
                             let _ = conn.execute("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);", []);
@@ -364,7 +364,7 @@ async fn main() -> Result<()> {
 
     {
         let prices_snap = prices.clone();
-        let cache_db = real_db.clone(); // write to real-trader.db, not profiles
+        let cache_db = profiles_db.clone();
         let e_ctx = engine_ctx.clone();
         tokio::spawn(async move {
             // Wait just 5s for collectors to connect, then publish immediately
