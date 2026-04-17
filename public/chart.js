@@ -292,7 +292,7 @@ async function fetchSnapshot() {
         const json = await res.json();
         
         // 1. Snapshot
-        let rawData = (json.snapshot?.data || []).filter(r => r.spread >= scannerState.threshold);
+        let rawData = (json.snapshot?.data || []);
         const currentProfile = (typeof profiles !== 'undefined' && typeof activeTabId !== 'undefined') ? profiles.find(p => p.id === activeTabId) : null;
         if (currentProfile) {
             let disabled = [];
@@ -300,7 +300,6 @@ async function fetchSnapshot() {
             
             rawData = rawData.filter(r => {
                 if (disabled.includes(r.exchangeA) || disabled.includes(r.exchangeB)) return false;
-                if (r.spread < scannerState.threshold || r.spread > scannerState.maxSpread) return false;
                 return true;
             });
         }
@@ -398,18 +397,15 @@ function renderTable() {
         scannerState.activeExchanges.has(r.exchangeA) && scannerState.activeExchanges.has(r.exchangeB)
     );
 
-    // Apply active profile's settings (min/max entry spread)
+    // Filter only by disabled exchanges (min/max spread filtering is for trade signals only, not scanner)
     const currentProfile = (typeof profiles !== 'undefined' && typeof activeTabId !== 'undefined') 
         ? profiles.find(p => p.id === activeTabId) 
         : null;
     
     if (currentProfile) {
-        const s = currentProfile;
-        const minS = (s.min_entry_spread !== undefined && s.min_entry_spread !== null) ? s.min_entry_spread : 0;
-        const maxS = (s.max_entry_spread !== undefined && s.max_entry_spread !== null) ? s.max_entry_spread : 999;
         let disabled = [];
-        try { disabled = typeof s.disabled_exchanges === 'string' ? JSON.parse(s.disabled_exchanges) : (s.disabled_exchanges || []); } catch(e){}
-        filtered = filtered.filter(r => r.spread >= minS && r.spread <= maxS && !disabled.includes(r.exchangeA) && !disabled.includes(r.exchangeB));
+        try { disabled = typeof currentProfile.disabled_exchanges === 'string' ? JSON.parse(currentProfile.disabled_exchanges) : (currentProfile.disabled_exchanges || []); } catch(e){}
+        filtered = filtered.filter(r => !disabled.includes(r.exchangeA) && !disabled.includes(r.exchangeB));
     }
     const sorted = [...filtered].sort((a, b) => {
         const av = a[scannerState.sortKey] ?? 0, bv = b[scannerState.sortKey] ?? 0;

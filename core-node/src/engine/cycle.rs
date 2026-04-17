@@ -798,6 +798,66 @@ pub async fn run_cycle(
             continue;
         }
 
+        // --- 🚨 EARLY ABORT FOR ASYMMETRIC REJECTIONS ---
+        // If one leg was rejected at API level, there's no point wasting 150ms on filling verification.
+        // We trim the surviving leg immediately (if it got an order ID, it might have filled).
+        if oid_a.is_none() != oid_b.is_none() {
+            error!("[real] ⚠️ ONE-SIDED REJECTION {}: A={} B={}", pair, oid_a.is_some(), oid_b.is_some());
+            
+            let api_timeout = ts.api_timeout_ms;
+            let mult_a_t = sig.mult_a;
+            let mult_b_t = sig.mult_b;
+
+            if oid_a.is_some() {
+                // Leg A has an order ID, trim it
+                info!("[real] 🪚 IMMEDIATE TRIM for orphaned leg A on {} ({})", exa, pair);
+                tokio::spawn({
+                    let hc = http.clone();
+                    let kc = Arc::clone(&keys);
+                    let p = pair.clone();
+                    let ex = exa.clone();
+                    let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
+                    let is_buy = !is_a_higher;
+                    let fallback = sig.entry_a;
+                    let t_qty = qty_a;
+                    let t_tick = tick_a;
+                    async move {
+                        let _ = conn.trim_position(
+                            &hc, &kc, &p, !is_buy, t_qty, dry_run, mult_a_t, t_tick, fallback, api_timeout
+                        ).await;
+                    }
+                });
+            } else if oid_b.is_some() {
+                // Leg B has an order ID, trim it
+                info!("[real] 🪚 IMMEDIATE TRIM for orphaned leg B on {} ({})", exb, pair);
+                tokio::spawn({
+                    let hc = http.clone();
+                    let kc = Arc::clone(&keys);
+                    let p = pair.clone();
+                    let ex = exb.clone();
+                    let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
+                    let is_buy = is_a_higher;
+                    let fallback = sig.entry_b;
+                    let t_qty = qty_b;
+                    let t_tick = tick_b;
+                    async move {
+                        let _ = conn.trim_position(
+                            &hc, &kc, &p, !is_buy, t_qty, dry_run, mult_b_t, t_tick, fallback, api_timeout
+                        ).await;
+                    }
+                });
+            }
+
+            // Record as close failure to trigger kill-switch if happening repeatedly
+            let fails = e_ctx.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            if fails >= ts.max_consecutive_failures {
+                error!("[real] 🚨 KILL SWITCH TRIGGERED: {} consecutive symmetric failures (due to one-sided rejections). Pausing profile for {}s", fails, ts.kill_switch_pause_secs);
+                e_ctx.profile_pause.insert(settings.id.clone(), now_ms() + (ts.kill_switch_pause_secs as i64 * 1000));
+            }
+
+            continue;
+        }
+
         let mult_a = sig.mult_a;
         let mult_b = sig.mult_b;
 

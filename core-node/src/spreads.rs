@@ -25,11 +25,32 @@ pub fn compute_spreads(
     min_vol_m: f64,
     ts: &TechnicalSettings,
 ) -> Vec<SpreadRow> {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST_DIAG: AtomicI64 = AtomicI64::new(0);
+
     let now_f64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
     let now_secs = now_f64 as u64;
+    let now_ms = (now_f64 * 1000.0) as i64;
+
+    // Diagnostic logging — throttled to once per 30s
+    let last_d = LAST_DIAG.load(Ordering::Relaxed);
+    let log_diag = (now_ms - last_d) > 30_000;
+    if log_diag {
+        LAST_DIAG.store(now_ms, Ordering::Relaxed);
+    }
+
+    // Filter-stage counters
+    let mut cnt_total_pairs: u32 = 0;
+    let mut cnt_blacklist: u32 = 0;
+    let mut cnt_stale: u32 = 0;
+    let mut cnt_invalid_price: u32 = 0;
+    let mut cnt_intra_spread: u32 = 0;
+    let mut cnt_volume: u32 = 0;
+    let mut cnt_spread_range: u32 = 0;
+    let mut cnt_passed: u32 = 0;
 
     // Snapshot: take a quick read of each exchange shard into owned HashMaps.
     // This releases the DashMap refs immediately so collectors are never blocked.
@@ -55,28 +76,35 @@ pub fn compute_spreads(
                     None => continue,
                 };
 
+                cnt_total_pairs += 1;
+
                 if blacklist.iter().any(|bl| sym.eq_ignore_ascii_case(bl)) {
+                    cnt_blacklist += 1;
                     continue;
                 }
 
                 if data_a.last_updated > 0
                     && now_secs.saturating_sub(data_a.last_updated) > ts.stale_secs
                 {
+                    cnt_stale += 1;
                     continue;
                 }
                 if data_b.last_updated > 0
                     && now_secs.saturating_sub(data_b.last_updated) > ts.stale_secs
                 {
+                    cnt_stale += 1;
                     continue;
                 }
 
                 if data_a.bid <= 0.0 || data_a.ask <= 0.0 || data_b.bid <= 0.0 || data_b.ask <= 0.0
                 {
+                    cnt_invalid_price += 1;
                     continue;
                 }
                 if data_a.ask > data_a.bid * ts.intra_spread_limit
                     || data_b.ask > data_b.bid * ts.intra_spread_limit
                 {
+                    cnt_intra_spread += 1;
                     continue;
                 }
 
@@ -85,6 +113,7 @@ pub fn compute_spreads(
                     || data_b.vol <= 0.0
                     || data_b.vol < min_v
                 {
+                    cnt_volume += 1;
                     continue;
                 }
 
@@ -100,8 +129,11 @@ pub fn compute_spreads(
                 };
 
                 if spread < ts.spread_threshold || spread > ts.spread_max {
+                    cnt_spread_range += 1;
                     continue;
                 }
+
+                cnt_passed += 1;
 
                 // ── STRUCTURAL SPREAD (MID-PRICE EMA) ──
                 let is_a_first = name_a < name_b;
@@ -266,6 +298,25 @@ pub fn compute_spreads(
                 });
             }
         }
+    }
+
+    // ── PERIODIC DIAGNOSTICS ──
+    if log_diag {
+        tracing::info!(
+            "[spreads] DIAG: exchanges={} total_pairs={} → blacklist={} stale={} invalid_price={} intra_spread={} volume={} spread_range={} → PASSED={} | min_vol={:.1}M spread_thr={:.2} stale={}s",
+            snapshot.len(),
+            cnt_total_pairs,
+            cnt_blacklist,
+            cnt_stale,
+            cnt_invalid_price,
+            cnt_intra_spread,
+            cnt_volume,
+            cnt_spread_range,
+            cnt_passed,
+            min_vol_m,
+            ts.spread_threshold,
+            ts.stale_secs,
+        );
     }
 
     // Partial sort: we only need top spreads, but full sort is fine for ~1-5k rows

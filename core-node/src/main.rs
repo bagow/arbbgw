@@ -266,22 +266,7 @@ async fn main() -> Result<()> {
 
                 // Read cached settings (no SQL, just RwLock read)
                 let real_profiles = real_cache.read().await.clone();
-
-                // Log settings being used (every ~5s = ~500 ticks at 10ms)
-                static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if tick % 500 == 0 {
-                    for p in real_profiles.iter() {
-                        info!(
-                            "[settings] real  id={} active={} vol={} tp={}% min_spread={}",
-                            p.id,
-                            p.is_active,
-                            p.trade_volume,
-                            p.take_profit_percent,
-                            p.min_entry_spread
-                        );
-                    }
-                }
+                let ts = ts_cache.read().await.clone();
 
                 let min_vol = real_profiles
                     .iter()
@@ -289,7 +274,24 @@ async fn main() -> Result<()> {
                     .fold(f64::MAX, f64::min);
                 let min_vol = if min_vol == f64::MAX { 1.0 } else { min_vol };
 
-                let ts = ts_cache.read().await.clone();
+                // Log settings being used (every ~5s = ~500 ticks at 10ms)
+                static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if tick % 500 == 0 {
+                    for p in real_profiles.iter() {
+                        info!(
+                            "[settings] real  id={} active={} vol={} tp={}% min_spread={} | tech: spread_thr={:.2} stale={}s min_vol={:.1}M",
+                            p.id,
+                            p.is_active,
+                            p.trade_volume,
+                            p.take_profit_percent,
+                            p.min_entry_spread,
+                            ts.spread_threshold,
+                            ts.stale_secs,
+                            min_vol
+                        );
+                    }
+                }
 
                 let spreads = compute_spreads(&prices, min_vol, &ts);
 
