@@ -67,7 +67,6 @@ async fn main() -> Result<()> {
         .tcp_nodelay(true) // Disable Nagle's for lower latency
         .build()?;
 
-    let engine_ctx = Arc::new(crate::state::EngineContext::default());
 
     let engine_ctx = Arc::new(crate::state::EngineContext::default());
 
@@ -253,6 +252,7 @@ async fn main() -> Result<()> {
         let keys = exchange_keys.clone();
         let ts_cache = tech_settings_cache.clone();
         let e_ctx = engine_ctx.clone();
+        let profiles_db_engine = profiles_db.clone();
 
         tokio::spawn(async move {
             let mut last_run = std::time::Instant::now();
@@ -308,7 +308,7 @@ async fn main() -> Result<()> {
                     let snapshot_val =
                         serde_json::json!({ "ts": now_ms as i64, "data": snapshot_spreads })
                             .to_string();
-                    let cache_db = profiles_db.clone();
+                    let cache_db = profiles_db_engine.clone();
                     tokio::spawn(async move {
                         let _ = cache_db.call(move |conn| {
                             let _ = conn.execute("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);", []);
@@ -370,12 +370,13 @@ async fn main() -> Result<()> {
             // Wait just 5s for collectors to connect, then publish immediately
             // Subsequent updates every 30s
             let mut first = true;
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
                 if first {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     first = false;
                 } else {
-                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    interval.tick().await;
                 }
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

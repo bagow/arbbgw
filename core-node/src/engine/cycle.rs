@@ -712,7 +712,7 @@ pub async fn run_cycle(
             }
         );
 
-        let order_ms = t0.elapsed().as_millis();
+        let _order_ms = t0.elapsed().as_millis();
 
         let (res_a, ms_a) = result_a;
         if ms_a > 500 {

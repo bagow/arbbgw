@@ -152,7 +152,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
-    let mut ping = tokio::time::interval(Duration::from_secs(20));
+    let mut _ping = tokio::time::interval(Duration::from_secs(20));
     #[derive(Deserialize)]
     struct BybitMsg<'a> {
         #[serde(borrow)]
