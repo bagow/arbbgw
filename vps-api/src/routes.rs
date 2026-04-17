@@ -194,7 +194,7 @@ pub async fn handle_get_unified(
 
     // 1. Get Snapshot and Exchange Maps
     let snapshot = state
-        .real_db
+        .db
         .call(|conn| {
             let row: Result<String, rusqlite::Error> = conn.query_row(
                 "SELECT value FROM server_cache WHERE key = 'snapshot'",
@@ -212,7 +212,7 @@ pub async fn handle_get_unified(
         .unwrap_or(json!({}));
 
     let exchanges_raw = state
-        .real_db
+        .db
         .call(|conn| {
             let row: Result<String, rusqlite::Error> = conn.query_row(
                 "SELECT value FROM server_cache WHERE key = 'exchange_maps'",
