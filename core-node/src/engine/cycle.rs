@@ -131,16 +131,18 @@ pub async fn run_cycle(
         let _contracts_a = trade.contracts_a as f64;
         let _contracts_b = trade.contracts_b as f64;
 
+        let trade_coins = trade.volume / trade.entry_price_a.max(1e-12);
+
         // PnL for DISPLAY (using mark/mid prices — matches exchange PnL)
         let live_pnl_a = if is_a_higher {
-            (trade.entry_price_a - c_price_a) * (trade.volume / trade.entry_price_a.max(1e-12))
+            (trade.entry_price_a - c_price_a) * trade_coins
         } else {
-            (c_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a.max(1e-12))
+            (c_price_a - trade.entry_price_a) * trade_coins
         };
         let live_pnl_b = if is_a_higher {
-            (c_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12))
+            (c_price_b - trade.entry_price_b) * trade_coins
         } else {
-            (trade.entry_price_b - c_price_b) * (trade.volume / trade.entry_price_b.max(1e-12))
+            (trade.entry_price_b - c_price_b) * trade_coins
         };
         let live_gross_pnl = live_pnl_a + live_pnl_b;
 
@@ -151,14 +153,14 @@ pub async fn run_cycle(
 
         // PnL for CLOSE TRIGGERS (using bid/ask — pessimistic, for safe execution)
         let exec_pnl_a = if is_a_higher {
-            (trade.entry_price_a - exit_price_a) * (trade.volume / trade.entry_price_a.max(1e-12))
+            (trade.entry_price_a - exit_price_a) * trade_coins
         } else {
-            (exit_price_a - trade.entry_price_a) * (trade.volume / trade.entry_price_a.max(1e-12))
+            (exit_price_a - trade.entry_price_a) * trade_coins
         };
         let exec_pnl_b = if is_a_higher {
-            (exit_price_b - trade.entry_price_b) * (trade.volume / trade.entry_price_b.max(1e-12))
+            (exit_price_b - trade.entry_price_b) * trade_coins
         } else {
-            (trade.entry_price_b - exit_price_b) * (trade.volume / trade.entry_price_b.max(1e-12))
+            (trade.entry_price_b - exit_price_b) * trade_coins
         };
         let exec_gross_pnl = exec_pnl_a + exec_pnl_b;
         let exec_net_pnl = exec_gross_pnl - trade.commission_cost - fund_cost;
@@ -230,20 +232,20 @@ pub async fn run_cycle(
 
                 // Exit A requires us to do the OPPOSITE of entry. 
                 // If Entry A was Short (is_a_higher = true), we must BUY.
-                let vwap_a = analyze_vwap(ob_a_res, is_a_higher, vol, mult_a);
+                let vwap_a = analyze_vwap(ob_a_res, is_a_higher, trade_coins, mult_a);
                 // If Entry B was Long (is_a_higher = true), we must SELL (is_buy = false).
-                let vwap_b = analyze_vwap(ob_b_res, !is_a_higher, vol, mult_b);
+                let vwap_b = analyze_vwap(ob_b_res, !is_a_higher, trade_coins, mult_b);
 
                 if let (Some(px_a), Some(px_b)) = (vwap_a, vwap_b) {
                     let vwap_exec_pnl_a = if is_a_higher {
-                        (trade.entry_price_a - px_a) * (vol / trade.entry_price_a.max(1e-12))
+                        (trade.entry_price_a - px_a) * trade_coins
                     } else {
-                        (px_a - trade.entry_price_a) * (vol / trade.entry_price_a.max(1e-12))
+                        (px_a - trade.entry_price_a) * trade_coins
                     };
                     let vwap_exec_pnl_b = if is_a_higher {
-                        (px_b - trade.entry_price_b) * (vol / trade.entry_price_b.max(1e-12))
+                        (px_b - trade.entry_price_b) * trade_coins
                     } else {
-                        (trade.entry_price_b - px_b) * (vol / trade.entry_price_b.max(1e-12))
+                        (trade.entry_price_b - px_b) * trade_coins
                     };
                     let vwap_gross_pnl = vwap_exec_pnl_a + vwap_exec_pnl_b;
                     let vwap_net_pnl = vwap_gross_pnl - trade.commission_cost - trade.funding_cost;
@@ -268,7 +270,7 @@ pub async fn run_cycle(
                         exit_price_b = px_b;
                     }
                 } else {
-                    tracing::warn!("[real] 🛑 MIRAGE DETECTED ({}): Insufficient L2 depth for {:.4} volume on {}/{}. Aborting close.", reason_str, vol, exa, exb);
+                    tracing::warn!("[real] 🛑 MIRAGE DETECTED ({}): Insufficient L2 depth for {:.4} phys coins on {}/{}. Aborting close.", reason_str, trade_coins, exa, exb);
                     continue;
                 }
             }
@@ -284,6 +286,7 @@ pub async fn run_cycle(
             let vol = trade.volume;
             let entry_a = trade.entry_price_a;
             let entry_b = trade.entry_price_b;
+            let tc = trade_coins;
             let h = http.clone();
             let k = Arc::clone(&keys);
             let db_c = db.clone();
@@ -404,31 +407,31 @@ pub async fn run_cycle(
 
                 // ✅ Fill confirmed — compute real PnL and mark CLOSED
                 let real_pna = if is_a_higher {
-                    (entry_a - real_exit_a) * (vol / entry_a)
+                    (entry_a - real_exit_a) * tc
                 } else {
-                    (real_exit_a - entry_a) * (vol / entry_a)
+                    (real_exit_a - entry_a) * tc
                 };
                 let real_pnb = if is_a_higher {
-                    (real_exit_b - entry_b) * (vol / entry_b)
+                    (real_exit_b - entry_b) * tc
                 } else {
-                    (entry_b - real_exit_b) * (vol / entry_b)
+                    (entry_b - real_exit_b) * tc
                 };
                 let real_gp = real_pna + real_pnb;
 
                 let slip_cost_exit_a = if real_exit_a > 0.0 {
                     if is_a_higher {
-                        ((real_exit_a - exit_price_a) * (vol / entry_a)).max(0.0)
+                        ((real_exit_a - exit_price_a) * tc).max(0.0)
                     } else {
-                        ((exit_price_a - real_exit_a) * (vol / entry_a)).max(0.0)
+                        ((exit_price_a - real_exit_a) * tc).max(0.0)
                     }
                 } else {
                     0.0
                 };
                 let slip_cost_exit_b = if real_exit_b > 0.0 {
                     if !is_a_higher {
-                        ((real_exit_b - exit_price_b) * (vol / entry_b)).max(0.0)
+                        ((real_exit_b - exit_price_b) * tc).max(0.0)
                     } else {
-                        ((exit_price_b - real_exit_b) * (vol / entry_b)).max(0.0)
+                        ((exit_price_b - real_exit_b) * tc).max(0.0)
                     }
                 } else {
                     0.0
