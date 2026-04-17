@@ -667,374 +667,583 @@ pub async fn run_cycle(
             .map(|v| *v)
             .unwrap_or(0.000001);
 
-        let (result_a, result_b) = tokio::join!(
-            async {
-                let t_a = std::time::Instant::now();
-                let res = conn_ensure_a
-                    .place_order(
-                        &http,
-                        &keys,
-                        &pair,
-                        !is_a_higher,
-                        qty_a,
-                        dry_run,
-                        limit_price_a,
-                        limit_price_a > 0.0,
-                        settings.leverage as f64,
-                        mult_a,
-                        settings.slippage_percent,
-                        tick_a,
-                        ts.api_timeout_ms,
-                    )
-                    .await;
-                (res, t_a.elapsed().as_millis())
-            },
-            async {
-                let t_b = std::time::Instant::now();
-                let res = conn_ensure_b
-                    .place_order(
-                        &http,
-                        &keys,
-                        &pair,
-                        is_a_higher,
-                        qty_b,
-                        dry_run,
-                        limit_price_b,
-                        limit_price_b > 0.0,
-                        settings.leverage as f64,
-                        mult_b,
-                        settings.slippage_percent,
-                        tick_b,
-                        ts.api_timeout_ms,
-                    )
-                    .await;
-                (res, t_b.elapsed().as_millis())
-            }
+        // ── JIT ORDERBOOK VERIFICATION ───────────────────────────────────────
+        info!("[real] 🔍 Checking L2/L3 orderbook depth for {}...", pair);
+        let t_ob = std::time::Instant::now();
+        let (ob_a_res, ob_b_res) = tokio::join!(
+            conn_ensure_a.fetch_orderbook(&http, &pair, 10),
+            conn_ensure_b.fetch_orderbook(&http, &pair, 10)
         );
+        let _ob_ms = t_ob.elapsed().as_millis();
 
-        let _order_ms = t0.elapsed().as_millis();
-
-        let (res_a, ms_a) = result_a;
-        if ms_a > 500 {
-            let mut strikes = e_ctx.high_latency_strikes.entry(exa.clone()).or_insert(0);
-            *strikes += 1;
-            if *strikes >= 3 {
-                e_ctx
-                    .exchange_cooldown
-                    .insert(exa.clone(), now_ms() + 60_000); // 1 minute cooldown
-                error!("[real] 🐢 LATENCY ALERT: {} RTT is {}ms (>500ms). Exchange put on COOLDOWN for 1 minute.", exa, ms_a);
-                *strikes = 0;
-            }
-        } else {
-            e_ctx.high_latency_strikes.insert(exa.clone(), 0);
-        }
-
-        let (res_b, ms_b) = result_b;
-        if ms_b > 500 {
-            let mut strikes = e_ctx.high_latency_strikes.entry(exb.clone()).or_insert(0);
-            *strikes += 1;
-            if *strikes >= 3 {
-                e_ctx
-                    .exchange_cooldown
-                    .insert(exb.clone(), now_ms() + 60_000); // 1 minute cooldown
-                error!("[real] 🐢 LATENCY ALERT: {} RTT is {}ms (>500ms). Exchange put on COOLDOWN for 1 minute.", exb, ms_b);
-                *strikes = 0;
-            }
-        } else {
-            e_ctx.high_latency_strikes.insert(exb.clone(), 0);
-        }
-
-        let order_ms = t0.elapsed().as_millis();
-
-        // Destructure (order_id, inline_fill_price, inline_fill_fee)
-        let (oid_a, inline_fill_a, inline_fee_a) = match res_a {
-            Ok(t) => (t.0, t.1, t.2),
-            Err(e) => {
-                let es = e.to_string();
-                error!(
-                    "[real] LEG_A reject {}/{}: {} ({}ms)",
-                    exa, pair, es, order_ms
-                );
-                let esl = es.to_lowercase();
-                if esl.contains("insufficient")
-                    || esl.contains("balance")
-                    || esl.contains("margin")
-                    || esl.contains("exceed")
-                    || esl.contains("not enough")
-                {
-                    mark_balance_low(&exa, &e_ctx);
-                }
-                (None, 0.0, 0.0)
-            }
-        };
-        let (oid_b, inline_fill_b, inline_fee_b) = match res_b {
-            Ok(t) => (t.0, t.1, t.2),
-            Err(e) => {
-                let es = e.to_string();
-                error!(
-                    "[real] LEG_B reject {}/{}: {} ({}ms)",
-                    exb, pair, es, order_ms
-                );
-                let esl = es.to_lowercase();
-                if esl.contains("insufficient")
-                    || esl.contains("balance")
-                    || esl.contains("margin")
-                    || esl.contains("exceed")
-                    || esl.contains("not enough")
-                {
-                    mark_balance_low(&exb, &e_ctx);
-                }
-                (None, 0.0, 0.0)
-            }
-        };
-
-        let pair_cd = &e_ctx.pair_cooldown;
-
-        // ── SET PAIR COOLDOWN IMMEDIATELY AFTER ORDER ATTEMPT ──
-        // Prevents the same pair from being spammed regardless of fill outcome.
-        pair_cd.insert(pair.clone(), now_ms());
-
-        if oid_a.is_none() && oid_b.is_none() {
-            continue;
-        }
-
-        // --- 🚨 EARLY ABORT FOR ASYMMETRIC REJECTIONS ---
-        // If one leg was rejected at API level, there's no point wasting 150ms on filling verification.
-        // We trim the surviving leg immediately (if it got an order ID, it might have filled).
-        if oid_a.is_none() != oid_b.is_none() {
-            error!("[real] ⚠️ ONE-SIDED REJECTION {}: A={} B={}", pair, oid_a.is_some(), oid_b.is_some());
-            
-            let api_timeout = ts.api_timeout_ms;
-            let mult_a_t = sig.mult_a;
-            let mult_b_t = sig.mult_b;
-
-            if oid_a.is_some() {
-                // Leg A has an order ID, trim it
-                info!("[real] 🪚 IMMEDIATE TRIM for orphaned leg A on {} ({})", exa, pair);
-                tokio::spawn({
-                    let hc = http.clone();
-                    let kc = Arc::clone(&keys);
-                    let p = pair.clone();
-                    let ex = exa.clone();
-                    let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
-                    let is_buy = !is_a_higher;
-                    let fallback = sig.entry_a;
-                    let t_qty = qty_a;
-                    let t_tick = tick_a;
-                    async move {
-                        let _ = conn.trim_position(
-                            &hc, &kc, &p, !is_buy, t_qty, dry_run, mult_a_t, t_tick, fallback, api_timeout
-                        ).await;
-                    }
-                });
-            } else if oid_b.is_some() {
-                // Leg B has an order ID, trim it
-                info!("[real] 🪚 IMMEDIATE TRIM for orphaned leg B on {} ({})", exb, pair);
-                tokio::spawn({
-                    let hc = http.clone();
-                    let kc = Arc::clone(&keys);
-                    let p = pair.clone();
-                    let ex = exb.clone();
-                    let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
-                    let is_buy = is_a_higher;
-                    let fallback = sig.entry_b;
-                    let t_qty = qty_b;
-                    let t_tick = tick_b;
-                    async move {
-                        let _ = conn.trim_position(
-                            &hc, &kc, &p, !is_buy, t_qty, dry_run, mult_b_t, t_tick, fallback, api_timeout
-                        ).await;
-                    }
-                });
-            }
-
-            // Record as close failure to trigger kill-switch if happening repeatedly
-            let fails = e_ctx.consecutive_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if fails >= 5 {
-                error!("[real] 🚨 KILL SWITCH TRIGGERED: 5 consecutive failures (one-sided rejections). Suspending new entries.");
-                e_ctx.is_killed.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-
-            continue;
-        }
-
-        let mult_a = sig.mult_a;
-        let mult_b = sig.mult_b;
-
-        // ── PARALLEL FILL VERIFICATION ───────────────────────────────────────
-        // ALL order types (market + IOC) MUST be verified via fetch_order.
-        // No WS price fallbacks — only exchange-confirmed fill prices.
-        let mut fill_a = inline_fill_a;
-        let mut fee_a_val = inline_fee_a;
-        let mut actual_vol_phys_a = None;
-        let mut fill_b = inline_fill_b;
-        let mut fee_b_val = inline_fee_b;
-        let mut actual_vol_phys_b = None;
-        let mut got_a = oid_a.is_none() || dry_run || fill_a > 0.0;
-        let mut got_b = oid_b.is_none() || dry_run || fill_b > 0.0;
-
-        for attempt in 0..ts.fill_verify_retries {
-            if got_a && got_b && actual_vol_phys_a.is_some() && actual_vol_phys_b.is_some() {
-                break;
-            }
-            if attempt > 0 {
-                tokio::time::sleep(Duration::from_millis(ts.fill_verify_delay_ms as u64)).await;
-            }
-            let (fa, fb) = tokio::join!(
-                async {
-                    if !got_a || actual_vol_phys_a.is_none() {
-                        if let Some(ref oid) = oid_a {
-                            if let Ok::<(f64, f64, f64), String>((p, f, ev)) =
-                                crate::engine::exchanges::get_connector(&exa)
-                                    .unwrap()
-                                    .fetch_order(&http, &keys, &pair, oid.as_str(), mult_a)
-                                    .await
-                            {
-                                let af = if f > 1e-9 { f.abs() } else { 0.0 };
-                                return Some((p, af, ev));
-                            }
+        let analyze_depth = |ob_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>,
+                             is_buy: bool,
+                             limit_price: f64,
+                             m: f64|
+         -> f64 {
+            if let Ok((bids, asks)) = ob_res {
+                let levels = if is_buy { asks } else { bids };
+                let mut cum_vol = 0.0;
+                for (px, sz) in levels {
+                    if limit_price > 0.0 {
+                        if is_buy && px > limit_price {
+                            continue;
+                        }
+                        if !is_buy && px < limit_price {
+                            continue;
                         }
                     }
-                    None
-                },
-                async {
-                    if !got_b || actual_vol_phys_b.is_none() {
-                        if let Some(ref oid) = oid_b {
-                            if let Ok::<(f64, f64, f64), String>((p, f, ev)) =
-                                crate::engine::exchanges::get_connector(&exb)
-                                    .unwrap()
-                                    .fetch_order(&http, &keys, &pair, oid.as_str(), mult_b)
-                                    .await
-                            {
-                                let af = if f > 1e-9 { f.abs() } else { 0.0 };
-                                return Some((p, af, ev));
-                            }
-                        }
-                    }
-                    None
-                }
-            );
-            if let Some((p, f, ev)) = fa {
-                fill_a = p;
-                fee_a_val = f;
-                actual_vol_phys_a = Some(ev);
-                got_a = true;
-            }
-            if let Some((p, f, ev)) = fb {
-                fill_b = p;
-                fee_b_val = f;
-                actual_vol_phys_b = Some(ev);
-                got_b = true;
-            }
-        }
-
-        // NO WS FALLBACK for entry fills! If fetch_order couldn't verify the fill
-        // after all retries, the order is treated as UNFILLED in first pass.
-        // --- 🛡️ NEW: POSITIONS FALLBACK ---
-        // But before we treat it as UNFILLED, we check `fetch_positions` directly.
-        // If the position exists, it means the API reported 0 fill but the position was actually created (Ghost position).
-        let api_timeout = ts.api_timeout_ms;
-        if oid_a.is_some() && actual_vol_phys_a.is_none() && !dry_run {
-            if let Ok(pos_res) = crate::engine::exchanges::get_connector(&exa)
-                .unwrap()
-                .fetch_positions(&http, &keys)
-                .await
-            {
-                if let Some(pos) = pos_res
-                    .iter()
-                    .find(|p| p.symbol == pair && p.size.abs() > 1e-12)
-                {
-                    actual_vol_phys_a = Some(pos.size.abs());
-                    fill_a = if pos.entry_price > 0.0 {
-                        pos.entry_price
+                    if m > 0.0 && m != 1.0 {
+                        cum_vol += sz * m;
                     } else {
-                        sig.entry_a
-                    };
-                    fee_a_val = 0.0;
-                    info!("[real] 🛡️ POSITION FALLBACK for {}: fetch_order failed, but position {} exists (size: {})", exa, pair, pos.size.abs());
+                        cum_vol += sz;
+                    }
+                }
+                cum_vol
+            } else {
+                -1.0
+            }
+        };
+
+        let depth_a = analyze_depth(ob_a_res, !is_a_higher, limit_price_a, mult_a);
+        let depth_b = analyze_depth(ob_b_res, is_a_higher, limit_price_b, mult_b);
+
+        if depth_a < qty_a || depth_b < qty_b {
+            tracing::warn!("[real] 🛑 ABORT {}: Insufficient L2/L3 depth! req A={} (has {:.2}), req B={} (has {:.2})", pair, qty_a, depth_a, qty_b, depth_b);
+            continue;
+        }
+
+        // ── SEQUENTIAL ORDER EXECUTION (THINNER LEG FIRST) ───────────────────
+        opened_this_cycle = true;
+        let a_is_thinner = depth_a <= depth_b;
+
+        let mut actual_vol_phys_a: Option<f64> = None;
+        let mut actual_vol_phys_b: Option<f64> = None;
+        let mut fill_a = 0.0;
+        let mut fill_b = 0.0;
+        let mut fee_a_val = 0.0;
+        let mut fee_b_val = 0.0;
+
+        let mut oid_a_opt: Option<String> = None;
+        let mut oid_b_opt: Option<String> = None;
+
+        if a_is_thinner {
+            info!(
+                "[real] ⚡ Executing Leg 1 (thinner leg) on {} for {}...",
+                exa, pair
+            );
+            let t_a = std::time::Instant::now();
+            let res_a = conn_ensure_a
+                .place_order(
+                    &http,
+                    &keys,
+                    &pair,
+                    !is_a_higher,
+                    qty_a,
+                    dry_run,
+                    limit_price_a,
+                    limit_price_a > 0.0,
+                    settings.leverage as f64,
+                    mult_a,
+                    settings.slippage_percent,
+                    tick_a,
+                    ts.api_timeout_ms,
+                )
+                .await;
+
+            if t_a.elapsed().as_millis() > 500 {
+                let mut strikes = e_ctx.high_latency_strikes.entry(exa.clone()).or_insert(0);
+                *strikes += 1;
+                if *strikes >= 3 {
+                    e_ctx
+                        .exchange_cooldown
+                        .insert(exa.clone(), now_ms() + 60_000);
+                    error!("[real] 🐢 LATENCY ALERT: {} RTT >500ms. Cooldown 1m.", exa);
+                    *strikes = 0;
+                }
+            } else {
+                e_ctx.high_latency_strikes.insert(exa.clone(), 0);
+            }
+            e_ctx.pair_cooldown.insert(pair.clone(), now_ms());
+
+            let (oid_a, inline_fill_a, inline_fee_a) = match res_a {
+                Ok(t) => (t.0, t.1, t.2),
+                Err(e) => {
+                    error!("[real] LEG_A reject {}/{}: {}", exa, pair, e);
+                    let esl = e.to_string().to_lowercase();
+                    if esl.contains("insufficient")
+                        || esl.contains("balance")
+                        || esl.contains("margin")
+                        || esl.contains("exceed")
+                    {
+                        mark_balance_low(&exa, &e_ctx);
+                    }
+                    (None, 0.0, 0.0)
+                }
+            };
+            oid_a_opt = oid_a.clone();
+
+            if oid_a.is_none() && !dry_run {
+                tracing::warn!(
+                    "[real] 🛑 ABORT {}: Leg 1 rejected by {}. Leg 2 aborted.",
+                    pair,
+                    exa
+                );
+                continue;
+            }
+
+            fill_a = inline_fill_a;
+            fee_a_val = inline_fee_a;
+            let mut got_a = dry_run || fill_a > 0.0;
+
+            for attempt in 0..ts.fill_verify_retries {
+                if got_a && actual_vol_phys_a.is_some() {
+                    break;
+                }
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        ts.fill_verify_delay_ms as u64,
+                    ))
+                    .await;
+                }
+
+                if !got_a || actual_vol_phys_a.is_none() {
+                    if let Some(ref oid) = oid_a {
+                        if let Ok((p, f, ev)) = conn_ensure_a
+                            .fetch_order(&http, &keys, &pair, oid, mult_a)
+                            .await
+                        {
+                            if p > 0.0 {
+                                fill_a = p;
+                            }
+                            if f > 1e-9 {
+                                fee_a_val = f;
+                            }
+                            if ev > 1e-12 {
+                                actual_vol_phys_a = Some(ev);
+                                got_a = true;
+                            }
+                        }
+                    }
                 }
             }
-        }
-        if oid_a.is_some() && actual_vol_phys_a.is_none() {
-            error!("[real] ❌ ENTRY FILL UNVERIFIED for {} leg A after {} retries — treating as UNFILLED", pair, ts.fill_verify_retries);
-            tokio::spawn({
+
+            let filled_a = actual_vol_phys_a.unwrap_or(0.0);
+            if filled_a <= 1e-12 && !dry_run {
+                tracing::warn!(
+                    "[real] 🛑 ABORT {}: Leg 1 filled 0% on {}. Leg 2 aborted.",
+                    pair,
+                    exa
+                );
+                continue;
+            }
+
+            let final_qty_b = if dry_run { qty_b } else { filled_a };
+            tracing::info!(
+                "[real] ⚡ Executing Leg 2 on {} for {}. Re-matching volume: {}",
+                exb,
+                pair,
+                final_qty_b
+            );
+
+            let t_b = std::time::Instant::now();
+            let res_b = conn_ensure_b
+                .place_order(
+                    &http,
+                    &keys,
+                    &pair,
+                    is_a_higher,
+                    final_qty_b,
+                    dry_run,
+                    limit_price_b,
+                    limit_price_b > 0.0,
+                    settings.leverage as f64,
+                    mult_b,
+                    settings.slippage_percent,
+                    tick_b,
+                    ts.api_timeout_ms,
+                )
+                .await;
+
+            if t_b.elapsed().as_millis() > 500 {
+                let mut strikes = e_ctx.high_latency_strikes.entry(exb.clone()).or_insert(0);
+                *strikes += 1;
+                if *strikes >= 3 {
+                    e_ctx
+                        .exchange_cooldown
+                        .insert(exb.clone(), now_ms() + 60_000);
+                    error!("[real] 🐢 LATENCY ALERT: {} RTT >500ms. Cooldown 1m.", exb);
+                    *strikes = 0;
+                }
+            } else {
+                e_ctx.high_latency_strikes.insert(exb.clone(), 0);
+            }
+
+            let (oid_b, inline_fill_b, inline_fee_b) = match res_b {
+                Ok(t) => (t.0, t.1, t.2),
+                Err(e) => {
+                    error!("[real] LEG_B reject {}/{}: {}", exb, pair, e);
+                    (None, 0.0, 0.0)
+                }
+            };
+            oid_b_opt = oid_b.clone();
+
+            if oid_b.is_none() && !dry_run {
+                error!(
+                    "[real] ⚠️ ONE-SIDED REJECTION {}: Leg 2 rejected by {}. Trimming Leg 1.",
+                    pair, exb
+                );
                 let hc = http.clone();
                 let kc = Arc::clone(&keys);
                 let p = pair.clone();
                 let ex = exa.clone();
-                let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
-                let is_buy = !is_a_higher;
-                let fallback = sig.entry_a;
-                async move {
-                    error!("[real] 🚨 GHOST PREVENTION: Blind trimming {} on {} to drop unverified orphaned position", p, ex);
-                    let _ = conn
+                let fall = sig.entry_a;
+                let at = ts.api_timeout_ms;
+                tokio::spawn(async move {
+                    let _ = crate::engine::exchanges::get_connector(&ex)
+                        .unwrap()
                         .trim_position(
                             &hc,
                             &kc,
                             &p,
-                            !is_buy,
-                            qty_a,
+                            !(!is_a_higher),
+                            final_qty_b,
                             dry_run,
                             mult_a,
                             tick_a,
-                            fallback,
-                            api_timeout,
+                            fall,
+                            at,
                         )
                         .await;
-                }
-            });
-        }
+                });
+                continue;
+            }
 
-        if oid_b.is_some() && actual_vol_phys_b.is_none() && !dry_run {
-            if let Ok(pos_res) = crate::engine::exchanges::get_connector(&exb)
-                .unwrap()
-                .fetch_positions(&http, &keys)
-                .await
-            {
-                if let Some(pos) = pos_res
-                    .iter()
-                    .find(|p| p.symbol == pair && p.size.abs() > 1e-12)
-                {
-                    actual_vol_phys_b = Some(pos.size.abs());
-                    fill_b = if pos.entry_price > 0.0 {
-                        pos.entry_price
-                    } else {
-                        sig.entry_b
-                    };
-                    fee_b_val = 0.0;
-                    info!("[real] 🛡️ POSITION FALLBACK for {}: fetch_order failed, but position {} exists (size: {})", exb, pair, pos.size.abs());
+            fill_b = inline_fill_b;
+            fee_b_val = inline_fee_b;
+            let mut got_b = dry_run || fill_b > 0.0;
+
+            for attempt in 0..ts.fill_verify_retries {
+                if got_b && actual_vol_phys_b.is_some() {
+                    break;
+                }
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        ts.fill_verify_delay_ms as u64,
+                    ))
+                    .await;
+                }
+
+                if !got_b || actual_vol_phys_b.is_none() {
+                    if let Some(ref oid) = oid_b {
+                        if let Ok((p, f, ev)) = conn_ensure_b
+                            .fetch_order(&http, &keys, &pair, oid, mult_b)
+                            .await
+                        {
+                            if p > 0.0 {
+                                fill_b = p;
+                            }
+                            if f > 1e-9 {
+                                fee_b_val = f;
+                            }
+                            if ev > 1e-12 {
+                                actual_vol_phys_b = Some(ev);
+                                got_b = true;
+                            }
+                        }
+                    }
                 }
             }
-        }
-        if oid_b.is_some() && actual_vol_phys_b.is_none() {
-            error!("[real] ❌ ENTRY FILL UNVERIFIED for {} leg B after {} retries — treating as UNFILLED", pair, ts.fill_verify_retries);
-            tokio::spawn({
+
+            let filled_b = actual_vol_phys_b.unwrap_or(0.0);
+            if (filled_b < filled_a * 0.99) && !dry_run {
+                let mismatch = filled_a - filled_b;
+                error!("[real] ⚠️ ASYMMETRIC FILL {}: Leg 2 {} filled less ({}) than Leg 1 {} ({}). Trimming Leg 1 excess: {}", pair, exb, filled_b, exa, filled_a, mismatch);
+                let hc = http.clone();
+                let kc = Arc::clone(&keys);
+                let p = pair.clone();
+                let ex = exa.clone();
+                let fall = sig.entry_a;
+                let at = ts.api_timeout_ms;
+                tokio::spawn(async move {
+                    let _ = crate::engine::exchanges::get_connector(&ex)
+                        .unwrap()
+                        .trim_position(
+                            &hc,
+                            &kc,
+                            &p,
+                            !(!is_a_higher),
+                            mismatch,
+                            dry_run,
+                            mult_a,
+                            tick_a,
+                            fall,
+                            at,
+                        )
+                        .await;
+                });
+            }
+        } else {
+            // -- B IS THINNER --
+            info!(
+                "[real] ⚡ Executing Leg 1 (thinner leg) on {} for {}...",
+                exb, pair
+            );
+            let t_b = std::time::Instant::now();
+            let res_b = conn_ensure_b
+                .place_order(
+                    &http,
+                    &keys,
+                    &pair,
+                    is_a_higher,
+                    qty_b,
+                    dry_run,
+                    limit_price_b,
+                    limit_price_b > 0.0,
+                    settings.leverage as f64,
+                    mult_b,
+                    settings.slippage_percent,
+                    tick_b,
+                    ts.api_timeout_ms,
+                )
+                .await;
+
+            if t_b.elapsed().as_millis() > 500 {
+                let mut strikes = e_ctx.high_latency_strikes.entry(exb.clone()).or_insert(0);
+                *strikes += 1;
+                if *strikes >= 3 {
+                    e_ctx
+                        .exchange_cooldown
+                        .insert(exb.clone(), now_ms() + 60_000);
+                    error!("[real] 🐢 LATENCY ALERT: {} RTT >500ms. Cooldown 1m.", exb);
+                    *strikes = 0;
+                }
+            } else {
+                e_ctx.high_latency_strikes.insert(exb.clone(), 0);
+            }
+            e_ctx.pair_cooldown.insert(pair.clone(), now_ms());
+
+            let (oid_b, inline_fill_b, inline_fee_b) = match res_b {
+                Ok(t) => (t.0, t.1, t.2),
+                Err(e) => {
+                    error!("[real] LEG_B reject {}/{}: {}", exb, pair, e);
+                    let esl = e.to_string().to_lowercase();
+                    if esl.contains("insufficient")
+                        || esl.contains("balance")
+                        || esl.contains("margin")
+                        || esl.contains("exceed")
+                    {
+                        mark_balance_low(&exb, &e_ctx);
+                    }
+                    (None, 0.0, 0.0)
+                }
+            };
+            oid_b_opt = oid_b.clone();
+
+            if oid_b.is_none() && !dry_run {
+                tracing::warn!(
+                    "[real] 🛑 ABORT {}: Leg 1 rejected by {}. Leg 2 aborted.",
+                    pair,
+                    exb
+                );
+                continue;
+            }
+
+            fill_b = inline_fill_b;
+            fee_b_val = inline_fee_b;
+            let mut got_b = dry_run || fill_b > 0.0;
+
+            for attempt in 0..ts.fill_verify_retries {
+                if got_b && actual_vol_phys_b.is_some() {
+                    break;
+                }
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        ts.fill_verify_delay_ms as u64,
+                    ))
+                    .await;
+                }
+
+                if !got_b || actual_vol_phys_b.is_none() {
+                    if let Some(ref oid) = oid_b {
+                        if let Ok((p, f, ev)) = conn_ensure_b
+                            .fetch_order(&http, &keys, &pair, oid, mult_b)
+                            .await
+                        {
+                            if p > 0.0 {
+                                fill_b = p;
+                            }
+                            if f > 1e-9 {
+                                fee_b_val = f;
+                            }
+                            if ev > 1e-12 {
+                                actual_vol_phys_b = Some(ev);
+                                got_b = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let filled_b = actual_vol_phys_b.unwrap_or(0.0);
+            if filled_b <= 1e-12 && !dry_run {
+                tracing::warn!(
+                    "[real] 🛑 ABORT {}: Leg 1 filled 0% on {}. Leg 2 aborted.",
+                    pair,
+                    exb
+                );
+                continue;
+            }
+
+            let final_qty_a = if dry_run { qty_a } else { filled_b };
+            tracing::info!(
+                "[real] ⚡ Executing Leg 2 on {} for {}. Re-matching volume: {}",
+                exa,
+                pair,
+                final_qty_a
+            );
+
+            let t_a = std::time::Instant::now();
+            let res_a = conn_ensure_a
+                .place_order(
+                    &http,
+                    &keys,
+                    &pair,
+                    !is_a_higher,
+                    final_qty_a,
+                    dry_run,
+                    limit_price_a,
+                    limit_price_a > 0.0,
+                    settings.leverage as f64,
+                    mult_a,
+                    settings.slippage_percent,
+                    tick_a,
+                    ts.api_timeout_ms,
+                )
+                .await;
+
+            if t_a.elapsed().as_millis() > 500 {
+                let mut strikes = e_ctx.high_latency_strikes.entry(exa.clone()).or_insert(0);
+                *strikes += 1;
+                if *strikes >= 3 {
+                    e_ctx
+                        .exchange_cooldown
+                        .insert(exa.clone(), now_ms() + 60_000);
+                    error!("[real] 🐢 LATENCY ALERT: {} RTT >500ms. Cooldown 1m.", exa);
+                    *strikes = 0;
+                }
+            } else {
+                e_ctx.high_latency_strikes.insert(exa.clone(), 0);
+            }
+
+            let (oid_a, inline_fill_a, inline_fee_a) = match res_a {
+                Ok(t) => (t.0, t.1, t.2),
+                Err(e) => {
+                    error!("[real] LEG_A reject {}/{}: {}", exa, pair, e);
+                    (None, 0.0, 0.0)
+                }
+            };
+            oid_a_opt = oid_a.clone();
+
+            if oid_a.is_none() && !dry_run {
+                error!(
+                    "[real] ⚠️ ONE-SIDED REJECTION {}: Leg 2 rejected by {}. Trimming Leg 1.",
+                    pair, exa
+                );
                 let hc = http.clone();
                 let kc = Arc::clone(&keys);
                 let p = pair.clone();
                 let ex = exb.clone();
-                let conn = crate::engine::exchanges::get_connector(&ex).unwrap();
-                let is_buy = is_a_higher;
-                let fallback = sig.entry_b;
-                async move {
-                    error!("[real] 🚨 GHOST PREVENTION: Blind trimming {} on {} to drop unverified orphaned position", p, ex);
-                    let _ = conn
+                let fall = sig.entry_b;
+                let at = ts.api_timeout_ms;
+                tokio::spawn(async move {
+                    let _ = crate::engine::exchanges::get_connector(&ex)
+                        .unwrap()
                         .trim_position(
                             &hc,
                             &kc,
                             &p,
-                            !is_buy,
-                            qty_b,
+                            !is_a_higher,
+                            final_qty_a,
                             dry_run,
                             mult_b,
                             tick_b,
-                            fallback,
-                            api_timeout,
+                            fall,
+                            at,
                         )
                         .await;
+                });
+                continue;
+            }
+
+            fill_a = inline_fill_a;
+            fee_a_val = inline_fee_a;
+            let mut got_a = dry_run || fill_a > 0.0;
+
+            for attempt in 0..ts.fill_verify_retries {
+                if got_a && actual_vol_phys_a.is_some() {
+                    break;
                 }
-            });
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        ts.fill_verify_delay_ms as u64,
+                    ))
+                    .await;
+                }
+
+                if !got_a || actual_vol_phys_a.is_none() {
+                    if let Some(ref oid) = oid_a {
+                        if let Ok((p, f, ev)) = conn_ensure_a
+                            .fetch_order(&http, &keys, &pair, oid, mult_a)
+                            .await
+                        {
+                            if p > 0.0 {
+                                fill_a = p;
+                            }
+                            if f > 1e-9 {
+                                fee_a_val = f;
+                            }
+                            if ev > 1e-12 {
+                                actual_vol_phys_a = Some(ev);
+                                got_a = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let filled_a = actual_vol_phys_a.unwrap_or(0.0);
+            if (filled_a < filled_b * 0.99) && !dry_run {
+                let mismatch = filled_b - filled_a;
+                error!("[real] ⚠️ ASYMMETRIC FILL {}: Leg 2 {} filled less ({}) than Leg 1 {} ({}). Trimming Leg 1 excess: {}", pair, exa, filled_a, exb, filled_b, mismatch);
+                let hc = http.clone();
+                let kc = Arc::clone(&keys);
+                let p = pair.clone();
+                let ex = exb.clone();
+                let fall = sig.entry_b;
+                let at = ts.api_timeout_ms;
+                tokio::spawn(async move {
+                    let _ = crate::engine::exchanges::get_connector(&ex)
+                        .unwrap()
+                        .trim_position(
+                            &hc,
+                            &kc,
+                            &p,
+                            !is_a_higher,
+                            mismatch,
+                            dry_run,
+                            mult_b,
+                            tick_b,
+                            fall,
+                            at,
+                        )
+                        .await;
+                });
+            }
         }
+
+        let oid_a = oid_a_opt;
+        let oid_b = oid_b_opt;
 
         let total_ms = t0.elapsed().as_millis();
         if dry_run {
@@ -1192,7 +1401,9 @@ pub async fn run_cycle(
             // Nothing survived the trim (e.g. one leg didn't fill at all, and we dumped the other)
             let total_fee = fee_a_val + fee_b_val + trimming_fee;
             error!("[real] ❌ FULL ASYMMETRY DUMPED {}. Trade canceled. Trimming Loss: {:.4}, Trimming Fee: {:.4}", pair, trimming_loss, trimming_fee);
-            pair_cd.insert(pair.clone(), now + ts.asymmetric_cooldown_ms);
+            e_ctx
+                .pair_cooldown
+                .insert(pair.clone(), now + ts.asymmetric_cooldown_ms);
 
             // Record failed asymmetrical trade into database...
             let (ea_s, eb_s, d, sp, pid) = (

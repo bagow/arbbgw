@@ -683,4 +683,66 @@ impl ExchangeConnector for GateConnector {
         }
         Ok(positions)
     }
+
+    async fn fetch_orderbook(
+        &self,
+        http: &Client,
+        pair: &str,
+        depth: u32,
+    ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
+        let contract = pair.replace("USDT", "_USDT");
+        let url = format!(
+            "https://api.gateio.ws/api/v4/futures/usdt/order_book?contract={}&limit={}&with_id=false",
+            contract, depth
+        );
+        let res = http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Gate depth error: {}", e))?;
+
+        let status = res.status();
+        let body = res
+            .text()
+            .await
+            .map_err(|e| format!("Body read error: {}", e))?;
+
+        if !status.is_success() {
+            return Err(format!("Gate API HTTP {}: {}", status, body));
+        }
+
+        let json: Value =
+            serde_json::from_str(&body).map_err(|e| format!("Gate Parse error: {}", e))?;
+
+        let parse_levels = |levels: &Value| -> Vec<(f64, f64)> {
+            let mut out = Vec::new();
+            if let Some(arr) = levels.as_array() {
+                for item in arr {
+                    if let (Some(px_str), Some(sz_f64)) = (
+                        item["p"].as_str(),
+                        item["s"]
+                            .as_number()
+                            .and_then(|n| n.as_f64())
+                            .or_else(|| item["s"].as_f64()),
+                    ) {
+                        if let Ok(px) = px_str.parse::<f64>() {
+                            out.push((px, sz_f64));
+                        }
+                    } else if let (Some(px_str), Some(sz_i64)) =
+                        (item["p"].as_str(), item["s"].as_i64())
+                    {
+                        if let Ok(px) = px_str.parse::<f64>() {
+                            out.push((px, sz_i64 as f64));
+                        }
+                    }
+                }
+            }
+            out
+        };
+
+        let bids = parse_levels(&json["bids"]);
+        let asks = parse_levels(&json["asks"]);
+
+        Ok((bids, asks))
+    }
 }

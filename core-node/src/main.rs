@@ -67,7 +67,6 @@ async fn main() -> Result<()> {
         .tcp_nodelay(true) // Disable Nagle's for lower latency
         .build()?;
 
-
     let engine_ctx = Arc::new(crate::state::EngineContext::default());
 
     // ── Profiles DB (settings) — open and ensure schema is current ───────────

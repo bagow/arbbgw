@@ -715,4 +715,56 @@ impl ExchangeConnector for BinanceConnector {
         }
         Ok(positions)
     }
+
+    async fn fetch_orderbook(
+        &self,
+        http: &Client,
+        pair: &str,
+        depth: u32,
+    ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
+        let url = format!(
+            "https://fapi.binance.com/fapi/v1/depth?symbol={}&limit={}",
+            pair, depth
+        );
+        let res = http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Binance depth error: {}", e))?;
+
+        let status = res.status();
+        let body = res
+            .text()
+            .await
+            .map_err(|e| format!("Body read error: {}", e))?;
+
+        if !status.is_success() {
+            return Err(format!("Binance API HTTP {}: {}", status, body));
+        }
+
+        let json: Value =
+            serde_json::from_str(&body).map_err(|e| format!("Binance Parse error: {}", e))?;
+
+        let parse_levels = |levels: &Value| -> Vec<(f64, f64)> {
+            let mut out = Vec::new();
+            if let Some(arr) = levels.as_array() {
+                for item in arr {
+                    if let (Some(px_str), Some(sz_str)) = (
+                        item.get(0).and_then(|v| v.as_str()),
+                        item.get(1).and_then(|v| v.as_str()),
+                    ) {
+                        if let (Ok(px), Ok(sz)) = (px_str.parse::<f64>(), sz_str.parse::<f64>()) {
+                            out.push((px, sz));
+                        }
+                    }
+                }
+            }
+            out
+        };
+
+        let bids = parse_levels(&json["bids"]);
+        let asks = parse_levels(&json["asks"]);
+
+        Ok((bids, asks))
+    }
 }

@@ -43,7 +43,8 @@ async fn fetch_gate_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>
         Some(a) => a,
         None => return Some(vec![]),
     };
-    let res: Vec<(f64, f64)> = arr.iter()
+    let res: Vec<(f64, f64)> = arr
+        .iter()
         .filter_map(|c| {
             // Gate candles: [{"t":ts,"o":open,"c":close,...}]
             let ts = c["t"].as_f64()?;
@@ -85,7 +86,8 @@ async fn fetch_kucoin_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64
         Some(a) => a,
         None => return Some(vec![]),
     };
-    let res: Vec<(f64, f64)> = arr.iter()
+    let res: Vec<(f64, f64)> = arr
+        .iter()
         .filter_map(|c| {
             let ts = c[0].as_f64()? / 1000.0; // ms → secs
             let close = c[4].as_f64()?;
@@ -120,7 +122,8 @@ async fn fetch_htx_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>>
         Some(a) => a,
         None => return Some(vec![]),
     };
-    let res: Vec<(f64, f64)> = arr.iter()
+    let res: Vec<(f64, f64)> = arr
+        .iter()
         .filter_map(|c| {
             let ts = c["id"].as_f64()?;
             let close = c["close"].as_f64()?;
@@ -155,7 +158,8 @@ async fn fetch_binance_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f6
         Some(a) => a,
         None => return Some(vec![]),
     };
-    let res: Vec<(f64, f64)> = arr.iter()
+    let res: Vec<(f64, f64)> = arr
+        .iter()
         .filter_map(|c| {
             // Binance klines: [openTime, open, high, low, close, vol, closeTime, ...]
             let ts = c[0].as_f64()? / 1000.0; // ms → secs
@@ -193,7 +197,8 @@ async fn fetch_bybit_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)
         Some(a) => a,
         None => return Some(vec![]),
     };
-    let res: Vec<(f64, f64)> = arr.iter()
+    let res: Vec<(f64, f64)> = arr
+        .iter()
         .filter_map(|c| {
             // Bybit klines: [startTime, open, high, low, close, vol, turnover]
             let ts = c[0].as_str().and_then(|s| s.parse::<f64>().ok())? / 1000.0;
@@ -337,7 +342,11 @@ async fn fetch_candles_for(http: &Client, exchange: &str, pair: &str) -> Option<
     }
 }
 
-async fn fetch_candles_for_with_retry(http: &Client, exchange: &str, pair: &str) -> Vec<(f64, f64)> {
+async fn fetch_candles_for_with_retry(
+    http: &Client,
+    exchange: &str,
+    pair: &str,
+) -> Vec<(f64, f64)> {
     // Retry indefinitely (or up to 100 times) until we get a successful HTTP 200 OK.
     for attempt in 1..=100 {
         if let Some(res) = fetch_candles_for(http, exchange, pair).await {

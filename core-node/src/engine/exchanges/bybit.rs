@@ -710,4 +710,63 @@ impl ExchangeConnector for BybitConnector {
         }
         Ok(positions)
     }
+
+    async fn fetch_orderbook(
+        &self,
+        http: &Client,
+        pair: &str,
+        depth: u32,
+    ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
+        // Bybit limits: 1, 50, 200, 500, 1000. Closest to depth is usually 50.
+        let bybit_limit = if depth <= 1 { 1 } else { 50 };
+        let url = format!(
+            "https://api.bybit.com/v5/market/orderbook?category=linear&symbol={}&limit={}",
+            pair, bybit_limit
+        );
+        let res = http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Bybit depth error: {}", e))?;
+
+        let status = res.status();
+        let body = res
+            .text()
+            .await
+            .map_err(|e| format!("Body read error: {}", e))?;
+
+        if !status.is_success() {
+            return Err(format!("Bybit API HTTP {}: {}", status, body));
+        }
+
+        let json: Value =
+            serde_json::from_str(&body).map_err(|e| format!("Bybit Parse error: {}", e))?;
+
+        if json["retCode"].as_i64().unwrap_or(-1) != 0 {
+            return Err(format!("Bybit API returned error: {}", json));
+        }
+
+        let parse_levels = |levels: &Value| -> Vec<(f64, f64)> {
+            let mut out = Vec::new();
+            if let Some(arr) = levels.as_array() {
+                for item in arr {
+                    if let (Some(px_str), Some(sz_str)) = (
+                        item.get(0).and_then(|v| v.as_str()),
+                        item.get(1).and_then(|v| v.as_str()),
+                    ) {
+                        if let (Ok(px), Ok(sz)) = (px_str.parse::<f64>(), sz_str.parse::<f64>()) {
+                            out.push((px, sz));
+                        }
+                    }
+                }
+            }
+            out
+        };
+
+        // Bybit returns nested "b" and "a" arrays inside "result"
+        let bids = parse_levels(&json["result"]["b"]);
+        let asks = parse_levels(&json["result"]["a"]);
+
+        Ok((bids, asks))
+    }
 }

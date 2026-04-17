@@ -131,4 +131,13 @@ pub trait ExchangeConnector: Send + Sync {
         http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<Vec<PositionInfo>, String>;
+
+    /// Fetches the orderbook (depth) for a given pair.
+    /// Returns (bids, asks) where each element is (price, quantity).
+    async fn fetch_orderbook(
+        &self,
+        http: &Client,
+        pair: &str,
+        depth: u32,
+    ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>;
 }
