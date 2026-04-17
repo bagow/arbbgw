@@ -193,8 +193,8 @@ pub fn generate_signals(
             .map(|r| *r)
             .unwrap_or(0);
         
-        let elapsed_a = if age_a > 0 { now_s - age_a } else { u64::MAX };
-        let elapsed_b = if age_b > 0 { now_s - age_b } else { u64::MAX };
+        let elapsed_a = if age_a > 0 { now_s - age_a } else { i64::MAX };
+        let elapsed_b = if age_b > 0 { now_s - age_b } else { i64::MAX };
         
         let oldest_elapsed = elapsed_a.max(elapsed_b);
 
