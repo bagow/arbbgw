@@ -321,7 +321,7 @@ async fn main() -> Result<()> {
                             ) {
                                 tracing::error!("Failed to save snapshot to db: {}", e);
                             }
-                            Ok::<(), rusqlite::Error>(())
+                            Ok(())
                         }).await;
                     });
                 }

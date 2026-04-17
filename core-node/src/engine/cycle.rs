@@ -849,10 +849,10 @@ pub async fn run_cycle(
             }
 
             // Record as close failure to trigger kill-switch if happening repeatedly
-            let fails = e_ctx.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-            if fails >= ts.max_consecutive_failures {
-                error!("[real] 🚨 KILL SWITCH TRIGGERED: {} consecutive symmetric failures (due to one-sided rejections). Pausing profile for {}s", fails, ts.kill_switch_pause_secs);
-                e_ctx.profile_pause.insert(settings.id.clone(), now_ms() + (ts.kill_switch_pause_secs as i64 * 1000));
+            let fails = e_ctx.consecutive_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if fails >= 5 {
+                error!("[real] 🚨 KILL SWITCH TRIGGERED: 5 consecutive failures (one-sided rejections). Suspending new entries.");
+                e_ctx.is_killed.store(true, std::sync::atomic::Ordering::Relaxed);
             }
 
             continue;
