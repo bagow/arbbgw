@@ -38,6 +38,12 @@ pub struct SpreadRow {
     pub funding_a: f64,
     #[serde(rename = "fundingB", default)]
     pub funding_b: f64,
+    #[serde(default)]
+    pub structural_spread: f64,
+    #[serde(default)]
+    pub structural_max: f64,
+    #[serde(default)]
+    pub structural_min: f64,
     pub spread: f64,
     pub direction: String,
     #[serde(default)]

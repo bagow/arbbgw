@@ -272,7 +272,7 @@ pub fn compute_spreads(
                 // This tracks the historical behavior of the actual executable spread cleanly!
                 let structural_spread = spread - mid_deviation;
 
-                let has_structural_spread = (now_f64 - last_cross) > 86400.0;
+                let has_structural_spread = (now_f64 - last_cross) > 86000.0;
 
                 rows.push(SpreadRow {
                     pair: sym.clone(),
