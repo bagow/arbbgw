@@ -488,8 +488,12 @@ pub async fn run_cycle(
     }
 
     if e_ctx.is_killed.load(std::sync::atomic::Ordering::Relaxed) {
-        if current_ms % 10000 < 500 {
+        static LAST_KILL_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let curr = now_ms() as u64;
+        let last = LAST_KILL_LOG.load(std::sync::atomic::Ordering::Relaxed);
+        if curr.saturating_sub(last) > 60000 {
             error!("[real] 🚨 RISK KILL-SWITCH IS ACTIVE. Engine will not open new trades until restarted.");
+            LAST_KILL_LOG.store(curr, std::sync::atomic::Ordering::Relaxed);
         }
         return;
     }

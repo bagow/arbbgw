@@ -241,7 +241,7 @@ pub fn generate_signals(
             // could be a guaranteed loss if the pair has a hidden structural premium.
             if !row.structural_verified {
                 if let Some(p) = &diag_prefix {
-                    tracing::info!("{} -> structural NOT VERIFIED (awaiting warmup)", p);
+                    tracing::info!("{} -> structural NOT VERIFIED (failed historical warmup - insufficient candles or API error)", p);
                 }
                 continue;
             }
