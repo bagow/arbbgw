@@ -49,6 +49,7 @@ async fn check_rate_limits(
 struct BinanceBalanceAccountResponse {
     availableBalance: String,
     totalWalletBalance: String,
+    totalMarginBalance: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -583,8 +584,12 @@ impl ExchangeConnector for BinanceConnector {
             .availableBalance
             .parse::<f64>()
             .map_err(|_| "Failed to parse Binance availableBalance as f64".to_string())?;
-        let wallet = data.totalWalletBalance.parse::<f64>().unwrap_or(0.0); // totalWalletBalance might not exist in some responses? It should.
-        Ok((wallet, avail))
+        let equity = data
+            .totalMarginBalance
+            .as_deref()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or_else(|| data.totalWalletBalance.parse::<f64>().unwrap_or(0.0));
+        Ok((equity, avail))
     }
 
     async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {

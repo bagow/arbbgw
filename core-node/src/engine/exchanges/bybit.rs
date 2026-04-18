@@ -554,7 +554,11 @@ impl ExchangeConnector for BybitConnector {
             .and_then(|c| c["equity"].as_str().and_then(|s| s.parse().ok()))
             .unwrap_or(wallet);
 
-        Ok((wallet, equity))
+        let available = coin_obj
+            .and_then(|c| c["availableToWithdraw"].as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or(wallet);
+
+        Ok((equity, available))
     }
 
     async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
