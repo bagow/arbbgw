@@ -258,6 +258,7 @@ pub async fn handle_get_unified(
         Ok::<_, tokio_rusqlite::Error>(map)
     }).await.unwrap_or_default();
 
+    let db_closed_pnl_today_total: f64 = daily_exch_stats.values().sum();
     let mut exchanges = exchanges_raw.clone();
     if let Some(obj) = exchanges.as_object_mut() {
         let mut daily_pnl_map = serde_json::Map::new();
@@ -291,6 +292,57 @@ pub async fn handle_get_unified(
         let fees_age_ms = fees_ts
             .map(|ts| (now_ms - ts).max(0))
             .unwrap_or(-1);
+        let current_balances: HashMap<String, f64> = balances
+            .map(|bals| {
+                bals.iter()
+                    .filter_map(|(ex, val)| val.as_f64().map(|v| (ex.clone(), v)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let day_key = format!("cex_balance_baseline:{}", now_ms / 86_400_000);
+        let baseline_balances = state
+            .db
+            .call({
+                let day_key = day_key.clone();
+                let current_balances = current_balances.clone();
+                move |conn| {
+                    let _: Result<usize, rusqlite::Error> = conn.execute(
+                        "CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER)",
+                        [],
+                    );
+                    let row: Result<String, rusqlite::Error> = conn.query_row(
+                        "SELECT value FROM server_cache WHERE key = ?",
+                        [day_key.clone()],
+                        |r| r.get(0),
+                    );
+                    if let Ok(raw) = row {
+                        let parsed: HashMap<String, f64> =
+                            serde_json::from_str(&raw).unwrap_or_default();
+                        Ok::<HashMap<String, f64>, tokio_rusqlite::Error>(parsed)
+                    } else {
+                        let baseline_json =
+                            serde_json::to_string(&current_balances).unwrap_or_else(|_| "{}".into());
+                        let _ = conn.execute(
+                            "INSERT INTO server_cache(key,value,expires_at) VALUES(?,?,?) \
+                             ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
+                            rusqlite::params![day_key, baseline_json, now_ms + (3 * 86_400_000)],
+                        );
+                        Ok::<HashMap<String, f64>, tokio_rusqlite::Error>(current_balances)
+                    }
+                }
+            })
+            .await
+            .unwrap_or_default();
+
+        let mut cex_balance_delta_today = serde_json::Map::new();
+        let mut cex_balance_delta_total_today = 0.0_f64;
+        for (ex, curr) in &current_balances {
+            let base = baseline_balances.get(ex).copied().unwrap_or(*curr);
+            let delta = curr - base;
+            cex_balance_delta_total_today += delta;
+            cex_balance_delta_today.insert(ex.clone(), json!(delta));
+        }
 
         for (ex, pnl) in daily_exch_stats {
             daily_pnl_map.insert(ex.clone(), json!(pnl));
@@ -312,6 +364,22 @@ pub async fn handle_get_unified(
         obj.insert("balances_age_ms".to_string(), json!(balances_age_ms));
         obj.insert("positions_age_ms".to_string(), json!(positions_age_ms));
         obj.insert("fees_age_ms".to_string(), json!(fees_age_ms));
+        obj.insert(
+            "cex_balance_delta_today".to_string(),
+            json!(cex_balance_delta_today),
+        );
+        obj.insert(
+            "cex_balance_delta_total_today".to_string(),
+            json!(cex_balance_delta_total_today),
+        );
+        obj.insert(
+            "db_closed_pnl_today_total".to_string(),
+            json!(db_closed_pnl_today_total),
+        );
+        obj.insert(
+            "cex_vs_db_delta_today".to_string(),
+            json!(cex_balance_delta_total_today - db_closed_pnl_today_total),
+        );
     }
 
     // 2. Get Profiles

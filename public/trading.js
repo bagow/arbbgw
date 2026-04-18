@@ -520,6 +520,10 @@ function renderCexTab(profile, exchangesData) {
     const balancesAgeText = balancesAgeMs >= 0 ? `${(balancesAgeMs / 1000).toFixed(1)}s` : 'n/a';
     const positionsAgeText = positionsAgeMs >= 0 ? `${(positionsAgeMs / 1000).toFixed(1)}s` : 'n/a';
     const feesAgeText = feesAgeMs >= 0 ? `${(feesAgeMs / 1000).toFixed(1)}s` : 'n/a';
+    const cexDeltaTotal = Number(exchangesData.cex_balance_delta_total_today ?? 0);
+    const dbClosedTodayTotal = Number(exchangesData.db_closed_pnl_today_total ?? 0);
+    const cexVsDbDelta = Number(exchangesData.cex_vs_db_delta_today ?? (cexDeltaTotal - dbClosedTodayTotal));
+    const cexDeltaByExchange = exchangesData.cex_balance_delta_today || {};
     const STALE_WARN_MS = 30_000;
     const STALE_CRIT_MS = 90_000;
     const ageTuples = [
@@ -545,6 +549,14 @@ function renderCexTab(profile, exchangesData) {
             </div>
         `;
     }
+    const driftColor = Math.abs(cexVsDbDelta) > 0.05 ? 'var(--red)' : 'var(--text-sub)';
+    const reconcileBar = `
+        <div style="margin-bottom:14px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-panel-2);font-size:0.85rem;font-family:var(--font-mono);display:flex;gap:16px;flex-wrap:wrap;">
+            <span style="color:var(--text-sub);">CEX balance delta (UTC day): <strong style="color:${cexDeltaTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(cexDeltaTotal)}</strong></span>
+            <span style="color:var(--text-sub);">DB closed today: <strong style="color:${dbClosedTodayTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbClosedTodayTotal)}</strong></span>
+            <span style="color:${driftColor};">Drift: <strong>${fmtPnL(cexVsDbDelta)}</strong></span>
+        </div>
+    `;
 
     let html = `
         <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:20px;">
@@ -558,6 +570,7 @@ function renderCexTab(profile, exchangesData) {
                 Updating in: <span id="poll-countdown" style="font-weight:600;color:var(--text);">10s</span>
             </div>
         </div>
+        ${reconcileBar}
         ${staleBanner}
         <div class="cex-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px;">
     `;
@@ -572,6 +585,7 @@ function renderCexTab(profile, exchangesData) {
         const fee = (exchangesData.fees && exchangesData.fees[exA]) || 0;
         const dailyPnl = (exchangesData.daily_pnl && exchangesData.daily_pnl[exA]) || 0;
         const dailyPct = (exchangesData.daily_pnl_pct && exchangesData.daily_pnl_pct[exA]) || 0;
+        const cexBalanceDelta = Number(cexDeltaByExchange[exA] ?? 0);
         for (const exB of exNames) {
             if (exA === exB) continue;
             let matchCount = 0;
@@ -605,6 +619,9 @@ function renderCexTab(profile, exchangesData) {
                             <span style="color:${dailyPnl > 0 ? 'var(--green)' : dailyPnl < 0 ? 'var(--red)' : 'var(--text-sub)'};">
                                 ${dailyPnl > 0 ? '+' : ''}$${dailyPnl.toFixed(2)} <span style="font-size:0.75rem;">(${dailyPct > 0 ? '+' : ''}${dailyPct.toFixed(2)}%)</span>
                             </span>
+                            <div style="color:var(--text-sub);font-size:0.75rem;margin-top:2px;">
+                                CEX Δ: <span style="color:${cexBalanceDelta > 0 ? 'var(--green)' : cexBalanceDelta < 0 ? 'var(--red)' : 'var(--text-sub)'};">${fmtPnL(cexBalanceDelta)}</span>
+                            </div>
                         </div>
                     </div>
                     <div style="text-align:right;">
