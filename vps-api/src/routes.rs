@@ -236,7 +236,7 @@ pub async fn handle_get_unified(
     let today_midnight_ms = now_ms - (now_ms % 86_400_000); // Rounds down to midnight UTC
     let daily_exch_stats = state.real_db.call(move |conn| {
         let mut map: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-        let mut stmt = match conn.prepare("SELECT exchange_a, exchange_b, pnl_a, pnl_b, commission_cost, funding_cost, slippage_cost FROM trades WHERE status='CLOSED' AND exit_time >= ?") {
+        let mut stmt = match conn.prepare("SELECT exchange_a, exchange_b, COALESCE(pnl,0.0) FROM trades WHERE status='CLOSED' AND exit_time >= ?") {
             Ok(s) => s,
             Err(_) => return Ok::<_, tokio_rusqlite::Error>(map)
         };
@@ -244,18 +244,16 @@ pub async fn handle_get_unified(
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
-                r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-                r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
-                r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
-                r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+                r.get::<_, f64>(2)?,
             ))
         }).map(|iter| iter.filter_map(|r| r.ok()).collect::<Vec<_>>()).unwrap_or_default();
-        
-        for (exa, exb, pnla, pnlb, comm, fund, slip) in rows {
-            let shared_costs = (comm + fund + slip) / 2.0;
-            *map.entry(exa).or_insert(0.0) += pnla - shared_costs;
-            *map.entry(exb).or_insert(0.0) += pnlb - shared_costs;
+
+        // Canonical per-exchange day PnL allocation:
+        // each closed trade contributes half of final net pnl to each leg exchange.
+        for (exa, exb, net_pnl) in rows {
+            let half = net_pnl / 2.0;
+            *map.entry(exa).or_insert(0.0) += half;
+            *map.entry(exb).or_insert(0.0) += half;
         }
         Ok::<_, tokio_rusqlite::Error>(map)
     }).await.unwrap_or_default();
@@ -265,6 +263,11 @@ pub async fn handle_get_unified(
         let mut daily_pnl_map = serde_json::Map::new();
         let mut daily_pct_map = serde_json::Map::new();
         let balances = obj.get("balances").and_then(|b| b.as_object());
+        let snapshot_age_ms = obj
+            .get("ts")
+            .and_then(|v| v.as_i64())
+            .map(|ts| (now_ms - ts).max(0))
+            .unwrap_or(-1);
 
         for (ex, pnl) in daily_exch_stats {
             daily_pnl_map.insert(ex.clone(), json!(pnl));
@@ -278,6 +281,7 @@ pub async fn handle_get_unified(
         }
         obj.insert("daily_pnl".to_string(), json!(daily_pnl_map));
         obj.insert("daily_pnl_pct".to_string(), json!(daily_pct_map));
+        obj.insert("snapshot_age_ms".to_string(), json!(snapshot_age_ms));
     }
 
     // 2. Get Profiles

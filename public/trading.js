@@ -510,8 +510,16 @@ function renderCexTab(profile, exchangesData) {
         disabledRaw.forEach(ex => disabledMap[ex] = true);
     }
 
+    const snapshotAgeMs = Number(exchangesData.snapshot_age_ms ?? -1);
+    const snapshotAgeText = snapshotAgeMs >= 0
+        ? `${(snapshotAgeMs / 1000).toFixed(1)}s`
+        : 'n/a';
+
     let html = `
         <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:20px;">
+            <div style="color:var(--text-sub);font-size:0.85rem;font-family:var(--font-mono);">
+                Snapshot age: <span style="font-weight:600;color:var(--text);">${snapshotAgeText}</span>
+            </div>
             <div style="color:var(--text-sub);font-size:0.85rem;font-family:var(--font-mono);margin-left:auto;">
                 Updating in: <span id="poll-countdown" style="font-weight:600;color:var(--text);">10s</span>
             </div>
