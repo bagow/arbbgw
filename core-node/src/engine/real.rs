@@ -241,13 +241,19 @@ pub fn start_position_sync(
                         trade.id, trade.pair
                     );
                     let id = trade.id;
-                    let fund_cost = trade.funding_cost;
                     let _ = db.call(move |conn| {
                         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
                         conn.execute(
                             "UPDATE trades SET status='CLOSED', exit_time=?, close_reason='EXTERNAL_CLOSE', \
-                             pnl=0.0, gross_pnl=0.0, curr_gross_pnl=0.0, pnl_a=0.0, pnl_b=0.0, funding_cost=? WHERE id=?",
-                            rusqlite::params![now, fund_cost, id]
+                             gross_pnl=COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0), \
+                             pnl=COALESCE(curr_gross_pnl, \
+                                 (COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
+                                  -COALESCE(commission_cost,0.0)-COALESCE(funding_cost,0.0)-COALESCE(slippage_cost,0.0))), \
+                             curr_gross_pnl=COALESCE(curr_gross_pnl, \
+                                 (COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
+                                  -COALESCE(commission_cost,0.0)-COALESCE(funding_cost,0.0)-COALESCE(slippage_cost,0.0))) \
+                             WHERE id=?",
+                            rusqlite::params![now, id]
                         )?;
                         Ok(())
                     }).await;
@@ -316,15 +322,19 @@ pub fn start_position_sync(
                             error!("[pos_sync] Emergency close done id={} {} on {} fill={:.6} fee={:.4}",
                                 trade.id, trade.pair, remaining_ex, close_fill, close_fee);
                             let id = trade.id;
-                            let fund_cost = trade.funding_cost;
                             let total_fee = trade.commission_cost + close_fee;
                             let _ = db.call(move |conn| {
                                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
                                 conn.execute(
                                     "UPDATE trades SET status='CLOSED', exit_time=?, close_reason='EXTERNAL_PARTIAL_CLOSE', \
-                                     pnl=0.0, gross_pnl=0.0, curr_gross_pnl=0.0, pnl_a=0.0, pnl_b=0.0, \
-                                     commission_cost=?, funding_cost=? WHERE id=?",
-                                    rusqlite::params![now, total_fee, fund_cost, id]
+                                     commission_cost=?, \
+                                     gross_pnl=COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0), \
+                                     pnl=(COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
+                                         -?-COALESCE(funding_cost,0.0)-COALESCE(slippage_cost,0.0)), \
+                                     curr_gross_pnl=(COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
+                                         -?-COALESCE(funding_cost,0.0)-COALESCE(slippage_cost,0.0)) \
+                                     WHERE id=?",
+                                    rusqlite::params![now, total_fee, total_fee, total_fee, id]
                                 )?;
                                 Ok(())
                             }).await;

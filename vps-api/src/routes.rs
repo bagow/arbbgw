@@ -338,7 +338,8 @@ pub async fn handle_get_unified(
                 obj.insert("gross_pnl".into(), json!(gross));
                 obj.insert("pnl_a".into(), json!(db_pnl_a));
                 obj.insert("pnl_b".into(), json!(db_pnl_b));
-                // Net PnL: trust curr_gross_pnl from DB (= gross - commission - funding)
+                // Net PnL: trust curr_gross_pnl from DB
+                // (canonical: gross - commission - funding - slippage).
                 obj.insert(
                     "current_pnl".into(),
                     json!(t.curr_gross_pnl.unwrap_or(gross)),

@@ -158,7 +158,8 @@ pub async fn run_cycle(
         // Use the accumulated real funding cost from DB (column updated every live-update cycle
         // using real rates fetched from exchange API — NOT from the settings constant).
         let fund_cost = trade.funding_cost;
-        let _live_net_pnl = live_gross_pnl - trade.commission_cost - fund_cost;
+        let _live_net_pnl =
+            live_gross_pnl - trade.commission_cost - trade.slippage_cost - fund_cost;
 
         // PnL for CLOSE TRIGGERS (using bid/ask — pessimistic, for safe execution)
         let exec_pnl_a = if is_a_higher {
@@ -554,17 +555,30 @@ pub async fn run_cycle(
                 .unwrap_or((0.0, 0));
             let fund_next = next_a.min(next_b); // nearest funding event
 
-            // Replace momentary funding projection map with predictable smooth funding cost estimation (using settings parameter).
-            // This prevents random huge distortions in lifetime PnL if live API rate suddenly spikes.
+            // Estimate accumulated funding using live exchange rates instead of the static profile setting.
+            // Positive funding means longs pay shorts; shorts receive (negative cost).
             let hours_open = (now_ms() - trade.entry_time) as f64 / 3_600_000.0_f64;
-            // Configured rate (e.g. 0.01) is in percentage terms, so divide by 100
-            let fr_user = settings.funding_rate_8h / 100.0;
-            // Total cost estimation
-            let acc_fund_cost = fr_user * trade.volume * (hours_open / 8.0);
+            let periods_8h = (hours_open / 8.0).max(0.0);
+            let notional_a = trade.entry_price_a * trade_coins;
+            let notional_b = trade.entry_price_b * trade_coins;
+            let long_a = !is_a_higher;
+            let long_b = is_a_higher;
+            let leg_a_fund = if long_a {
+                notional_a * fr_a * periods_8h
+            } else {
+                -notional_a * fr_a * periods_8h
+            };
+            let leg_b_fund = if long_b {
+                notional_b * fr_b * periods_8h
+            } else {
+                -notional_b * fr_b * periods_8h
+            };
+            let acc_fund_cost = leg_a_fund + leg_b_fund;
 
             // Recompute net PnL with the freshly-fetched real funding cost so curr_gross_pnl
             // in the DB reflects the true net position (gross - commission - real_funding).
-            let real_live_net_pnl = live_gross_pnl - trade.commission_cost - acc_fund_cost;
+            let real_live_net_pnl =
+                live_gross_pnl - trade.commission_cost - trade.slippage_cost - acc_fund_cost;
 
             live_updates.push((
                 trade.id,
