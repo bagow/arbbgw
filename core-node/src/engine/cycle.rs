@@ -11,6 +11,15 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 static LAST_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
 
+fn is_position_missing_or_liquidated_error(err: &str) -> bool {
+    let s = err.to_lowercase();
+    s.contains("position not found")
+        || s.contains("no position")
+        || s.contains("position size is zero")
+        || s.contains("reduce-only")
+        || s.contains("liquidat")
+}
+
 // NOTE: LAST_LIVE_FLUSH is declared as a function-local static inside run_cycle below.
 
 pub async fn run_cycle(
@@ -370,6 +379,8 @@ pub async fn run_cycle(
                 let mut real_exit_b = 0.0;
                 let mut exit_fee = 0.0;
                 let mut error_msg = String::new();
+                let mut leg_a_external = false;
+                let mut leg_b_external = false;
 
                 match ra {
                     Ok(rc) => {
@@ -377,7 +388,21 @@ pub async fn run_cycle(
                         exit_fee += rc.total_fee;
                     }
                     Err(e) => {
-                        error_msg.push_str(&format!("Leg A close failed: {} ", e));
+                        if is_position_missing_or_liquidated_error(&e) {
+                            leg_a_external = true;
+                            // Leg already gone on exchange (liquidation/external close).
+                            // Use entry price as a neutral marker to allow DB finalization.
+                            real_exit_a = entry_a;
+                            tracing::warn!(
+                                "[real] leg A already absent for id={} {} on {}: {}",
+                                id,
+                                pair,
+                                exa,
+                                e
+                            );
+                        } else {
+                            error_msg.push_str(&format!("Leg A close failed: {} ", e));
+                        }
                     }
                 }
                 match rb {
@@ -386,7 +411,20 @@ pub async fn run_cycle(
                         exit_fee += rc.total_fee;
                     }
                     Err(e) => {
-                        error_msg.push_str(&format!("Leg B close failed: {}", e));
+                        if is_position_missing_or_liquidated_error(&e) {
+                            leg_b_external = true;
+                            // Leg already gone on exchange (liquidation/external close).
+                            real_exit_b = entry_b;
+                            tracing::warn!(
+                                "[real] leg B already absent for id={} {} on {}: {}",
+                                id,
+                                pair,
+                                exb,
+                                e
+                            );
+                        } else {
+                            error_msg.push_str(&format!("Leg B close failed: {}", e));
+                        }
                     }
                 }
 
@@ -399,11 +437,23 @@ pub async fn run_cycle(
                         pair,
                         error_msg
                     );
-                    repo_close.revert_to_open(id).await;
+                    // If one leg is already externally liquidated/closed, keep the manual close
+                    // reason so the engine keeps retrying the remaining leg immediately.
+                    if !(leg_a_external || leg_b_external) {
+                        repo_close.revert_to_open(id).await;
+                    }
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     closing_guard.remove(&trade_id_for_guard);
                     return;
                 }
+
+                let close_reason_db = if leg_a_external && leg_b_external {
+                    "EXTERNAL_CLOSE".to_string()
+                } else if leg_a_external || leg_b_external {
+                    "EXTERNAL_PARTIAL_CLOSE".to_string()
+                } else {
+                    r.clone()
+                };
 
                 // ✅ Fill confirmed — compute real PnL and mark CLOSED
                 let real_pna = if is_a_higher {
@@ -452,12 +502,22 @@ pub async fn run_cycle(
                 let still_a = pos_check_a
                     .as_ref()
                     .ok()
-                    .map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12))
+                    .map(|ps| {
+                        ps.iter().any(|p| {
+                            crate::engine::real::symbols_match(&p.symbol, &pair)
+                                && p.size.abs() > 1e-12
+                        })
+                    })
                     .unwrap_or(false);
                 let still_b = pos_check_b
                     .as_ref()
                     .ok()
-                    .map(|ps| ps.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12))
+                    .map(|ps| {
+                        ps.iter().any(|p| {
+                            crate::engine::real::symbols_match(&p.symbol, &pair)
+                                && p.size.abs() > 1e-12
+                        })
+                    })
                     .unwrap_or(false);
                 if still_a || still_b {
                     error!("[real] ⚠️ POSITION STILL EXISTS after close id={} {} still_a={} still_b={} — marking closed but position may be orphaned", id, pair, still_a, still_b);
@@ -472,7 +532,7 @@ pub async fn run_cycle(
                         real_gp,
                         real_pna,
                         real_pnb,
-                        &r,
+                        &close_reason_db,
                         fund_cost,
                         exit_fee,
                         exit_slip,

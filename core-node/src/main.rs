@@ -214,10 +214,14 @@ async fn main() -> Result<()> {
         tokio::spawn(async move { collector::bybit::run(p, s, sc).await });
     }
 
-    // ── Position sync — DISABLED: caused false EXTERNAL_PARTIAL_CLOSE ──────────
-    // Symbol format mismatch between DB (ARIAUSDT) and exchange API responses
-    // caused false positives. Needs proper symbol normalization before re-enabling.
-    // engine::real::start_position_sync(http.clone(), exchange_keys.clone(), real_db.clone(), engine_ctx.clone());
+    // ── Position sync — enabled with symbol normalization in real.rs ───────────
+    // Detects externally closed/liquidated legs and emergency-closes the remaining leg.
+    engine::real::start_position_sync(
+        http.clone(),
+        exchange_keys.clone(),
+        real_db.clone(),
+        engine_ctx.clone(),
+    );
 
     // ── Pre-warm HTTP connections to exchange APIs ────────────────────────────
     // Establishes DNS + TCP + TLS ahead of time so the first trade doesn't

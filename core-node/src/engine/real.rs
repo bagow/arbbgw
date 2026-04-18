@@ -65,6 +65,25 @@ pub fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+pub fn normalize_symbol(sym: &str) -> String {
+    let mut s = sym.to_uppercase();
+    s = s.replace(['-', '_', '/'], "");
+    if s == "XBTUSDTM" {
+        return "BTCUSDT".to_string();
+    }
+    if s == "XBTUSDT" {
+        return "BTCUSDT".to_string();
+    }
+    if s.ends_with("USDTM") {
+        s = s.trim_end_matches('M').to_string();
+    }
+    s
+}
+
+pub fn symbols_match(a: &str, b: &str) -> bool {
+    normalize_symbol(a) == normalize_symbol(b)
+}
+
 /// Round price to the nearest valid tick size for the given exchange:pair.
 /// If tick size is unknown, rounds to 8 decimal places (safe fallback).
 pub fn round_to_tick(
@@ -200,14 +219,14 @@ pub fn start_position_sync(
                     .get(&trade.exchange_a)
                     .map(|ps| {
                         ps.iter()
-                            .any(|p| p.symbol == trade.pair && p.size.abs() > 1e-12)
+                            .any(|p| symbols_match(&p.symbol, &trade.pair) && p.size.abs() > 1e-12)
                     })
                     .unwrap_or(true); // conservative: if can't check, assume exists
                 let has_pos_b = all_positions
                     .get(&trade.exchange_b)
                     .map(|ps| {
                         ps.iter()
-                            .any(|p| p.symbol == trade.pair && p.size.abs() > 1e-12)
+                            .any(|p| symbols_match(&p.symbol, &trade.pair) && p.size.abs() > 1e-12)
                     })
                     .unwrap_or(true); // conservative
 
