@@ -521,7 +521,13 @@ pub async fn run_cycle(
                     })
                     .unwrap_or(false);
                 if still_a || still_b {
-                    error!("[real] ⚠️ POSITION STILL EXISTS after close id={} {} still_a={} still_b={} — marking closed but position may be orphaned", id, pair, still_a, still_b);
+                    error!(
+                        "[real] ⚠️ POSITION STILL EXISTS after close id={} {} still_a={} still_b={} — keeping trade OPEN for retry/recovery",
+                        id, pair, still_a, still_b
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    closing_guard.remove(&trade_id_for_guard);
+                    return;
                 }
 
                 repo_close

@@ -231,6 +231,13 @@ pub fn generate_signals(
             if row.spread < profile.min_entry_spread || row.spread > profile.max_entry_spread {
                 continue;
             }
+            // Intentional product rule: listing age is treated as token age from the
+            // oldest known listing venue, but liquidity threshold is profile-specific.
+            if row.vol_a < profile.min_volume_millions * 1_000_000.0
+                || row.vol_b < profile.min_volume_millions * 1_000_000.0
+            {
+                continue;
+            }
 
             let diag_prefix = if log_diag && row.spread >= profile.min_entry_spread {
                 Some(format!(
@@ -304,14 +311,14 @@ pub fn generate_signals(
 
                 // If A is higher, we SELL A (hit bid) and BUY B (hit ask).
                 let depth_a_usd = if is_a_higher {
-                    data_a.as_ref().unwrap().bid_size
+                    data_a.as_ref().unwrap().bid_size * data_a.as_ref().unwrap().bid
                 } else {
-                    data_a.as_ref().unwrap().ask_size
+                    data_a.as_ref().unwrap().ask_size * data_a.as_ref().unwrap().ask
                 };
                 let depth_b_usd = if is_a_higher {
-                    data_b.as_ref().unwrap().ask_size
+                    data_b.as_ref().unwrap().ask_size * data_b.as_ref().unwrap().ask
                 } else {
-                    data_b.as_ref().unwrap().bid_size
+                    data_b.as_ref().unwrap().bid_size * data_b.as_ref().unwrap().bid
                 };
 
                 if depth_a_usd < min_depth_usd || depth_b_usd < min_depth_usd {
