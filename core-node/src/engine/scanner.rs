@@ -199,21 +199,53 @@ pub fn generate_signals(
 
         let lmap = &e_ctx.launch_times;
         let min_age_secs = ts.min_listing_age_days * 24 * 3600;
-        let age_a = lmap
-            .get(&format!("{}:{}", row.exchange_a, row.pair))
-            .map(|r| *r)
-            .unwrap_or(0);
-        let age_b = lmap
-            .get(&format!("{}:{}", row.exchange_b, row.pair))
-            .map(|r| *r)
-            .unwrap_or(0);
-        
-        let elapsed_a = if age_a > 0 { now_s - age_a } else { i64::MAX };
-        let elapsed_b = if age_b > 0 { now_s - age_b } else { i64::MAX };
-        
-        let oldest_elapsed = elapsed_a.max(elapsed_b);
 
-        if oldest_elapsed < min_age_secs {
+        let mut oldest_elapsed = -1i64;
+        let mut missing_date_for_legs = false;
+
+        // 1. Check the active legs
+        for ex in [&row.exchange_a, &row.exchange_b] {
+            let age = lmap
+                .get(&format!("{}:{}", ex, row.pair))
+                .map(|r| *r)
+                .unwrap_or(0);
+            if age > 0 {
+                let el = now_s - age;
+                if el > oldest_elapsed {
+                    oldest_elapsed = el;
+                }
+            } else {
+                missing_date_for_legs = true;
+            }
+        }
+
+        // 2. Check all other potential exchanges to find the absolute oldest listing
+        for ex in ["binance", "bybit", "gate", "kucoin"] {
+            if ex == row.exchange_a || ex == row.exchange_b {
+                continue;
+            }
+            let age = lmap
+                .get(&format!("{}:{}", ex, row.pair))
+                .map(|r| *r)
+                .unwrap_or(0);
+            if age > 0 {
+                let el = now_s - age;
+                if el > oldest_elapsed {
+                    oldest_elapsed = el;
+                }
+            }
+        }
+
+        // If active spread legs failed to report a launch time, fallback to i64::MAX to prevent false rejections
+        let final_oldest_elapsed = if missing_date_for_legs {
+            i64::MAX
+        } else if oldest_elapsed == -1 {
+            i64::MAX
+        } else {
+            oldest_elapsed
+        };
+
+        if final_oldest_elapsed < min_age_secs {
             if worth_diag {
                 tracing::info!(
                     "[scanner] REJECT {} ({} vs {}) spread={:.4}% -> listing too young",
