@@ -6,6 +6,19 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 static LAST_DIAG_LOG: AtomicI64 = AtomicI64::new(0);
 
+fn cooldown_active(marker: i64, now: i64, cooldown_ms: i64) -> bool {
+    if marker <= 0 {
+        return false;
+    }
+    // Support both contracts during migration:
+    // 1) marker = last event timestamp
+    // 2) marker = blocked-until timestamp
+    if marker > now {
+        return true;
+    }
+    now - marker < cooldown_ms
+}
+
 /// Core logic of token analysis: translates bare `SpreadRow` into ready-to-execute `TradeSignal`.
 pub fn generate_signals(
     spreads: &[SpreadRow],
@@ -37,12 +50,14 @@ pub fn generate_signals(
 
         let cd_a = ex_cd.get(&row.exchange_a).map(|v| *v).unwrap_or(0);
         let cd_b = ex_cd.get(&row.exchange_b).map(|v| *v).unwrap_or(0);
-        if now - cd_a < ts.exchange_cooldown_ms || now - cd_b < ts.exchange_cooldown_ms {
+        if cooldown_active(cd_a, now, ts.exchange_cooldown_ms)
+            || cooldown_active(cd_b, now, ts.exchange_cooldown_ms)
+        {
             continue;
         }
 
         let cd_pair = pair_cd.get(&row.pair).map(|v| *v).unwrap_or(0);
-        if now - cd_pair < ts.pair_cooldown_ms {
+        if cooldown_active(cd_pair, now, ts.pair_cooldown_ms) {
             continue;
         }
 

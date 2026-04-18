@@ -525,6 +525,9 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
                 pnl_a                 REAL,
                 pnl_b                 REAL,
                 close_reason          TEXT,
+                close_attempts        INTEGER DEFAULT 0,
+                last_close_attempt_at INTEGER,
+                close_error           TEXT,
                 profile_id            TEXT DEFAULT 'real-default',
                 order_id_a            TEXT,
                 order_id_b            TEXT,
@@ -565,6 +568,9 @@ async fn init_trades_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN pnl_a REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN pnl_b REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN close_reason TEXT", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN close_attempts INTEGER DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN last_close_attempt_at INTEGER", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN close_error TEXT", []);
         // Funding rate tracking columns (added for accurate PnL)
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_rate_a REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_rate_b REAL", []);

@@ -167,7 +167,7 @@ impl TradeRepository {
                      last_price_a=?, last_price_b=?, last_spread=?, curr_gross_pnl=?, \
                      funding_rate_a=?, funding_rate_b=?, funding_next_ts=?, \
                      funding_cost=?, pnl_a=?, pnl_b=? \
-                     WHERE id=? AND status='OPEN'",
+                     WHERE id=? AND status IN ('OPEN','CLOSING')",
                     )?;
                     for (id, pa, pb, cs, pnl, fra, frb, fnt, fund_cost, pnl_a, pnl_b) in
                         live_updates
@@ -196,19 +196,19 @@ impl TradeRepository {
             .call(move |conn| {
                 if real_a > 0.0 {
                     let _ = conn.execute(
-                        "UPDATE trades SET entry_price_a=? WHERE order_id_a=? AND status='OPEN'",
+                        "UPDATE trades SET entry_price_a=? WHERE order_id_a=? AND status IN ('OPEN','CLOSING')",
                         params![real_a, oid_a2],
                     );
                 }
                 if real_b > 0.0 {
                     let _ = conn.execute(
-                        "UPDATE trades SET entry_price_b=? WHERE order_id_b=? AND status='OPEN'",
+                        "UPDATE trades SET entry_price_b=? WHERE order_id_b=? AND status IN ('OPEN','CLOSING')",
                         params![real_b, oid_b2],
                     );
                 }
                 if total_fee > 1e-9 {
                     let _ = conn.execute(
-                        "UPDATE trades SET commission_cost=? WHERE order_id_a=? AND status='OPEN'",
+                        "UPDATE trades SET commission_cost=? WHERE order_id_a=? AND status IN ('OPEN','CLOSING')",
                         params![total_fee, oid_a2],
                     );
                 }
@@ -224,9 +224,54 @@ impl TradeRepository {
             .db
             .call(move |conn| {
                 conn.execute(
-                    "UPDATE trades SET close_reason=NULL WHERE id=? AND status='OPEN'",
+                    "UPDATE trades SET status='OPEN', close_reason=NULL WHERE id=? AND status IN ('OPEN','CLOSING')",
                     params![id],
                 )?;
+                Ok(())
+            })
+            .await;
+    }
+
+    pub async fn begin_close_attempt(&self, id: i64, reason: &str) -> bool {
+        let reason_owned = reason.to_string();
+        let ts = now_ms();
+        self.db
+            .call(move |conn| {
+                let changed = conn.execute(
+                    "UPDATE trades SET \
+                     status='CLOSING', \
+                     close_reason=CASE WHEN close_reason IS NULL OR close_reason='' THEN ? ELSE close_reason END, \
+                     close_attempts=COALESCE(close_attempts,0)+1, \
+                     last_close_attempt_at=?, \
+                     close_error=NULL \
+                     WHERE id=? AND status IN ('OPEN','CLOSING')",
+                    params![reason_owned, ts, id],
+                )?;
+                Ok(changed > 0)
+            })
+            .await
+            .unwrap_or(false)
+    }
+
+    pub async fn record_close_failure(&self, id: i64, err: &str, keep_closing: bool) {
+        let err_owned = err.to_string();
+        let ts = now_ms();
+        let _ = self
+            .db
+            .call(move |conn| {
+                if keep_closing {
+                    conn.execute(
+                        "UPDATE trades SET status='CLOSING', close_error=?, last_close_attempt_at=? \
+                         WHERE id=? AND status IN ('OPEN','CLOSING')",
+                        params![err_owned, ts, id],
+                    )?;
+                } else {
+                    conn.execute(
+                        "UPDATE trades SET status='OPEN', close_reason=NULL, close_error=?, last_close_attempt_at=? \
+                         WHERE id=? AND status IN ('OPEN','CLOSING')",
+                        params![err_owned, ts, id],
+                    )?;
+                }
                 Ok(())
             })
             .await;
@@ -272,7 +317,7 @@ impl TradeRepository {
                 "UPDATE trades SET \
                  status='CLOSED', exit_price_a=?, exit_price_b=?, exit_spread=?, exit_time=?, \
                  pnl_a=?, pnl_b=?, gross_pnl=?, curr_gross_pnl=?, close_reason=?, \
-                 funding_cost=?, commission_cost=?, slippage_cost=?, \
+                 funding_cost=?, commission_cost=?, slippage_cost=?, close_error=NULL, \
                  pnl=? \
                  WHERE id=?",
                 params![

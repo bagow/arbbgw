@@ -302,7 +302,7 @@ pub async fn handle_get_unified(
             let p = pid.clone();
             move |conn| {
                 let mut stmt =
-                    conn.prepare("SELECT * FROM trades WHERE status='OPEN' AND profile_id=?")?;
+                    conn.prepare("SELECT * FROM trades WHERE status IN ('OPEN','CLOSING') AND profile_id=?")?;
                 let items: Vec<_> = stmt
                     .query_map([p], row_to_trade)?
                     .filter_map(|r| r.ok())
@@ -862,7 +862,7 @@ pub async fn handle_market_close_all(
 
     let _id2 = id.clone();
     let r1 = state.real_db.call(move |conn| {
-        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status='OPEN'", params![id])?;
+        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status IN ('OPEN','CLOSING')", params![id])?;
         Ok(())
     }).await;
 
@@ -887,7 +887,7 @@ pub async fn handle_market_close_trade(
         .real_db
         .call(move |conn| {
             conn.execute(
-                "UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status='OPEN'",
+                "UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status IN ('OPEN','CLOSING')",
                 params![trade_id],
             )?;
             Ok(())

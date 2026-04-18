@@ -11,6 +11,16 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 static LAST_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
 
+fn cooldown_active(marker: i64, now: i64, cooldown_ms: i64) -> bool {
+    if marker <= 0 {
+        return false;
+    }
+    if marker > now {
+        return true;
+    }
+    now - marker < cooldown_ms
+}
+
 fn is_position_missing_or_liquidated_error(err: &str) -> bool {
     let s = err.to_lowercase();
     s.contains("position not found")
@@ -62,6 +72,7 @@ pub async fn run_cycle(
         let _elapsed_ms = now_ms() - trade.entry_time;
 
         let manual_close = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
+        let closing_retry = trade.status == "CLOSING";
         if manual_close {
             info!(
                 "[real] MANUAL_CLOSE detected for trade {} {} on {}/{}",
@@ -71,7 +82,7 @@ pub async fn run_cycle(
 
         // CRITICAL: skip trades where entry prices aren't confirmed yet (fast-poll pending)
         // Bypass this check if the user is forcing a manual close.
-        if (trade.entry_price_a <= 0.0 || trade.entry_price_b <= 0.0) && !manual_close {
+        if (trade.entry_price_a <= 0.0 || trade.entry_price_b <= 0.0) && !manual_close && !closing_retry {
             info!(
                 "[real] Skipping close for {} {} — entry prices not confirmed yet",
                 trade.id, trade.pair
@@ -86,7 +97,7 @@ pub async fn run_cycle(
             .get(&trade.exchange_b)
             .and_then(|m| m.get(&trade.pair).cloned());
 
-        if (data_a.is_none() || data_b.is_none()) && !manual_close {
+        if (data_a.is_none() || data_b.is_none()) && !manual_close && !closing_retry {
             continue;
         }
 
@@ -173,7 +184,7 @@ pub async fn run_cycle(
             (trade.entry_price_b - exit_price_b) * trade_coins
         };
         let exec_gross_pnl = exec_pnl_a + exec_pnl_b;
-        let exec_net_pnl = exec_gross_pnl - trade.commission_cost - fund_cost;
+        let exec_net_pnl = exec_gross_pnl - trade.commission_cost - trade.slippage_cost - fund_cost;
         let exec_net_pct = exec_net_pnl / trade.volume * 100.0;
 
         let top_spread = trade.highest_spread.max(current_spread);
@@ -189,7 +200,7 @@ pub async fn run_cycle(
         else if triggered_tp { reason_str = "TP"; }
         else if zero_spread { reason_str = "ZERO_SPREAD"; }
 
-        if manual_close || triggered_tp || triggered_stop || zero_spread {
+        if closing_retry || manual_close || triggered_tp || triggered_stop || zero_spread {
             if e_ctx.closing_in_flight.get(&trade.id).map(|v| *v).unwrap_or(false) {
                 tracing::debug!("[real] Close already in-flight for id={} {}, skipping", trade.id, trade.pair);
                 continue;
@@ -204,7 +215,7 @@ pub async fn run_cycle(
             let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
 
             // 🛡️ JIT L2/L3 VERIFICATION FOR EXITS (TP / ZERO_SPREAD) ───────────────────
-            if !manual_close && !triggered_stop && (reason_str == "TP" || reason_str == "ZERO_SPREAD") {
+            if !closing_retry && !manual_close && !triggered_stop && (reason_str == "TP" || reason_str == "ZERO_SPREAD") {
                 tracing::info!("[real] 🔍 JIT Exit Verification (VWAP) for {} on {}/{}...", pair, exa, exb);
                 let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
@@ -258,7 +269,8 @@ pub async fn run_cycle(
                         (trade.entry_price_b - px_b) * trade_coins
                     };
                     let vwap_gross_pnl = vwap_exec_pnl_a + vwap_exec_pnl_b;
-                    let vwap_net_pnl = vwap_gross_pnl - trade.commission_cost - trade.funding_cost;
+                    let vwap_net_pnl =
+                        vwap_gross_pnl - trade.commission_cost - trade.slippage_cost - trade.funding_cost;
                     let vwap_net_pct = vwap_net_pnl / vol * 100.0;
 
                     let vwap_exit_spread = if is_a_higher {
@@ -285,9 +297,15 @@ pub async fn run_cycle(
                 }
             }
 
+            let reason = if reason_str.is_empty() {
+                trade.close_reason.as_deref().unwrap_or("RETRY_CLOSE")
+            } else {
+                reason_str
+            };
+            if !repo.begin_close_attempt(trade.id, reason).await {
+                continue;
+            }
             e_ctx.closing_in_flight.insert(trade.id, true);
-
-            let reason = reason_str;
             info!("[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4}", trade.id, pair, reason, exec_net_pct, exit_spread);
 
             let c_a = trade.contracts_a;
@@ -438,11 +456,10 @@ pub async fn run_cycle(
                         pair,
                         error_msg
                     );
-                    // If one leg is already externally liquidated/closed, keep the manual close
-                    // reason so the engine keeps retrying the remaining leg immediately.
-                    if !(leg_a_external || leg_b_external) {
-                        repo_close.revert_to_open(id).await;
-                    }
+                    let keep_closing = leg_a_external || leg_b_external || r == "MANUAL";
+                    repo_close
+                        .record_close_failure(id, &error_msg, keep_closing)
+                        .await;
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     closing_guard.remove(&trade_id_for_guard);
                     return;
@@ -525,6 +542,13 @@ pub async fn run_cycle(
                         "[real] ⚠️ POSITION STILL EXISTS after close id={} {} still_a={} still_b={} — keeping trade OPEN for retry/recovery",
                         id, pair, still_a, still_b
                     );
+                    repo_close
+                        .record_close_failure(
+                            id,
+                            &format!("post-close verification failed still_a={} still_b={}", still_a, still_b),
+                            true,
+                        )
+                        .await;
                     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
                     closing_guard.remove(&trade_id_for_guard);
                     return;
@@ -743,7 +767,7 @@ pub async fn run_cycle(
         // the same pair could sneak through the same scan cycle. Block it here.
         {
             let cd_val = e_ctx.pair_cooldown.get(&pair).map(|v| *v).unwrap_or(0);
-            if now - cd_val < ts.pair_cooldown_ms {
+            if cooldown_active(cd_val, now, ts.pair_cooldown_ms) {
                 continue;
             }
         }

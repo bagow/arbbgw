@@ -87,7 +87,8 @@ impl ExchangeConnector for GateConnector {
         let tif = if use_ioc && target_price > 0.0 {
             "ioc"
         } else {
-            "gtc"
+            // For price=0 paths use IOC semantics to avoid lingering limit orders.
+            "ioc"
         };
 
         let body = json!({

@@ -157,22 +157,33 @@ pub fn start_position_sync(
             // 1. Load ALL open trades (across all profiles)
             let open_trades: Vec<Trade> = db.call(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, pair, exchange_a, exchange_b, direction, volume, \
+                    "SELECT id, pair, status, exchange_a, exchange_b, direction, volume, \
                      entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, \
                      pnl_a, pnl_b, close_reason, contracts_a, contracts_b, commission_cost, slippage_cost, \
                      COALESCE(funding_cost, 0.0) \
-                     FROM trades WHERE status='OPEN'"
+                     FROM trades WHERE status IN ('OPEN','CLOSING')"
                 )?;
                 let trades = stmt.query_map([], |row| Ok(Trade {
-                    id: row.get(0)?, pair: row.get(1)?, exchange_a: row.get(2)?, exchange_b: row.get(3)?,
-                    direction: row.get(4)?, volume: row.get(5)?, entry_price_a: row.get(6)?, entry_price_b: row.get(7)?,
-                    entry_spread: row.get(8)?, entry_time: row.get(9)?, highest_spread: row.get(10)?,
-                    pnl_a: row.get(11)?, pnl_b: row.get(12)?, close_reason: row.get(13)?,
-                    contracts_a: row.get::<_, Option<f64>>(14)?.unwrap_or(0.0),
-                    contracts_b: row.get::<_, Option<f64>>(15)?.unwrap_or(0.0),
-                    commission_cost: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
-                    slippage_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
-                    funding_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
+                    id: row.get(0)?,
+                    pair: row.get(1)?,
+                    status: row.get(2)?,
+                    exchange_a: row.get(3)?,
+                    exchange_b: row.get(4)?,
+                    direction: row.get(5)?,
+                    volume: row.get(6)?,
+                    entry_price_a: row.get(7)?,
+                    entry_price_b: row.get(8)?,
+                    entry_spread: row.get(9)?,
+                    entry_time: row.get(10)?,
+                    highest_spread: row.get(11)?,
+                    pnl_a: row.get(12)?,
+                    pnl_b: row.get(13)?,
+                    close_reason: row.get(14)?,
+                    contracts_a: row.get::<_, Option<f64>>(15)?.unwrap_or(0.0),
+                    contracts_b: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+                    commission_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
+                    slippage_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
+                    funding_cost: row.get::<_, Option<f64>>(19)?.unwrap_or(0.0),
                 }))?.filter_map(|t| t.ok()).collect::<Vec<_>>();
                 Ok(trades)
             }).await.unwrap_or_default();
@@ -810,6 +821,7 @@ pub fn bybit_sign(secret: &str, ts: &str, api_key: &str, recv_window: &str, body
 pub struct Trade {
     pub id: i64,
     pub pair: String,
+    pub status: String,
     pub exchange_a: String,
     pub exchange_b: String,
     pub direction: String,
@@ -835,38 +847,39 @@ pub async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
     let p_id_clone = p_id.to_string();
     db.call(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, pair, exchange_a, exchange_b, direction, volume, \
+            "SELECT id, pair, status, exchange_a, exchange_b, direction, volume, \
              entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, \
              pnl_a, pnl_b, close_reason, contracts_a, contracts_b, commission_cost, slippage_cost, \
              COALESCE(funding_cost, 0.0) \
-             FROM trades WHERE status='OPEN' AND profile_id=?",
+             FROM trades WHERE status IN ('OPEN','CLOSING') AND profile_id=?",
         )?;
         let trades = stmt
             .query_map([p_id_clone], |row| {
                 Ok(Trade {
                     id: row.get(0)?,
                     pair: row.get(1)?,
-                    exchange_a: row.get(2)?,
-                    exchange_b: row.get(3)?,
-                    direction: row.get(4)?,
-                    volume: row.get(5)?,
-                    entry_price_a: row.get(6)?,
-                    entry_price_b: row.get(7)?,
-                    entry_spread: row.get(8)?,
-                    entry_time: row.get(9)?,
-                    highest_spread: row.get(10)?,
-                    pnl_a: row.get(11)?,
-                    pnl_b: row.get(12)?,
-                    close_reason: row.get(13)?,
-                    contracts_a: row.get::<_, Option<f64>>(14)?.unwrap_or(
-                        (row.get::<_, f64>(5)? / row.get::<_, f64>(6)?.max(1e-12)).round(),
+                    status: row.get(2)?,
+                    exchange_a: row.get(3)?,
+                    exchange_b: row.get(4)?,
+                    direction: row.get(5)?,
+                    volume: row.get(6)?,
+                    entry_price_a: row.get(7)?,
+                    entry_price_b: row.get(8)?,
+                    entry_spread: row.get(9)?,
+                    entry_time: row.get(10)?,
+                    highest_spread: row.get(11)?,
+                    pnl_a: row.get(12)?,
+                    pnl_b: row.get(13)?,
+                    close_reason: row.get(14)?,
+                    contracts_a: row.get::<_, Option<f64>>(15)?.unwrap_or(
+                        (row.get::<_, f64>(6)? / row.get::<_, f64>(7)?.max(1e-12)).round(),
                     ),
-                    contracts_b: row.get::<_, Option<f64>>(15)?.unwrap_or(
-                        (row.get::<_, f64>(5)? / row.get::<_, f64>(7)?.max(1e-12)).round(),
+                    contracts_b: row.get::<_, Option<f64>>(16)?.unwrap_or(
+                        (row.get::<_, f64>(6)? / row.get::<_, f64>(8)?.max(1e-12)).round(),
                     ),
-                    commission_cost: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
-                    slippage_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
-                    funding_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
+                    commission_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
+                    slippage_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
+                    funding_cost: row.get::<_, Option<f64>>(19)?.unwrap_or(0.0),
                 })
             })?
             .filter_map(|t| t.ok())

@@ -234,6 +234,9 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
                 pnl_a REAL,
                 pnl_b REAL,
                 close_reason TEXT,
+                close_attempts INTEGER DEFAULT 0,
+                last_close_attempt_at INTEGER,
+                close_error TEXT,
                 profile_id TEXT DEFAULT 'real-default',
                 order_id_a TEXT,
                 order_id_b TEXT,
@@ -257,6 +260,9 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_rate_a REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_rate_b REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_next_ts INTEGER", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN close_attempts INTEGER DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN last_close_attempt_at INTEGER", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN close_error TEXT", []);
         Ok(())
     }).await?;
     Ok(())
@@ -333,6 +339,9 @@ pub fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
         pnl_a: row.get("pnl_a").unwrap_or(None),
         pnl_b: row.get("pnl_b").unwrap_or(None),
         close_reason: row.get("close_reason").unwrap_or(None),
+        close_attempts: row.get("close_attempts").unwrap_or(None),
+        last_close_attempt_at: row.get("last_close_attempt_at").unwrap_or(None),
+        close_error: row.get("close_error").unwrap_or(None),
         profile_id: row.get("profile_id").unwrap_or(Some("real-default".into())),
         contracts_a: row.get("contracts_a").unwrap_or(None),
         contracts_b: row.get("contracts_b").unwrap_or(None),
