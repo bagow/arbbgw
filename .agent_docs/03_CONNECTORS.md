@@ -25,6 +25,12 @@
 Коннекторы агрессивно защищают API ключи. При запросах (в частности, Binance) перехватываются заголовки `X-MBX-USED-WEIGHT-1M` и `Retry-After`. 
 Если биржа возвращает HTTP `429` (Too Many Requests), коннектор обязан увести процесс в `tokio::time::sleep`, иначе следующий запрос вызовет гнев биржи и приведет к HTTP `418 IP banned`.
 
+### Close Verification Truthfulness (критическое правило)
+- `close_position()` НЕ имеет права возвращать успешный `CloseReceipt`, если цена/комиссия закрытия не подтверждены через `fetch_order`.
+- Если по deep-verify видно, что позиция исчезла, но fill details не получены, коннектор обязан вернуть ошибку верификации (`unverified close`) вместо фиктивного `final_price=target_price` и `fee=0`.
+- Это защищает PnL от скрытого искажения и не позволяет двигателю записывать ложную финансовую реальность в `trades`.
+- Сравнение символов при deep-verify выполняется только через нормализацию (например, `BTC_USDT`, `BTCUSDT`, `XBTUSDTM`).
+
 ---
 ## 🌐 WebSocket Stream Collectors (`core-node/src/collector/`)
 

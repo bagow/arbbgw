@@ -334,14 +334,12 @@ impl ExchangeConnector for BybitConnector {
         let pos = self
             .fetch_positions(http, keys)
             .await
-            .unwrap_or_else(|_| vec![]);
-        let still_has = pos.iter().any(|p| p.symbol == pair && p.size.abs() > 1e-12);
+            .map_err(|e| format!("Bybit close unverified: failed to fetch positions: {e}"))?;
+        let still_has = pos
+            .iter()
+            .any(|p| crate::engine::real::symbols_match(&p.symbol, pair) && p.size.abs() > 1e-12);
         if !still_has {
-            Ok(CloseReceipt {
-                final_price: target_price,
-                total_fee: 0.0,
-                closed_volume: phys_amount,
-            })
+            Err("Bybit close unverified: position appears closed but fill price/fee is unknown".to_string())
         } else {
             Err("Bybit close unverified, position still active".to_string())
         }

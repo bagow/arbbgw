@@ -352,20 +352,16 @@ impl ExchangeConnector for KucoinConnector {
         let pos = self
             .fetch_positions(http, keys)
             .await
-            .unwrap_or_else(|_| vec![]);
+            .map_err(|e| format!("Kucoin close unverified: failed to fetch positions: {e}"))?;
         let mut std_sym = sym.replace("USDTM", "USDT");
         if std_sym == "XBTUSDT" {
             std_sym = "BTCUSDT".to_string();
         }
         let still_has = pos
             .iter()
-            .any(|p| p.symbol == std_sym && p.size.abs() > 1e-12);
+            .any(|p| crate::engine::real::symbols_match(&p.symbol, &std_sym) && p.size.abs() > 1e-12);
         if !still_has {
-            Ok(CloseReceipt {
-                final_price: target_price,
-                total_fee: 0.0,
-                closed_volume: phys_amount,
-            })
+            Err("Kucoin close unverified: position appears closed but fill price/fee is unknown".to_string())
         } else {
             Err("Kucoin close unverified, position still active".to_string())
         }

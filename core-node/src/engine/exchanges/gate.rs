@@ -368,16 +368,15 @@ impl ExchangeConnector for GateConnector {
         let pos = self
             .fetch_positions(http, keys)
             .await
-            .unwrap_or_else(|_| vec![]);
+            .map_err(|e| format!("Gate close unverified: failed to fetch positions: {e}"))?;
         let still_has = pos
             .iter()
-            .any(|p| p.symbol == contract.replace("_", "") && p.size.abs() > 1e-12);
+            .any(|p| {
+                crate::engine::real::symbols_match(&p.symbol, &contract.replace("_", ""))
+                    && p.size.abs() > 1e-12
+            });
         if !still_has {
-            Ok(CloseReceipt {
-                final_price: target_price,
-                total_fee: 0.0,
-                closed_volume: phys_amount,
-            })
+            Err("Gate close unverified: position appears closed but fill price/fee is unknown".to_string())
         } else {
             Err("Gate close unverified, position still active".to_string())
         }
