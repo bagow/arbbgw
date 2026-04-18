@@ -520,6 +520,31 @@ function renderCexTab(profile, exchangesData) {
     const balancesAgeText = balancesAgeMs >= 0 ? `${(balancesAgeMs / 1000).toFixed(1)}s` : 'n/a';
     const positionsAgeText = positionsAgeMs >= 0 ? `${(positionsAgeMs / 1000).toFixed(1)}s` : 'n/a';
     const feesAgeText = feesAgeMs >= 0 ? `${(feesAgeMs / 1000).toFixed(1)}s` : 'n/a';
+    const STALE_WARN_MS = 30_000;
+    const STALE_CRIT_MS = 90_000;
+    const ageTuples = [
+        ['snapshot', snapshotAgeMs],
+        ['balances', balancesAgeMs],
+        ['positions', positionsAgeMs],
+        ['fees', feesAgeMs]
+    ];
+    const knownAges = ageTuples.map(([, ms]) => ms).filter(ms => ms >= 0);
+    const maxKnownAgeMs = knownAges.length ? Math.max(...knownAges) : -1;
+    const staleParts = ageTuples
+        .filter(([, ms]) => ms >= STALE_WARN_MS)
+        .map(([name]) => name);
+    let staleBanner = '';
+    if (maxKnownAgeMs >= STALE_WARN_MS) {
+        const isCritical = maxKnownAgeMs >= STALE_CRIT_MS;
+        const staleColor = isCritical ? 'var(--red)' : '#b08900';
+        const staleBg = isCritical ? 'rgba(239,68,68,0.08)' : 'rgba(245,158,11,0.08)';
+        const staleBorder = isCritical ? 'rgba(239,68,68,0.35)' : 'rgba(245,158,11,0.35)';
+        staleBanner = `
+            <div style="margin-bottom:14px;padding:10px 12px;border:1px solid ${staleBorder};border-radius:8px;background:${staleBg};font-size:0.85rem;color:${staleColor};font-family:var(--font-mono);">
+                Data is stale (${(maxKnownAgeMs / 1000).toFixed(1)}s). Affected: ${staleParts.join(', ')}.
+            </div>
+        `;
+    }
 
     let html = `
         <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:20px;">
@@ -533,6 +558,7 @@ function renderCexTab(profile, exchangesData) {
                 Updating in: <span id="poll-countdown" style="font-weight:600;color:var(--text);">10s</span>
             </div>
         </div>
+        ${staleBanner}
         <div class="cex-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px;">
     `;
     
