@@ -263,7 +263,7 @@ impl Default for TechnicalSettings {
             depth_multiplier: 1.5,
             vol_diff_max_pct: 5.0,
             vol_tolerance_pct: 15.0,
-            min_listing_age_days: 30,
+            min_listing_age_days: 21,
             binance_min_notional: 5.05,
             margin_check_multiplier: 1.2,
             max_spreads_per_cycle: 200,
