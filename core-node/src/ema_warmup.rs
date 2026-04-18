@@ -272,7 +272,7 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
 
                     // Merge by timestamp (align to 15-min buckets)
                     let merged = merge_candles(&candles_a, &candles_b);
-                    if merged.len() < 10 {
+                    if merged.len() < 2 {
                         return 0;
                     }
 
@@ -347,8 +347,8 @@ async fn fetch_candles_for_with_retry(
     exchange: &str,
     pair: &str,
 ) -> Vec<(f64, f64)> {
-    // Retry indefinitely (or up to 100 times) until we get a successful HTTP 200 OK.
-    for attempt in 1..=100 {
+    // Limited retries to avoid semaphore deadlocks during API rate limits or IP bans.
+    for attempt in 1..=3 {
         if let Some(res) = fetch_candles_for(http, exchange, pair).await {
             // Reached HTTP 200 OK. Even if empty, it's valid.
             return res;
