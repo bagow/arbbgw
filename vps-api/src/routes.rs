@@ -279,6 +279,34 @@ pub async fn handle_get_unified(
         })
         .await
         .unwrap_or(0.0);
+    let db_open_live_pnl_by_exchange: HashMap<String, f64> = state
+        .real_db
+        .call(|conn| {
+            let mut by_ex: HashMap<String, f64> = HashMap::new();
+            let mut stmt = conn.prepare(
+                "SELECT exchange_a, exchange_b,
+                        COALESCE(curr_gross_pnl,
+                            COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0)
+                            - COALESCE(commission_cost,0.0)
+                            - COALESCE(funding_cost,0.0)
+                            - COALESCE(slippage_cost,0.0)
+                        ) as net_live
+                 FROM trades
+                 WHERE status IN ('OPEN','CLOSING')",
+            )?;
+            let rows: Vec<(String, String, f64)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
+            for (ex_a, ex_b, net_live) in rows {
+                let half = net_live / 2.0;
+                *by_ex.entry(ex_a).or_insert(0.0) += half;
+                *by_ex.entry(ex_b).or_insert(0.0) += half;
+            }
+            Ok::<HashMap<String, f64>, tokio_rusqlite::Error>(by_ex)
+        })
+        .await
+        .unwrap_or_default();
     let mut exchanges = exchanges_raw.clone();
     if let Some(obj) = exchanges.as_object_mut() {
         let mut daily_pnl_map = serde_json::Map::new();
@@ -363,6 +391,15 @@ pub async fn handle_get_unified(
             cex_balance_delta_total_today += delta;
             cex_balance_delta_today.insert(ex.clone(), json!(delta));
         }
+        let mut cex_balance_current = serde_json::Map::new();
+        let mut cex_balance_baseline = serde_json::Map::new();
+        for (ex, curr) in &current_balances {
+            cex_balance_current.insert(ex.clone(), json!(curr));
+            cex_balance_baseline.insert(
+                ex.clone(),
+                json!(baseline_balances.get(ex).copied().unwrap_or(*curr)),
+            );
+        }
 
         for (ex, pnl) in daily_exch_stats {
             daily_pnl_map.insert(ex.clone(), json!(pnl));
@@ -412,6 +449,34 @@ pub async fn handle_get_unified(
         obj.insert(
             "cex_vs_db_expected_delta".to_string(),
             json!(cex_balance_delta_total_today - db_expected_balance_delta_total),
+        );
+        let mut db_open_live_pnl_by_exchange_json = serde_json::Map::new();
+        for (ex, v) in &db_open_live_pnl_by_exchange {
+            db_open_live_pnl_by_exchange_json.insert(ex.clone(), json!(v));
+        }
+        let mut db_expected_delta_by_exchange = serde_json::Map::new();
+        let mut cex_vs_db_expected_by_exchange = serde_json::Map::new();
+        for (ex, cex_delta_val) in &cex_balance_delta_today {
+            let cex_delta = cex_delta_val.as_f64().unwrap_or(0.0);
+            let db_closed = daily_pnl_map.get(ex).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let db_open_live = db_open_live_pnl_by_exchange.get(ex).copied().unwrap_or(0.0);
+            let db_expected = db_closed + db_open_live;
+            db_expected_delta_by_exchange.insert(ex.clone(), json!(db_expected));
+            cex_vs_db_expected_by_exchange.insert(ex.clone(), json!(cex_delta - db_expected));
+        }
+        obj.insert("cex_balance_current".to_string(), json!(cex_balance_current));
+        obj.insert("cex_balance_baseline_today".to_string(), json!(cex_balance_baseline));
+        obj.insert(
+            "db_open_live_pnl_by_exchange".to_string(),
+            json!(db_open_live_pnl_by_exchange_json),
+        );
+        obj.insert(
+            "db_expected_delta_by_exchange".to_string(),
+            json!(db_expected_delta_by_exchange),
+        );
+        obj.insert(
+            "cex_vs_db_expected_by_exchange".to_string(),
+            json!(cex_vs_db_expected_by_exchange),
         );
     }
 

@@ -527,6 +527,9 @@ function renderCexTab(profile, exchangesData) {
     const dbExpectedDeltaTotal = Number(exchangesData.db_expected_balance_delta_total ?? (dbClosedTodayTotal + dbOpenLivePnlTotal));
     const unexplainedResidual = Number(exchangesData.cex_vs_db_expected_delta ?? (cexDeltaTotal - dbExpectedDeltaTotal));
     const cexDeltaByExchange = exchangesData.cex_balance_delta_today || {};
+    const dbOpenLiveByExchange = exchangesData.db_open_live_pnl_by_exchange || {};
+    const dbExpectedByExchange = exchangesData.db_expected_delta_by_exchange || {};
+    const residualByExchange = exchangesData.cex_vs_db_expected_by_exchange || {};
     const STALE_WARN_MS = 30_000;
     const STALE_CRIT_MS = 90_000;
     const ageTuples = [
@@ -592,6 +595,9 @@ function renderCexTab(profile, exchangesData) {
         const dailyPnl = (exchangesData.daily_pnl && exchangesData.daily_pnl[exA]) || 0;
         const dailyPct = (exchangesData.daily_pnl_pct && exchangesData.daily_pnl_pct[exA]) || 0;
         const cexBalanceDelta = Number(cexDeltaByExchange[exA] ?? 0);
+        const dbOpenLiveEx = Number(dbOpenLiveByExchange[exA] ?? 0);
+        const dbExpectedEx = Number(dbExpectedByExchange[exA] ?? (dailyPnl + dbOpenLiveEx));
+        const residualEx = Number(residualByExchange[exA] ?? (cexBalanceDelta - dbExpectedEx));
         for (const exB of exNames) {
             if (exA === exB) continue;
             let matchCount = 0;
@@ -627,6 +633,9 @@ function renderCexTab(profile, exchangesData) {
                             </span>
                             <div style="color:var(--text-sub);font-size:0.75rem;margin-top:2px;">
                                 CEX Δ: <span style="color:${cexBalanceDelta > 0 ? 'var(--green)' : cexBalanceDelta < 0 ? 'var(--red)' : 'var(--text-sub)'};">${fmtPnL(cexBalanceDelta)}</span>
+                            </div>
+                            <div style="color:var(--text-sub);font-size:0.75rem;margin-top:2px;">
+                                Residual: <span style="color:${Math.abs(residualEx) > 0.05 ? 'var(--red)' : 'var(--text-sub)'};">${fmtPnL(residualEx)}</span>
                             </div>
                         </div>
                     </div>
