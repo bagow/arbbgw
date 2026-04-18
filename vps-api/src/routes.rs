@@ -263,9 +263,32 @@ pub async fn handle_get_unified(
         let mut daily_pnl_map = serde_json::Map::new();
         let mut daily_pct_map = serde_json::Map::new();
         let balances = obj.get("balances").and_then(|b| b.as_object());
-        let snapshot_age_ms = obj
-            .get("ts")
+        let snapshot_ts = obj
+            .get("snapshot_ts")
             .and_then(|v| v.as_i64())
+            .or_else(|| obj.get("ts").and_then(|v| v.as_i64()));
+        let balances_ts = obj
+            .get("balances_ts")
+            .and_then(|v| v.as_i64())
+            .or(snapshot_ts);
+        let positions_ts = obj
+            .get("positions_ts")
+            .and_then(|v| v.as_i64())
+            .or(snapshot_ts);
+        let fees_ts = obj
+            .get("fees_ts")
+            .and_then(|v| v.as_i64())
+            .or(snapshot_ts);
+        let snapshot_age_ms = snapshot_ts
+            .map(|ts| (now_ms - ts).max(0))
+            .unwrap_or(-1);
+        let balances_age_ms = balances_ts
+            .map(|ts| (now_ms - ts).max(0))
+            .unwrap_or(-1);
+        let positions_age_ms = positions_ts
+            .map(|ts| (now_ms - ts).max(0))
+            .unwrap_or(-1);
+        let fees_age_ms = fees_ts
             .map(|ts| (now_ms - ts).max(0))
             .unwrap_or(-1);
 
@@ -282,6 +305,13 @@ pub async fn handle_get_unified(
         obj.insert("daily_pnl".to_string(), json!(daily_pnl_map));
         obj.insert("daily_pnl_pct".to_string(), json!(daily_pct_map));
         obj.insert("snapshot_age_ms".to_string(), json!(snapshot_age_ms));
+        obj.insert("snapshot_ts".to_string(), json!(snapshot_ts.unwrap_or(-1)));
+        obj.insert("balances_ts".to_string(), json!(balances_ts.unwrap_or(-1)));
+        obj.insert("positions_ts".to_string(), json!(positions_ts.unwrap_or(-1)));
+        obj.insert("fees_ts".to_string(), json!(fees_ts.unwrap_or(-1)));
+        obj.insert("balances_age_ms".to_string(), json!(balances_age_ms));
+        obj.insert("positions_age_ms".to_string(), json!(positions_age_ms));
+        obj.insert("fees_age_ms".to_string(), json!(fees_age_ms));
     }
 
     // 2. Get Profiles

@@ -442,6 +442,10 @@ async fn main() -> Result<()> {
 
                 let val = serde_json::json!({
                     "ts": now_ms,
+                    "snapshot_ts": now_ms,
+                    "balances_ts": now_ms,
+                    "positions_ts": now_ms,
+                    "fees_ts": now_ms,
                     "data": pairs_map,
                     "balances": balances,
                     "margin_balances": margin_balances,

@@ -514,11 +514,20 @@ function renderCexTab(profile, exchangesData) {
     const snapshotAgeText = snapshotAgeMs >= 0
         ? `${(snapshotAgeMs / 1000).toFixed(1)}s`
         : 'n/a';
+    const balancesAgeMs = Number(exchangesData.balances_age_ms ?? -1);
+    const positionsAgeMs = Number(exchangesData.positions_age_ms ?? -1);
+    const feesAgeMs = Number(exchangesData.fees_age_ms ?? -1);
+    const balancesAgeText = balancesAgeMs >= 0 ? `${(balancesAgeMs / 1000).toFixed(1)}s` : 'n/a';
+    const positionsAgeText = positionsAgeMs >= 0 ? `${(positionsAgeMs / 1000).toFixed(1)}s` : 'n/a';
+    const feesAgeText = feesAgeMs >= 0 ? `${(feesAgeMs / 1000).toFixed(1)}s` : 'n/a';
 
     let html = `
         <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:20px;">
             <div style="color:var(--text-sub);font-size:0.85rem;font-family:var(--font-mono);">
                 Snapshot age: <span style="font-weight:600;color:var(--text);">${snapshotAgeText}</span>
+                <span style="margin-left:12px;">Balances: <span style="font-weight:600;color:var(--text);">${balancesAgeText}</span></span>
+                <span style="margin-left:12px;">Positions: <span style="font-weight:600;color:var(--text);">${positionsAgeText}</span></span>
+                <span style="margin-left:12px;">Fees: <span style="font-weight:600;color:var(--text);">${feesAgeText}</span></span>
             </div>
             <div style="color:var(--text-sub);font-size:0.85rem;font-family:var(--font-mono);margin-left:auto;">
                 Updating in: <span id="poll-countdown" style="font-weight:600;color:var(--text);">10s</span>
