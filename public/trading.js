@@ -523,6 +523,9 @@ function renderCexTab(profile, exchangesData) {
     const cexDeltaTotal = Number(exchangesData.cex_balance_delta_total_today ?? 0);
     const dbClosedTodayTotal = Number(exchangesData.db_closed_pnl_today_total ?? 0);
     const cexVsDbDelta = Number(exchangesData.cex_vs_db_delta_today ?? (cexDeltaTotal - dbClosedTodayTotal));
+    const dbOpenLivePnlTotal = Number(exchangesData.db_open_live_pnl_total ?? 0);
+    const dbExpectedDeltaTotal = Number(exchangesData.db_expected_balance_delta_total ?? (dbClosedTodayTotal + dbOpenLivePnlTotal));
+    const unexplainedResidual = Number(exchangesData.cex_vs_db_expected_delta ?? (cexDeltaTotal - dbExpectedDeltaTotal));
     const cexDeltaByExchange = exchangesData.cex_balance_delta_today || {};
     const STALE_WARN_MS = 30_000;
     const STALE_CRIT_MS = 90_000;
@@ -555,6 +558,9 @@ function renderCexTab(profile, exchangesData) {
             <span style="color:var(--text-sub);">CEX balance delta (UTC day): <strong style="color:${cexDeltaTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(cexDeltaTotal)}</strong></span>
             <span style="color:var(--text-sub);">DB closed today: <strong style="color:${dbClosedTodayTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbClosedTodayTotal)}</strong></span>
             <span style="color:${driftColor};">Drift: <strong>${fmtPnL(cexVsDbDelta)}</strong></span>
+            <span style="color:var(--text-sub);">DB open live: <strong style="color:${dbOpenLivePnlTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbOpenLivePnlTotal)}</strong></span>
+            <span style="color:var(--text-sub);">DB expected delta: <strong style="color:${dbExpectedDeltaTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbExpectedDeltaTotal)}</strong></span>
+            <span style="color:${Math.abs(unexplainedResidual)>0.05?'var(--red)':'var(--text-sub)'};">Residual: <strong>${fmtPnL(unexplainedResidual)}</strong></span>
         </div>
     `;
 

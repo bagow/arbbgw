@@ -259,6 +259,26 @@ pub async fn handle_get_unified(
     }).await.unwrap_or_default();
 
     let db_closed_pnl_today_total: f64 = daily_exch_stats.values().sum();
+    let db_open_live_pnl_total: f64 = state
+        .real_db
+        .call(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT COALESCE(SUM(
+                    COALESCE(curr_gross_pnl,
+                        COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0)
+                        - COALESCE(commission_cost,0.0)
+                        - COALESCE(funding_cost,0.0)
+                        - COALESCE(slippage_cost,0.0)
+                    )
+                ), 0.0)
+                 FROM trades
+                 WHERE status IN ('OPEN','CLOSING')",
+            )?;
+            let v: f64 = stmt.query_row([], |r| r.get(0))?;
+            Ok::<f64, tokio_rusqlite::Error>(v)
+        })
+        .await
+        .unwrap_or(0.0);
     let mut exchanges = exchanges_raw.clone();
     if let Some(obj) = exchanges.as_object_mut() {
         let mut daily_pnl_map = serde_json::Map::new();
@@ -379,6 +399,19 @@ pub async fn handle_get_unified(
         obj.insert(
             "cex_vs_db_delta_today".to_string(),
             json!(cex_balance_delta_total_today - db_closed_pnl_today_total),
+        );
+        let db_expected_balance_delta_total = db_closed_pnl_today_total + db_open_live_pnl_total;
+        obj.insert(
+            "db_open_live_pnl_total".to_string(),
+            json!(db_open_live_pnl_total),
+        );
+        obj.insert(
+            "db_expected_balance_delta_total".to_string(),
+            json!(db_expected_balance_delta_total),
+        );
+        obj.insert(
+            "cex_vs_db_expected_delta".to_string(),
+            json!(cex_balance_delta_total_today - db_expected_balance_delta_total),
         );
     }
 
