@@ -356,7 +356,7 @@ pub async fn handle_get_unified(
             baseline_schema_version,
             now_ms / 86_400_000
         );
-        let baseline_balances = state
+        let (baseline_balances, baseline_ts_ms) = state
             .db
             .call({
                 let day_key = day_key.clone();
@@ -372,23 +372,50 @@ pub async fn handle_get_unified(
                         |r| r.get(0),
                     );
                     if let Ok(raw) = row {
-                        let parsed: HashMap<String, f64> =
-                            serde_json::from_str(&raw).unwrap_or_default();
-                        Ok::<HashMap<String, f64>, tokio_rusqlite::Error>(parsed)
+                        let mut parsed_balances: HashMap<String, f64> = HashMap::new();
+                        let mut parsed_ts = now_ms;
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            if let Some(obj) = v.as_object() {
+                                if let Some(ts) = obj.get("ts").and_then(|x| x.as_i64()) {
+                                    parsed_ts = ts;
+                                }
+                                if let Some(bals) = obj.get("balances").and_then(|x| x.as_object()) {
+                                    for (ex, val) in bals {
+                                        if let Some(f) = val.as_f64() {
+                                            parsed_balances.insert(ex.clone(), f);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if parsed_balances.is_empty() {
+                            parsed_balances = serde_json::from_str::<HashMap<String, f64>>(&raw)
+                                .unwrap_or_default();
+                        }
+                        Ok::<(HashMap<String, f64>, i64), tokio_rusqlite::Error>((
+                            parsed_balances,
+                            parsed_ts,
+                        ))
                     } else {
-                        let baseline_json =
-                            serde_json::to_string(&current_balances).unwrap_or_else(|_| "{}".into());
+                        let baseline_json = serde_json::json!({
+                            "ts": now_ms,
+                            "balances": current_balances.clone()
+                        })
+                        .to_string();
                         let _ = conn.execute(
                             "INSERT INTO server_cache(key,value,expires_at) VALUES(?,?,?) \
                              ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
                             rusqlite::params![day_key, baseline_json, now_ms + (3 * 86_400_000)],
                         );
-                        Ok::<HashMap<String, f64>, tokio_rusqlite::Error>(current_balances)
+                        Ok::<(HashMap<String, f64>, i64), tokio_rusqlite::Error>((
+                            current_balances,
+                            now_ms,
+                        ))
                     }
                 }
             })
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|_| (HashMap::new(), now_ms));
 
         let mut cex_balance_delta_today = serde_json::Map::new();
         let mut cex_balance_delta_total_today = 0.0_f64;
@@ -473,6 +500,7 @@ pub async fn handle_get_unified(
         }
         obj.insert("cex_balance_current".to_string(), json!(cex_balance_current));
         obj.insert("cex_balance_baseline_today".to_string(), json!(cex_balance_baseline));
+        obj.insert("cex_baseline_ts_ms".to_string(), json!(baseline_ts_ms));
         obj.insert(
             "db_open_live_pnl_by_exchange".to_string(),
             json!(db_open_live_pnl_by_exchange_json),

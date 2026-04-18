@@ -220,7 +220,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
 
     // ─── Polling Update: Only refresh dynamic data ──────────────────────────
     if (panel.dataset.activeProfileId === profile.id) {
-        updateDynamicElements(profile, active, stats);
+        updateDynamicElements(profile, active, stats, exchanges);
         if (active !== null) {
             renderActiveTable(profile.id, active);
             renderHistoryTable(profile.id, history);
@@ -352,6 +352,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
 
         <!-- History sub-panel -->
         <div class="mt-content" id="mt-sub-history" style="display:${activeSubTabId==='history'?'block':'none'};">
+            ${renderHistoryReconcile(exchanges)}
             <div class="trading-table-wrap">
                 <table>
                     <thead><tr>
@@ -416,7 +417,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
 }
 
 /** Helper to update stats in sub-nav during polling without full re-render */
-function updateDynamicElements(profile, active, stats) {
+function updateDynamicElements(profile, active, stats, exchanges) {
     const statsEl = document.getElementById(`panel-stats-${profile.id}`);
     if (statsEl) {
         statsEl.innerHTML = renderSubNavStats(active, stats, profile.mode);
@@ -435,6 +436,31 @@ function updateDynamicElements(profile, active, stats) {
         hPnlEl.innerHTML = fmtPnL(stats.total_pnl || 0);
         hPnlEl.style.color = (stats.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
     }
+
+    const reconcileEl = document.getElementById('history-reconcile-box');
+    if (reconcileEl && exchanges) {
+        reconcileEl.outerHTML = renderHistoryReconcile(exchanges);
+    }
+}
+
+function renderHistoryReconcile(exchangesData) {
+    if (!exchangesData) return '';
+    const cexDelta = Number(exchangesData.cex_balance_delta_total_today ?? 0);
+    const dbExpected = Number(exchangesData.db_expected_balance_delta_total ?? 0);
+    const residual = Number(exchangesData.cex_vs_db_expected_delta ?? (cexDelta - dbExpected));
+    const baseTs = Number(exchangesData.cex_baseline_ts_ms ?? 0);
+    const baseTsText = baseTs > 0
+        ? new Date(baseTs).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false }) + ' UTC'
+        : 'n/a';
+    return `
+        <div id="history-reconcile-box" style="margin:0 0 14px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-panel-2);font-size:0.85rem;font-family:var(--font-mono);display:flex;gap:16px;flex-wrap:wrap;">
+            <span style="color:var(--text-sub);">History window: all CLOSED trades in DB</span>
+            <span style="color:var(--text-sub);">CEX window start: <strong>${baseTsText}</strong></span>
+            <span style="color:var(--text-sub);">CEX Δ: <strong style="color:${cexDelta>=0?'var(--green)':'var(--red)'}">${fmtPnL(cexDelta)}</strong></span>
+            <span style="color:var(--text-sub);">DB expected Δ: <strong style="color:${dbExpected>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbExpected)}</strong></span>
+            <span style="color:${Math.abs(residual)>0.05?'var(--red)':'var(--text-sub)'};">Residual: <strong>${fmtPnL(residual)}</strong></span>
+        </div>
+    `;
 }
 
 function renderSubNavStats(active, stats, mode) {
@@ -517,6 +543,10 @@ function renderCexTab(profile, exchangesData) {
     const balancesAgeMs = Number(exchangesData.balances_age_ms ?? -1);
     const positionsAgeMs = Number(exchangesData.positions_age_ms ?? -1);
     const feesAgeMs = Number(exchangesData.fees_age_ms ?? -1);
+    const cexBaselineTs = Number(exchangesData.cex_baseline_ts_ms ?? 0);
+    const cexBaselineText = cexBaselineTs > 0
+        ? new Date(cexBaselineTs).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false }) + ' UTC'
+        : 'n/a';
     const balancesAgeText = balancesAgeMs >= 0 ? `${(balancesAgeMs / 1000).toFixed(1)}s` : 'n/a';
     const positionsAgeText = positionsAgeMs >= 0 ? `${(positionsAgeMs / 1000).toFixed(1)}s` : 'n/a';
     const feesAgeText = feesAgeMs >= 0 ? `${(feesAgeMs / 1000).toFixed(1)}s` : 'n/a';
@@ -571,6 +601,7 @@ function renderCexTab(profile, exchangesData) {
         <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:20px;">
             <div style="color:var(--text-sub);font-size:0.85rem;font-family:var(--font-mono);">
                 Snapshot age: <span style="font-weight:600;color:var(--text);">${snapshotAgeText}</span>
+                <span style="margin-left:12px;">CEX window start: <span style="font-weight:600;color:var(--text);">${cexBaselineText}</span></span>
                 <span style="margin-left:12px;">Balances: <span style="font-weight:600;color:var(--text);">${balancesAgeText}</span></span>
                 <span style="margin-left:12px;">Positions: <span style="font-weight:600;color:var(--text);">${positionsAgeText}</span></span>
                 <span style="margin-left:12px;">Fees: <span style="font-weight:600;color:var(--text);">${feesAgeText}</span></span>
