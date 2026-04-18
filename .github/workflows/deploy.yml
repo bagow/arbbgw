@@ -69,7 +69,6 @@ jobs:
               - 'src/**'
               - 'public/**'
               - 'wrangler.toml'
-              - '.github/workflows/deploy.yml'
 
   # --- 2. Деплой vps-api ---
   deploy-vps-api:
