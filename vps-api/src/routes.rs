@@ -348,7 +348,14 @@ pub async fn handle_get_unified(
             })
             .unwrap_or_default();
 
-        let day_key = format!("cex_balance_baseline:{}", now_ms / 86_400_000);
+        // Versioned baseline key: reset baseline when balance methodology changes
+        // (e.g. wallet -> equity normalization), so deltas stay comparable.
+        let baseline_schema_version = "v2_equity";
+        let day_key = format!(
+            "cex_balance_baseline:{}:{}",
+            baseline_schema_version,
+            now_ms / 86_400_000
+        );
         let baseline_balances = state
             .db
             .call({
