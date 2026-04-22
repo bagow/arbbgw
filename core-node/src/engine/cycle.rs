@@ -216,10 +216,8 @@ pub async fn run_cycle(
             // 🛡️ JIT L2 VERIFICATION FOR EXITS (TP / ZERO_SPREAD) ───────────────────
             if !closing_retry && !manual_close && !triggered_stop && (reason_str == "TP" || reason_str == "ZERO_SPREAD") {
                 tracing::info!("[real] 🔍 JIT Exit Verification (VWAP) for {} on {}/{}...", pair, exa, exb);
-                let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
-                let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
 
-                // Try L2 cache first (0ms), REST fallback if stale
+                // L2 WS cache only — zero REST calls
                 let l2_key_a = format!("{}:{}", exa, pair);
                 let l2_key_b = format!("{}:{}", exb, pair);
                 let cached_a = e_ctx.l2_books.get(&l2_key_a).map(|v| v.clone());
@@ -231,10 +229,9 @@ pub async fn run_cycle(
                         (Ok((a.bids.clone(), a.asks.clone())), Ok((b.bids.clone(), b.asks.clone())))
                     },
                     _ => {
-                        tokio::join!(
-                            conn_a.fetch_orderbook(&http, &pair, 10),
-                            conn_b.fetch_orderbook(&http, &pair, 10)
-                        )
+                        // No fresh L2 WS data — skip VWAP verification, allow close to proceed
+                        tracing::info!("[real] ⏭️ No L2 WS data for {}/{} — skipping VWAP exit check", exa, exb);
+                        (Ok((vec![], vec![])), Ok((vec![], vec![])))
                     }
                 };
 
@@ -871,31 +868,25 @@ pub async fn run_cycle(
             }
         }
 
-        // ── L2 ORDERBOOK VERIFICATION (WS cache → REST fallback) ─────────────
-        info!("[real] 🔍 Checking L2 depth for {}...", pair);
-        let t_ob = std::time::Instant::now();
-
-        // Try L2 cache first (populated by WS collectors, 0ms latency)
+        // ── L2 ORDERBOOK VERIFICATION (WS cache only, zero REST) ─────────────
         let l2_key_a = format!("{}:{}", exa, pair);
         let l2_key_b = format!("{}:{}", exb, pair);
         let cached_a = e_ctx.l2_books.get(&l2_key_a).map(|v| v.clone());
         let cached_b = e_ctx.l2_books.get(&l2_key_b).map(|v| v.clone());
         let now_cache = now_ms();
 
-        // Use cache if fresh (< 2 seconds old), otherwise fall back to REST
+        // L2 cache must exist AND be fresh (< 2s). No REST fallback.
         let (ob_a_res, ob_b_res) = match (&cached_a, &cached_b) {
             (Some(a), Some(b)) if (now_cache - a.updated_ms) < 2_000 && (now_cache - b.updated_ms) < 2_000 => {
                 (Ok((a.bids.clone(), a.asks.clone())), Ok((b.bids.clone(), b.asks.clone())))
             },
             _ => {
-                // REST fallback — still needed when L2 cache is cold
-                tokio::join!(
-                    conn_ensure_a.fetch_orderbook(&http, &pair, 10),
-                    conn_ensure_b.fetch_orderbook(&http, &pair, 10)
-                )
+                // No fresh L2 data from WS — skip this pair entirely
+                tracing::info!("[real] ⏭️ SKIP {} — no fresh L2 WS data for {}/{}", pair, exa, exb);
+                e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 3_000);
+                continue;
             }
         };
-        let _ob_ms = t_ob.elapsed().as_millis();
 
         let analyze_depth = |ob_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>,
                              is_buy: bool,
