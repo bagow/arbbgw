@@ -214,9 +214,10 @@ impl ExchangeConnector for BinanceConnector {
             .unwrap_or_else(|| "none".to_string());
         let resp_status_str = v["status"].as_str().unwrap_or("?");
         tracing::info!(
-            "[binance] place_order {} req={} → orderId={} status={}",
+            "[binance] place_order {} side={} qty={} → orderId={} status={}",
             pair,
-            qs,
+            side,
+            qty_str,
             resp_oid,
             resp_status_str
         );
