@@ -39,9 +39,9 @@ async fn main() -> anyhow::Result<()> {
     let pass_sergei = env::var("PASS_SERGEI").unwrap_or_else(|_| "pass_sergei".into());
 
     let db_path = env::var("PROFILES_DB_PATH")
-        .unwrap_or_else(|_| "/home/opc/core-node/vps-api.db".to_string());
+        .unwrap_or_else(|_| "/home/ubuntu/core-node/vps-api.db".to_string());
     let real_path = env::var("REAL_DB_PATH")
-        .unwrap_or_else(|_| "/home/opc/core-node/real-trader.db".to_string());
+        .unwrap_or_else(|_| "/home/ubuntu/core-node/real-trader.db".to_string());
 
     // ── Profiles DB (vps-api.db) ──────────────────────────────────────────────
     tracing::info!("Profiles DB: {}", db_path);
