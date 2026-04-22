@@ -342,22 +342,59 @@ async fn main() -> Result<()> {
                 );
 
                 // ── EVALUATE SMART SIGNALS ──
-                let signals = crate::engine::scanner::generate_signals(
-                    &spreads,
-                    &prices,
-                    &real_profiles,
-                    &keys,
-                    &e_ctx,
-                    &ts,
-                );
+                // Split profiles by strategy type for isolated dispatch
+                let ema_profiles: Vec<_> = real_profiles.iter().filter(|p| p.strategy_type != "hft").cloned().collect();
+                let hft_profiles: Vec<_> = real_profiles.iter().filter(|p| p.strategy_type == "hft").cloned().collect();
 
-                // Run REAL engine first — real money needs freshest prices
-                for real_s in real_profiles {
+                // ── EMA REVERSION ENGINE (existing, untouched logic) ──
+                let signals = if !ema_profiles.is_empty() {
+                    crate::engine::scanner::generate_signals(
+                        &spreads,
+                        &prices,
+                        &ema_profiles,
+                        &keys,
+                        &e_ctx,
+                        &ts,
+                    )
+                } else {
+                    vec![]
+                };
+
+                for ema_s in &ema_profiles {
                     engine::cycle::run_cycle(
                         signals.clone(),
                         spreads.clone(),
                         prices.clone(),
-                        real_s,
+                        ema_s.clone(),
+                        http.clone(),
+                        real_db.clone(),
+                        keys.clone(),
+                        &ts,
+                        e_ctx.clone(),
+                    )
+                    .await;
+                }
+
+                // ── HFT LATENCY ARBITRAGE ENGINE (isolated module) ──
+                let hft_signals = if !hft_profiles.is_empty() {
+                    crate::engine::hft_scanner::generate_hft_signals(
+                        &spreads,
+                        &prices,
+                        &hft_profiles,
+                        &keys,
+                        &e_ctx,
+                        &ts,
+                    )
+                } else {
+                    vec![]
+                };
+
+                for hft_s in &hft_profiles {
+                    engine::hft_cycle::run_hft_cycle(
+                        hft_signals.clone(),
+                        spreads.clone(),
+                        prices.clone(),
+                        hft_s.clone(),
                         http.clone(),
                         real_db.clone(),
                         keys.clone(),

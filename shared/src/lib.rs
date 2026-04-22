@@ -158,6 +158,10 @@ pub struct TradingSettings {
     pub disabled_exchanges: Vec<String>,
     pub leverage: i64,
     pub margin_mode: String,
+    /// "ema" (default — EMA reversion) or "hft" (latency arbitrage)
+    pub strategy_type: String,
+    /// Maximum hold time for HFT trades in milliseconds before force-closing
+    pub hft_timeout_ms: i64,
 }
 
 impl Default for TradingSettings {
@@ -183,6 +187,8 @@ impl Default for TradingSettings {
             disabled_exchanges: vec![],
             leverage: 10,
             margin_mode: "cross".to_string(),
+            strategy_type: "ema".to_string(),
+            hft_timeout_ms: 10_000,
         }
     }
 }

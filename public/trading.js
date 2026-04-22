@@ -758,6 +758,17 @@ function renderSettingsForm(profile) {
                     <input type="number" id="sf-max-${p.id}" step="0.0001" value="${p.max_entry_spread??10}" />
                 </div>
                 <div class="form-group">
+                    <label>Strategy Type</label>
+                    <select id="sf-strategy-${p.id}" style="background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:.95rem;">
+                        <option value="ema" ${(p.strategy_type||'ema')==='ema'?'selected':''}>EMA Reversion</option>
+                        <option value="hft" ${(p.strategy_type)==='hft'?'selected':''}>HFT / Latency Arb</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>HFT Timeout (ms)</label>
+                    <input type="number" id="sf-hft-timeout-${p.id}" step="1" value="${p.hft_timeout_ms??10000}" title="Time limit to hold an HFT trade before market closing" />
+                </div>
+                <div class="form-group">
                     <label>Trade Volume (USD)</label>
                     <input type="number" id="sf-vol-${p.id}" step="0.0001" value="${p.trade_volume??1000}" />
                 </div>
@@ -1597,6 +1608,8 @@ window.saveSettings = async function (profileId) {
         collector_interval_secs: parseInt(g(`sf-interval-${profileId}`)),
         leverage:              parseInt(g(`sf-leverage-${profileId}`)) || 10,
         margin_mode:           document.getElementById(`sf-margin-${profileId}`)?.value || 'cross',
+        strategy_type:         document.getElementById(`sf-strategy-${profileId}`)?.value || 'ema',
+        hft_timeout_ms:        parseInt(g(`sf-hft-timeout-${profileId}`)) || 10000,
     };
     const btn = document.getElementById(`sf-save-${profileId}`);
     try {

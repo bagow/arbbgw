@@ -36,7 +36,9 @@ const PROFILE_SELECT: &str = "
         leverage,
         margin_mode,
         min_structural_deviation,
-        min_depth_percent
+        min_depth_percent,
+        strategy_type,
+        hft_timeout_ms
     FROM trading_profiles
 ";
 
@@ -128,6 +130,16 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
             .get("min_depth_percent")
             .unwrap_or(Some(100.0))
             .unwrap_or(100.0),
+        strategy_type: row
+            .get::<_, Option<String>>(21)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "ema".to_string()),
+        hft_timeout_ms: row
+            .get::<_, Option<i64>>(22)
+            .ok()
+            .flatten()
+            .unwrap_or(10_000),
     }
 }
 

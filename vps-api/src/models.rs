@@ -83,6 +83,10 @@ pub struct TradingProfile {
     pub margin_mode: String,
     pub min_structural_deviation: f64,
     pub min_depth_percent: f64,
+    #[serde(default)]
+    pub strategy_type: String,
+    #[serde(default)]
+    pub hft_timeout_ms: i64,
 }
 
 impl Default for TradingProfile {
@@ -112,6 +116,8 @@ impl Default for TradingProfile {
             margin_mode: "cross".to_string(),
             min_structural_deviation: 0.0,
             min_depth_percent: 100.0,
+            strategy_type: "ema".to_string(),
+            hft_timeout_ms: 10000,
         }
     }
 }
