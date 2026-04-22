@@ -8,11 +8,12 @@ use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
 
-use crate::state::{PriceMap, TickerData, UpdateSignal};
+use crate::state::{L2OrderbookMap, PriceMap, TickerData, UpdateSignal};
 
 pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
+    _l2_books: L2OrderbookMap,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     let mut backoff = Duration::from_secs(1);

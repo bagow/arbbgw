@@ -17,6 +17,21 @@ pub use shared::TickerData;
 /// exchange_id → symbol → TickerData (e.g. "gate" → "BTCUSDT" → {...})
 pub type PriceMap = Arc<DashMap<String, HashMap<String, TickerData>>>;
 
+/// Live L2 orderbook depth — updated by WS collectors every ~100ms.
+/// Key: "exchange:PAIR" (e.g. "binance:BTCUSDT")
+/// Value: (bids, asks) where each is Vec<(price, size_in_base_asset)> sorted by best first.
+pub type L2OrderbookMap = Arc<DashMap<String, L2Snapshot>>;
+
+#[derive(Clone, Debug, Default)]
+pub struct L2Snapshot {
+    /// Sorted descending by price (best bid first)
+    pub bids: Vec<(f64, f64)>,
+    /// Sorted ascending by price (best ask first)
+    pub asks: Vec<(f64, f64)>,
+    /// Unix millis of last update
+    pub updated_ms: i64,
+}
+
 /// Fired after every WS tick update. Engine wakes up and recomputes spreads.
 pub type UpdateSignal = Arc<Notify>;
 
@@ -57,6 +72,8 @@ pub struct EngineContext {
     pub high_latency_strikes: Arc<DashMap<String, u32>>,
     /// Market Regime Tracker: pair -> (price, timestamp_ms). Used to calculate spread velocity.
     pub price_history: Arc<DashMap<String, (f64, i64)>>,
+    /// Live L2 orderbook depth cache — updated by WS collectors in real-time.
+    pub l2_books: L2OrderbookMap,
 }
 
 impl Default for EngineContext {
@@ -80,6 +97,7 @@ impl Default for EngineContext {
             is_killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             high_latency_strikes: Arc::new(DashMap::new()),
             price_history: Arc::new(DashMap::new()),
+            l2_books: Arc::new(DashMap::new()),
         }
     }
 }

@@ -8,11 +8,12 @@ use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
 
-use crate::state::{PriceMap, TickerData, UpdateSignal};
+use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
 
 pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
+    l2_books: L2OrderbookMap,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -50,7 +51,7 @@ pub async fn run(
         };
 
         tokio::select! {
-            res = handler(&prices, &signal) => {
+            res = handler(&prices, &signal, &l2_books) => {
                 match res {
                     Ok(_)  => { warn!("[bybit] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
                     Err(e) => error!("[bybit] Error: {}. Reconnecting in {:?}", e, backoff),
@@ -66,7 +67,7 @@ pub async fn run(
     }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
+async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
     let http = Client::new();
     // Fetch all linear USDT perpetual tickers (includes volume)
     let resp: Value = http
@@ -143,6 +144,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             .context("Bybit WS connect failed")?;
     info!("[bybit] Connected, subscribing...");
 
+    // Subscribe to L1 (orderbook.1) for all symbols
     for chunk in symbols.chunks(10) {
         let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.1.{}", s)).collect();
         ws.send(Message::Text(
@@ -151,6 +153,18 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
         .await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
+
+    // Subscribe to L2 (orderbook.25) for top volume symbols (depth cache)
+    let l2_symbols: Vec<&String> = symbols.iter().take(50).collect();
+    for chunk in l2_symbols.chunks(10) {
+        let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.25.{}", s)).collect();
+        ws.send(Message::Text(
+            json!({"op":"subscribe","args":args}).to_string().into(),
+        ))
+        .await?;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    info!("[bybit] Subscribed L2 depth for {} symbols", l2_symbols.len());
 
     let mut _ping = tokio::time::interval(Duration::from_secs(20));
     #[derive(Deserialize)]
@@ -179,10 +193,41 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
             msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(v) = serde_json::from_str::<BybitMsg>(&text) {
-                        if v.topic.map(|t| !t.starts_with("orderbook.1.")).unwrap_or(true) { continue; }
+                        let topic = match v.topic {
+                            Some(t) => t,
+                            None => continue,
+                        };
                         if let Some(d) = v.data {
                             if let Some(sym) = d.s {
                                 if !sym.ends_with("USDT") { continue; }
+
+                                // L2 depth (orderbook.25) → update l2_books cache
+                                if topic.starts_with("orderbook.25.") {
+                                    let now_ms = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as i64;
+                                    let bids: Vec<(f64, f64)> = d.b.as_ref().map(|levels| {
+                                        levels.iter().filter_map(|&(p, q)| {
+                                            Some((p.parse::<f64>().ok()?, q.parse::<f64>().ok()?))
+                                        }).collect()
+                                    }).unwrap_or_default();
+                                    let asks: Vec<(f64, f64)> = d.a.as_ref().map(|levels| {
+                                        levels.iter().filter_map(|&(p, q)| {
+                                            Some((p.parse::<f64>().ok()?, q.parse::<f64>().ok()?))
+                                        }).collect()
+                                    }).unwrap_or_default();
+                                    if !bids.is_empty() || !asks.is_empty() {
+                                        l2_books.insert(
+                                            format!("bybit:{}", sym),
+                                            L2Snapshot { bids, asks, updated_ms: now_ms },
+                                        );
+                                    }
+                                    continue;
+                                }
+
+                                // L1 ticker (orderbook.1) → update PriceMap
+                                if !topic.starts_with("orderbook.1.") { continue; }
 
                                 if let Some(mut ex_map) = price_map.get_mut("bybit") {
                                     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -209,7 +254,6 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                                             signal.notify_one();
                                         }
                                     } else {
-                                        // new entry creation logic
                                         let mut b_p = 0.0; let mut b_q = 0.0;
                                         let mut a_p = 0.0; let mut a_q = 0.0;
                                         if let Some(bids) = d.b {

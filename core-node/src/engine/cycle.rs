@@ -1,7 +1,6 @@
 use crate::engine::db::TradeRepository;
 use reqwest::Client;
 use std::sync::Arc;
-use tokio::time::Duration;
 use tokio_rusqlite::Connection;
 use tracing::{error, info};
 
@@ -214,16 +213,30 @@ pub async fn run_cycle(
             let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
             let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
 
-            // 🛡️ JIT L2/L3 VERIFICATION FOR EXITS (TP / ZERO_SPREAD) ───────────────────
+            // 🛡️ JIT L2 VERIFICATION FOR EXITS (TP / ZERO_SPREAD) ───────────────────
             if !closing_retry && !manual_close && !triggered_stop && (reason_str == "TP" || reason_str == "ZERO_SPREAD") {
                 tracing::info!("[real] 🔍 JIT Exit Verification (VWAP) for {} on {}/{}...", pair, exa, exb);
                 let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
-                
-                let (ob_a_res, ob_b_res) = tokio::join!(
-                    conn_a.fetch_orderbook(&http, &pair, 10),
-                    conn_b.fetch_orderbook(&http, &pair, 10)
-                );
+
+                // Try L2 cache first (0ms), REST fallback if stale
+                let l2_key_a = format!("{}:{}", exa, pair);
+                let l2_key_b = format!("{}:{}", exb, pair);
+                let cached_a = e_ctx.l2_books.get(&l2_key_a).map(|v| v.clone());
+                let cached_b = e_ctx.l2_books.get(&l2_key_b).map(|v| v.clone());
+                let now_l2 = now_ms();
+
+                let (ob_a_res, ob_b_res) = match (&cached_a, &cached_b) {
+                    (Some(a), Some(b)) if (now_l2 - a.updated_ms) < 2_000 && (now_l2 - b.updated_ms) < 2_000 => {
+                        (Ok((a.bids.clone(), a.asks.clone())), Ok((b.bids.clone(), b.asks.clone())))
+                    },
+                    _ => {
+                        tokio::join!(
+                            conn_a.fetch_orderbook(&http, &pair, 10),
+                            conn_b.fetch_orderbook(&http, &pair, 10)
+                        )
+                    }
+                };
 
                 let analyze_vwap = |ob_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>, is_buy: bool, required_vol: f64, m: f64| -> Option<f64> {
                     if let Ok((bids, asks)) = ob_res {
@@ -838,13 +851,50 @@ pub async fn run_cycle(
             .map(|v| *v)
             .unwrap_or(0.000001);
 
-        // ── JIT ORDERBOOK VERIFICATION ───────────────────────────────────────
-        info!("[real] 🔍 Checking L2/L3 orderbook depth for {}...", pair);
+        // ── L1 PRE-FILTER (skip REST fetch if WS L1 already shows insufficient depth) ──
+        {
+            let l1_a = prices.get(&exa).and_then(|m| m.get(&pair).cloned());
+            let l1_b = prices.get(&exb).and_then(|m| m.get(&pair).cloned());
+            if let (Some(da), Some(db)) = (&l1_a, &l1_b) {
+                let l1_depth_a_usd = if !is_a_higher { da.ask_size } else { da.bid_size };
+                let l1_depth_b_usd = if is_a_higher { db.ask_size } else { db.bid_size };
+                let required_usd = settings.trade_volume;
+                if l1_depth_a_usd < required_usd * 0.5 || l1_depth_b_usd < required_usd * 0.5 {
+                    tracing::warn!(
+                        "[real] ⏭️ SKIP {} L1 depth too shallow: A={:.1}$ B={:.1}$ < {:.0}$",
+                        pair, l1_depth_a_usd, l1_depth_b_usd, required_usd * 0.5
+                    );
+                    // Cooldown 5s to avoid re-checking the same thin pair every tick
+                    e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 5_000);
+                    continue;
+                }
+            }
+        }
+
+        // ── L2 ORDERBOOK VERIFICATION (WS cache → REST fallback) ─────────────
+        info!("[real] 🔍 Checking L2 depth for {}...", pair);
         let t_ob = std::time::Instant::now();
-        let (ob_a_res, ob_b_res) = tokio::join!(
-            conn_ensure_a.fetch_orderbook(&http, &pair, 10),
-            conn_ensure_b.fetch_orderbook(&http, &pair, 10)
-        );
+
+        // Try L2 cache first (populated by WS collectors, 0ms latency)
+        let l2_key_a = format!("{}:{}", exa, pair);
+        let l2_key_b = format!("{}:{}", exb, pair);
+        let cached_a = e_ctx.l2_books.get(&l2_key_a).map(|v| v.clone());
+        let cached_b = e_ctx.l2_books.get(&l2_key_b).map(|v| v.clone());
+        let now_cache = now_ms();
+
+        // Use cache if fresh (< 2 seconds old), otherwise fall back to REST
+        let (ob_a_res, ob_b_res) = match (&cached_a, &cached_b) {
+            (Some(a), Some(b)) if (now_cache - a.updated_ms) < 2_000 && (now_cache - b.updated_ms) < 2_000 => {
+                (Ok((a.bids.clone(), a.asks.clone())), Ok((b.bids.clone(), b.asks.clone())))
+            },
+            _ => {
+                // REST fallback — still needed when L2 cache is cold
+                tokio::join!(
+                    conn_ensure_a.fetch_orderbook(&http, &pair, 10),
+                    conn_ensure_b.fetch_orderbook(&http, &pair, 10)
+                )
+            }
+        };
         let _ob_ms = t_ob.elapsed().as_millis();
 
         let analyze_depth = |ob_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>,
@@ -880,7 +930,9 @@ pub async fn run_cycle(
         let depth_b = analyze_depth(ob_b_res, is_a_higher, limit_price_b, mult_b);
 
         if depth_a < qty_a || depth_b < qty_b {
-            tracing::warn!("[real] 🛑 ABORT {}: Insufficient L2/L3 depth! req A={} (has {:.2}), req B={} (has {:.2})", pair, qty_a, depth_a, qty_b, depth_b);
+            tracing::warn!("[real] 🛑 ABORT {}: Insufficient L2 depth! req A={} (has {:.2}), req B={} (has {:.2})", pair, qty_a, depth_a, qty_b, depth_b);
+            // Cooldown 5s after abort — prevents hammering the same illiquid pair
+            e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 5_000);
             continue;
         }
 

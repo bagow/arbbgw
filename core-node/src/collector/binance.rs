@@ -1,4 +1,5 @@
 //! Binance USDT Futures WebSocket collector — !bookTicker stream (all pairs)
+//! + L2 depth stream for active pairs (top 5 levels @ 100ms)
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -8,11 +9,12 @@ use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
 
-use crate::state::{PriceMap, TickerData, UpdateSignal};
+use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
 
 pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
+    l2_books: L2OrderbookMap,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -50,7 +52,7 @@ pub async fn run(
         };
 
         tokio::select! {
-            res = handler(&prices, &signal) => {
+            res = handler(&prices, &signal, &l2_books) => {
                 match res {
                     Ok(_)  => { warn!("[binance] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
                     Err(e) => error!("[binance] Error: {}. Reconnecting in {:?}", e, backoff),
@@ -66,7 +68,7 @@ pub async fn run(
     }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
+async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
     // Seed 24h volume from REST miniTicker snapshot
     let http = Client::new();
     if let Ok(resp) = http
@@ -109,7 +111,13 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
     )
     .await
     .context("Binance WS connect failed")?;
-    info!("[binance] Connected");
+    info!("[binance] Connected (bookTicker)");
+
+    // Spawn L2 depth collector as a separate parallel task
+    let l2_books_clone = l2_books.clone();
+    tokio::spawn(async move {
+        run_l2_depth_stream(l2_books_clone).await;
+    });
 
     #[derive(Deserialize)]
     struct BinanceTicker<'a> {
@@ -179,4 +187,85 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Separate L2 depth stream for top-volume pairs.
+/// Subscribes to depth5@100ms for a curated set of high-volume futures.
+/// Updates l2_books cache which cycle.rs reads instead of REST API calls.
+async fn run_l2_depth_stream(l2_books: L2OrderbookMap) {
+    // Top ~40 perpetuals by volume — covers 90%+ of arb opportunities.
+    // These are the ones where JIT depth checks actually matter.
+    let symbols: Vec<&str> = vec![
+        "btcusdt", "ethusdt", "solusdt", "bnbusdt", "dogeusdt",
+        "xrpusdt", "pepeusdt", "suiusdt", "adausdt", "trxusdt",
+        "avaxusdt", "linkusdt", "dotusdt", "ltcusdt", "maticusdt",
+        "arbusdt", "opusdt", "aptusdt", "nearusdt", "filusdt",
+        "wifusdt", "shibusdt", "bonkusdt", "flokiusdt", "wldusdt",
+        "1000satsusdt", "ordiusdt", "tiausdt", "seiusdt", "injusdt",
+        "fetusdt", "runeusdt", "jupusdt", "enausdt", "ondousdt",
+        "renderusdt", "aaveusdt", "mkrusdt", "ldousdt", "pendleusdt",
+    ];
+
+    let streams: Vec<String> = symbols.iter().map(|s| format!("{}@depth5@100ms", s)).collect();
+    let url = format!("wss://fstream.binance.com/stream?streams={}", streams.join("/"));
+
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match connect_async_tls_with_config(&url, None, false, None).await {
+            Ok((mut ws, _)) => {
+                info!("[binance_l2] Connected — {} depth streams", symbols.len());
+                backoff = Duration::from_secs(1);
+
+                while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+                    if let Ok(Message::Text(text)) = msg {
+                        // Combined stream format: {"stream":"btcusdt@depth5@100ms","data":{...}}
+                        if let Ok(wrapper) = serde_json::from_str::<Value>(&text) {
+                            if let Some(stream_name) = wrapper["stream"].as_str() {
+                                // Extract symbol from stream name: "btcusdt@depth5@100ms" → "BTCUSDT"
+                                let sym = stream_name.split('@').next().unwrap_or("").to_uppercase();
+                                if sym.is_empty() { continue; }
+
+                                let data = &wrapper["data"];
+                                let bids = parse_levels(data, "b");
+                                let asks = parse_levels(data, "a");
+
+                                if !bids.is_empty() || !asks.is_empty() {
+                                    let now_ms = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as i64;
+                                    l2_books.insert(
+                                        format!("binance:{}", sym),
+                                        L2Snapshot { bids, asks, updated_ms: now_ms },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                warn!("[binance_l2] WS closed, reconnecting...");
+            }
+            Err(e) => {
+                error!("[binance_l2] Connect failed: {}. Retry in {:?}", e, backoff);
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(60));
+    }
+}
+
+/// Parse [[price, qty], ...] from depth snapshot
+fn parse_levels(data: &Value, key: &str) -> Vec<(f64, f64)> {
+    data[key]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|level| {
+                    let px: f64 = level[0].as_str()?.parse().ok()?;
+                    let sz: f64 = level[1].as_str()?.parse().ok()?;
+                    if px > 0.0 && sz > 0.0 { Some((px, sz)) } else { None }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

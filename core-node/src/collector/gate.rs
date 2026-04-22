@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
 
-use crate::state::{PriceMap, UpdateSignal};
+use crate::state::{L2OrderbookMap, PriceMap, UpdateSignal};
 
 /// Max symbols per single WS connection — keeps well under Gate's implicit limit.
 const SYMBOLS_PER_WS: usize = 100;
@@ -18,6 +18,7 @@ const SYMBOLS_PER_WS: usize = 100;
 pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
+    _l2_books: L2OrderbookMap,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     let mut backoff = Duration::from_secs(1);

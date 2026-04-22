@@ -14,7 +14,7 @@ use tracing::{error, info};
 
 use crate::engine::real::{has_sufficient_margin, mark_balance_low, now_ms};
 use shared::{SpreadRow, TechnicalSettings, TradingSettings};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::AtomicI64;
 
 static LAST_HFT_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
 

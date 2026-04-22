@@ -193,25 +193,29 @@ async fn main() -> Result<()> {
         let p = prices.clone();
         let s = signal.clone();
         let sc = real_settings_cache.clone();
-        tokio::spawn(async move { collector::gate::run(p, s, sc).await });
+        let l2 = engine_ctx.l2_books.clone();
+        tokio::spawn(async move { collector::gate::run(p, s, l2, sc).await });
     }
     {
         let p = prices.clone();
         let s = signal.clone();
         let sc = real_settings_cache.clone();
-        tokio::spawn(async move { collector::kucoin::run(p, s, sc).await });
+        let l2 = engine_ctx.l2_books.clone();
+        tokio::spawn(async move { collector::kucoin::run(p, s, l2, sc).await });
     }
     {
         let p = prices.clone();
         let s = signal.clone();
         let sc = real_settings_cache.clone();
-        tokio::spawn(async move { collector::binance::run(p, s, sc).await });
+        let l2 = engine_ctx.l2_books.clone();
+        tokio::spawn(async move { collector::binance::run(p, s, l2, sc).await });
     }
     {
         let p = prices.clone();
         let s = signal.clone();
         let sc = real_settings_cache.clone();
-        tokio::spawn(async move { collector::bybit::run(p, s, sc).await });
+        let l2 = engine_ctx.l2_books.clone();
+        tokio::spawn(async move { collector::bybit::run(p, s, l2, sc).await });
     }
 
     // ── Position sync — enabled with symbol normalization in real.rs ───────────
