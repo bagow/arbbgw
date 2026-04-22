@@ -68,3 +68,74 @@ REST/Websocket сервер на фреймворке Axum.
 
 > **ЛЮБОЕ АРХИТЕКТУРНОЕ ИЛИ КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ ОБЯЗАНО БЫТЬ ОТРАЖЕНО В `01_ARCHITECTURE.md` И СОСЕДНИХ ДОКУМЕНТАХ `.agent_docs/`**.
 Документация для агентов в этой директории является ЕДИНСТВЕННЫМ источником истины (Ground Truth) системы. При добавлении механизмов, изменении форматов БД или конвенций обхода API бирж — сначала обновите мануалы, чтобы следующие агенты не разрушили архитектурную целостность.
+
+---
+
+## 🔀 Dual Strategy Architecture (EMA + HFT)
+
+Система поддерживает два полностью изолированных торговых модуля. Каждый профиль имеет поле `strategy_type` (`"ema"` или `"hft"`), которое определяет, какой модуль обрабатывает этот профиль.
+
+### Dispatch (main.rs)
+```
+Engine Loop (каждые ~10ms)
+  ├── strategy_type == "ema"  → scanner.rs → cycle.rs       (EMA Reversion)
+  └── strategy_type == "hft"  → hft_scanner.rs → hft_cycle.rs  (Latency Arb)
+```
+
+### Общие ресурсы (shared):
+- Exchange коннекторы (`exchanges/`)
+- DB слой (`db.rs`, `TradeRepository`)
+- Ценовые данные (`PriceMap`)
+- `EngineContext` (cooldowns, balances, multipliers)
+- `TradingSettings` + `TechnicalSettings`
+
+### Изолированные модули:
+| Компонент | EMA (существующий) | HFT (новый) |
+|---|---|---|
+| Сканер | `scanner.rs` | `hft_scanner.rs` |
+| Цикл | `cycle.rs` | `hft_cycle.rs` |
+| Вход | structural EMA + deviation | raw spread > break-even |
+| Выход | trailing stop + TP% | timeout (`hft_timeout_ms`) или spread ≤ 0 |
+| Close reasons | TP, STOP, ZERO_SPREAD | HFT_TIMEOUT, HFT_REVERT |
+
+### Поля в `TradingSettings` (shared/lib.rs):
+- `strategy_type: String` — `"ema"` (default) или `"hft"`
+- `hft_timeout_ms: i64` — макс. время удержания HFT сделки (default: 10000ms)
+
+### Поля в DB (`trading_profiles` table):
+- `strategy_type TEXT DEFAULT 'ema'`
+- `hft_timeout_ms INTEGER DEFAULT 10000`
+
+> [!IMPORTANT]
+> **ПРАВИЛО ИЗОЛЯЦИИ**: Код EMA модуля (`scanner.rs`, `cycle.rs`) НЕ ДОЛЖЕН содержать `if strategy_type == "hft"`. Код HFT модуля (`hft_scanner.rs`, `hft_cycle.rs`) НЕ ДОЛЖЕН содержать логику EMA/structural spread. Вся маршрутизация происходит ТОЛЬКО в `main.rs`.
+
+---
+
+## 🖥️ Серверы
+
+### Production (Tokyo) — ОСНОВНОЙ
+```
+ssh -i "tokyo.pem" ubuntu@ec2-13-158-135-57.ap-northeast-1.compute.amazonaws.com
+```
+- **OS**: Ubuntu
+- **Локация**: Tokyo (ap-northeast-1) — минимальная задержка до бирж (Binance, Bybit)
+- **Провайдер**: AWS EC2
+
+### Legacy (Oracle) — УСТАРЕВШИЙ
+```
+ssh opc@140.238.217.190
+```
+- **OS**: Oracle Linux (user: `opc`)
+- **Cloudflare tunnel** + **Cloudflare front**
+
+> [!WARNING]
+> Oracle сервер будет выведен из эксплуатации после полной миграции на Tokyo.
+
+---
+
+## 🚫 Правила компиляции
+
+- **ЗАПРЕЩЕНО** компилировать (`cargo build`, `cargo check`) на VPS и на локальной машине
+- Только через **GitHub CI/CD** — просто `git push`
+- CI собирает бинарники и деплоит на сервер автоматически
+

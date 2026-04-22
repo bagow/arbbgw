@@ -117,17 +117,15 @@ jobs:
             sudo mv /tmp/deploy/vps-api /usr/local/bin/
             sudo chown root:root /usr/local/bin/vps-api
             sudo chmod +x /usr/local/bin/vps-api
-            sudo restorecon -v /usr/local/bin/vps-api 2>/dev/null || true
             if [ -f /tmp/deploy/vps-api.service ]; then
               sudo mv /tmp/deploy/vps-api.service /etc/systemd/system/
-              sudo restorecon -v /etc/systemd/system/vps-api.service 2>/dev/null || true
               sudo systemctl daemon-reload
               sudo systemctl enable vps-api
             fi
             sudo systemctl restart vps-api
             sudo systemctl status vps-api
 
-  # --- 6. Деплой core-node (single-process: collector + trader) ---
+  # --- 3. Деплой core-node (single-process: collector + trader) ---
   deploy-core:
     needs: [check, changes]
     if: |
@@ -164,18 +162,10 @@ jobs:
             sudo mv /tmp/deploy/core-node /usr/local/bin/
             sudo chown root:root /usr/local/bin/core-node
             sudo chmod +x /usr/local/bin/core-node
-            sudo restorecon -v /usr/local/bin/core-node 2>/dev/null || true
-            mkdir -p /home/opc/core-node
-            printf '[Unit]\nDescription=CEX Arbitrage Core Node\nAfter=network-online.target time-sync.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=opc\nWorkingDirectory=/home/opc/core-node\nExecStart=/usr/local/bin/core-node\nRestart=on-failure\nRestartSec=5\nStartLimitInterval=60\nStartLimitBurst=5\nEnvironment=PROFILES_DB_PATH=/home/opc/core-node/vps-api.db\nEnvironment=REAL_DB_PATH=/home/opc/core-node/real-trader.db\nEnvironment=RUST_LOG=info\nEnvironment=GATE_KEY=ae7d8937e6b6a14482ece62991bfe7cb\nEnvironment=GATE_SECRET=ca80162d1e0908e10ef64e764b9c2ca99bf45a6e7d6f37d8c2cb574451175753\nEnvironment=HTX_KEY=21bce128-997e8b61-vftwcr5tnh-3f065\nEnvironment=HTX_SECRET=010cf63c-9eb2c7b7-aef327fc-1a56b\nEnvironment=KUCOIN_KEY=69c43b3a7c503d000146b852\nEnvironment=KUCOIN_SECRET=c3df0848-6a3c-4674-a792-1bd881655668\nEnvironment=KUCOIN_PASSPHRASE=8X.s2fVZ[Ch4Uek\nEnvironment=BINANCE_KEY=ktolZxeXkqtr6svQCJm0IoJImQSX9LwKE1yUB23AiffwdJTfdx6OItZT1t1nMvrA\nEnvironment=BINANCE_SECRET=yEHhBTRYkGEHR4lm7ubu5m7nEGh10VDx1QS2sbbvzF6iengF7wqlAIrBUjpUdPsA\nEnvironment=BITGET_KEY=bg_8697395e4dc980811ec22f533b2a6145\nEnvironment=BITGET_SECRET=4ad1b352b5470f9dc14f27f602f426755772f81ca123f8c2967af32108a76abc\nEnvironment=BITGET_PASSPHRASE=nhbyflwfnbcfynbvtnhjdsq\nEnvironment=BYBIT_KEY=aANKhbnhCfuKRkTkeo\nEnvironment=BYBIT_SECRET=huMkPNgDFWS7coPTDfDkBCxiESXlurxLO4qQ\nOOMScoreAdjust=-600\nLimitNOFILE=65536\nTimeoutStopSec=5\nKillMode=process\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=core-node\n\n[Install]\nWantedBy=multi-user.target\n' > /tmp/core-node.service
+            mkdir -p /home/ubuntu/core-node
+            printf '[Unit]\nDescription=CEX Arbitrage Core Node\nAfter=network-online.target time-sync.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=ubuntu\nWorkingDirectory=/home/ubuntu/core-node\nExecStart=/usr/local/bin/core-node\nRestart=on-failure\nRestartSec=5\nStartLimitInterval=60\nStartLimitBurst=5\nEnvironment=PROFILES_DB_PATH=/home/ubuntu/core-node/vps-api.db\nEnvironment=REAL_DB_PATH=/home/ubuntu/core-node/real-trader.db\nEnvironment=RUST_LOG=info\nEnvironment=GATE_KEY=ae7d8937e6b6a14482ece62991bfe7cb\nEnvironment=GATE_SECRET=ca80162d1e0908e10ef64e764b9c2ca99bf45a6e7d6f37d8c2cb574451175753\nEnvironment=HTX_KEY=21bce128-997e8b61-vftwcr5tnh-3f065\nEnvironment=HTX_SECRET=010cf63c-9eb2c7b7-aef327fc-1a56b\nEnvironment=KUCOIN_KEY=69c43b3a7c503d000146b852\nEnvironment=KUCOIN_SECRET=c3df0848-6a3c-4674-a792-1bd881655668\nEnvironment=KUCOIN_PASSPHRASE=8X.s2fVZ[Ch4Uek\nEnvironment=BINANCE_KEY=ktolZxeXkqtr6svQCJm0IoJImQSX9LwKE1yUB23AiffwdJTfdx6OItZT1t1nMvrA\nEnvironment=BINANCE_SECRET=yEHhBTRYkGEHR4lm7ubu5m7nEGh10VDx1QS2sbbvzF6iengF7wqlAIrBUjpUdPsA\nEnvironment=BITGET_KEY=bg_8697395e4dc980811ec22f533b2a6145\nEnvironment=BITGET_SECRET=4ad1b352b5470f9dc14f27f602f426755772f81ca123f8c2967af32108a76abc\nEnvironment=BITGET_PASSPHRASE=nhbyflwfnbcfynbvtnhjdsq\nEnvironment=BYBIT_KEY=aANKhbnhCfuKRkTkeo\nEnvironment=BYBIT_SECRET=huMkPNgDFWS7coPTDfDkBCxiESXlurxLO4qQ\nOOMScoreAdjust=-600\nLimitNOFILE=65536\nTimeoutStopSec=5\nKillMode=process\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=core-node\n\n[Install]\nWantedBy=multi-user.target\n' > /tmp/core-node.service
             sudo mv /tmp/core-node.service /etc/systemd/system/core-node.service
             sudo chmod 644 /etc/systemd/system/core-node.service
-            sudo restorecon /etc/systemd/system/core-node.service 2>/dev/null || true
-            
-            echo "Killing ghost legacy services..."
-            sudo systemctl stop rust-collector paper-trader real-trader || true
-            sudo systemctl disable rust-collector paper-trader real-trader || true
-            sudo rm -f /etc/systemd/system/rust-collector.service /etc/systemd/system/paper-trader.service /etc/systemd/system/real-trader.service || true
-            sudo killall -9 rust-collector paper-trader real-trader || true
             
             sudo systemctl daemon-reload
             sudo systemctl enable core-node
@@ -185,7 +175,7 @@ jobs:
             echo "=== Profiles in use ==="
             sudo journalctl -u core-node --no-pager -n 30 | grep -E "STARTUP|Profiles DB|vol=" || true
 
-  # --- 7. Деплой Cloudflare Tunnel (cloudflared) на VPS ---
+  # --- 4. Деплой Cloudflare Tunnel (cloudflared) на VPS ---
   deploy-cloudflared:
     needs: [check, changes]
     if: |
@@ -209,17 +199,16 @@ jobs:
             printf 'CLOUDFLARE_TUNNEL_TOKEN=${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}\n' > /tmp/cloudflared.env
             sudo mv /tmp/cloudflared.env /etc/cloudflared.env
             sudo chmod 600 /etc/cloudflared.env
-            printf '[Unit]\nDescription=Cloudflare Tunnel arb-api\nAfter=network.target\n\n[Service]\nType=simple\nUser=opc\nEnvironmentFile=/etc/cloudflared.env\nExecStart=/usr/local/bin/cloudflared tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}\nRestart=always\nRestartSec=5\nStandardOutput=journal\nStandardError=journal\n\n[Install]\nWantedBy=multi-user.target\n' > /tmp/cloudflared.service
+            printf '[Unit]\nDescription=Cloudflare Tunnel arb-api\nAfter=network.target\n\n[Service]\nType=simple\nUser=ubuntu\nEnvironmentFile=/etc/cloudflared.env\nExecStart=/usr/local/bin/cloudflared tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}\nRestart=always\nRestartSec=5\nStandardOutput=journal\nStandardError=journal\n\n[Install]\nWantedBy=multi-user.target\n' > /tmp/cloudflared.service
             sudo mv /tmp/cloudflared.service /etc/systemd/system/cloudflared.service
             sudo chmod 644 /etc/systemd/system/cloudflared.service
-            sudo restorecon /etc/systemd/system/cloudflared.service 2>/dev/null || true
             sudo systemctl daemon-reload
             sudo systemctl enable cloudflared
             sudo systemctl restart cloudflared
             sleep 3
             sudo systemctl status cloudflared --no-pager
 
-  # --- 7. Деплой в Cloudflare ---
+  # --- 5. Деплой в Cloudflare ---
   deploy-cloudflare:
     needs: [check, changes]
     if: |

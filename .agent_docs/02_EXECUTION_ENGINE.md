@@ -75,3 +75,34 @@
   - `net = gross - commission - funding - slippage`
 - `gross` это сумма по ногам (`pnl_a + pnl_b`), а не итог после комиссий.
 - В history и stats запрещено иметь отдельные "особые" формулы, отличные от канонической.
+
+---
+
+## ⚡ HFT Latency Arbitrage Engine (`hft_scanner.rs` + `hft_cycle.rs`)
+
+Полностью изолированный модуль, не пересекающийся с EMA логикой.
+
+### HFT Scanner (`hft_scanner.rs`)
+- **Нет EMA/structural проверок** — вход чисто по raw spread > break-even
+- **Нет structural deviation filter** — не ждём warmup
+- Все остальные фильтры (cooldown, balance, multiplier, tick_size, listing age, depth) — идентичны EMA сканеру
+- HFT всегда использует IOC ордера
+
+### HFT Cycle (`hft_cycle.rs`)
+- **Вход**: аналогичен EMA (thinner leg first, sequential), но без JIT orderbook verification для скорости
+- **Выход** — два условия:
+  1. `hft_timeout_ms` — таймаут с момента входа (настраивается в профиле)
+  2. `exit_spread <= 0 && net_pnl >= 0` — спред ревертнулся, фиксируем профит
+- **Нет trailing stop, нет TP%** — только timeout и revert
+- Close reasons: `HFT_TIMEOUT`, `HFT_REVERT`, `MANUAL`
+- Funding не учитывается (сделки живут секунды)
+- Та же DB схема, тот же `TradeRepository`
+
+### Файлы:
+| Файл | Назначение |
+|---|---|
+| `engine/hft_scanner.rs` | Генерация HFT сигналов |
+| `engine/hft_cycle.rs` | Lifecycle HFT сделок |
+| `engine/mod.rs` | Регистрация модулей |
+| `main.rs:345-410` | Dispatch по strategy_type |
+
