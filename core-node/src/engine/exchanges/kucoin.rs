@@ -292,16 +292,46 @@ impl ExchangeConnector for KucoinConnector {
             pair,
             phys_amount
         );
-        let fb_body = json!({
-            "clientOid": Uuid::new_v4().to_string(),
-            "symbol": sym,
-            "side": side,
-            "type": "market",
-            "size": req_size,
-            "leverage": lev_str,
-            "marginMode": "CROSS",
-            "reduceOnly": true
-        });
+        let mut fb_price_str = "".to_string();
+        if target_price > 0.0 {
+            let p = if is_buy { target_price * 1.02 } else { target_price * 0.98 };
+            let rp = if is_buy {
+                (p / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+            } else {
+                (p / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+            };
+            fb_price_str = format!("{:.8}", rp).trim_end_matches('0').to_string();
+            if fb_price_str.ends_with('.') { fb_price_str.pop(); }
+            if fb_price_str == "0" { fb_price_str = "".to_string(); }
+        }
+
+        let is_fb_market = fb_price_str.is_empty();
+
+        let fb_body = if is_fb_market {
+            json!({
+                "clientOid": Uuid::new_v4().to_string(),
+                "symbol": sym,
+                "side": side,
+                "type": "market",
+                "size": req_size,
+                "leverage": lev_str,
+                "marginMode": "CROSS",
+                "reduceOnly": true
+            })
+        } else {
+            json!({
+                "clientOid": Uuid::new_v4().to_string(),
+                "symbol": sym,
+                "side": side,
+                "type": "limit",
+                "timeInForce": "IOC",
+                "price": fb_price_str,
+                "size": req_size,
+                "leverage": lev_str,
+                "marginMode": "CROSS",
+                "reduceOnly": true
+            })
+        };
         let fb_str = fb_body.to_string();
         let ts_fb = now_ms().to_string();
         let (sig_fb, pass_sig_fb) = kucoin_sign(
@@ -391,7 +421,7 @@ impl ExchangeConnector for KucoinConnector {
             1.0,
             0.0,
             false,
-            0.0,
+            _fallback_price,
             multiplier,
             tick_size,
             15,

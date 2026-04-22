@@ -526,7 +526,7 @@ pub async fn run_cycle(
                                 && p.size.abs() > 1e-12
                         })
                     })
-                    .unwrap_or(false);
+                    .unwrap_or(true);
                 let still_b = pos_check_b
                     .as_ref()
                     .ok()
@@ -536,7 +536,7 @@ pub async fn run_cycle(
                                 && p.size.abs() > 1e-12
                         })
                     })
-                    .unwrap_or(false);
+                    .unwrap_or(true);
                 if still_a || still_b {
                     error!(
                         "[real] ⚠️ POSITION STILL EXISTS after close id={} {} still_a={} still_b={} — keeping trade OPEN for retry/recovery",
