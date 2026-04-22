@@ -412,7 +412,7 @@ impl ExchangeConnector for BinanceConnector {
         phys_excess: f64,
         dry_run: bool,
         multiplier: f64,
-        _tick_size: f64,
+        tick_size: f64,
         fallback_price: f64,
         api_timeout_ms: u64,
     ) -> Result<CloseReceipt, String> {
