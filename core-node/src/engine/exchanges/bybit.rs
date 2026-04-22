@@ -382,14 +382,15 @@ impl ExchangeConnector for BybitConnector {
         };
         let fb_str = fb_body.to_string();
         let ts_fb = now_ms().to_string();
-        let sig_fb = bybit_sign(&keys.bybit_secret, &ts_fb, &keys.bybit_key, recv, &fb_str);
+        let recv_fb = "5000";
+        let sig_fb = bybit_sign(&keys.bybit_secret, &ts_fb, &keys.bybit_key, recv_fb, &fb_str);
 
         let resp_fb = http
             .post("https://api.bybit.com/v5/order/create")
             .header("X-BAPI-API-KEY", &keys.bybit_key)
             .header("X-BAPI-SIGN", &sig_fb)
             .header("X-BAPI-TIMESTAMP", &ts_fb)
-            .header("X-BAPI-RECV-WINDOW", recv)
+            .header("X-BAPI-RECV-WINDOW", recv_fb)
             .header("Content-Type", "application/json")
             .body(fb_str)
             .timeout(Duration::from_millis(api_timeout_ms))

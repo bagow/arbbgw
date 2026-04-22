@@ -53,3 +53,44 @@
 ### Изоляция WebSocket DeadLock (Bybit Fix)
 Коннектор `bybit.rs` (и другие) оборачиваются в `tokio::spawn` с автоматическим перезапуском в бесконечном цикле `loop {}`. 
 Если WS поток по каким-то причинам завис, не прислал пинг за 20 секунд или разорвал соединение с кодом `1006` - процесс выходит из внутреннего цикла и перезапускает HTTP Handshake без падения всего `core-node`.
+
+---
+## ⚡ WebSocket Trading API (`core-node/src/engine/exchanges/ws_*.rs`)
+
+Для минимизации задержки при размещении ордеров (2-8ms вместо 50-120ms REST), коннекторы поддерживают persistent WebSocket соединения для исполнения ордеров.
+
+### Поддержка по биржам
+
+| Биржа | WS Trading | Файл | Endpoint |
+|---|---|---|---|
+| ✅ Binance | Да | `ws_trader.rs` | `wss://ws-fapi.binance.com/ws-fapi/v1` |
+| ✅ Bybit | Да | `ws_bybit.rs` | `wss://stream.bybit.com/v5/trade` |
+| ✅ Gate.io | Да | `ws_gate.rs` | `wss://fx-ws.gateio.ws/v4/ws/usdt` |
+| ❌ HTX | Нет | — | API не поддерживает |
+| ⏳ KuCoin | Планируется | — | `wss://wsapi.kucoin.com/v1/private` |
+
+### Архитектура WS Trading
+
+1. **Lazy Init**: WS соединение создаётся при первом ордере через `get_or_init_*_ws()`. 
+   Используется `OnceLock` для singleton-инициализации.
+2. **Persistent Connection**: Одно WS соединение переиспользуется для всех ордеров.
+   Auto-reconnect при обрыве (бесконечный loop с задержкой).
+3. **WS Primary → REST Fallback**: Каждый `place_order()` / `close_position()` сначала 
+   пробует отправить ордер через WS. Если WS недоступен или вернул ошибку → автоматический
+   fallback на REST API. Это гарантирует zero-downtime.
+4. **Request Correlation**:
+   - Binance: поле `id` (UUID)
+   - Bybit: поле `reqId` (UUID)  
+   - Gate.io: поле `request_id` (UUID)
+5. **Auth**:
+   - Binance: подпись в params каждого запроса
+   - Bybit: отдельный auth handshake при подключении (HMAC-SHA256 `GET/realtime{expires}`)
+   - Gate.io: inline auth в каждом запросе (HMAC-SHA512 `channel=&event=&time=`)
+6. **Keepalive**: Ping отправляется каждые 10-18с в зависимости от биржи.
+
+### Правило изоляции
+
+Вся WS-специфичная логика (auth, reconnect, signature) находится **строго внутри** 
+файлов `ws_*.rs` и соответствующих коннекторов (`binance.rs`, `bybit.rs`, `gate.rs`).
+Движок `cycle.rs` и `hft_cycle.rs` **не знают** о том, какой транспорт (WS или REST) 
+используется для исполнения ордера.
