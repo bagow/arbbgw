@@ -4,15 +4,15 @@ After=network.target
 
 [Service]
 Type=simple
-User=opc
-Group=opc
-WorkingDirectory=/home/opc/core-node
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/core-node
 Environment="COLLECTOR_TOKEN=Drc8#mP2vLq!"
 Environment="INTERNAL_TOKEN=Drc8#mP2vLq!"
 Environment="PASS_DIMA=Xk9mP2#vLqRt7Yw"
 Environment="PASS_SERGEI=Bn4cZ8@jNhKs3Fd"
-Environment="PROFILES_DB_PATH=/home/opc/core-node/vps-api.db"
-Environment="REAL_DB_PATH=/home/opc/core-node/real-trader.db"
+Environment="PROFILES_DB_PATH=/home/ubuntu/core-node/vps-api.db"
+Environment="REAL_DB_PATH=/home/ubuntu/core-node/real-trader.db"
 ExecStart=/usr/local/bin/vps-api
 Restart=always
 RestartSec=3
