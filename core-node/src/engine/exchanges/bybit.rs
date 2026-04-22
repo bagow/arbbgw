@@ -284,14 +284,44 @@ impl ExchangeConnector for BybitConnector {
             pair,
             phys_amount
         );
-        let fb_body = json!({
-            "category": "linear",
-            "symbol": pair,
-            "side": side_str,
-            "orderType": "Market",
-            "qty": qty_str,
-            "reduceOnly": true
-        });
+        let mut fb_price_str = "0".to_string();
+        if target_price > 0.0 {
+            let p = if is_buy {
+                target_price * 1.02
+            } else {
+                target_price * 0.98
+            };
+            let rp = if is_buy {
+                (p / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+            } else {
+                (p / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+            };
+            fb_price_str = format!("{:.8}", rp).trim_end_matches('0').to_string();
+            if fb_price_str.ends_with('.') { fb_price_str.pop(); }
+            if fb_price_str.is_empty() { fb_price_str = "0".to_string(); }
+        }
+
+        let fb_body = if fb_price_str == "0" {
+            json!({
+                "category": "linear",
+                "symbol": pair,
+                "side": side_str,
+                "orderType": "Market",
+                "qty": qty_str,
+                "reduceOnly": true
+            })
+        } else {
+            json!({
+                "category": "linear",
+                "symbol": pair,
+                "side": side_str,
+                "orderType": "Limit",
+                "qty": qty_str,
+                "price": fb_price_str,
+                "timeInForce": "IOC",
+                "reduceOnly": true
+            })
+        };
         let fb_str = fb_body.to_string();
         let ts_fb = now_ms().to_string();
         let sig_fb = bybit_sign(&keys.bybit_secret, &ts_fb, &keys.bybit_key, recv, &fb_str);
@@ -366,8 +396,8 @@ impl ExchangeConnector for BybitConnector {
             phys_excess,
             dry_run,
             1.0,
-            0.0,
-            false,
+            _fallback_price,
+            true,
             0.0,
             multiplier,
             tick_size,
@@ -651,63 +681,79 @@ impl ExchangeConnector for BybitConnector {
         http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<Vec<PositionInfo>, String> {
-        let ts = now_ms().to_string();
-        let recv = "5000";
-        let qs = "category=linear&settleCoin=USDT";
-        let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs);
-        let resp = http
-            .get(format!("https://api.bybit.com/v5/position/list?{}", qs))
-            .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-SIGN", &sig)
-            .header("X-BAPI-TIMESTAMP", &ts)
-            .header("X-BAPI-RECV-WINDOW", recv)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !resp.status().is_success() {
-            let err_txt = resp.text().await.unwrap_or_default();
-            return Err(format!("Bybit position API error: {}", err_txt));
-        }
-
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-
-        if v["retCode"].as_i64().unwrap_or(-1) != 0 {
-            return Err(format!("Bybit API returned error: {}", v));
-        }
-
         let mut positions = Vec::new();
-        if let Some(arr) = v["result"]["list"].as_array() {
-            for p in arr {
-                let size: f64 = p["size"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                if size.abs() < 1e-12 {
-                    continue;
+        let mut cursor = String::new();
+
+        loop {
+            let ts = now_ms().to_string();
+            let recv = "5000";
+            let mut qs = "category=linear&settleCoin=USDT&limit=50".to_string();
+            if !cursor.is_empty() {
+                qs.push_str(&format!("&cursor={}", cursor));
+            }
+            let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
+            let resp = http
+                .get(format!("https://api.bybit.com/v5/position/list?{}", qs))
+                .header("X-BAPI-API-KEY", &keys.bybit_key)
+                .header("X-BAPI-SIGN", &sig)
+                .header("X-BAPI-TIMESTAMP", &ts)
+                .header("X-BAPI-RECV-WINDOW", recv)
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            if !resp.status().is_success() {
+                let err_txt = resp.text().await.unwrap_or_default();
+                return Err(format!("Bybit position API error: {}", err_txt));
+            }
+
+            let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+
+            if v["retCode"].as_i64().unwrap_or(-1) != 0 {
+                return Err(format!("Bybit API returned error: {}", v));
+            }
+
+            if let Some(arr) = v["result"]["list"].as_array() {
+                for p in arr {
+                    let size: f64 = p["size"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
+                    if size.abs() < 1e-12 {
+                        continue;
+                    }
+                    let side = p["side"].as_str().unwrap_or("");
+                    let signed_size = if side == "Sell" { -size } else { size };
+                    let realized = p["cumRealisedPnl"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
+                    positions.push(PositionInfo {
+                        symbol: p["symbol"].as_str().unwrap_or("").to_string(),
+                        size: signed_size,
+                        entry_price: p["avgPrice"]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0),
+                        unrealized_pnl: p["unrealisedPnl"]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0),
+                        realized_pnl: realized,
+                        accumulated_fee: 0.0,
+                        accumulated_funding: 0.0,
+                    });
                 }
-                let side = p["side"].as_str().unwrap_or("");
-                let signed_size = if side == "Sell" { -size } else { size };
-                let realized = p["cumRealisedPnl"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                positions.push(PositionInfo {
-                    symbol: p["symbol"].as_str().unwrap_or("").to_string(),
-                    size: signed_size,
-                    entry_price: p["avgPrice"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.0),
-                    unrealized_pnl: p["unrealisedPnl"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.0),
-                    realized_pnl: realized,
-                    accumulated_fee: 0.0,
-                    accumulated_funding: 0.0,
-                });
+            }
+
+            if let Some(c) = v["result"]["nextPageCursor"].as_str() {
+                if c.is_empty() {
+                    break;
+                }
+                cursor = c.to_string();
+            } else {
+                break;
             }
         }
         Ok(positions)

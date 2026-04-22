@@ -319,11 +319,36 @@ impl ExchangeConnector for BinanceConnector {
             pair,
             phys_amount
         );
+        let mut fb_price_str = "".to_string();
+        if target_price > 0.0 {
+            let p = if is_buy {
+                target_price * 1.02
+            } else {
+                target_price * 0.98
+            };
+            let rp = if is_buy {
+                (p / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+            } else {
+                (p / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+            };
+            let mut s = format!("{:.8}", rp).trim_end_matches('0').to_string();
+            if s.ends_with('.') { s.pop(); }
+            if !s.is_empty() && s != "0" {
+                fb_price_str = format!("&price={}", s);
+            }
+        }
+
+        let type_fb = if fb_price_str.is_empty() { "MARKET" } else { "LIMIT" };
+        let tif_fb = if fb_price_str.is_empty() { "" } else { "&timeInForce=IOC" };
+
         let qs_fb = format!(
-            "symbol={}&side={}&type=MARKET&quantity={}&reduceOnly=true&timestamp={}",
+            "symbol={}&side={}&type={}&quantity={}&reduceOnly=true{}{}&timestamp={}",
             pair,
             side,
+            type_fb,
             qty_str,
+            tif_fb,
+            fb_price_str,
             now_ms()
         );
         let sig_fb = binance_sign(&keys.binance_secret, &qs_fb);
@@ -391,61 +416,24 @@ impl ExchangeConnector for BinanceConnector {
         fallback_price: f64,
         api_timeout_ms: u64,
     ) -> Result<CloseReceipt, String> {
-        let side = if is_buy { "BUY" } else { "SELL" };
-        if dry_run {
-            return Ok(CloseReceipt {
-                final_price: fallback_price,
-                total_fee: 0.0,
-                closed_volume: phys_excess,
-            });
-        }
-
-        // We drop excess at market
-        let qs = format!(
-            "symbol={}&side={}&type=MARKET&quantity={:.8}&reduceOnly=true&timestamp={}",
+        self.close_position(
+            http,
+            keys,
             pair,
-            side,
+            is_buy,
             phys_excess,
-            now_ms()
-        );
-        let sig = binance_sign(&keys.binance_secret, &qs);
-        let url = format!(
-            "https://fapi.binance.com/fapi/v1/order?{}&signature={}",
-            qs, sig
-        );
-
-        let resp = http
-            .post(&url)
-            .header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_millis(api_timeout_ms))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        check_rate_limits(resp.status(), resp.headers()).await?;
-
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let order_id = v["orderId"]
-            .as_i64()
-            .map(|id| id.to_string())
-            .ok_or_else(|| "Trim rejected".to_string())?;
-
-        for _ in 0..6 {
-            if let Ok((p, f, _)) = self
-                .fetch_order(http, keys, pair, &order_id, multiplier)
-                .await
-            {
-                if p > 0.0 {
-                    return Ok(CloseReceipt {
-                        final_price: p,
-                        total_fee: f,
-                        closed_volume: phys_excess,
-                    });
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        Err("Trim market order timed out".to_string())
+            dry_run,
+            1.0,
+            fallback_price,
+            true,
+            0.0,
+            multiplier,
+            tick_size,
+            15,
+            100,
+            api_timeout_ms,
+        )
+        .await
     }
 
     async fn fetch_order(

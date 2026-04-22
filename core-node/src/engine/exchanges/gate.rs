@@ -316,13 +316,29 @@ impl ExchangeConnector for GateConnector {
             pair,
             phys_amount
         );
+        let mut fb_price_str = "0".to_string();
+        if target_price > 0.0 {
+            let p = if is_buy { target_price * 1.02 } else { target_price * 0.98 };
+            let rp = if is_buy {
+                (p / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+            } else {
+                (p / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+            };
+            fb_price_str = format!("{:.8}", rp).trim_end_matches('0').to_string();
+            if fb_price_str.ends_with('.') { fb_price_str.pop(); }
+            if fb_price_str.is_empty() { fb_price_str = "0".to_string(); }
+        }
+
+        let is_fb_market = fb_price_str == "0";
+        let fb_size = if is_fb_market { 0 } else { size };
+
         let fb_body = json!({
             "contract": contract,
-            "size": size,
-            "price": "0",
+            "size": fb_size,
+            "price": fb_price_str,
             "tif": "ioc",
             "reduce_only": true,
-            "close": true,
+            "close": is_fb_market,
             "text": "t-corenode-fb"
         });
         let fb_str = fb_body.to_string();
@@ -405,7 +421,7 @@ impl ExchangeConnector for GateConnector {
             phys_excess,
             dry_run,
             1.0,
-            0.0,
+            _fallback_price,
             true,
             0.0,
             multiplier,
