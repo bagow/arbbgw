@@ -11,6 +11,66 @@ use crate::engine::real::{gate_sign, ExchangeKeys};
 
 pub struct GateConnector;
 
+/// Try placing order via WS, return Ok(orderId) or Err for REST fallback
+async fn try_gate_ws_order(
+    keys: &ExchangeKeys,
+    contract: &str,
+    size: i64,
+    price_str: &str,
+    tif: &str,
+) -> Result<String, String> {
+    use super::ws_gate::send_gate_ws_request;
+
+    let req_id = uuid::Uuid::new_v4().to_string();
+
+    let ws_req = serde_json::json!({
+        "request_id": req_id,
+        "channel": "futures.order_place",
+        "event": "api",
+        "payload": [{
+            "contract": contract,
+            "size": size,
+            "price": price_str,
+            "tif": tif,
+            "reduce_only": false,
+            "close": false,
+            "text": "t-corenode-ws"
+        }]
+    });
+
+    let resp = send_gate_ws_request(ws_req).await?;
+
+    let status = resp["header"]["status"].as_str().unwrap_or("0");
+    if status == "200" || status == "201" {
+        if let Some(result) = resp["data"]["result"].as_object() {
+            if let Some(id) = result.get("id") {
+                let oid = id.as_i64().map(|i| i.to_string())
+                    .or_else(|| id.as_str().map(|s| s.to_string()));
+                if let Some(oid) = oid {
+                    return Ok(oid);
+                }
+            }
+        }
+        // Check if result is an array (batch response)
+        if let Some(arr) = resp["data"]["result"].as_array() {
+            if let Some(first) = arr.first() {
+                if let Some(id) = first.get("id") {
+                    let oid = id.as_i64().map(|i| i.to_string())
+                        .or_else(|| id.as_str().map(|s| s.to_string()));
+                    if let Some(oid) = oid {
+                        return Ok(oid);
+                    }
+                }
+            }
+        }
+    }
+
+    let errs = resp["data"]["errs"].as_object()
+        .map(|e| format!("{:?}", e))
+        .unwrap_or_else(|| format!("status={}", status));
+    Err(format!("Gate WS: {}", errs))
+}
+
 #[derive(Deserialize, Debug)]
 #[allow(non_snake_case)]
 struct GateBalanceResponse {
@@ -106,6 +166,23 @@ impl ExchangeConnector for GateConnector {
             return Ok((Some(format!("dry_{}", Uuid::new_v4())), target_price, 0.0));
         }
 
+        // ── TRY WS FIRST ──
+        let _ = super::ws_gate::get_or_init_gate_ws(
+            keys.gate_key.clone(),
+            keys.gate_secret.clone(),
+        );
+
+        match try_gate_ws_order(keys, &contract, size, &price_str, tif).await {
+            Ok(oid) => {
+                tracing::info!("[gate_ws] ✅ place_order {} orderId={} (WS)", pair, oid);
+                return Ok((Some(oid), 0.0, 0.0));
+            }
+            Err(e) => {
+                tracing::warn!("[gate_ws] WS order failed ({}). Falling back to REST.", e);
+            }
+        }
+
+        // ── REST FALLBACK ──
         let resp = http
             .post(format!("https://api.gateio.ws{}", path))
             .headers(gate_sign(
@@ -133,8 +210,8 @@ impl ExchangeConnector for GateConnector {
             .as_i64()
             .map(|i| i.to_string())
             .unwrap_or_else(|| "none".to_string());
-        tracing::info!("[gate] place_order {} req={} → orderId={} http={} status={} size={} left={} fill_price={}", 
-            pair, body_str, resp_oid, status, resp_status, resp_size, resp_left, resp_fill);
+        tracing::info!("[gate] place_order {} → orderId={} http={} status={} size={} left={} fill_price={} (REST fallback)", 
+            pair, resp_oid, status, resp_status, resp_size, resp_left, resp_fill);
 
         if !status.is_success() {
             return Err(format!("Gate API Error: {}", v));
