@@ -46,21 +46,37 @@ async fn check_rate_limits(
 async fn execute_binance_order(
     http: &Client,
     keys: &ExchangeKeys,
-    qs: &str,
-    mut params: serde_json::Map<String, Value>,
+    params: &serde_json::Map<String, Value>,
     api_timeout_ms: u64,
 ) -> Result<Value, String> {
     use crate::engine::exchanges::ws_trader::send_ws_request;
     
-    let sig = binance_sign(&keys.binance_secret, qs);
-    params.insert("apiKey".to_string(), serde_json::json!(keys.binance_key));
-    params.insert("signature".to_string(), serde_json::json!(sig));
+    // Build alphabetically sorted query string from params (required by WS API)
+    let mut sorted_keys: Vec<&String> = params.keys().collect();
+    sorted_keys.sort();
+    let qs: String = sorted_keys.iter()
+        .map(|k| {
+            let v = &params[k.as_str()];
+            let vs = match v {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => v.to_string(),
+            };
+            format!("{}={}", k, vs)
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    
+    let sig = binance_sign(&keys.binance_secret, &qs);
+    let mut ws_params = params.clone();
+    ws_params.insert("apiKey".to_string(), serde_json::json!(keys.binance_key));
+    ws_params.insert("signature".to_string(), serde_json::json!(sig));
     
     let req_id = uuid::Uuid::new_v4().to_string();
     let ws_req = serde_json::json!({
         "id": req_id,
         "method": "order.place",
-        "params": params
+        "params": ws_params
     });
     
     match send_ws_request(ws_req).await {
@@ -172,7 +188,7 @@ impl ExchangeConnector for BinanceConnector {
         params.insert("timestamp".to_string(), serde_json::json!(ts));
 
         // MARKET vs IOC LIMIT
-        let qs = if use_ioc && target_price > 0.0 {
+        if use_ioc && target_price > 0.0 {
             let mut price_str = format!("{:.8}", rounded_price)
                 .trim_end_matches('0')
                 .to_string();
@@ -184,20 +200,12 @@ impl ExchangeConnector for BinanceConnector {
             }
             params.insert("type".to_string(), serde_json::json!("LIMIT"));
             params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
-            params.insert("price".to_string(), serde_json::json!(price_str.clone()));
-            format!(
-                "symbol={}&side={}&type=LIMIT&timeInForce=IOC&quantity={}&price={}&timestamp={}",
-                pair, side, qty_str, price_str, ts
-            )
+            params.insert("price".to_string(), serde_json::json!(price_str));
         } else {
             params.insert("type".to_string(), serde_json::json!("MARKET"));
-            format!(
-                "symbol={}&side={}&type=MARKET&quantity={}&timestamp={}",
-                pair, side, qty_str, ts
-            )
-        };
+        }
         
-        let v = execute_binance_order(http, keys, &qs, params, api_timeout_ms).await?;
+        let v = execute_binance_order(http, keys, &params, api_timeout_ms).await?;
 
         // Diagnostic: log order request and response
         let resp_oid = v["orderId"]
@@ -300,34 +308,14 @@ impl ExchangeConnector for BinanceConnector {
         let type_str = if use_ioc && target_price > 0.0 { "LIMIT" } else { "MARKET" };
         params.insert("type".to_string(), serde_json::json!(type_str));
 
-        let tif_str = if use_ioc && target_price > 0.0 {
+        if use_ioc && target_price > 0.0 {
             params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
-            "&timeInForce=IOC"
-        } else {
-            ""
-        };
-        
-        let price_param = if use_ioc && target_price > 0.0 {
-            params.insert("price".to_string(), serde_json::json!(price_str.clone()));
-            format!("&price={}", price_str)
-        } else {
-            "".to_string()
-        };
-
-        let qs = format!(
-            "symbol={}&side={}&type={}&quantity={}&reduceOnly=true{}{}&timestamp={}",
-            pair,
-            side,
-            type_str,
-            qty_str,
-            tif_str,
-            price_param,
-            ts
-        );
+            params.insert("price".to_string(), serde_json::json!(price_str));
+        }
 
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
 
-        let v_resp = execute_binance_order(http, keys, &qs, params, api_timeout_ms).await;
+        let v_resp = execute_binance_order(http, keys, &params, api_timeout_ms).await;
         if let Err(e) = &v_resp {
             tracing::error!("[binance] normal close rejected: {}", e);
         }
@@ -355,7 +343,7 @@ impl ExchangeConnector for BinanceConnector {
             pair,
             phys_amount
         );
-        let mut fb_price_str = "".to_string();
+        let mut fb_price_str = String::new();
         if target_price > 0.0 {
             let p = if is_buy {
                 target_price * 1.02
@@ -370,12 +358,11 @@ impl ExchangeConnector for BinanceConnector {
             let mut s = format!("{:.8}", rp).trim_end_matches('0').to_string();
             if s.ends_with('.') { s.pop(); }
             if !s.is_empty() && s != "0" {
-                fb_price_str = format!("&price={}", s);
+                fb_price_str = s;
             }
         }
 
         let type_fb = if fb_price_str.is_empty() { "MARKET" } else { "LIMIT" };
-        let tif_fb = if fb_price_str.is_empty() { "" } else { "&timeInForce=IOC" };
 
         let ts_fb = now_ms();
         let mut fb_params = serde_json::Map::new();
@@ -387,24 +374,11 @@ impl ExchangeConnector for BinanceConnector {
         fb_params.insert("timestamp".to_string(), serde_json::json!(ts_fb));
         
         if !fb_price_str.is_empty() {
-            fb_params.insert("price".to_string(), serde_json::json!(fb_price_str.replace("&price=", "")));
-        }
-        if !tif_fb.is_empty() {
+            fb_params.insert("price".to_string(), serde_json::json!(fb_price_str));
             fb_params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
         }
-
-        let qs_fb = format!(
-            "symbol={}&side={}&type={}&quantity={}&reduceOnly=true{}{}&timestamp={}",
-            pair,
-            side,
-            type_fb,
-            qty_str,
-            tif_fb,
-            fb_price_str,
-            ts_fb
-        );
         
-        let v_fb = execute_binance_order(http, keys, &qs_fb, fb_params, api_timeout_ms).await.map_err(|e| format!("Fallback close rejected: {}", e))?;
+        let v_fb = execute_binance_order(http, keys, &fb_params, api_timeout_ms).await.map_err(|e| format!("Fallback close rejected: {}", e))?;
         let oid_fb = v_fb["orderId"]
             .as_i64()
             .map(|id| id.to_string())
