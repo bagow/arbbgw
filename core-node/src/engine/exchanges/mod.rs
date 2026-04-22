@@ -3,6 +3,7 @@ pub mod bybit;
 pub mod gate;
 pub mod kucoin;
 pub mod traits;
+pub mod ws_trader;
 // pub mod context; // We'll put EngineContext here instead of state.rs if needed, or re-export
 
 use std::sync::Arc;

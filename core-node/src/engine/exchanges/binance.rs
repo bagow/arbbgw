@@ -33,7 +33,6 @@ async fn check_rate_limits(
         return Err("Binance HTTP 418 IP Banned".into());
     }
 
-    // Also log pre-emptive limits
     if let Some(w) = headers.get("X-MBX-USED-WEIGHT-1M") {
         if let Ok(weight) = w.to_str().unwrap_or("").parse::<u32>() {
             if weight > 4000 {
@@ -42,6 +41,55 @@ async fn check_rate_limits(
         }
     }
     Ok(())
+}
+
+async fn execute_binance_order(
+    http: &Client,
+    keys: &ExchangeKeys,
+    qs: &str,
+    mut params: serde_json::Map<String, Value>,
+    api_timeout_ms: u64,
+) -> Result<Value, String> {
+    use crate::engine::exchanges::ws_trader::send_ws_request;
+    
+    let sig = binance_sign(&keys.binance_secret, qs);
+    params.insert("apiKey".to_string(), serde_json::json!(keys.binance_key));
+    params.insert("signature".to_string(), serde_json::json!(sig));
+    
+    let req_id = uuid::Uuid::new_v4().to_string();
+    let ws_req = serde_json::json!({
+        "id": req_id,
+        "method": "order.place",
+        "params": params
+    });
+    
+    match send_ws_request(ws_req).await {
+        Ok(v_ws) => {
+            if let Some(status) = v_ws.get("status") {
+                if status.as_i64() == Some(200) {
+                    if let Some(res) = v_ws.get("result") {
+                        return Ok(res.clone());
+                    }
+                }
+            }
+            if let Some(err) = v_ws.get("error") {
+                tracing::error!("[binance_ws] order error: {}", err);
+                return Err(format!("Binance WS API Error: {}", err["msg"].as_str().unwrap_or("?")));
+            }
+            Ok(v_ws.get("result").cloned().unwrap_or(v_ws))
+        },
+        Err(e) => {
+            tracing::warn!("[binance_ws] WS order failed ({}). Falling back to REST.", e);
+            let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
+            let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key).timeout(Duration::from_millis(api_timeout_ms)).send().await.map_err(|e| e.to_string())?;
+            check_rate_limits(resp.status(), resp.headers()).await?;
+            let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+            if let Some(msg) = v["msg"].as_str() {
+                return Err(format!("Binance REST API Error: {}", msg));
+            }
+            Ok(v)
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -117,6 +165,12 @@ impl ExchangeConnector for BinanceConnector {
             (price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
         };
 
+        let mut params = serde_json::Map::new();
+        params.insert("symbol".to_string(), serde_json::json!(pair));
+        params.insert("side".to_string(), serde_json::json!(side));
+        params.insert("quantity".to_string(), serde_json::json!(qty_str));
+        params.insert("timestamp".to_string(), serde_json::json!(ts));
+
         // MARKET vs IOC LIMIT
         let qs = if use_ioc && target_price > 0.0 {
             let mut price_str = format!("{:.8}", rounded_price)
@@ -128,32 +182,22 @@ impl ExchangeConnector for BinanceConnector {
             if price_str.is_empty() {
                 price_str = "0".to_string();
             }
+            params.insert("type".to_string(), serde_json::json!("LIMIT"));
+            params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
+            params.insert("price".to_string(), serde_json::json!(price_str.clone()));
             format!(
                 "symbol={}&side={}&type=LIMIT&timeInForce=IOC&quantity={}&price={}&timestamp={}",
                 pair, side, qty_str, price_str, ts
             )
         } else {
+            params.insert("type".to_string(), serde_json::json!("MARKET"));
             format!(
                 "symbol={}&side={}&type=MARKET&quantity={}&timestamp={}",
                 pair, side, qty_str, ts
             )
         };
-        let sig = binance_sign(&keys.binance_secret, &qs);
-        let url = format!(
-            "https://fapi.binance.com/fapi/v1/order?{}&signature={}",
-            qs, sig
-        );
-        let resp = http
-            .post(&url)
-            .header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_millis(api_timeout_ms))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        check_rate_limits(resp.status(), resp.headers()).await?;
-
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        
+        let v = execute_binance_order(http, keys, &qs, params, api_timeout_ms).await?;
 
         // Diagnostic: log order request and response
         let resp_oid = v["orderId"]
@@ -168,10 +212,6 @@ impl ExchangeConnector for BinanceConnector {
             resp_oid,
             resp_status_str
         );
-
-        if let Some(msg) = v["msg"].as_str() {
-            return Err(format!("Binance API Error: {}", msg));
-        }
 
         let order_id = v["orderId"].as_i64().map(|id| id.to_string());
         if order_id.is_some() {
@@ -248,17 +288,27 @@ impl ExchangeConnector for BinanceConnector {
             price_str = "0".to_string();
         }
 
-        let type_str = if use_ioc && target_price > 0.0 {
-            "LIMIT"
-        } else {
-            "MARKET"
-        };
+        let mut params = serde_json::Map::new();
+        params.insert("symbol".to_string(), serde_json::json!(pair));
+        params.insert("side".to_string(), serde_json::json!(side));
+        params.insert("quantity".to_string(), serde_json::json!(qty_str));
+        params.insert("reduceOnly".to_string(), serde_json::json!("true"));
+        
+        let ts = now_ms();
+        params.insert("timestamp".to_string(), serde_json::json!(ts));
+
+        let type_str = if use_ioc && target_price > 0.0 { "LIMIT" } else { "MARKET" };
+        params.insert("type".to_string(), serde_json::json!(type_str));
+
         let tif_str = if use_ioc && target_price > 0.0 {
+            params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
             "&timeInForce=IOC"
         } else {
             ""
         };
+        
         let price_param = if use_ioc && target_price > 0.0 {
+            params.insert("price".to_string(), serde_json::json!(price_str.clone()));
             format!("&price={}", price_str)
         } else {
             "".to_string()
@@ -272,30 +322,16 @@ impl ExchangeConnector for BinanceConnector {
             qty_str,
             tif_str,
             price_param,
-            now_ms()
+            ts
         );
-        let sig = binance_sign(&keys.binance_secret, &qs);
-        let url = format!(
-            "https://fapi.binance.com/fapi/v1/order?{}&signature={}",
-            qs, sig
-        );
+
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
 
-        let resp = http
-            .post(&url)
-            .header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_millis(api_timeout_ms))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        check_rate_limits(resp.status(), resp.headers()).await?;
-
-        let v_resp: Value = resp.json().await.map_err(|e| e.to_string())?;
-        if let Some(msg) = v_resp["msg"].as_str() {
-            tracing::error!("[binance] normal close rejected: {}", msg);
+        let v_resp = execute_binance_order(http, keys, &qs, params, api_timeout_ms).await;
+        if let Err(e) = &v_resp {
+            tracing::error!("[binance] normal close rejected: {}", e);
         }
-        let order_id = v_resp["orderId"].as_i64().map(|id| id.to_string());
+        let order_id = v_resp.ok().and_then(|v| v["orderId"].as_i64().map(|id| id.to_string()));
 
         // Polling loop inside connector
         if let Some(ref oid) = order_id {
@@ -341,6 +377,22 @@ impl ExchangeConnector for BinanceConnector {
         let type_fb = if fb_price_str.is_empty() { "MARKET" } else { "LIMIT" };
         let tif_fb = if fb_price_str.is_empty() { "" } else { "&timeInForce=IOC" };
 
+        let ts_fb = now_ms();
+        let mut fb_params = serde_json::Map::new();
+        fb_params.insert("symbol".to_string(), serde_json::json!(pair));
+        fb_params.insert("side".to_string(), serde_json::json!(side));
+        fb_params.insert("type".to_string(), serde_json::json!(type_fb));
+        fb_params.insert("quantity".to_string(), serde_json::json!(qty_str));
+        fb_params.insert("reduceOnly".to_string(), serde_json::json!("true"));
+        fb_params.insert("timestamp".to_string(), serde_json::json!(ts_fb));
+        
+        if !fb_price_str.is_empty() {
+            fb_params.insert("price".to_string(), serde_json::json!(fb_price_str.replace("&price=", "")));
+        }
+        if !tif_fb.is_empty() {
+            fb_params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
+        }
+
         let qs_fb = format!(
             "symbol={}&side={}&type={}&quantity={}&reduceOnly=true{}{}&timestamp={}",
             pair,
@@ -349,28 +401,14 @@ impl ExchangeConnector for BinanceConnector {
             qty_str,
             tif_fb,
             fb_price_str,
-            now_ms()
+            ts_fb
         );
-        let sig_fb = binance_sign(&keys.binance_secret, &qs_fb);
-        let url_fb = format!(
-            "https://fapi.binance.com/fapi/v1/order?{}&signature={}",
-            qs_fb, sig_fb
-        );
-        let resp_fb = http
-            .post(&url_fb)
-            .header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_millis(api_timeout_ms))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        check_rate_limits(resp_fb.status(), resp_fb.headers()).await?;
-
-        let v_fb: Value = resp_fb.json().await.map_err(|e| e.to_string())?;
+        
+        let v_fb = execute_binance_order(http, keys, &qs_fb, fb_params, api_timeout_ms).await.map_err(|e| format!("Fallback close rejected: {}", e))?;
         let oid_fb = v_fb["orderId"]
             .as_i64()
             .map(|id| id.to_string())
-            .ok_or_else(|| "Fallback close rejected".to_string())?;
+            .ok_or_else(|| "Fallback close rejected: no orderId".to_string())?;
 
         for _ in 0..5 {
             if let Ok((p, f, _)) = self
