@@ -281,7 +281,7 @@ pub fn compute_spreads(
                     let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
                     verified.insert(ema_key.clone());
                     tracing::info!(
-                        "[spreads] \u2705 Auto-verified {} after 30min live WS tracking (no zero-cross)",
+                        "[spreads] Auto-verified {} after 30min live WS tracking (no zero-cross)",
                         ema_key
                     );
                 }
