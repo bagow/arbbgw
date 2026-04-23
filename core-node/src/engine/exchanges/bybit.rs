@@ -620,31 +620,38 @@ impl ExchangeConnector for BybitConnector {
             v = resp2.json().await.map_err(|e| e.to_string())?;
         }
 
-        let mut coin_obj = None;
-        if let Some(arr) = v["result"]["list"].as_array() {
-            if let Some(first) = arr.first() {
+        let coin_obj = v["result"]["list"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|first| {
                 if first["coin"].is_array() {
-                    coin_obj = first["coin"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|c| c["coin"].as_str() == Some("USDT"));
+                    first["coin"].as_array().and_then(|coins| {
+                        coins.iter().find(|c| c["coin"].as_str() == Some("USDT")).cloned()
+                    })
                 } else {
-                    coin_obj = arr.iter().find(|c| c["coin"].as_str() == Some("USDT"));
+                    v["result"]["list"].as_array().and_then(|arr| {
+                        arr.iter().find(|c| c["coin"].as_str() == Some("USDT")).cloned()
+                    })
                 }
-            }
-        }
+            });
 
-        let wallet = coin_obj
-            .and_then(|c| c["walletBalance"].as_str().and_then(|s| s.parse().ok()))
-            .unwrap_or(0.0);
+        let Some(coin_ref) = coin_obj else {
+            // No USDT coin found — could be rate limit response, empty account type, or API error.
+            // Return Err to preserve the previously known balance rather than overwriting with 0.0.
+            let ret = v["retCode"].as_i64().unwrap_or(-999);
+            let msg = v["retMsg"].as_str()
+                .or_else(|| v["error"].as_str())
+                .unwrap_or("unknown");
+            return Err(format!("Bybit: USDT not in wallet response (retCode={ret}, msg={msg})"));
+        };
 
-        let equity = coin_obj
-            .and_then(|c| c["equity"].as_str().and_then(|s| s.parse().ok()))
-            .unwrap_or(wallet);
-
-        let available = coin_obj
-            .and_then(|c| c["availableToWithdraw"].as_str().and_then(|s| s.parse().ok()))
+        let wallet: f64 = coin_ref["walletBalance"]
+            .as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        let equity: f64 = coin_ref["equity"]
+            .as_str().and_then(|s| s.parse().ok()).unwrap_or(wallet);
+        let available: f64 = coin_ref["availableToWithdraw"]
+            .as_str().and_then(|s| s.parse().ok())
+            .or_else(|| coin_ref["availableBalance"].as_str().and_then(|s| s.parse().ok()))
             .unwrap_or(wallet);
 
         Ok((equity, available))
