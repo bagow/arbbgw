@@ -126,7 +126,15 @@ pub async fn run_hft_cycle(
 
         // ── HFT EXIT CONDITIONS ──
         let timeout_hit = elapsed_ms >= settings.hft_timeout_ms;
-        let spread_reverted = exit_spread <= 0.0 && live_net_pnl >= 0.0;
+        // Exit when the entry-direction spread has reverted to zero.
+        // current_spread <= 0 means bid_a ≈ ask_b — the price gap is gone.
+        // This is the optimal exit: we've captured the full arbitrage move.
+        //
+        // NOTE: exit_spread (ask_a - bid_b) stays positive even at current_spread=0
+        // because it measures the cost to reverse (bid-ask cross), NOT spread closure.
+        // Using exit_spread <= 0 would require full price inversion — too late, often unreachable.
+        // Exit costs at current_spread=0 are already baked into break_even_pct (4x slippage).
+        let spread_reverted = current_spread <= 0.0;
 
         let mut reason_str = "";
         if manual_close { reason_str = "MANUAL"; }
