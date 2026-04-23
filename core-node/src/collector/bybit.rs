@@ -10,10 +10,39 @@ use tracing::{error, info, warn};
 
 use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
 
-/// Global symbol/ticker cache — avoids re-fetching on every WS reconnect
-/// (rapid reconnects triggered Bybit IP rate limits).
-static SYMBOL_CACHE: std::sync::OnceLock<tokio::sync::Mutex<Option<(Vec<(f64, String)>, std::time::Instant)>>> =
-    std::sync::OnceLock::new();
+const SYMBOL_CACHE_PATH: &str = "/home/ubuntu/core-node/bybit_symbols_cache.json";
+
+/// Load symbol list from disk cache. Returns symbols if file is fresh enough.
+/// always_use=true: use even if stale (for fallback on REST failure).
+fn load_disk_cache(always_use: bool) -> Option<Vec<(f64, String)>> {
+    use std::fs;
+    let meta = fs::metadata(SYMBOL_CACHE_PATH).ok()?;
+    let age = meta
+        .modified()
+        .ok()?
+        .elapsed()
+        .unwrap_or(std::time::Duration::from_secs(u64::MAX));
+    if !always_use && age.as_secs() > 3600 {
+        return None; // Older than 1 hour — force fresh fetch
+    }
+    let data = fs::read_to_string(SYMBOL_CACHE_PATH).ok()?;
+    let syms: Vec<(f64, String)> = serde_json::from_str(&data).ok()?;
+    if syms.is_empty() {
+        return None;
+    }
+    Some(syms)
+}
+
+/// Save symbol list to disk so restarts don't trigger REST rate limits.
+fn save_disk_cache(syms: &[(f64, String)]) {
+    use std::fs;
+    if let Some(parent) = std::path::Path::new(SYMBOL_CACHE_PATH).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(syms) {
+        let _ = fs::write(SYMBOL_CACHE_PATH, json);
+    }
+}
 
 pub async fn run(
     prices: PriceMap,
@@ -75,97 +104,76 @@ pub async fn run(
 async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
     let http = Client::new();
 
-    // ── SYMBOL CACHE (5 min TTL) ──────────────────────────────────────────────
-    // Rapid WS reconnects would hammer Bybit REST and trigger IP rate limits.
-    // We cache the ticker list and only re-fetch after 5 minutes.
-    let cache_lock = SYMBOL_CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
-    let use_cached = {
-        let c = cache_lock.lock().await;
-        c.as_ref().map(|(_, t)| t.elapsed().as_secs() < 300).unwrap_or(false)
-    };
-
+    // ── SYMBOL LIST: disk cache → REST fetch → stale disk fallback ──────────
+    // Rapid restarts + REST rate limits require a disk-backed symbol cache.
+    // Fresh disk cache (< 1h): skip REST entirely.
+    // REST fails: use stale disk cache rather than failing entirely.
     let mut symbols: Vec<(f64, String)> = Vec::new();
 
-    if use_cached {
-        let c = cache_lock.lock().await;
-        if let Some((syms, _)) = c.as_ref() {
-            symbols = syms.clone();
-            info!("[bybit] Using cached symbol list ({} symbols)", symbols.len());
-            // Re-seed prices from cached tickers (they'll be updated by WS anyway)
-        }
+    // Try fresh disk cache first (< 1 hour old)
+    if let Some(cached) = load_disk_cache(false) {
+        symbols = cached;
+        info!("[bybit] Using disk-cached symbol list ({} symbols)", symbols.len());
     } else {
-        // Fetch all linear USDT perpetual tickers (includes volume)
-        let resp: Value = http
+        // Fetch from REST
+        let rest_ok = match http
             .get("https://api.bybit.com/v5/market/tickers?category=linear")
             .timeout(Duration::from_secs(15))
             .send()
-            .await?
-            .json()
-            .await?;
+            .await
+        {
+            Ok(resp) => match resp.json::<Value>().await {
+                Ok(v) => {
+                    if let Some(list) = v["result"]["list"].as_array() {
+                        for t in list {
+                            let sym = t["symbol"].as_str().unwrap_or("");
+                            if !sym.ends_with("USDT") {
+                                continue;
+                            }
+                            let vol: f64 = t["turnover24h"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            let bid: f64 = t["bid1Price"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            let ask: f64 = t["ask1Price"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            let bid_qty: f64 = t["bid1Size"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            let ask_qty: f64 = t["ask1Size"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            let price: f64 = t["lastPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or((bid + ask) / 2.0);
+                            if bid > 0.0 && ask > 0.0 {
+                                let ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                price_map.entry("bybit".to_string()).or_default().insert(
+                                    sym.to_string(),
+                                    TickerData { bid, ask, price, vol, funding_rate: 0.0,
+                                        bid_size: bid_qty * price, ask_size: ask_qty * price,
+                                        last_updated: ts },
+                                );
+                                signal.notify_one();
+                            }
+                            symbols.push((vol, sym.to_string()));
+                        }
+                    }
+                    !symbols.is_empty()
+                }
+                Err(e) => { warn!("[bybit] REST parse error: {}", e); false }
+            },
+            Err(e) => { warn!("[bybit] REST fetch error: {}", e); false }
+        };
 
-        if let Some(list) = resp["result"]["list"].as_array() {
-            for t in list {
-                let sym = t["symbol"].as_str().unwrap_or("");
-                if !sym.ends_with("USDT") {
-                    continue;
-                }
-                let vol: f64 = t["turnover24h"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                let bid: f64 = t["bid1Price"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                let ask: f64 = t["ask1Price"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                let bid_qty: f64 = t["bid1Size"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                let ask_qty: f64 = t["ask1Size"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                let price: f64 = t["lastPrice"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or((bid + ask) / 2.0);
-                if bid > 0.0 && ask > 0.0 {
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    price_map.entry("bybit".to_string()).or_default().insert(
-                        sym.to_string(),
-                        TickerData {
-                            bid,
-                            ask,
-                            price,
-                            vol,
-                            funding_rate: 0.0,
-                            bid_size: bid_qty * price,
-                            ask_size: ask_qty * price,
-                            last_updated: ts,
-                        },
-                    );
-                    signal.notify_one();
-                }
-                symbols.push((vol, sym.to_string()));
+        if rest_ok {
+            // Save fresh list to disk for future restarts
+            save_disk_cache(&symbols);
+            info!("[bybit] Fetched {} USDT symbols from REST, saved to disk cache", symbols.len());
+        } else {
+            // REST failed — try stale disk cache as last resort
+            if let Some(cached) = load_disk_cache(true) {
+                symbols = cached;
+                warn!("[bybit] REST failed, using stale disk cache ({} symbols)", symbols.len());
             }
         }
-        if symbols.is_empty() {
-            return Err(anyhow::anyhow!("Failed to fetch symbols or list is empty"));
-        }
-        // Update cache
-        let mut c = cache_lock.lock().await;
-        *c = Some((symbols.clone(), std::time::Instant::now()));
-    } // end if !use_cached
+    }
 
     if symbols.is_empty() {
-        return Err(anyhow::anyhow!("Failed to fetch symbols or list is empty"));
+        return Err(anyhow::anyhow!("Failed to fetch symbols: REST failed and no disk cache available"));
     }
     // Sort by 24h volume desc so top-volume symbols get L2 coverage
     symbols.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
