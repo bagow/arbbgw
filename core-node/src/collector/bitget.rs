@@ -212,7 +212,7 @@ async fn handler(
             msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
                     // Bitget sends "pong" as plain text
-                    if text.as_ref() == "pong" { continue; }
+                    if text.as_str() == "pong" { continue; }
 
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let action = v["action"].as_str().unwrap_or("");

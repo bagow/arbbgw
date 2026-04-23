@@ -131,7 +131,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
-                    if text.as_ref() == "pong" { continue; }
+                    if text.as_str() == "pong" { continue; }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         if v["table"].as_str() == Some("quote") {
                             if let Some(arr) = v["data"].as_array() {

@@ -138,7 +138,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
                     // BingX sends "Pong" as text
-                    if text.as_ref() == "Pong" { continue; }
+                    if text.as_str() == "Pong" { continue; }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let data_type = v["dataType"].as_str().unwrap_or("");
                         // MARKET.PRICE_FEED.BTC-USDT
