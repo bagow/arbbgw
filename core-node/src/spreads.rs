@@ -15,6 +15,11 @@ static STRUCTURAL_EMA: OnceLock<DashMap<String, (f64, f64, f64, f64, f64, f64, f
 /// Pairs NOT in this set are "on probation" — entry is blocked.
 static VERIFIED_KEYS: OnceLock<DashSet<String>> = OnceLock::new();
 
+/// Tracks when each pair (ema_key) was FIRST observed with a valid spread.
+/// Used for auto-verification: verify if pair has had consistent spread for 5+ min.
+/// Independent of zero-cross timer so WS reconnects don't reset the clock.
+static FIRST_SEEN: OnceLock<DashMap<String, f64>> = OnceLock::new();
+
 /// Compute spread opportunities from PriceMap.
 /// Called directly by the engine loop — zero serialization/HTTP overhead.
 ///
@@ -62,6 +67,7 @@ pub fn compute_spreads(
     let min_v = min_vol_m * 1_000_000.0;
     let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
     let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
+    let first_seen_map = FIRST_SEEN.get_or_init(|| DashMap::new());
     let blacklist = ts.blacklist_vec();
     let mut rows = Vec::with_capacity(512);
 
@@ -274,18 +280,26 @@ pub fn compute_spreads(
 
                 let has_structural_spread = (now_f64 - last_cross) > 86000.0;
 
-                // Auto-verify via live WS data: if the spread has been consistently
-                // positive (no zero-crossing) for 5 minutes, the structural premium
-                // is real. This covers new listings with no historical candle data
-                // and pairs where the historical warmup hits API errors/rate limits.
-                let age_secs = now_f64 - last_cross;
-                if !is_verified && age_secs > 300.0 {
-                    let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
-                    verified.insert(ema_key.clone());
-                    tracing::info!(
-                        "[spreads] Auto-verified {} after {:.0}s of stable WS spread (no zero-cross)",
-                        ema_key, age_secs
-                    );
+                // ── AUTO-VERIFY via first_seen timer ──────────────────────────
+                // Pairs without historical candle data (new listings, API rate limits)
+                // are auto-verified once they've been observed for 5+ minutes AND the
+                // EMA mid-spread is still confirming the premium (> 0.1%).
+                //
+                // Uses FIRST_SEEN (not last_cross) so Bybit/BingX WS reconnects can't
+                // reset the clock — stale prices briefly crossing zero must not block.
+                if !is_verified {
+                    first_seen_map.entry(ema_key.clone()).or_insert(now_f64);
+                    let first_ts = *first_seen_map.get(&ema_key).unwrap();
+                    let observation_age = now_f64 - first_ts;
+                    // Auto-verify: 5min observation + current EMA still positive
+                    if observation_age > 300.0 && ema_mid_spread > 0.1 {
+                        let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
+                        verified.insert(ema_key.clone());
+                        tracing::info!(
+                            "[spreads] Auto-verified {} after {:.0}s observation, EMA={:.3}%",
+                            ema_key, observation_age, ema_mid_spread
+                        );
+                    }
                 }
                 let is_verified = verified.contains(&ema_key);
 
