@@ -519,10 +519,10 @@ function renderCexTab(profile, exchangesData) {
         return '<div class="text-sub" style="text-align:center;">No exchange data available yet. Please wait for collector to sync.</div>';
     }
 
-    // Real trading: only Gate/HTX/KuCoin have API keys
-    const REAL_EXCHANGES = new Set(['binance', 'bybit', 'gate', 'kucoin']);
+    // Real trading: exchanges that have API keys configured
+    const REAL_EXCHANGES = new Set(['binance', 'bybit', 'gate', 'kucoin', 'bitget', 'bingx', 'bitmex', 'ascendex', 'xt', 'toobit']);
     const isReal = profile.mode === 'real';
-    const KNOWN_EXCHANGES = ['binance', 'bybit', 'gate', 'kucoin', 'okx'];
+    const KNOWN_EXCHANGES = ['binance', 'bybit', 'gate', 'kucoin', 'okx', 'bitget', 'bingx', 'bitmex', 'ascendex', 'xt', 'toobit'];
     const exNames = KNOWN_EXCHANGES
         .filter(ex => !isReal || REAL_EXCHANGES.has(ex))
         .sort();

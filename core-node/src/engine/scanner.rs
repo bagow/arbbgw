@@ -220,7 +220,7 @@ pub fn generate_signals(
         }
 
         // 2. Check all other potential exchanges to find the absolute oldest listing
-        for ex in ["binance", "bybit", "gate", "kucoin"] {
+        for ex in ["binance", "bybit", "gate", "kucoin", "bitget", "bingx", "bitmex", "ascendex", "xt", "toobit"] {
             if ex == row.exchange_a || ex == row.exchange_b {
                 continue;
             }

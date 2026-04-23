@@ -29,6 +29,20 @@ pub struct ExchangeKeys {
     pub binance_secret: String,
     pub bybit_key: String,
     pub bybit_secret: String,
+    pub bitget_key: String,
+    pub bitget_secret: String,
+    pub bitget_passphrase: String,
+    // New exchanges
+    pub bingx_key: String,
+    pub bingx_secret: String,
+    pub bitmex_key: String,
+    pub bitmex_secret: String,
+    pub ascendex_key: String,
+    pub ascendex_secret: String,
+    pub xt_key: String,
+    pub xt_secret: String,
+    pub toobit_key: String,
+    pub toobit_secret: String,
 }
 
 impl ExchangeKeys {
@@ -43,6 +57,19 @@ impl ExchangeKeys {
             binance_secret: std::env::var("BINANCE_SECRET").unwrap_or_default(),
             bybit_key: std::env::var("BYBIT_KEY").unwrap_or_default(),
             bybit_secret: std::env::var("BYBIT_SECRET").unwrap_or_default(),
+            bitget_key: std::env::var("BITGET_KEY").unwrap_or_default(),
+            bitget_secret: std::env::var("BITGET_SECRET").unwrap_or_default(),
+            bitget_passphrase: std::env::var("BITGET_PASSPHRASE").unwrap_or_default(),
+            bingx_key: std::env::var("BINGX_KEY").unwrap_or_default(),
+            bingx_secret: std::env::var("BINGX_SECRET").unwrap_or_default(),
+            bitmex_key: std::env::var("BITMEX_KEY").unwrap_or_default(),
+            bitmex_secret: std::env::var("BITMEX_SECRET").unwrap_or_default(),
+            ascendex_key: std::env::var("ASCENDEX_KEY").unwrap_or_default(),
+            ascendex_secret: std::env::var("ASCENDEX_SECRET").unwrap_or_default(),
+            xt_key: std::env::var("XT_KEY").unwrap_or_default(),
+            xt_secret: std::env::var("XT_SECRET").unwrap_or_default(),
+            toobit_key: std::env::var("TOOBIT_KEY").unwrap_or_default(),
+            toobit_secret: std::env::var("TOOBIT_SECRET").unwrap_or_default(),
         }
     }
     pub fn supports(&self, ex: &str) -> bool {
@@ -51,6 +78,12 @@ impl ExchangeKeys {
             "kucoin" => !self.kucoin_key.is_empty(),
             "binance" => !self.binance_key.is_empty(),
             "bybit" => !self.bybit_key.is_empty(),
+            "bitget" => !self.bitget_key.is_empty(),
+            "bingx" => !self.bingx_key.is_empty(),
+            "bitmex" => !self.bitmex_key.is_empty(),
+            "ascendex" => !self.ascendex_key.is_empty(),
+            "xt" => !self.xt_key.is_empty(),
+            "toobit" => !self.toobit_key.is_empty(),
             _ => false,
         }
     }

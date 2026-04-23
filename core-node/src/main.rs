@@ -217,6 +217,48 @@ async fn main() -> Result<()> {
         let l2 = engine_ctx.l2_books.clone();
         tokio::spawn(async move { collector::bybit::run(p, s, l2, sc).await });
     }
+    {
+        let p = prices.clone();
+        let s = signal.clone();
+        let sc = real_settings_cache.clone();
+        let l2 = engine_ctx.l2_books.clone();
+        tokio::spawn(async move { collector::bitget::run(p, s, l2, sc).await });
+    }
+    {
+        let p = prices.clone();
+        let s = signal.clone();
+        let sc = real_settings_cache.clone();
+        let l2 = engine_ctx.l2_books.clone();
+        tokio::spawn(async move { collector::bingx::run(p, s, l2, sc).await });
+    }
+    {
+        let p = prices.clone();
+        let s = signal.clone();
+        let sc = real_settings_cache.clone();
+        let l2 = engine_ctx.l2_books.clone();
+        tokio::spawn(async move { collector::bitmex::run(p, s, l2, sc).await });
+    }
+    {
+        let p = prices.clone();
+        let s = signal.clone();
+        let sc = real_settings_cache.clone();
+        let l2 = engine_ctx.l2_books.clone();
+        tokio::spawn(async move { collector::ascendex::run(p, s, l2, sc).await });
+    }
+    {
+        let p = prices.clone();
+        let s = signal.clone();
+        let sc = real_settings_cache.clone();
+        let l2 = engine_ctx.l2_books.clone();
+        tokio::spawn(async move { collector::xt::run(p, s, l2, sc).await });
+    }
+    {
+        let p = prices.clone();
+        let s = signal.clone();
+        let sc = real_settings_cache.clone();
+        let l2 = engine_ctx.l2_books.clone();
+        tokio::spawn(async move { collector::toobit::run(p, s, l2, sc).await });
+    }
 
     // ── Position sync — enabled with symbol normalization in real.rs ───────────
     // Detects externally closed/liquidated legs and emergency-closes the remaining leg.

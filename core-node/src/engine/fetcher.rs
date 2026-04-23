@@ -19,12 +19,20 @@ pub fn start_balance_fetcher(
     tokio::spawn(async move {
         let fast_interval_ms = 2_000u64;
         let normal_interval_s = 25u64;
-        let all_exchanges = ["binance", "gate", "kucoin", "bybit"];
+        let all_exchanges = [
+            "binance", "gate", "kucoin", "bybit",
+            "bingx", "bitmex", "ascendex", "xt", "toobit",
+        ];
 
-        let binance = crate::engine::exchanges::binance::BinanceConnector;
-        let gate = crate::engine::exchanges::gate::GateConnector;
-        let kucoin = crate::engine::exchanges::kucoin::KucoinConnector;
-        let bybit = crate::engine::exchanges::bybit::BybitConnector;
+        let binance  = crate::engine::exchanges::binance::BinanceConnector;
+        let gate     = crate::engine::exchanges::gate::GateConnector;
+        let kucoin   = crate::engine::exchanges::kucoin::KucoinConnector;
+        let bybit    = crate::engine::exchanges::bybit::BybitConnector;
+        let bingx    = crate::engine::exchanges::bingx::BingxConnector;
+        let bitmex   = crate::engine::exchanges::bitmex::BitmexConnector;
+        let ascendex = crate::engine::exchanges::ascendex::AscendexConnector;
+        let xt       = crate::engine::exchanges::xt::XtConnector;
+        let toobit   = crate::engine::exchanges::toobit::ToobitConnector;
         use crate::engine::exchanges::traits::ExchangeConnector;
 
         loop {
@@ -54,26 +62,15 @@ pub fn start_balance_fetcher(
             if !low_exchanges.is_empty() {
                 for ex in &low_exchanges {
                     let fetch_res = match *ex {
-                        "binance" => binance
-                            .fetch_balances(&http, &keys)
-                            .await
-                            .map(|(w, _a)| w)
-                            .map_err(|e| e.to_string()),
-                        "gate" => gate
-                            .fetch_balances(&http, &keys)
-                            .await
-                            .map(|(w, _a)| w)
-                            .map_err(|e| e.to_string()),
-                        "kucoin" => kucoin
-                            .fetch_balances(&http, &keys)
-                            .await
-                            .map(|(w, _a)| w)
-                            .map_err(|e| e.to_string()),
-                        "bybit" => bybit
-                            .fetch_balances(&http, &keys)
-                            .await
-                            .map(|(w, _a)| w)
-                            .map_err(|e| e.to_string()),
+                        "binance"  => binance.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "gate"     => gate.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "kucoin"   => kucoin.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "bybit"    => bybit.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "bingx"    => bingx.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "bitmex"   => bitmex.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "ascendex" => ascendex.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "xt"       => xt.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "toobit"   => toobit.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
                         _ => Err("Unknown exchange".to_string()),
                     };
 
@@ -145,6 +142,66 @@ pub fn start_balance_fetcher(
                                 e_ctx.positions.insert(ex.to_string(), pos);
                             }
                             if let Ok(fee) = bybit.fetch_taker_fee(&http, &keys).await {
+                                e_ctx.fee_rates.insert(ex.to_string(), fee);
+                            }
+                        }
+                        "bingx" => {
+                            if let Ok((w, a)) = bingx.fetch_balances(&http, &keys).await {
+                                e_ctx.balances.insert(ex.to_string(), w);
+                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            }
+                            if let Ok(pos) = bingx.fetch_positions(&http, &keys).await {
+                                e_ctx.positions.insert(ex.to_string(), pos);
+                            }
+                            if let Ok(fee) = bingx.fetch_taker_fee(&http, &keys).await {
+                                e_ctx.fee_rates.insert(ex.to_string(), fee);
+                            }
+                        }
+                        "bitmex" => {
+                            if let Ok((w, a)) = bitmex.fetch_balances(&http, &keys).await {
+                                e_ctx.balances.insert(ex.to_string(), w);
+                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            }
+                            if let Ok(pos) = bitmex.fetch_positions(&http, &keys).await {
+                                e_ctx.positions.insert(ex.to_string(), pos);
+                            }
+                            if let Ok(fee) = bitmex.fetch_taker_fee(&http, &keys).await {
+                                e_ctx.fee_rates.insert(ex.to_string(), fee);
+                            }
+                        }
+                        "ascendex" => {
+                            if let Ok((w, a)) = ascendex.fetch_balances(&http, &keys).await {
+                                e_ctx.balances.insert(ex.to_string(), w);
+                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            }
+                            if let Ok(pos) = ascendex.fetch_positions(&http, &keys).await {
+                                e_ctx.positions.insert(ex.to_string(), pos);
+                            }
+                            if let Ok(fee) = ascendex.fetch_taker_fee(&http, &keys).await {
+                                e_ctx.fee_rates.insert(ex.to_string(), fee);
+                            }
+                        }
+                        "xt" => {
+                            if let Ok((w, a)) = xt.fetch_balances(&http, &keys).await {
+                                e_ctx.balances.insert(ex.to_string(), w);
+                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            }
+                            if let Ok(pos) = xt.fetch_positions(&http, &keys).await {
+                                e_ctx.positions.insert(ex.to_string(), pos);
+                            }
+                            if let Ok(fee) = xt.fetch_taker_fee(&http, &keys).await {
+                                e_ctx.fee_rates.insert(ex.to_string(), fee);
+                            }
+                        }
+                        "toobit" => {
+                            if let Ok((w, a)) = toobit.fetch_balances(&http, &keys).await {
+                                e_ctx.balances.insert(ex.to_string(), w);
+                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            }
+                            if let Ok(pos) = toobit.fetch_positions(&http, &keys).await {
+                                e_ctx.positions.insert(ex.to_string(), pos);
+                            }
+                            if let Ok(fee) = toobit.fetch_taker_fee(&http, &keys).await {
                                 e_ctx.fee_rates.insert(ex.to_string(), fee);
                             }
                         }
