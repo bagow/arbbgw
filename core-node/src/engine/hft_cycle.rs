@@ -162,8 +162,8 @@ pub async fn run_hft_cycle(
                 continue;
             }
             e_ctx.closing_in_flight.insert(trade.id, true);
-            info!("[hft] Closing {} {} reason={} elapsed={}ms spread={:.4}%",
-                trade.id, pair, reason, elapsed_ms, exit_spread);
+            info!("[hft] Closing {} {} reason={} elapsed={}ms curr_spread={:.4}% exit_spread={:.4}%",
+                trade.id, pair, reason, elapsed_ms, current_spread, exit_spread);
 
             let id = trade.id;
             let entry_a = trade.entry_price_a;
