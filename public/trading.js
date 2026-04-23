@@ -1,5 +1,6 @@
 /**
  * trading.js – Multi-tab trading UI
+ * v2.1 – adds BingX, BitMEX, AscendEX, XT.COM, Toobit to CEX tab
  *
  * Each "tab" is a trading profile. Profiles are stored in D1 via
  * API calls. The active tab's data is polled every 10s; others are lazy-loaded.
