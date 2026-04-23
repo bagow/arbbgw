@@ -789,41 +789,7 @@ pub async fn run_cycle(
         let t0 = std::time::Instant::now();
         let use_ioc = ts.entry_order_type == "ioc";
         let order_type_label = if use_ioc { "IOC" } else { "MKT" };
-        info!(
-            "[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}%",
-            pair,
-            order_type_label,
-            exa,
-            contracts_a,
-            limit_price_a,
-            exb,
-            contracts_b,
-            limit_price_b,
-            sig.spread,
-            break_even_pct
-        );
-
-        let snapshot = serde_json::json!({
-            "bid_a": sig.entry_a, // Best approximation since we don't carry full orderbook here
-            "bid_b": sig.entry_b,
-            "ask_a": sig.entry_a,
-            "ask_b": sig.entry_b,
-            "spread": sig.spread,
-            "latency": 0
-        })
-        .to_string();
-        tokio::spawn({
-            let snap_repo = TradeRepository::new(db.clone());
-            let sp_pair = pair.clone();
-            let sp_exa = exa.clone();
-            let sp_exb = exb.clone();
-            let ts_ms = current_ms as i64;
-            async move {
-                snap_repo
-                    .insert_snapshot(sp_pair, sp_exa, sp_exb, snapshot, ts_ms)
-                    .await;
-            }
-        });
+        // NOTE: FIRE log moved to after L2/depth checks to avoid false-positive log entries
 
         // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
         let mult_a = e_ctx
@@ -926,6 +892,24 @@ pub async fn run_cycle(
             e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 5_000);
             continue;
         }
+
+        // ── ALL CHECKS PASSED — log FIRE and execute ─────────────────────────
+        info!(
+            "[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}%",
+            pair, order_type_label, exa, contracts_a, limit_price_a,
+            exb, contracts_b, limit_price_b, sig.spread, break_even_pct
+        );
+        let snapshot = serde_json::json!({
+            "bid_a": sig.entry_a, "bid_b": sig.entry_b,
+            "ask_a": sig.entry_a, "ask_b": sig.entry_b,
+            "spread": sig.spread, "latency": 0
+        }).to_string();
+        tokio::spawn({
+            let snap_repo = TradeRepository::new(db.clone());
+            let sp_pair = pair.clone(); let sp_exa = exa.clone(); let sp_exb = exb.clone();
+            let ts_ms = current_ms as i64;
+            async move { snap_repo.insert_snapshot(sp_pair, sp_exa, sp_exb, snapshot, ts_ms).await; }
+        });
 
         // ── SEQUENTIAL ORDER EXECUTION (THINNER LEG FIRST) ───────────────────
         opened_this_cycle = true;
