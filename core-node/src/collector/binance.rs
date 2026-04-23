@@ -113,20 +113,12 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     .context("Binance WS connect failed")?;
     info!("[binance] Connected (bookTicker)");
 
-    // Spawn L2 depth collector with top-200 symbols by volume
+    // Spawn L2 depth collector — passes price_map so it can rebuild
+    // the symbol list dynamically on each reconnect (bookTicker fills it)
     let l2_books_clone = l2_books.clone();
-    // Build sorted symbol list from seeded data
-    let mut vol_syms: Vec<(f64, String)> = {
-        let map = price_map.get("binance");
-        match map {
-            Some(m) => m.iter().map(|e| (e.vol, e.key().clone())).collect(),
-            None => vec![],
-        }
-    };
-    vol_syms.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let top_syms: Vec<String> = vol_syms.into_iter().take(200).map(|(_, s)| s).collect();
+    let price_map_clone = price_map.clone();
     tokio::spawn(async move {
-        run_l2_depth_stream(l2_books_clone, top_syms).await;
+        run_l2_depth_stream(l2_books_clone, price_map_clone).await;
     });
 
     #[derive(Deserialize)]
@@ -200,16 +192,48 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 }
 
 /// Separate L2 depth stream for top-volume pairs (dynamic, top 200 by volume).
-/// Subscribes to depth5@100ms stream. Updates l2_books cache read by cycle.rs.
-async fn run_l2_depth_stream(l2_books: L2OrderbookMap, symbols: Vec<String>) {
-    let streams: Vec<String> = symbols
-        .iter()
-        .map(|s| format!("{}@depth5@100ms", s.to_lowercase()))
-        .collect();
-    let url = format!("wss://fstream.binance.com/stream?streams={}", streams.join("/"));
+/// Rebuilds symbol list from price_map on each reconnect — handles REST seed failures.
+async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::PriceMap) {
+    // Hardcoded fallback covers common pairs when REST/price_map is empty
+    const FALLBACK: &[&str] = &[
+        "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","DOGEUSDT","XRPUSDT","PEPEUSDT",
+        "SUIUSDT","ADAUSDT","TRXUSDT","AVAXUSDT","LINKUSDT","DOTUSDT","LTCUSDT",
+        "MATICUSDT","ARBUSDT","OPUSDT","APTUSDT","NEARUSDT","FILUSDT","WIFUSDT",
+        "SHIBUSDT","BONKUSDT","FLOKIUSDT","WLDUSDT","ORDIUSDT","TIAUSDT","SEIUSDT",
+        "INJUSDT","FETUSDT","RUNEUSDT","JUPUSDT","ENAUSDT","ONDOUSDT","RENDERUSDT",
+        "AAVEUSDT","MKRUSDT","LDOUSDT","PENDLEUSDT","TONUSDT","NOTUSDT","STXUSDT",
+        "KATUSDT","SPKUSDT","HYPEUSDT","VIRTUSDT","BOMEUSDT","JUPUSDT","WUSDT",
+        "APEUSDT","GMTUSDT","GALAUSDT","FTMUSDT","HBARUSDT","FLOWUSDT","ICPUSDT",
+        "SANDUSDT","MANAUSDT","AXSUSDT","CRVUSDT","SNXUSDT","ATOMUSDT","XLMUSDT",
+    ];
 
     let mut backoff = Duration::from_secs(1);
     loop {
+        // Rebuild symbol list on every reconnect attempt
+        let mut vol_syms: Vec<(f64, String)> = {
+            let map = price_map.get("binance");
+            match map {
+                Some(m) => m.iter()
+                    .map(|(k, v)| (v.vol, k.clone()))
+                    .filter(|(_, k)| k.ends_with("USDT"))
+                    .collect(),
+                None => vec![],
+            }
+        };
+        vol_syms.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let symbols: Vec<String> = if vol_syms.is_empty() {
+            // price_map not yet seeded — use fallback list
+            FALLBACK.iter().map(|s| s.to_string()).collect()
+        } else {
+            vol_syms.into_iter().take(200).map(|(_, s)| s).collect()
+        };
+
+        let streams: Vec<String> = symbols
+            .iter()
+            .map(|s| format!("{}@depth5@100ms", s.to_lowercase()))
+            .collect();
+        let url = format!("wss://fstream.binance.com/stream?streams={}", streams.join("/"));
+
         match connect_async_tls_with_config(&url, None, false, None).await {
             Ok((mut ws, _)) => {
                 info!("[binance_l2] Connected — {} depth streams", symbols.len());
