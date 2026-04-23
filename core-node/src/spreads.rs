@@ -275,27 +275,15 @@ pub fn compute_spreads(
                 let has_structural_spread = (now_f64 - last_cross) > 86000.0;
 
                 // Auto-verify via live WS data: if the spread has been consistently
-                // positive (no zero-crossing) for 2+ minutes, the structural premium
-                // is real. This covers new listings with no historical candle data.
+                // positive (no zero-crossing) for 5 minutes, the structural premium
+                // is real. This covers new listings with no historical candle data
+                // and pairs where the historical warmup hits API errors/rate limits.
                 let age_secs = now_f64 - last_cross;
-                if !is_verified {
-                    // Throttled diagnostic: log age for top pairs once per 30s
-                    use std::sync::atomic::{AtomicI64, Ordering};
-                    static LAST_CROSS_DIAG: AtomicI64 = AtomicI64::new(0);
-                    let now_i = now_f64 as i64;
-                    if now_i - LAST_CROSS_DIAG.load(Ordering::Relaxed) > 30 {
-                        LAST_CROSS_DIAG.store(now_i, Ordering::Relaxed);
-                        tracing::info!(
-                            "[spreads] CROSS-AGE {} age={:.0}s p12={:.4} p21={:.4}",
-                            ema_key, age_secs, premium_1_over_2, premium_2_over_1
-                        );
-                    }
-                }
-                if !is_verified && age_secs > 120.0 {
+                if !is_verified && age_secs > 300.0 {
                     let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
                     verified.insert(ema_key.clone());
                     tracing::info!(
-                        "[spreads] Auto-verified {} after {:.0}s live WS tracking (no zero-cross)",
+                        "[spreads] Auto-verified {} after {:.0}s of stable WS spread (no zero-cross)",
                         ema_key, age_secs
                     );
                 }
