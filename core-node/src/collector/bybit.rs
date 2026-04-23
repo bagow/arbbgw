@@ -158,10 +158,9 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
-    // Subscribe to L2 (orderbook.25) for top 200 by volume
-    let l2_limit = 200.min(symbols.len());
-    let l2_symbols: Vec<&String> = symbols.iter().take(l2_limit).collect();
-    for chunk in l2_symbols.chunks(10) {
+    // Subscribe to L2 (orderbook.25) for ALL symbols — arb opportunities
+    // are often in low-volume pairs, so we can't cap by volume rank.
+    for chunk in symbols.chunks(10) {
         let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.25.{}", s)).collect();
         ws.send(Message::Text(
             json!({"op":"subscribe","args":args}).to_string().into(),
@@ -169,7 +168,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         .await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
-    info!("[bybit] Subscribed L2 depth for {} symbols (top by volume)", l2_symbols.len());
+    info!("[bybit] Subscribed L2 depth for ALL {} symbols", symbols.len());
 
     let mut _ping = tokio::time::interval(Duration::from_secs(20));
     #[derive(Deserialize)]

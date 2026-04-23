@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
 
-use crate::state::{L2OrderbookMap, PriceMap, UpdateSignal};
+use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, UpdateSignal};
 
 /// Max symbols per single WS connection — keeps well under Gate's implicit limit.
 const SYMBOLS_PER_WS: usize = 100;
@@ -18,7 +18,7 @@ const SYMBOLS_PER_WS: usize = 100;
 pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
-    _l2_books: L2OrderbookMap,
+    l2_books: L2OrderbookMap,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -56,7 +56,7 @@ pub async fn run(
         };
 
         tokio::select! {
-            res = orchestrator(&prices, &signal) => {
+            res = orchestrator(&prices, &signal, &l2_books) => {
                 match res {
                     Ok(_)  => { warn!("[gate] orchestrator returned, restarting..."); backoff = Duration::from_secs(1); }
                     Err(e) => error!("[gate] Error: {}. Reconnecting in {:?}", e, backoff),
@@ -75,7 +75,7 @@ pub async fn run(
 /// Fetches symbol list + seeds tickers from REST, then spawns N parallel WS
 /// connections (each handling ~100 symbols). If ANY connection dies, all are
 /// cancelled and the whole orchestrator returns (triggering full reconnect).
-async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
+async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
     let client = reqwest::Client::new();
     let res = client
         .get("https://api.gateio.ws/api/v4/futures/usdt/contracts")
@@ -162,8 +162,9 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()>
         let pm = price_map.clone();
         let sig = signal.clone();
         let sm = sym_map_arc.clone();
+        let l2 = l2_books.clone();
         handles.push(tokio::spawn(async move {
-            ws_shard(idx, chunk, &pm, &sig, sm).await
+            ws_shard(idx, chunk, &pm, &sig, sm, &l2).await
         }));
     }
 
@@ -223,45 +224,7 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()>
     }
 }
 
-#[derive(Deserialize)]
-struct GateMsg<'a> {
-    #[serde(borrow)]
-    channel: Option<&'a str>,
-    #[serde(borrow)]
-    event: Option<&'a str>,
-    #[serde(borrow)]
-    result: Option<GateData<'a>>,
-}
 
-#[derive(Deserialize)]
-struct GateData<'a> {
-    s: Option<&'a str>,
-    #[serde(deserialize_with = "de_opt_f64_or_str", default)]
-    b: Option<f64>,
-    #[serde(deserialize_with = "de_opt_f64_or_str", default)]
-    a: Option<f64>,
-    #[serde(rename = "B", default)]
-    bid_qty: f64,
-    #[serde(rename = "A", default)]
-    ask_qty: f64,
-}
-
-fn de_opt_f64_or_str<'de, D>(deserializer: D) -> std::result::Result<Option<f64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Any<'a> {
-        Float(f64),
-        Str(&'a str),
-    }
-    Ok(match Option::<Any>::deserialize(deserializer)? {
-        Some(Any::Float(f)) => Some(f),
-        Some(Any::Str(s)) => s.parse().ok(),
-        None => None,
-    })
-}
 
 /// A single WS shard handling a subset of symbols.
 async fn ws_shard(
@@ -270,6 +233,7 @@ async fn ws_shard(
     price_map: &PriceMap,
     signal: &UpdateSignal,
     sym_map: Arc<std::collections::HashMap<String, String>>,
+    l2_books: &L2OrderbookMap,
 ) -> Result<()> {
     let (mut ws, _) =
         connect_async_tls_with_config("wss://fx-ws.gateio.ws/v4/ws/usdt", None, false, None)
@@ -282,7 +246,7 @@ async fn ws_shard(
         symbols.len()
     );
 
-    // Subscribe in chunks of 50 (Gate protocol limit per message)
+    // Subscribe to L1 book_ticker for all symbols in this shard
     for chunk in symbols.chunks(50) {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -296,7 +260,28 @@ async fn ws_shard(
         .await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    info!("[gate] Shard {} subscribed OK", idx);
+
+    // Subscribe to L2 order_book (20 levels) for all symbols in this shard
+    for chunk in symbols.chunks(20) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // payload format: ["CONTRACT", "depth_level", "0"] where "0" = real-time
+        let payload: Vec<Value> = chunk.iter()
+            .map(|s| json!([s, "20", "0"]))
+            .collect();
+        for item in payload {
+            ws.send(Message::Text(
+                json!({"time":ts,"channel":"futures.order_book","event":"subscribe","payload": item})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    info!("[gate] Shard {} subscribed L1+L2 OK", idx);
 
     // Ensure gate map exists for mutably getting later
     price_map.entry("gate".to_string()).or_default();
@@ -307,29 +292,33 @@ async fn ws_shard(
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
-                    if let Ok(v) = serde_json::from_str::<GateMsg>(&text) {
-                        if v.channel != Some("futures.book_ticker") { continue; }
-                        if v.event == Some("subscribe") { continue; }
-                        if let Some(item) = v.result {
-                            if let Some(raw_sym) = item.s {
-                                if let Some(sym) = sym_map.get(raw_sym) {
-                                    let bid = match item.b { Some(v) if v > 0.0 => v, _ => continue };
-                                    let ask = match item.a { Some(v) if v > 0.0 => v, _ => continue };
-                                    let mid = (bid + ask) / 2.0;
+                    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                        let channel = v["channel"].as_str().unwrap_or("");
+                        let event = v["event"].as_str().unwrap_or("");
+                        if event == "subscribe" || event == "unsubscribe" { continue; }
 
+                        if channel == "futures.book_ticker" {
+                            // L1: best bid/ask
+                            if let Some(item) = v["result"].as_object() {
+                                let raw_sym = item.get("s").and_then(|v| v.as_str()).unwrap_or("");
+                                if let Some(sym) = sym_map.get(raw_sym) {
+                                    let bid: f64 = item.get("b").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                                    let ask: f64 = item.get("a").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                                    let bid_qty: f64 = item.get("B").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let ask_qty: f64 = item.get("A").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    if bid <= 0.0 || ask <= 0.0 { continue; }
+                                    let mid = (bid + ask) / 2.0;
+                                    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                                     if let Some(mut ex_map) = price_map.get_mut("gate") {
-                                        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                                         if let Some(entry) = ex_map.get_mut(sym) {
-                                            entry.bid = bid;
-                                            entry.ask = ask;
-                                            entry.bid_size = item.bid_qty * mid;
-                                            entry.ask_size = item.ask_qty * mid;
+                                            entry.bid = bid; entry.ask = ask;
+                                            entry.bid_size = bid_qty * mid; entry.ask_size = ask_qty * mid;
                                             if entry.price == 0.0 { entry.price = mid; }
                                             entry.last_updated = ts;
                                         } else {
                                             ex_map.insert(sym.to_string(), crate::state::TickerData {
                                                 bid, ask, price: mid, vol: 0.0, funding_rate: 0.0,
-                                                bid_size: item.bid_qty * mid, ask_size: item.ask_qty * mid,
+                                                bid_size: bid_qty * mid, ask_size: ask_qty * mid,
                                                 last_updated: ts
                                             });
                                         }
@@ -337,11 +326,37 @@ async fn ws_shard(
                                     signal.notify_one();
                                 }
                             }
-                        }
-                    } else {
-                        // try to log error message if present (slow path)
-                        let v_err: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-                        if v_err.get("error").is_some() {
+                        } else if channel == "futures.order_book" {
+                            // L2: order book depth
+                            if let Some(result) = v["result"].as_object() {
+                                let raw_sym = result.get("s").and_then(|v| v.as_str()).unwrap_or("");
+                                if let Some(std_sym) = sym_map.get(raw_sym) {
+                                    let now_ms = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default().as_millis() as u64;
+                                    let parse_level = |arr: &Value| -> Vec<(f64, f64)> {
+                                        arr.as_array().map(|levels| {
+                                            levels.iter().filter_map(|l| {
+                                                let p = l[0].as_str().and_then(|s| s.parse::<f64>().ok())?;
+                                                let q = l[1].as_str().and_then(|s| s.parse::<f64>().ok())
+                                                    .or_else(|| l[1].as_f64())?;
+                                                Some((p, q))
+                                            }).collect()
+                                        }).unwrap_or_default()
+                                    };
+                                    let bids = parse_level(&v["result"]["b"]);
+                                    let asks = parse_level(&v["result"]["a"]);
+                                    if !bids.is_empty() || !asks.is_empty() {
+                                        l2_books.insert(
+                                            format!("gate:{}", std_sym),
+                                            L2Snapshot { bids, asks, updated_ms: now_ms },
+                                        );
+                                    }
+                                }
+                            }
+                        } else if channel == "futures.pong" || channel == "futures.ping" {
+                            // ignore
+                        } else if v.get("error").is_some() {
                             warn!("[gate] Shard {} WS Error: {}", idx, text);
                         }
                     }
