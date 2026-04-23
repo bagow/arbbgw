@@ -405,3 +405,16 @@ pub fn warmup_ema_from_premiums(
         verified.insert(key);
     }
 }
+/// Returns all EMA keys that are being tracked but not yet verified.
+/// Used by the background re-warmup task to retry candle fetches for new listings.
+pub fn unverified_ema_keys() -> Vec<String> {
+    let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
+    let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
+    ema_map
+        .iter()
+        .filter_map(|e| {
+            let key = e.key().clone();
+            if verified.contains(&key) { None } else { Some(key) }
+        })
+        .collect()
+}

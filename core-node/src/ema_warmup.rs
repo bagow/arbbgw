@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::info;
 
-use crate::spreads::warmup_ema_from_premiums;
+use crate::spreads::{warmup_ema_from_premiums, unverified_ema_keys};
 use crate::state::PriceMap;
 
 const LOOKBACK_SECS: u64 = 86_400; // 24 hours
@@ -327,6 +327,85 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
         "[ema_warmup] ✅ Warmed EMA for {} pair combinations from 24h history",
         warmed
     );
+
+    // Spawn background re-warmup task — retries unverified pairs every 10 minutes.
+    // New listings (e.g. FOLKSUSDT) that had no candle history at startup
+    // will be verified as soon as they accumulate 2+ candles on both exchanges.
+    let http2 = http.clone();
+    let prices2 = prices.clone();
+    let ts2 = ts.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await; // 10 min
+            let verified = run_retry_unverified(&http2, &prices2, &ts2).await;
+            if verified > 0 {
+                info!("[ema_warmup] 🔄 Background re-warmup verified {} new pair(s)", verified);
+            }
+        }
+    });
+}
+
+/// Retry warmup for pairs in STRUCTURAL_EMA that are not yet VERIFIED.
+/// Called every 10 minutes so new listings get verified as candle data accumulates.
+async fn run_retry_unverified(
+    http: &Client,
+    prices: &PriceMap,
+    ts: &shared::TechnicalSettings,
+) -> usize {
+    let unverified = unverified_ema_keys();
+    if unverified.is_empty() {
+        return 0;
+    }
+
+    let semaphore = Arc::new(Semaphore::new(10));
+    let mut handles = Vec::new();
+
+    for key in unverified {
+        // Key format: "SYMBOL|exchange1|exchange2"
+        let parts: Vec<&str> = key.splitn(3, '|').collect();
+        if parts.len() != 3 { continue; }
+        let pair = parts[0].to_string();
+        let ex_a = parts[1].to_string();
+        let ex_b = parts[2].to_string();
+
+        // Only retry if pair is still present on both exchanges
+        let pair_exists = {
+            let has_a = prices.get(ex_a.as_str()).map(|m| m.contains_key(pair.as_str())).unwrap_or(false);
+            let has_b = prices.get(ex_b.as_str()).map(|m| m.contains_key(pair.as_str())).unwrap_or(false);
+            has_a && has_b
+        };
+        if !pair_exists { continue; }
+
+        let http = http.clone();
+        let ts = ts.clone();
+        let sem = semaphore.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            let candles_a = fetch_candles_for_with_retry(&http, &ex_a, &pair).await;
+            let candles_b = fetch_candles_for_with_retry(&http, &ex_b, &pair).await;
+            if candles_a.is_empty() || candles_b.is_empty() { return 0usize; }
+            let merged = merge_candles(&candles_a, &candles_b);
+            if merged.len() < 2 { return 0; }
+            let is_a_first = ex_a < ex_b;
+            let (name1, name2) = if is_a_first { (ex_a.clone(), ex_b.clone()) } else { (ex_b.clone(), ex_a.clone()) };
+            let mut history = Vec::with_capacity(merged.len());
+            for (ts_val, price_a, price_b) in &merged {
+                if *price_a <= 0.0 || *price_b <= 0.0 { continue; }
+                let (c1, c2) = if is_a_first { (*price_a, *price_b) } else { (*price_b, *price_a) };
+                let p12 = (c1 - c2) / c2 * 100.0;
+                let p21 = (c2 - c1) / c1 * 100.0;
+                history.push((*ts_val, p12, p21, pair.to_string(), name1.clone(), name2.clone()));
+            }
+            warmup_ema_from_premiums(&history, &ts);
+            1usize
+        }));
+    }
+
+    let mut count = 0usize;
+    for h in handles {
+        if let Ok(n) = h.await { count += n; }
+    }
+    count
 }
 
 // ─── Dispatch to the right exchange API ──────────────────────────────────────
