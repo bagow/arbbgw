@@ -113,23 +113,15 @@ Engine Loop (каждые ~10ms)
 
 ## 🖥️ Серверы
 
-### Production (Tokyo) — ОСНОВНОЙ
+### Production (Tokyo) — ЕДИНСТВЕННЫЙ АКТИВНЫЙ СЕРВЕР
 ```
 ssh -i "tokyo.pem" ubuntu@ec2-13-158-135-57.ap-northeast-1.compute.amazonaws.com
 ```
-- **OS**: Ubuntu
-- **Локация**: Tokyo (ap-northeast-1) — минимальная задержка до бирж (Binance, Bybit)
+- **OS**: Ubuntu (`user: ubuntu`)
+- **Локация**: Tokyo (ap-northeast-1) — минимальная задержка до бирж (Binance, Bybit, BingX)
 - **Провайдер**: AWS EC2
-
-### Legacy (Oracle) — УСТАРЕВШИЙ
-```
-ssh opc@140.238.217.190
-```
-- **OS**: Oracle Linux (user: `opc`)
 - **Cloudflare tunnel** + **Cloudflare front**
-
-> [!WARNING]
-> Oracle сервер будет выведен из эксплуатации после полной миграции на Tokyo.
+- **Сервисы**: `core-node.service`, `vps-api.service`, `cloudflared.service`
 
 ---
 

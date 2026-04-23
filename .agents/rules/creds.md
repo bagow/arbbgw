@@ -2,7 +2,7 @@
 trigger: always_on
 ---
 
-vps: ssh opc@140.238.217.190
+vps: ssh -i "tokyo.pem" ubuntu@ec2-13-158-135-57.ap-northeast-1.compute.amazonaws.com
 cloudflare tunnel
 cloudflare front
 ничего не компилировать(cargo check - запрещен) на впс и на локалке только с помощью github ci/cd просто пуш в гит.
