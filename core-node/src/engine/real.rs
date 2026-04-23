@@ -405,12 +405,36 @@ pub fn has_sufficient_margin(
     match e_ctx.margin_balances.get(exchange) {
         Some(margin) => {
             let available = *margin;
-            // Physical margin needed for this trade
             let required = notional_usd / leverage.max(1.0);
-            // Require 1.5x of the required margin as a safety buffer
-            available >= required * 1.5
+            let ok = available >= required * 1.5;
+            if !ok {
+                use std::sync::atomic::{AtomicI64, Ordering};
+                static LAST_LOG: AtomicI64 = AtomicI64::new(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_millis() as i64;
+                if now - LAST_LOG.load(Ordering::Relaxed) > 15_000 {
+                    LAST_LOG.store(now, Ordering::Relaxed);
+                    tracing::warn!(
+                        "[margin] {} available=${:.2} required=${:.2} (notional=${:.2} lev={}x) — INSUFFICIENT",
+                        exchange, available, required * 1.5, notional_usd, leverage
+                    );
+                }
+            }
+            ok
         }
-        None => false, // STRICT MODE: Do not enter trades blindly if we don't know our balance
+        None => {
+            use std::sync::atomic::{AtomicI64, Ordering};
+            static LAST_NONE_LOG: AtomicI64 = AtomicI64::new(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_millis() as i64;
+            if now - LAST_NONE_LOG.load(Ordering::Relaxed) > 15_000 {
+                LAST_NONE_LOG.store(now, Ordering::Relaxed);
+                tracing::warn!("[margin] {} NOT in margin_balances — balance fetch failed or pending", exchange);
+            }
+            false
+        }
     }
 }
 
