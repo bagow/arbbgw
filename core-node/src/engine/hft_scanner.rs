@@ -3,6 +3,20 @@
 //! Completely isolated from the EMA reversion scanner (scanner.rs).
 //! Scans for raw instantaneous spread > break-even — no structural EMA needed.
 //! Produces the same `TradeSignal` struct for execution by `hft_cycle.rs`.
+//!
+//! ## Two HFT-specific filters (not present in EMA scanner):
+//!
+//! ### 1. Spike-above-norm filter
+//! The raw spread must be a FRESH DEVIATION above the EMA structural baseline,
+//! not just the chronic normal gap. A pair with structural_spread=1.0% trading at
+//! 1.0% is NOT a latency spike — it's just its normal state, won't revert.
+//! We require: raw_spread > structural_spread + hft_min_spike_above_norm.
+//!
+//! ### 2. Velocity asymmetry filter
+//! Latency arbitrage = ONE exchange moved, the OTHER is still.
+//! If both exchanges moved together (even if one moved faster), it's a trend.
+//! We measure price change per exchange over the last ~3 seconds using price_history,
+//! keyed by "exchange:PAIR". If asymmetry < hft_min_velocity_asymmetry_pct, skip.
 
 use crate::engine::real::{now_ms, now_secs, ExchangeKeys};
 use crate::state::{EngineContext, PriceMap};
@@ -11,6 +25,20 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 static LAST_HFT_DIAG_LOG: AtomicI64 = AtomicI64::new(0);
+
+/// Updates per-exchange price snapshot in price_history (key = "exchange:PAIR").
+/// Called every scanner cycle so velocity is always fresh.
+fn update_exchange_price_snapshot(e_ctx: &EngineContext, exchange: &str, pair: &str, current_price: f64, now: i64) {
+    let key = format!("{}:{}", exchange, pair);
+    // Only update if old snapshot is >500ms old to avoid overwriting mid-cycle
+    let should_update = e_ctx.price_history
+        .get(&key)
+        .map(|(_, ts)| now - ts > 500)
+        .unwrap_or(true);
+    if should_update {
+        e_ctx.price_history.insert(key, (current_price, now));
+    }
+}
 
 fn cooldown_active(marker: i64, now: i64, cooldown_ms: i64) -> bool {
     if marker <= 0 {
@@ -25,11 +53,13 @@ fn cooldown_active(marker: i64, now: i64, cooldown_ms: i64) -> bool {
 /// HFT signal generator — scans for raw instantaneous spread opportunities.
 ///
 /// Key differences from EMA scanner:
-/// - No structural spread / EMA warmup check
-/// - No structural deviation filter
 /// - No structural guard (profit_potential check)
 /// - Pure raw spread: `spread > break_even`
 /// - Same lot sizing, multiplier, tick_size, cooldown logic
+///
+/// HFT-specific additions (vs EMA scanner):
+/// - Spike-above-norm: spread must exceed structural_spread EMA by a margin
+/// - Velocity asymmetry: only ONE exchange must have moved (latency, not trend)
 pub fn generate_hft_signals(
     spreads: &[SpreadRow],
     prices: &PriceMap,
@@ -202,6 +232,85 @@ pub fn generate_hft_signals(
             crate::engine::real::get_exchange_fee(&row.exchange_a, ts.default_fee_rate, e_ctx);
         let fee_b =
             crate::engine::real::get_exchange_fee(&row.exchange_b, ts.default_fee_rate, e_ctx);
+
+        // ── FILTER 1: SPIKE-ABOVE-NORM ───────────────────────────────────────
+        // The spread must be a fresh deviation ABOVE its EMA structural baseline.
+        // A pair trading at its chronic norm (raw ≈ structural) will NOT revert
+        // on HFT timescales — it's been there for hours, not seconds.
+        // We require: raw_spread > structural_spread + min_spike_margin.
+        //
+        // min_spike_margin default: 0.3% (configurable via hft_min_spike_above_norm in TechnicalSettings)
+        // If structural_spread is not yet computed (has_structural_spread=false), skip this filter.
+        let hft_min_spike_above_norm = 0.3_f64; // % above EMA norm to qualify as latency spike
+        if row.has_structural_spread && row.structural_spread > 0.0 {
+            let spike = row.spread - row.structural_spread;
+            if spike < hft_min_spike_above_norm {
+                if log_diag {
+                    tracing::debug!(
+                        "[hft_scanner] SKIP {} spike={:.4}% < {:.4}% (spread={:.4}% structural={:.4}%) — chronic norm, not latency",
+                        row.pair, spike, hft_min_spike_above_norm, row.spread, row.structural_spread
+                    );
+                }
+                continue;
+            }
+        }
+
+        // ── FILTER 2: VELOCITY ASYMMETRY ────────────────────────────────────
+        // In true latency arb, ONE exchange's price moved (e.g. large order hit Bybit)
+        // while the OTHER exchange is still (Gate hasn't reacted yet).
+        // If BOTH exchanges moved together → it's a trend, not latency → skip.
+        //
+        // Velocity window: 3 seconds. Asymmetry threshold: 0.2% difference.
+        // If we have no per-exchange history yet (first cycles) → allow entry (benefit of doubt).
+        let vel_window_ms = 3_000_i64;
+        let hft_min_asymmetry_pct = 0.2_f64; // minimum difference between exchange velocities
+
+        let price_a_now = if is_a_higher { row.bid_a } else { row.ask_a };
+        let price_b_now = if is_a_higher { row.ask_b } else { row.bid_b };
+
+        // Update per-exchange snapshots so next cycle can measure velocity
+        update_exchange_price_snapshot(e_ctx, &row.exchange_a, &row.pair, price_a_now, now);
+        update_exchange_price_snapshot(e_ctx, &row.exchange_b, &row.pair, price_b_now, now);
+
+        // Compute velocity for each exchange independently
+        let key_a = format!("{}:{}", row.exchange_a, row.pair);
+        let key_b = format!("{}:{}", row.exchange_b, row.pair);
+
+        let vel_a_pct = e_ctx.price_history.get(&key_a).and_then(|(old_p, old_ts)| {
+            let elapsed = now - old_ts;
+            if elapsed >= 500 && elapsed <= vel_window_ms * 3 && old_p > 1e-12 {
+                Some(((price_a_now - old_p) / old_p).abs() * 100.0)
+            } else { None }
+        });
+        let vel_b_pct = e_ctx.price_history.get(&key_b).and_then(|(old_p, old_ts)| {
+            let elapsed = now - old_ts;
+            if elapsed >= 500 && elapsed <= vel_window_ms * 3 && old_p > 1e-12 {
+                Some(((price_b_now - old_p) / old_p).abs() * 100.0)
+            } else { None }
+        });
+
+        if let (Some(va), Some(vb)) = (vel_a_pct, vel_b_pct) {
+            let asymmetry = (va - vb).abs();
+            if asymmetry < hft_min_asymmetry_pct {
+                // Both exchanges moved similarly — this is a synchronized trend, not latency
+                if log_diag {
+                    tracing::debug!(
+                        "[hft_scanner] SKIP {} vel_a={:.4}% vel_b={:.4}% asymmetry={:.4}% < {:.4}% — synchronized trend, not latency spike",
+                        row.pair, va, vb, asymmetry, hft_min_asymmetry_pct
+                    );
+                }
+                continue;
+            }
+            // Log when we DO pass — useful for tuning thresholds
+            if log_diag {
+                tracing::debug!(
+                    "[hft_scanner] PASS {} vel_a={:.4}% vel_b={:.4}% asymmetry={:.4}% spike={:.4}%",
+                    row.pair, va, vb, asymmetry,
+                    row.spread - row.structural_spread
+                );
+            }
+        }
+        // If no history yet for either exchange → allow entry (benefit of the doubt on first cycles)
 
         // ── HFT PROFILE EVALUATION ──
         for profile in &hft_profiles {
