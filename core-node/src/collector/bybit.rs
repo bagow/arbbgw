@@ -78,7 +78,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         .json()
         .await?;
 
-    let mut symbols = Vec::new();
+    let mut symbols: Vec<(f64, String)> = Vec::new(); // (volume, symbol)
     if let Some(list) = resp["result"]["list"].as_array() {
         for t in list {
             let sym = t["symbol"].as_str().unwrap_or("");
@@ -129,12 +129,16 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                 );
                 signal.notify_one();
             }
-            symbols.push(sym.to_string());
+            symbols.push((vol, sym.to_string()));
+
         }
     }
     if symbols.is_empty() {
         return Err(anyhow::anyhow!("Failed to fetch symbols or list is empty"));
     }
+    // Sort by 24h volume desc so top-volume symbols get L2 coverage
+    symbols.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let symbols: Vec<String> = symbols.into_iter().map(|(_, s)| s).collect();
     info!("[bybit] Seeded {} USDT linear tickers", symbols.len());
 
     // WS: subscribe to tickers in batches of 10
@@ -154,8 +158,9 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
-    // Subscribe to L2 (orderbook.25) for top volume symbols (depth cache)
-    let l2_symbols: Vec<&String> = symbols.iter().take(50).collect();
+    // Subscribe to L2 (orderbook.25) for top 200 by volume
+    let l2_limit = 200.min(symbols.len());
+    let l2_symbols: Vec<&String> = symbols.iter().take(l2_limit).collect();
     for chunk in l2_symbols.chunks(10) {
         let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.25.{}", s)).collect();
         ws.send(Message::Text(
@@ -164,7 +169,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         .await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
-    info!("[bybit] Subscribed L2 depth for {} symbols", l2_symbols.len());
+    info!("[bybit] Subscribed L2 depth for {} symbols (top by volume)", l2_symbols.len());
 
     let mut _ping = tokio::time::interval(Duration::from_secs(20));
     #[derive(Deserialize)]

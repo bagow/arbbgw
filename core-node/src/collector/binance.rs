@@ -113,10 +113,20 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     .context("Binance WS connect failed")?;
     info!("[binance] Connected (bookTicker)");
 
-    // Spawn L2 depth collector as a separate parallel task
+    // Spawn L2 depth collector with top-200 symbols by volume
     let l2_books_clone = l2_books.clone();
+    // Build sorted symbol list from seeded data
+    let mut vol_syms: Vec<(f64, String)> = {
+        let map = price_map.get("binance");
+        match map {
+            Some(m) => m.iter().map(|e| (e.vol, e.key().clone())).collect(),
+            None => vec![],
+        }
+    };
+    vol_syms.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let top_syms: Vec<String> = vol_syms.into_iter().take(200).map(|(_, s)| s).collect();
     tokio::spawn(async move {
-        run_l2_depth_stream(l2_books_clone).await;
+        run_l2_depth_stream(l2_books_clone, top_syms).await;
     });
 
     #[derive(Deserialize)]
@@ -189,24 +199,13 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     Ok(())
 }
 
-/// Separate L2 depth stream for top-volume pairs.
-/// Subscribes to depth5@100ms for a curated set of high-volume futures.
-/// Updates l2_books cache which cycle.rs reads instead of REST API calls.
-async fn run_l2_depth_stream(l2_books: L2OrderbookMap) {
-    // Top ~40 perpetuals by volume — covers 90%+ of arb opportunities.
-    // These are the ones where JIT depth checks actually matter.
-    let symbols: Vec<&str> = vec![
-        "btcusdt", "ethusdt", "solusdt", "bnbusdt", "dogeusdt",
-        "xrpusdt", "pepeusdt", "suiusdt", "adausdt", "trxusdt",
-        "avaxusdt", "linkusdt", "dotusdt", "ltcusdt", "maticusdt",
-        "arbusdt", "opusdt", "aptusdt", "nearusdt", "filusdt",
-        "wifusdt", "shibusdt", "bonkusdt", "flokiusdt", "wldusdt",
-        "1000satsusdt", "ordiusdt", "tiausdt", "seiusdt", "injusdt",
-        "fetusdt", "runeusdt", "jupusdt", "enausdt", "ondousdt",
-        "renderusdt", "aaveusdt", "mkrusdt", "ldousdt", "pendleusdt",
-    ];
-
-    let streams: Vec<String> = symbols.iter().map(|s| format!("{}@depth5@100ms", s)).collect();
+/// Separate L2 depth stream for top-volume pairs (dynamic, top 200 by volume).
+/// Subscribes to depth5@100ms stream. Updates l2_books cache read by cycle.rs.
+async fn run_l2_depth_stream(l2_books: L2OrderbookMap, symbols: Vec<String>) {
+    let streams: Vec<String> = symbols
+        .iter()
+        .map(|s| format!("{}@depth5@100ms", s.to_lowercase()))
+        .collect();
     let url = format!("wss://fstream.binance.com/stream?streams={}", streams.join("/"));
 
     let mut backoff = Duration::from_secs(1);
