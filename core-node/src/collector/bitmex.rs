@@ -170,6 +170,18 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
             },
             _ = ping.tick() => {
                 ws.send(Message::Text("ping".into())).await?;
+                // WS heartbeat: update last_updated for all pairs with valid prices.
+                // BitMEX quote stream pushes only on change — heartbeat confirms WS is alive.
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_secs();
+                if let Some(mut ex_map) = price_map.get_mut("bitmex") {
+                    for (_, entry) in ex_map.iter_mut() {
+                        if entry.bid > 0.0 && entry.ask > 0.0 {
+                            entry.last_updated = now_ts;
+                        }
+                    }
+                }
             }
         }
     }

@@ -283,6 +283,16 @@ async fn handler(
             },
             _ = ping.tick() => {
                 ws.send(Message::Text("ping".into())).await?;
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_secs();
+                if let Some(mut ex_map) = price_map.get_mut("bitget") {
+                    for (_, entry) in ex_map.iter_mut() {
+                        if entry.bid > 0.0 && entry.ask > 0.0 {
+                            entry.last_updated = now_ts;
+                        }
+                    }
+                }
             }
         }
     }

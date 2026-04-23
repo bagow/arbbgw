@@ -175,6 +175,20 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             },
             _ = ping.tick() => {
                 ws.send(Message::Text("Ping".into())).await?;
+                // WS heartbeat: update last_updated for all pairs with valid prices.
+                // If the WS is alive, the exchange would notify us of price changes —
+                // so existing bid/ask data is as current as the last received update.
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if let Some(mut ex_map) = price_map.get_mut("bingx") {
+                    for (_, entry) in ex_map.iter_mut() {
+                        if entry.bid > 0.0 && entry.ask > 0.0 {
+                            entry.last_updated = now_ts;
+                        }
+                    }
+                }
             }
         }
     }
