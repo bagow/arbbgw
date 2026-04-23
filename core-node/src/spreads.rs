@@ -274,6 +274,19 @@ pub fn compute_spreads(
 
                 let has_structural_spread = (now_f64 - last_cross) > 86000.0;
 
+                // Auto-verify via live WS data: if the spread has been consistently
+                // positive (no zero-crossing) for 30+ minutes, the structural premium
+                // is real. This covers new listings with no historical candle data.
+                if !is_verified && (now_f64 - last_cross) > 1800.0 {
+                    let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
+                    verified.insert(ema_key.clone());
+                    tracing::info!(
+                        "[spreads] \u2705 Auto-verified {} after 30min live WS tracking (no zero-cross)",
+                        ema_key
+                    );
+                }
+                let is_verified = verified.contains(&ema_key);
+
                 rows.push(SpreadRow {
                     pair: sym.clone(),
                     exchange_a: name_a.clone(),
