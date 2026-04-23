@@ -35,6 +35,12 @@ mod collector {
     pub mod bybit;
     pub mod gate;
     pub mod kucoin;
+    pub mod bitget;
+    pub mod bingx;
+    pub mod bitmex;
+    pub mod ascendex;
+    pub mod xt;
+    pub mod toobit;
 }
 
 mod engine;

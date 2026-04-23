@@ -206,7 +206,7 @@ impl ExchangeConnector for ToobitConnector {
         let data = &v["data"]["order"];
         let filled: f64 = data["executedQty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
         let avg_price: f64 = data["avgPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-        let fee: f64 = data["fee"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0).abs();
+        let fee: f64 = data["fee"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0).abs();
         Ok((avg_price, fee, filled))
     }
 

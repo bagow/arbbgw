@@ -10,7 +10,7 @@ use reqwest::Client;
 use serde_json::Value;
 use sha2::Sha256;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 pub struct BingxConnector;
 
@@ -267,7 +267,7 @@ impl ExchangeConnector for BingxConnector {
         let data = &v["data"]["order"];
         let filled: f64 = data["executedQty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
         let avg_price: f64 = data["avgPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-        let fee: f64 = data["fee"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0).abs();
+        let fee: f64 = data["fee"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0).abs();
         Ok((avg_price, fee, filled))
     }
 

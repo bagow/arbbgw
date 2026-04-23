@@ -9,7 +9,7 @@ use reqwest::Client;
 use serde_json::Value;
 use sha2::Sha256;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 pub struct BitgetConnector;
 
@@ -396,7 +396,7 @@ impl ExchangeConnector for BitgetConnector {
             .unwrap_or(0.0);
         let fee: f64 = data["fee"]
             .as_str()
-            .and_then(|s| s.parse().ok())
+            .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0)
             .abs();
 
