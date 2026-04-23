@@ -67,10 +67,11 @@ async fn main() -> Result<()> {
     let http = Client::builder()
         .user_agent("core-node/1.0")
         .timeout(Duration::from_secs(15))
-        .pool_max_idle_per_host(20) // Larger pool to avoid H2 stream contention
-        .pool_idle_timeout(Duration::from_secs(90))
+        .http1_only()  // Force HTTP/1.1: avoids H2 "locally-reset streams reached limit (1024)"
+        .pool_max_idle_per_host(10)
+        .pool_idle_timeout(Duration::from_secs(60))
         .tcp_keepalive(Duration::from_secs(30))
-        .tcp_nodelay(true) // Disable Nagle's for lower latency
+        .tcp_nodelay(true)
         .build()?;
 
     let engine_ctx = Arc::new(crate::state::EngineContext::default());
