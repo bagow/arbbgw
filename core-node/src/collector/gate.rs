@@ -333,7 +333,7 @@ async fn ws_shard(
                                 if let Some(std_sym) = sym_map.get(raw_sym) {
                                     let now_ms = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default().as_millis() as u64;
+                                        .unwrap_or_default().as_millis() as i64;
                                     let parse_level = |arr: &Value| -> Vec<(f64, f64)> {
                                         arr.as_array().map(|levels| {
                                             levels.iter().filter_map(|l| {
