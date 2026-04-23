@@ -118,6 +118,9 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     let l2_books_clone = l2_books.clone();
     let price_map_clone = price_map.clone();
     tokio::spawn(async move {
+        // Wait 15s for bookTicker to populate price_map with all symbols
+        // before building the top-200 sorted list for the L2 stream.
+        tokio::time::sleep(Duration::from_secs(15)).await;
         run_l2_depth_stream(l2_books_clone, price_map_clone).await;
     });
 
@@ -238,8 +241,15 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
             Ok((mut ws, _)) => {
                 info!("[binance_l2] Connected — {} depth streams", symbols.len());
                 backoff = Duration::from_secs(1);
+                let conn_start = std::time::Instant::now();
+                // Reconnect every 30 min to refresh the top-200 symbol list
+                let max_age = Duration::from_secs(1800);
 
                 while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+                    if conn_start.elapsed() > max_age {
+                        info!("[binance_l2] Refreshing symbol list after 30min...");
+                        break;
+                    }
                     if let Ok(Message::Text(text)) = msg {
                         // Combined stream format: {"stream":"btcusdt@depth5@100ms","data":{...}}
                         if let Ok(wrapper) = serde_json::from_str::<Value>(&text) {
