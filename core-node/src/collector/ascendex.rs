@@ -56,7 +56,9 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
     let http = Client::new();
 
     // Seed from REST: get all futures contracts
-    let mut ws_symbols: Vec<String> = Vec::new(); // "BTC/USDT" format
+    // API returns: symbol="BTC-PERP", displayName="BTCUSDT", settlementAsset="USDT"
+    let mut ws_symbols: Vec<String> = Vec::new(); // "BTC-PERP" format for WS
+    let mut sym_map: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // "BTC-PERP" → "BTCUSDT"
     if let Ok(resp) = http
         .get("https://ascendex.com/api/pro/v2/futures/contract")
         .timeout(Duration::from_secs(15))
@@ -66,15 +68,17 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
             if let Some(arr) = body["data"].as_array() {
                 let mut seeded = 0usize;
                 for c in arr {
-                    let sym = c["symbol"].as_str().unwrap_or(""); // "BTC/USDT"
-                    let std_sym = sym.replace('/', ""); // "BTCUSDT"
-                    if !std_sym.ends_with("USDT") { continue; }
+                    let ws_sym = c["symbol"].as_str().unwrap_or(""); // "BTC-PERP"
+                    let std_sym = c["displayName"].as_str().unwrap_or(""); // "BTCUSDT"
+                    let settlement = c["settlementAsset"].as_str().unwrap_or("");
+                    if settlement != "USDT" || std_sym.is_empty() || ws_sym.is_empty() { continue; }
                     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                    price_map.entry("ascendex".to_string()).or_default().entry(std_sym).or_insert(TickerData {
+                    price_map.entry("ascendex".to_string()).or_default().entry(std_sym.to_string()).or_insert(TickerData {
                         bid: 0.0, ask: 0.0, price: 0.0, vol: 0.0, funding_rate: 0.0,
                         bid_size: 0.0, ask_size: 0.0, last_updated: ts,
                     });
-                    ws_symbols.push(sym.to_string());
+                    sym_map.insert(ws_sym.to_string(), std_sym.to_string());
+                    ws_symbols.push(ws_sym.to_string());
                     seeded += 1;
                 }
                 info!("[ascendex] Seeded {} futures symbols from REST", seeded);
@@ -109,9 +113,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                         let m = v["m"].as_str().unwrap_or("");
                         if m == "futures/bbo" {
                             if let Some(data) = v["data"].as_object() {
-                                let sym_raw = data["s"].as_str().unwrap_or(""); // "BTC/USDT"
-                                let std_sym = sym_raw.replace('/', ""); // "BTCUSDT"
-                                if !std_sym.ends_with("USDT") { continue; }
+                                let sym_raw = data["s"].as_str().unwrap_or(""); // "BTC-PERP"
+                                let std_sym = match sym_map.get(sym_raw) {
+                                    Some(s) => s.clone(),
+                                    None => continue, // unknown symbol
+                                };
                                 let bid: f64 = data["b"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                 let ask: f64 = data["a"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                 let bid_sz: f64 = data["bq"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);

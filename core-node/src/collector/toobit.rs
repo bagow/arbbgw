@@ -55,10 +55,23 @@ pub async fn run(
 async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2OrderbookMap) -> Result<()> {
     let http = Client::new();
 
-    // Seed from REST: GET /openApi/swap/v2/quote/contracts
+    // Top USDT-M perp pairs on Toobit (fallback when REST is unreachable)
+    const FALLBACK: &[&str] = &[
+        "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT",
+        "AVAXUSDT","DOTUSDT","LINKUSDT","LTCUSDT","MATICUSDT","UNIUSDT","ATOMUSDT",
+        "ETCUSDT","XLMUSDT","FILUSDT","AAVEUSDT","TRXUSDT","EOSUSDT","ALGOUSDT",
+        "ICPUSDT","SANDUSDT","MANAUSDT","AXSUSDT","CRVUSDT","MKRUSDT","SNXUSDT",
+        "NEARUSDT","FTMUSDT","HBARUSDT","APEUSDT","OPUSDT","APTUSDT","ARBUSDT",
+        "SUIUSDT","PEPEUSDT","WLDUSDT","INJUSDT","TIAUSDT","SEIUSDT","JUPUSDT",
+        "ORDIUSDT","RNDRUSDT","FETUSDT","TONUSDT","NOTUSDT","BOMEUSDT","ENAUSDT",
+        "WIFUSDT","STXUSDT","RUNEUSDT","LDOUSDT","GMTUSDT","GALAUSDT","FLOWUSDT",
+    ];
+
+    // Try REST first (may be blocked from some regions)
+    let mut rest_ok = false;
     if let Ok(resp) = http
         .get("https://openapi.toobit.com/openApi/swap/v2/quote/contracts")
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(8))
         .send().await
     {
         if let Ok(body) = resp.json::<Value>().await {
@@ -67,38 +80,28 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                 for t in list {
                     let sym = t["symbol"].as_str().unwrap_or("");
                     if !sym.ends_with("USDT") { continue; }
-                    price_map.entry("toobit".to_string()).or_default().entry(sym.to_string()).or_default();
+                    price_map.entry("toobit".to_string()).or_default()
+                        .entry(sym.to_string()).or_default();
                     seeded += 1;
                 }
-                info!("[toobit] Seeded {} symbols from REST", seeded);
+                if seeded > 0 {
+                    info!("[toobit] Seeded {} symbols from REST", seeded);
+                    rest_ok = true;
+                }
             }
         }
     }
 
-    // Seed ticker prices from REST
-    if let Ok(resp) = http
-        .get("https://openapi.toobit.com/openApi/swap/v2/quote/ticker")
-        .timeout(Duration::from_secs(15))
-        .send().await
-    {
-        if let Ok(body) = resp.json::<Value>().await {
-            if let Some(list) = body["data"].as_array() {
-                for t in list {
-                    let sym = t["symbol"].as_str().unwrap_or("");
-                    if !sym.ends_with("USDT") { continue; }
-                    let bid: f64 = t["bestBidPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let ask: f64 = t["bestAskPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let price: f64 = t["lastPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let vol: f64 = t["quoteVolume"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    if price > 0.0 {
-                        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                        price_map.entry("toobit".to_string()).or_default().insert(sym.to_string(), TickerData {
-                            bid, ask, price, vol, funding_rate: 0.0,
-                            bid_size: 0.0, ask_size: 0.0, last_updated: ts,
-                        });
-                    }
-                }
-            }
+    // Fallback: seed hardcoded list if REST was blocked/empty
+    if !rest_ok {
+        warn!("[toobit] REST unavailable, using hardcoded fallback ({} symbols)", FALLBACK.len());
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        for &sym in FALLBACK {
+            price_map.entry("toobit".to_string()).or_default()
+                .entry(sym.to_string()).or_insert(TickerData {
+                    bid: 0.0, ask: 0.0, price: 0.0, vol: 0.0, funding_rate: 0.0,
+                    bid_size: 0.0, ask_size: 0.0, last_updated: ts,
+                });
         }
     }
 

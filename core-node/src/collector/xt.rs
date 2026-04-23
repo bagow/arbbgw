@@ -68,12 +68,15 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
         .send().await
     {
         if let Ok(body) = resp.json::<Value>().await {
-            if let Some(arr) = body["result"]["symbols"].as_array() {
+            // result is a flat array, not result.symbols
+            if let Some(arr) = body["result"].as_array() {
                 let mut seeded = 0usize;
                 for c in arr {
+                    // only USDT-settled perpetuals
+                    if c["underlyingType"].as_str() != Some("U_BASED") { continue; }
                     let sym = c["symbol"].as_str().unwrap_or(""); // "btc_usdt"
                     let std_sym = xt_to_standard(sym); // "BTCUSDT"
-                    if !std_sym.ends_with("USDT") { continue; }
+                    if !std_sym.ends_with("USDT") || sym.is_empty() { continue; }
                     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                     price_map.entry("xt".to_string()).or_default().entry(std_sym).or_insert(TickerData {
                         bid: 0.0, ask: 0.0, price: 0.0, vol: 0.0, funding_rate: 0.0,
