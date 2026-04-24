@@ -124,6 +124,45 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         run_l2_depth_stream(l2_books_clone, price_map_clone).await;
     });
 
+    // Spawn background volume refresher — re-seeds 24h volumes every 30 min
+    // so Binance doesn't disappear from the spread scanner after long uptime.
+    {
+        let pm = price_map.clone();
+        let http2 = Client::new();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1800)).await;
+                if let Ok(resp) = http2
+                    .get("https://fapi.binance.com/fapi/v1/ticker/24hr")
+                    .timeout(Duration::from_secs(15))
+                    .send()
+                    .await
+                {
+                    if let Ok(arr) = resp.json::<Vec<Value>>().await {
+                        let mut count = 0u32;
+                        for t in &arr {
+                            let sym = t["symbol"].as_str().unwrap_or("");
+                            if !sym.ends_with("USDT") { continue; }
+                            let vol: f64 = t["quoteVolume"]
+                                .as_str()
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0.0);
+                            if vol > 0.0 {
+                                if let Some(mut ex_map) = pm.get_mut("binance") {
+                                    if let Some(entry) = ex_map.get_mut(sym) {
+                                        entry.vol = vol;
+                                        count += 1;
+                                    }
+                                }
+                            }
+                        }
+                        info!("[binance] Volume refreshed for {} symbols", count);
+                    }
+                }
+            }
+        });
+    }
+
     #[derive(Deserialize)]
     struct BinanceTicker<'a> {
         #[serde(rename = "s")]
