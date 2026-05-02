@@ -218,15 +218,47 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
         // Don't break early, otherwise slower exchanges like Gate/Kucoin miss historical warmup!
     }
 
-    // Collect all pairs available on each exchange
+    // First, collect all unique (exchange, pair) combinations to fetch
+    let mut unique_ex_pairs = std::collections::HashSet::new();
     let exchanges: Vec<String> = prices.iter().map(|e| e.key().clone()).collect();
+    for ex in &exchanges {
+        if let Some(map) = prices.get(ex.as_str()) {
+            for pair in map.keys() {
+                unique_ex_pairs.insert((ex.clone(), pair.clone()));
+            }
+        }
+    }
+
     info!(
-        "[ema_warmup] Starting EMA warmup with {} exchanges (tau={}s)",
-        exchanges.len(),
+        "[ema_warmup] Starting EMA warmup: fetching candles for {} unique (exchange, pair) combos (tau={}s)",
+        unique_ex_pairs.len(),
         ts.ema_tau_secs
     );
 
+    use dashmap::DashMap;
+    let candle_cache: Arc<DashMap<String, Vec<(f64, f64)>>> = Arc::new(DashMap::new());
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
+    let mut fetch_handles = Vec::new();
+
+    for (ex, pair) in unique_ex_pairs {
+        let http = http.clone();
+        let sem = semaphore.clone();
+        let cache = candle_cache.clone();
+        fetch_handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            let candles = fetch_candles_for_with_retry(&http, &ex, &pair).await;
+            if !candles.is_empty() {
+                cache.insert(format!("{}:{}", ex, pair), candles);
+            }
+        }));
+    }
+
+    for h in fetch_handles {
+        let _ = h.await;
+    }
+
+    info!("[ema_warmup] Fetched candles. Reconstructing cross-exchange historical premiums...");
+
     let mut handles = Vec::new();
 
     for i in 0..exchanges.len() {
@@ -253,18 +285,14 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
             };
 
             for pair in pairs {
-                let http = http.clone();
                 let ex_a = ex_a.clone();
                 let ex_b = ex_b.clone();
                 let ts = ts.clone();
-                let sem = semaphore.clone();
+                let cache = candle_cache.clone();
 
                 handles.push(tokio::spawn(async move {
-                    // Acquire semaphore permit — limits concurrent REST requests
-                    let _permit = sem.acquire().await.unwrap();
-
-                    let candles_a = fetch_candles_for_with_retry(&http, &ex_a, &pair).await;
-                    let candles_b = fetch_candles_for_with_retry(&http, &ex_b, &pair).await;
+                    let candles_a = cache.get(&format!("{}:{}", ex_a, pair)).map(|v| v.clone()).unwrap_or_default();
+                    let candles_b = cache.get(&format!("{}:{}", ex_b, pair)).map(|v| v.clone()).unwrap_or_default();
 
                     if candles_a.is_empty() || candles_b.is_empty() {
                         return 0usize;

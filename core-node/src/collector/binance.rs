@@ -71,12 +71,19 @@ pub async fn run(
 async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
     // Seed 24h volume from REST miniTicker snapshot
     let http = Client::new();
-    if let Ok(resp) = http
-        .get("https://fapi.binance.com/fapi/v1/ticker/24hr")
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-    {
+    let mut target_url = "https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
+    let mut resp = http.get(&target_url).timeout(Duration::from_secs(15)).send().await;
+    
+    if let Ok(ref r) = resp {
+        let status = r.status().as_u16();
+        if status == 403 || status == 418 || status == 429 {
+            target_url = "https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
+            tracing::warn!("[binance] Using proxy fallback for volume due to HTTP {}", status);
+            resp = http.get(&target_url).timeout(Duration::from_secs(15)).send().await;
+        }
+    }
+
+    if let Ok(r) = resp {
         if let Ok(arr) = resp.json::<Vec<Value>>().await {
             for t in &arr {
                 let sym = t["symbol"].as_str().unwrap_or("");
@@ -132,13 +139,19 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(1800)).await;
-                if let Ok(resp) = http2
-                    .get("https://fapi.binance.com/fapi/v1/ticker/24hr")
-                    .timeout(Duration::from_secs(15))
-                    .send()
-                    .await
-                {
-                    if let Ok(arr) = resp.json::<Vec<Value>>().await {
+                let mut target_url = "https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
+                let mut resp = http2.get(&target_url).timeout(Duration::from_secs(15)).send().await;
+                
+                if let Ok(ref r) = resp {
+                    let status = r.status().as_u16();
+                    if status == 403 || status == 418 || status == 429 {
+                        target_url = "https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
+                        resp = http2.get(&target_url).timeout(Duration::from_secs(15)).send().await;
+                    }
+                }
+
+                if let Ok(r) = resp {
+                    if let Ok(arr) = r.json::<Vec<Value>>().await {
                         let mut count = 0u32;
                         for t in &arr {
                             let sym = t["symbol"].as_str().unwrap_or("");

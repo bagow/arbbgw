@@ -632,8 +632,14 @@ pub fn start_multiplier_fetcher(
                     continue;
                 }
 
+                let mut target_url = "https://fapi.binance.com/fapi/v1/exchangeInfo".to_string();
+                if last_http_status == 403 || last_http_status == 418 || last_http_status == 429 {
+                    target_url = "https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/exchangeInfo".to_string();
+                    tracing::warn!("[multipliers] Binance: Using proxy fallback due to HTTP {}", last_http_status);
+                }
+
                 match http
-                    .get("https://fapi.binance.com/fapi/v1/exchangeInfo")
+                    .get(&target_url)
                     .timeout(Duration::from_secs(15))
                     .send()
                     .await
@@ -717,16 +723,14 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else if last_http_status == 418 {
-                    // IP ban scales from 2min to 3 DAYS for repeat offenders.
-                    // Do NOT retry frequently — it prolongs the ban.
-                    tracing::error!("[multipliers] Binance: IP BANNED (418). Backing off 1 HOUR. Binance pairs disabled until ban expires.");
-                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    tracing::error!("[multipliers] Binance: IP BANNED (418). Proxy failed. Backing off 10 min.");
+                    tokio::time::sleep(std::time::Duration::from_secs(600)).await;
                 } else if last_http_status == 429 {
-                    tracing::warn!("[multipliers] Binance: rate limited (429), backing off 5min");
+                    tracing::warn!("[multipliers] Binance: rate limited (429), proxy failed, backing off 5min");
                     tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 } else {
                     tracing::warn!(
-                        "[multipliers] Binance: FAILED to load (http={}), retrying in 30s",
+                        "[multipliers] Binance: FAILED to load (http={}), retrying in 30s via proxy",
                         last_http_status
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
