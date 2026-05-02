@@ -172,9 +172,12 @@ pub fn start_balance_fetcher(
                             }
                         }
                         "bitmex" => {
-                            if let Ok((w, a)) = bitmex.fetch_balances(&http, &keys).await {
-                                e_ctx.balances.insert(ex.to_string(), w);
-                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            match bitmex.fetch_balances(&http, &keys).await {
+                                Ok((w, a)) => {
+                                    e_ctx.balances.insert(ex.to_string(), w);
+                                    e_ctx.margin_balances.insert(ex.to_string(), a);
+                                }
+                                Err(e) => tracing::error!("[bitmex] balance err: {}", e),
                             }
                             if let Ok(pos) = bitmex.fetch_positions(&http, &keys).await {
                                 e_ctx.positions.insert(ex.to_string(), pos);

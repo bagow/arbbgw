@@ -55,9 +55,9 @@ async fn xt_request(
     let url = format!("https://fapi.xt.com{}", path);
 
     let builder = match method {
-        "GET" => http.get(&url),
+        "GET" => http.get(&url).header("Content-Type", "application/json"),
         "POST" => http.post(&url).header("Content-Type", "application/json").body(body.to_string()),
-        "DELETE" => http.delete(&url),
+        "DELETE" => http.delete(&url).header("Content-Type", "application/json"),
         _ => return Err("Unsupported method".to_string()),
     };
 
@@ -73,8 +73,9 @@ async fn xt_request(
     let v: Value = resp.json().await.map_err(|e| format!("XT JSON parse error: {}", e))?;
     let result_code = v["returnCode"].as_i64().unwrap_or(-1);
     if result_code != 0 {
-        let msg = v["msgInfo"].as_str().unwrap_or("unknown");
-        return Err(format!("XT API error {}: {}", result_code, msg));
+        let err_code = v["error"]["code"].as_str().unwrap_or("");
+        let err_msg = v["error"]["msg"].as_str().unwrap_or("unknown");
+        return Err(format!("XT API error {}: {} ({})", result_code, err_msg, err_code));
     }
     Ok(v)
 }
