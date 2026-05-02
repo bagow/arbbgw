@@ -84,7 +84,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             if s.ends_with("USDTM") {
                 symbols.push(s.to_string());
                 let normalized = s.replace("XBTUSDTM", "BTCUSDT").replace("USDTM", "USDT");
-                sym_map.insert(s.to_string(), normalized.clone());
+                let mult = c["multiplier"].as_f64().unwrap_or(1.0);
+                sym_map.insert(s.to_string(), (normalized.clone(), mult));
 
                 let vol_usd = c["turnoverOf24h"].as_f64().unwrap_or(0.0);
                 if vol_usd > 0.0 {
@@ -134,7 +135,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         let mut needed_symbols = Vec::new();
         for sym in &symbols {
             let normalized = match sym_map.get(sym.as_str()) {
-                Some(n) => n.as_str(),
+                Some(n) => n.0.as_str(),
                 None => continue,
             };
             let mut found = false;
@@ -240,7 +241,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                         if v.msg_type != "message" { continue; }
                         if let Some(d) = v.data {
                             if let Some(raw_sym) = d.symbol {
-                                if let Some(sym) = sym_map.get(raw_sym) {
+                                if let Some((sym, mult)) = sym_map.get(raw_sym) {
                                     if v.topic.as_deref().unwrap_or("").starts_with("/contractMarket/level2Depth50:") {
                                         let bids: Vec<(f64, f64)> = d.bids.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse().ok()?))).collect()).unwrap_or_default();
                                         let asks: Vec<(f64, f64)> = d.asks.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse().ok()?))).collect()).unwrap_or_default();
@@ -262,13 +263,13 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                             entry.bid = bid;
                                             entry.ask = ask;
                                             entry.price = price;
-                                            entry.bid_size = bid_qty * price;
-                                            entry.ask_size = ask_qty * price;
+                                            entry.bid_size = bid_qty * mult * price;
+                                            entry.ask_size = ask_qty * mult * price;
                                             entry.last_updated = ts;
                                         } else {
                                             ex_map.insert(sym.to_string(), TickerData {
                                                 bid, ask, price, vol: 0.0, funding_rate: 0.0,
-                                                bid_size: bid_qty * price, ask_size: ask_qty * price,
+                                                bid_size: bid_qty * mult * price, ask_size: ask_qty * mult * price,
                                                 last_updated: ts
                                             });
                                         }

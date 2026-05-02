@@ -73,6 +73,26 @@ async fn handler(
     l2_books: &L2OrderbookMap,
 ) -> Result<()> {
     let http = Client::new();
+    let mut sym_map = std::collections::HashMap::new();
+
+    if let Ok(resp) = http
+        .get("https://api.bitget.com/api/v2/mix/market/contracts?productType=USDT-FUTURES")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+    {
+        if let Ok(body) = resp.json::<Value>().await {
+            if let Some(list) = body["data"].as_array() {
+                for t in list {
+                    let sym = t["symbol"].as_str().unwrap_or("");
+                    if sym.ends_with("USDT") {
+                        let mult = t["sizeMultiplier"].as_str().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+                        sym_map.insert(sym.to_string(), mult);
+                    }
+                }
+            }
+        }
+    }
 
     // Seed 24h volume from REST tickers
     if let Ok(resp) = http
@@ -231,6 +251,7 @@ async fn handler(
                                     let ask_sz: f64 = d["bestAskSz"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     let last: f64 = d["lastPr"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     if bid <= 0.0 || ask <= 0.0 { continue; }
+                                    let mult = sym_map.get(inst_id).copied().unwrap_or(1.0);
                                     let mid = (bid + ask) / 2.0;
                                     let ts = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
@@ -241,14 +262,14 @@ async fn handler(
                                             entry.bid = bid;
                                             entry.ask = ask;
                                             entry.price = if last > 0.0 { last } else { mid };
-                                            entry.bid_size = bid_sz * mid;
-                                            entry.ask_size = ask_sz * mid;
+                                            entry.bid_size = bid_sz * mult * mid;
+                                            entry.ask_size = ask_sz * mult * mid;
                                             entry.last_updated = ts;
                                         } else {
                                             ex_map.insert(inst_id.to_string(), TickerData {
                                                 bid, ask, price: if last > 0.0 { last } else { mid },
                                                 vol: 0.0, funding_rate: 0.0,
-                                                bid_size: bid_sz * mid, ask_size: ask_sz * mid,
+                                                bid_size: bid_sz * mult * mid, ask_size: ask_sz * mult * mid,
                                                 last_updated: ts,
                                             });
                                         }

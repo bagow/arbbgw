@@ -92,6 +92,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
         }
     }
 
+    let mut sym_map = std::collections::HashMap::new();
+
     // Collect raw symbols for subscription
     let raw_syms: Vec<String> = {
         // Re-fetch to get the raw BitMEX symbols for WS subscription
@@ -103,6 +105,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
             let settle = inst["settlCurrency"].as_str().unwrap_or("");
             let std_sym = normalize_bitmex(sym);
             if (settle == "USDt" || sym.ends_with("USDT")) && std_sym.ends_with("USDT") {
+                let mult = inst["lotSize"].as_f64().unwrap_or(1.0);
+                sym_map.insert(sym.to_string(), mult);
                 Some(sym.to_string())
             } else { None }
         }).collect()
@@ -144,17 +148,18 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                                     let bid_sz: f64 = d["bidSize"].as_f64().unwrap_or(0.0);
                                     let ask_sz: f64 = d["askSize"].as_f64().unwrap_or(0.0);
                                     if bid <= 0.0 || ask <= 0.0 { continue; }
+                                    let mult = sym_map.get(raw_sym).copied().unwrap_or(1.0);
                                     let mid = (bid + ask) / 2.0;
                                     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                                     if let Some(mut ex_map) = price_map.get_mut("bitmex") {
                                         if let Some(entry) = ex_map.get_mut(&std_sym) {
                                             entry.bid = bid; entry.ask = ask; entry.price = mid;
-                                            entry.bid_size = bid_sz; entry.ask_size = ask_sz;
+                                            entry.bid_size = bid_sz * mult * mid; entry.ask_size = ask_sz * mult * mid;
                                             entry.last_updated = ts;
                                         } else {
                                             ex_map.insert(std_sym, TickerData {
                                                 bid, ask, price: mid, vol: 0.0, funding_rate: 0.0,
-                                                bid_size: bid_sz, ask_size: ask_sz, last_updated: ts,
+                                                bid_size: bid_sz * mult * mid, ask_size: ask_sz * mult * mid, last_updated: ts,
                                             });
                                         }
                                     }

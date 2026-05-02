@@ -96,7 +96,11 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2
 
             let sym = name.replace('_', "");
             if sym.ends_with("USDT") {
-                sym_map.insert(name.to_string(), sym.clone());
+                let mult: f64 = c["quanto_multiplier"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1.0);
+                sym_map.insert(name.to_string(), (sym.clone(), mult));
                 price_map
                     .entry("gate".to_string())
                     .or_default()
@@ -231,7 +235,7 @@ async fn ws_shard(
     symbols: Vec<String>,
     price_map: &PriceMap,
     signal: &UpdateSignal,
-    sym_map: Arc<std::collections::HashMap<String, String>>,
+    sym_map: Arc<std::collections::HashMap<String, (String, f64)>>,
     l2_books: &L2OrderbookMap,
 ) -> Result<()> {
     let (mut ws, _) =
@@ -300,7 +304,7 @@ async fn ws_shard(
                             // L1: best bid/ask
                             if let Some(item) = v["result"].as_object() {
                                 let raw_sym = item.get("s").and_then(|v| v.as_str()).unwrap_or("");
-                                if let Some(sym) = sym_map.get(raw_sym) {
+                                if let Some((sym, mult)) = sym_map.get(raw_sym) {
                                     let bid: f64 = item.get("b").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     let ask: f64 = item.get("a").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     let bid_qty: f64 = item.get("B").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -311,13 +315,13 @@ async fn ws_shard(
                                     if let Some(mut ex_map) = price_map.get_mut("gate") {
                                         if let Some(entry) = ex_map.get_mut(sym) {
                                             entry.bid = bid; entry.ask = ask;
-                                            entry.bid_size = bid_qty * mid; entry.ask_size = ask_qty * mid;
+                                            entry.bid_size = bid_qty * mult * mid; entry.ask_size = ask_qty * mult * mid;
                                             if entry.price == 0.0 { entry.price = mid; }
                                             entry.last_updated = ts;
                                         } else {
                                             ex_map.insert(sym.to_string(), crate::state::TickerData {
                                                 bid, ask, price: mid, vol: 0.0, funding_rate: 0.0,
-                                                bid_size: bid_qty * mid, ask_size: ask_qty * mid,
+                                                bid_size: bid_qty * mult * mid, ask_size: ask_qty * mult * mid,
                                                 last_updated: ts
                                             });
                                         }
@@ -329,7 +333,7 @@ async fn ws_shard(
                             // L2: order book depth
                             if let Some(result) = v["result"].as_object() {
                                 let raw_sym = result.get("s").and_then(|v| v.as_str()).unwrap_or("");
-                                if let Some(std_sym) = sym_map.get(raw_sym) {
+                                if let Some((std_sym, _)) = sym_map.get(raw_sym) {
                                     let now_ms = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_default().as_millis() as i64;

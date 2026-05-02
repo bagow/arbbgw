@@ -356,27 +356,17 @@ pub fn generate_signals(
             if profile.min_depth_percent > 0.0 {
                 let min_depth_usd = profile.trade_volume * (profile.min_depth_percent / 100.0);
 
-                // bid_size from collectors is ALREADY `qty * price` (where qty is either coins or contracts).
-                // For Binance/Bybit/Ascendex/XT/Toobit, qty is in coins, so bid_size is true USD.
-                // For Gate/Kucoin/Bitget/Bitmex, qty is in contracts. We must multiply by `mult` to get USD.
-                let get_usd_depth = |ex: &str, raw_size: f64, mult: f64| -> f64 {
-                    if ex == "gate" || ex == "kucoin" || ex == "bitget" || ex == "bitmex" {
-                        raw_size * mult
-                    } else {
-                        raw_size
-                    }
-                };
-
+                // bid_size from collectors is ALREADY in TRUE USD (for all exchanges, natively calculated in the collectors).
                 // If A is higher, we SELL A (hit bid) and BUY B (hit ask).
                 let depth_a_usd = if is_a_higher {
-                    get_usd_depth(&row.exchange_a, data_a.as_ref().unwrap().bid_size, mult_a)
+                    data_a.as_ref().unwrap().bid_size
                 } else {
-                    get_usd_depth(&row.exchange_a, data_a.as_ref().unwrap().ask_size, mult_a)
+                    data_a.as_ref().unwrap().ask_size
                 };
                 let depth_b_usd = if is_a_higher {
-                    get_usd_depth(&row.exchange_b, data_b.as_ref().unwrap().ask_size, mult_b)
+                    data_b.as_ref().unwrap().ask_size
                 } else {
-                    get_usd_depth(&row.exchange_b, data_b.as_ref().unwrap().bid_size, mult_b)
+                    data_b.as_ref().unwrap().bid_size
                 };
 
                 if depth_a_usd < min_depth_usd || depth_b_usd < min_depth_usd {
