@@ -295,8 +295,10 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
                 needed_symbols.push(sym);
             }
         }
-        let symbols = needed_symbols;
-
+        
+        // Binance Futures strictly limits to 200 streams per WebSocket connection.
+        // Take top 200 by volume to avoid immediate disconnects.
+        let symbols: Vec<String> = needed_symbols.into_iter().take(200).collect();
 
         // Connect to the base WS URL
         match connect_async_tls_with_config("wss://fstream.binance.com/ws", None, false, None).await {
