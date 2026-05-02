@@ -33,7 +33,7 @@ fn update_exchange_price_snapshot(e_ctx: &EngineContext, exchange: &str, pair: &
     // Only update if old snapshot is >500ms old to avoid overwriting mid-cycle
     let should_update = e_ctx.price_history
         .get(&key)
-        .map(|(_, ts)| now - ts > 500)
+        .map(|r| now - r.1 > 500)
         .unwrap_or(true);
     if should_update {
         e_ctx.price_history.insert(key, (current_price, now));
@@ -276,13 +276,15 @@ pub fn generate_hft_signals(
         let key_a = format!("{}:{}", row.exchange_a, row.pair);
         let key_b = format!("{}:{}", row.exchange_b, row.pair);
 
-        let vel_a_pct = e_ctx.price_history.get(&key_a).and_then(|(old_p, old_ts)| {
+        let vel_a_pct = e_ctx.price_history.get(&key_a).and_then(|r| {
+            let (old_p, old_ts) = *r;
             let elapsed = now - old_ts;
             if elapsed >= 500 && elapsed <= vel_window_ms * 3 && old_p > 1e-12 {
                 Some(((price_a_now - old_p) / old_p).abs() * 100.0)
             } else { None }
         });
-        let vel_b_pct = e_ctx.price_history.get(&key_b).and_then(|(old_p, old_ts)| {
+        let vel_b_pct = e_ctx.price_history.get(&key_b).and_then(|r| {
+            let (old_p, old_ts) = *r;
             let elapsed = now - old_ts;
             if elapsed >= 500 && elapsed <= vel_window_ms * 3 && old_p > 1e-12 {
                 Some(((price_b_now - old_p) / old_p).abs() * 100.0)

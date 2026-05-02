@@ -20,7 +20,7 @@ pub fn start_balance_fetcher(
         let fast_interval_ms = 2_000u64;
         let normal_interval_s = 25u64;
         let all_exchanges = [
-            "binance", "gate", "kucoin", "bybit",
+            "binance", "gate", "kucoin", "bybit", "bitget",
             "bingx", "bitmex", "ascendex", "xt", "toobit",
         ];
 
@@ -28,6 +28,7 @@ pub fn start_balance_fetcher(
         let gate     = crate::engine::exchanges::gate::GateConnector;
         let kucoin   = crate::engine::exchanges::kucoin::KucoinConnector;
         let bybit    = crate::engine::exchanges::bybit::BybitConnector;
+        let bitget   = crate::engine::exchanges::bitget::BitgetConnector;
         let bingx    = crate::engine::exchanges::bingx::BingxConnector;
         let bitmex   = crate::engine::exchanges::bitmex::BitmexConnector;
         let ascendex = crate::engine::exchanges::ascendex::AscendexConnector;
@@ -66,6 +67,7 @@ pub fn start_balance_fetcher(
                         "gate"     => gate.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
                         "kucoin"   => kucoin.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
                         "bybit"    => bybit.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
+                        "bitget"   => bitget.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
                         "bingx"    => bingx.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
                         "bitmex"   => bitmex.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
                         "ascendex" => ascendex.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
@@ -130,6 +132,18 @@ pub fn start_balance_fetcher(
                                 e_ctx.positions.insert(ex.to_string(), pos);
                             }
                             if let Ok(fee) = kucoin.fetch_taker_fee(&http, &keys).await {
+                                e_ctx.fee_rates.insert(ex.to_string(), fee);
+                            }
+                        }
+                        "bitget" => {
+                            if let Ok((w, a)) = bitget.fetch_balances(&http, &keys).await {
+                                e_ctx.balances.insert(ex.to_string(), w);
+                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            }
+                            if let Ok(pos) = bitget.fetch_positions(&http, &keys).await {
+                                e_ctx.positions.insert(ex.to_string(), pos);
+                            }
+                            if let Ok(fee) = bitget.fetch_taker_fee(&http, &keys).await {
                                 e_ctx.fee_rates.insert(ex.to_string(), fee);
                             }
                         }

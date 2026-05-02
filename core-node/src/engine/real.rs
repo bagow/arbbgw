@@ -806,6 +806,492 @@ pub fn start_multiplier_fetcher(
             }
         }
     });
+
+    // Bitget USDT-FUTURES
+    tokio::spawn({
+        let http = http.clone();
+        let e_ctx = e_ctx.clone();
+        let settings = settings.clone();
+        async move {
+            loop {
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"bitget".to_string()))
+                };
+                if is_disabled {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+
+                if let Ok(resp) = http
+                    .get("https://api.bitget.com/api/v2/mix/market/contracts?productType=USDT-FUTURES")
+                    .send()
+                    .await
+                {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(arr) = json["data"].as_array() {
+                            let map = &e_ctx.multipliers;
+                            let lmap = &e_ctx.launch_times;
+                            let tmap = &e_ctx.tick_sizes;
+                            let mut count = 0u32;
+                            for c in arr {
+                                let sym = c["symbol"].as_str().unwrap_or("");
+                                if !sym.ends_with("USDT") {
+                                    continue;
+                                }
+                                // sizeMultiplier is the qty step size (e.g. "0.0001" for BTC)
+                                if let Some(sm) = c["sizeMultiplier"].as_str() {
+                                    if let Ok(m) = sm.parse::<f64>() {
+                                        if m > 0.0 {
+                                            map.insert(format!("bitget:{}", sym), m);
+                                            count += 1;
+                                        }
+                                    }
+                                }
+                                // pricePlace = number of decimal places for price → tick = 10^(-pricePlace)
+                                if let Some(pp) = c["pricePlace"].as_str() {
+                                    if let Ok(places) = pp.parse::<u32>() {
+                                        let tick = 10f64.powi(-(places as i32));
+                                        if tick > 0.0 {
+                                            tmap.insert(format!("bitget:{}", sym), tick);
+                                        }
+                                    }
+                                }
+                                // openTime as launch time (ms timestamp string)
+                                if let Some(ot) = c["openTime"].as_str() {
+                                    if !ot.is_empty() && ot != "-1" {
+                                        if let Ok(ts) = ot.parse::<i64>() {
+                                            lmap.insert(format!("bitget:{}", sym), ts / 1000);
+                                        }
+                                    }
+                                }
+                            }
+                            info!("[multipliers] Bitget: loaded {} symbols", count);
+                        }
+                    }
+                }
+                let loaded = e_ctx
+                    .multipliers
+                    .iter()
+                    .filter(|e| e.key().starts_with("bitget:"))
+                    .count();
+                if loaded > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                } else {
+                    tracing::warn!("[multipliers] Bitget: FAILED to load, retrying in 30s");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            }
+        }
+    });
+
+    // BingX USDT-M Perpetual Swap
+    tokio::spawn({
+        let http = http.clone();
+        let e_ctx = e_ctx.clone();
+        let settings = settings.clone();
+        async move {
+            loop {
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"bingx".to_string()))
+                };
+                if is_disabled {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+
+                if let Ok(resp) = http
+                    .get("https://open-api.bingx.com/openApi/swap/v2/quote/contracts")
+                    .send()
+                    .await
+                {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(arr) = json["data"].as_array() {
+                            let map = &e_ctx.multipliers;
+                            let tmap = &e_ctx.tick_sizes;
+                            let lmap = &e_ctx.launch_times;
+                            let mut count = 0u32;
+                            for c in arr {
+                                let sym_raw = c["symbol"].as_str().unwrap_or("");
+                                // BingX uses "BTC-USDT" format, normalize to "BTCUSDT"
+                                let sym = sym_raw.replace('-', "");
+                                if !sym.ends_with("USDT") {
+                                    continue;
+                                }
+                                // tradeMinQuantity as step size
+                                if let Some(tq) = c["tradeMinQuantity"].as_str() {
+                                    if let Ok(q) = tq.parse::<f64>() {
+                                        if q > 0.0 {
+                                            map.insert(format!("bingx:{}", sym), q);
+                                            count += 1;
+                                        }
+                                    }
+                                } else if let Some(sz) = c["size"].as_str() {
+                                    if let Ok(q) = sz.parse::<f64>() {
+                                        if q > 0.0 {
+                                            map.insert(format!("bingx:{}", sym), q);
+                                            count += 1;
+                                        }
+                                    }
+                                }
+                                // tickSize for price precision
+                                if let Some(ts) = c["tickSize"].as_str() {
+                                    if let Ok(tick) = ts.parse::<f64>() {
+                                        if tick > 0.0 {
+                                            tmap.insert(format!("bingx:{}", sym), tick);
+                                        }
+                                    }
+                                }
+                                // launchTime
+                                if let Some(lt) = c["launchTime"].as_i64() {
+                                    if lt > 0 {
+                                        lmap.insert(format!("bingx:{}", sym), lt / 1000);
+                                    }
+                                }
+                            }
+                            info!("[multipliers] BingX: loaded {} symbols", count);
+                        }
+                    }
+                }
+                let loaded = e_ctx
+                    .multipliers
+                    .iter()
+                    .filter(|e| e.key().starts_with("bingx:"))
+                    .count();
+                if loaded > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                } else {
+                    tracing::warn!("[multipliers] BingX: FAILED to load, retrying in 30s");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            }
+        }
+    });
+
+    // BitMEX
+    tokio::spawn({
+        let http = http.clone();
+        let e_ctx = e_ctx.clone();
+        let settings = settings.clone();
+        async move {
+            loop {
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"bitmex".to_string()))
+                };
+                if is_disabled {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+
+                if let Ok(resp) = http
+                    .get("https://www.bitmex.com/api/v1/instrument/active")
+                    .send()
+                    .await
+                {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(arr) = json.as_array() {
+                            let map = &e_ctx.multipliers;
+                            let tmap = &e_ctx.tick_sizes;
+                            let lmap = &e_ctx.launch_times;
+                            let mut count = 0u32;
+                            for c in arr {
+                                let sym_raw = c["symbol"].as_str().unwrap_or("");
+                                // Normalize XBTUSDT → BTCUSDT
+                                let sym = if sym_raw == "XBTUSDT" {
+                                    "BTCUSDT".to_string()
+                                } else {
+                                    sym_raw.to_string()
+                                };
+                                if !sym.ends_with("USDT") {
+                                    continue;
+                                }
+                                // lotSize = qty step
+                                if let Some(ls) = c["lotSize"].as_f64() {
+                                    if ls > 0.0 {
+                                        map.insert(format!("bitmex:{}", sym), ls);
+                                        count += 1;
+                                    }
+                                }
+                                // tickSize = price step
+                                if let Some(ts) = c["tickSize"].as_f64() {
+                                    if ts > 0.0 {
+                                        tmap.insert(format!("bitmex:{}", sym), ts);
+                                    }
+                                }
+                                // listing date
+                                if let Some(listing) = c["listing"].as_str() {
+                                    // ISO 8601 format "2020-01-01T00:00:00.000Z"
+                                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(listing) {
+                                        lmap.insert(format!("bitmex:{}", sym), dt.timestamp());
+                                    }
+                                }
+                            }
+                            info!("[multipliers] BitMEX: loaded {} symbols", count);
+                        }
+                    }
+                }
+                let loaded = e_ctx
+                    .multipliers
+                    .iter()
+                    .filter(|e| e.key().starts_with("bitmex:"))
+                    .count();
+                if loaded > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                } else {
+                    tracing::warn!("[multipliers] BitMEX: FAILED to load, retrying in 30s");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            }
+        }
+    });
+
+    // AscendEX (BitMax) Futures
+    tokio::spawn({
+        let http = http.clone();
+        let e_ctx = e_ctx.clone();
+        let settings = settings.clone();
+        async move {
+            loop {
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"ascendex".to_string()))
+                };
+                if is_disabled {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+
+                if let Ok(resp) = http
+                    .get("https://ascendex.com/api/pro/v2/futures/contract")
+                    .send()
+                    .await
+                {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(arr) = json["data"].as_array() {
+                            let map = &e_ctx.multipliers;
+                            let tmap = &e_ctx.tick_sizes;
+                            let lmap = &e_ctx.launch_times;
+                            let mut count = 0u32;
+                            for c in arr {
+                                let sym_raw = c["symbol"].as_str().unwrap_or("");
+                                // AscendEX uses "BTC/USDT" format
+                                let sym = sym_raw.replace('/', "");
+                                if !sym.ends_with("USDT") {
+                                    continue;
+                                }
+                                // lotSize = qty step
+                                if let Some(ls) = c["lotSize"].as_str() {
+                                    if let Ok(lot) = ls.parse::<f64>() {
+                                        if lot > 0.0 {
+                                            map.insert(format!("ascendex:{}", sym), lot);
+                                            count += 1;
+                                        }
+                                    }
+                                }
+                                // tickSize = price step
+                                if let Some(ts) = c["tickSize"].as_str() {
+                                    if let Ok(tick) = ts.parse::<f64>() {
+                                        if tick > 0.0 {
+                                            tmap.insert(format!("ascendex:{}", sym), tick);
+                                        }
+                                    }
+                                }
+                                // listingTime
+                                if let Some(lt) = c["listingTime"].as_i64() {
+                                    if lt > 0 {
+                                        lmap.insert(format!("ascendex:{}", sym), lt / 1000);
+                                    }
+                                }
+                            }
+                            info!("[multipliers] AscendEX: loaded {} symbols", count);
+                        }
+                    }
+                }
+                let loaded = e_ctx
+                    .multipliers
+                    .iter()
+                    .filter(|e| e.key().starts_with("ascendex:"))
+                    .count();
+                if loaded > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                } else {
+                    tracing::warn!("[multipliers] AscendEX: FAILED to load, retrying in 30s");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            }
+        }
+    });
+
+    // XT.COM USDT-M Futures
+    tokio::spawn({
+        let http = http.clone();
+        let e_ctx = e_ctx.clone();
+        let settings = settings.clone();
+        async move {
+            loop {
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"xt".to_string()))
+                };
+                if is_disabled {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+
+                if let Ok(resp) = http
+                    .get("https://fapi.xt.com/future/market/v1/public/symbol/list")
+                    .send()
+                    .await
+                {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(arr) = json["result"].as_array() {
+                            let map = &e_ctx.multipliers;
+                            let tmap = &e_ctx.tick_sizes;
+                            let lmap = &e_ctx.launch_times;
+                            let mut count = 0u32;
+                            for c in arr {
+                                let sym_raw = c["symbol"].as_str().unwrap_or("");
+                                // XT uses "btc_usdt" format — normalize to "BTCUSDT"
+                                let sym = sym_raw.replace('_', "").to_uppercase();
+                                if !sym.ends_with("USDT") {
+                                    continue;
+                                }
+                                // stepSize = qty step
+                                if let Some(ss) = c["stepSize"].as_str() {
+                                    if let Ok(step) = ss.parse::<f64>() {
+                                        if step > 0.0 {
+                                            map.insert(format!("xt:{}", sym), step);
+                                            count += 1;
+                                        }
+                                    }
+                                } else if let Some(ss) = c["minQty"].as_str() {
+                                    if let Ok(step) = ss.parse::<f64>() {
+                                        if step > 0.0 {
+                                            map.insert(format!("xt:{}", sym), step);
+                                            count += 1;
+                                        }
+                                    }
+                                }
+                                // priceStep = price tick
+                                if let Some(ps) = c["priceStep"].as_str() {
+                                    if let Ok(tick) = ps.parse::<f64>() {
+                                        if tick > 0.0 {
+                                            tmap.insert(format!("xt:{}", sym), tick);
+                                        }
+                                    }
+                                }
+                                // listTime / createTime
+                                if let Some(lt) = c["listTime"].as_i64() {
+                                    if lt > 0 {
+                                        lmap.insert(format!("xt:{}", sym), lt / 1000);
+                                    }
+                                }
+                            }
+                            info!("[multipliers] XT: loaded {} symbols", count);
+                        }
+                    }
+                }
+                let loaded = e_ctx
+                    .multipliers
+                    .iter()
+                    .filter(|e| e.key().starts_with("xt:"))
+                    .count();
+                if loaded > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                } else {
+                    tracing::warn!("[multipliers] XT: FAILED to load, retrying in 30s");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            }
+        }
+    });
+
+    // Toobit USDT-M
+    tokio::spawn({
+        let http = http.clone();
+        let e_ctx = e_ctx.clone();
+        let settings = settings.clone();
+        async move {
+            loop {
+                let is_disabled = {
+                    let p = settings.read().await;
+                    !p.is_empty()
+                        && p.iter()
+                            .all(|x| x.disabled_exchanges.contains(&"toobit".to_string()))
+                };
+                if is_disabled {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+
+                if let Ok(resp) = http
+                    .get("https://openapi.toobit.com/openApi/swap/v2/quote/contracts")
+                    .send()
+                    .await
+                {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(arr) = json["data"].as_array() {
+                            let map = &e_ctx.multipliers;
+                            let tmap = &e_ctx.tick_sizes;
+                            let lmap = &e_ctx.launch_times;
+                            let mut count = 0u32;
+                            for c in arr {
+                                let sym = c["symbol"].as_str().unwrap_or("");
+                                if !sym.ends_with("USDT") {
+                                    continue;
+                                }
+                                // quantityPrecision → step = 10^(-N)
+                                if let Some(qp) = c["quantityPrecision"].as_i64() {
+                                    let step = 10f64.powi(-(qp as i32));
+                                    if step > 0.0 {
+                                        map.insert(format!("toobit:{}", sym), step);
+                                        count += 1;
+                                    }
+                                }
+                                // pricePrecision → tick = 10^(-N)
+                                if let Some(pp) = c["pricePrecision"].as_i64() {
+                                    let tick = 10f64.powi(-(pp as i32));
+                                    if tick > 0.0 {
+                                        tmap.insert(format!("toobit:{}", sym), tick);
+                                    }
+                                }
+                                // launchTime
+                                if let Some(lt) = c["launchTime"].as_i64() {
+                                    if lt > 0 {
+                                        lmap.insert(format!("toobit:{}", sym), lt / 1000);
+                                    }
+                                }
+                            }
+                            info!("[multipliers] Toobit: loaded {} symbols", count);
+                        }
+                    }
+                }
+                let loaded = e_ctx
+                    .multipliers
+                    .iter()
+                    .filter(|e| e.key().starts_with("toobit:"))
+                    .count();
+                if loaded > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                } else {
+                    tracing::warn!("[multipliers] Toobit: FAILED to load, retrying in 30s");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            }
+        }
+    });
 }
 
 pub fn now_secs() -> i64 {
