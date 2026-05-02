@@ -184,9 +184,12 @@ pub fn start_balance_fetcher(
                             }
                         }
                         "ascendex" => {
-                            if let Ok((w, a)) = ascendex.fetch_balances(&http, &keys).await {
-                                e_ctx.balances.insert(ex.to_string(), w);
-                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            match ascendex.fetch_balances(&http, &keys).await {
+                                Ok((w, a)) => {
+                                    e_ctx.balances.insert(ex.to_string(), w);
+                                    e_ctx.margin_balances.insert(ex.to_string(), a);
+                                }
+                                Err(e) => tracing::error!("[ascendex] balance err: {}", e),
                             }
                             if let Ok(pos) = ascendex.fetch_positions(&http, &keys).await {
                                 e_ctx.positions.insert(ex.to_string(), pos);
@@ -196,9 +199,12 @@ pub fn start_balance_fetcher(
                             }
                         }
                         "xt" => {
-                            if let Ok((w, a)) = xt.fetch_balances(&http, &keys).await {
-                                e_ctx.balances.insert(ex.to_string(), w);
-                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            match xt.fetch_balances(&http, &keys).await {
+                                Ok((w, a)) => {
+                                    e_ctx.balances.insert(ex.to_string(), w);
+                                    e_ctx.margin_balances.insert(ex.to_string(), a);
+                                }
+                                Err(e) => tracing::error!("[xt] balance err: {}", e),
                             }
                             if let Ok(pos) = xt.fetch_positions(&http, &keys).await {
                                 e_ctx.positions.insert(ex.to_string(), pos);
@@ -208,9 +214,12 @@ pub fn start_balance_fetcher(
                             }
                         }
                         "toobit" => {
-                            if let Ok((w, a)) = toobit.fetch_balances(&http, &keys).await {
-                                e_ctx.balances.insert(ex.to_string(), w);
-                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            match toobit.fetch_balances(&http, &keys).await {
+                                Ok((w, a)) => {
+                                    e_ctx.balances.insert(ex.to_string(), w);
+                                    e_ctx.margin_balances.insert(ex.to_string(), a);
+                                }
+                                Err(e) => tracing::error!("[toobit] balance err: {}", e),
                             }
                             if let Ok(pos) = toobit.fetch_positions(&http, &keys).await {
                                 e_ctx.positions.insert(ex.to_string(), pos);
