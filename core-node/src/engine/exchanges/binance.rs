@@ -563,7 +563,7 @@ impl ExchangeConnector for BinanceConnector {
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String> {
         let ts = now_ms();
-        let qs = format!("timestamp={}", ts);
+        let qs = format!("recvWindow=10000&timestamp={}", ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
         let url = format!(
             "https://fapi.binance.com/fapi/v2/account?{}&signature={}",
@@ -577,10 +577,9 @@ impl ExchangeConnector for BinanceConnector {
             .await
             .map_err(|e| e.to_string())?;
 
-        let data: BinanceBalanceAccountResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Binance balance json parse err: {}", e))?;
+        let body = resp.text().await.map_err(|e| format!("Binance body read err: {}", e))?;
+        let data: BinanceBalanceAccountResponse = serde_json::from_str(&body)
+            .map_err(|e| format!("Binance balance parse err: {} | body: {}", e, &body[..body.len().min(300)]))?;
         let avail = data
             .availableBalance
             .parse::<f64>()
