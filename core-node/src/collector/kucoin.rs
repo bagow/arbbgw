@@ -104,21 +104,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         "[kucoin] Found {} USDT-M contracts (volumes seeded)",
         symbols.len()
     );
-        // Filter symbols: only subscribe to L2 depth if the symbol exists on at least one OTHER exchange
-        let mut needed_symbols = Vec::new();
-        for sym in symbols {
-            let mut count = 0;
-            for ex in price_map.iter() {
-                if ex.key() != "kucoin" && ex.value().contains_key(&sym) {
-                    count += 1;
-                    break;
-                }
-            }
-            if count > 0 {
-                needed_symbols.push(sym);
-            }
-        }
-        let symbols = needed_symbols;
+
 
 
     let resp: Value = http
@@ -142,11 +128,28 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     .await
     .context("KuCoin WS connect failed")?;
     info!("[kucoin] Connected, subscribing...");
+        // Filter symbols: only subscribe to L2 depth if the symbol exists on at least one OTHER exchange
+        let mut needed_symbols = Vec::new();
+        for sym in &symbols {
+            let mut count = 0;
+            for ex in price_map.iter() {
+                if ex.key() != "kucoin" && ex.value().contains_key(sym.as_str()) {
+                    count += 1;
+                    break;
+                }
+            }
+            if count > 0 {
+                needed_symbols.push(sym.clone());
+            }
+        }
+        let needed_symbols = needed_symbols;
 
     for chunk in symbols.chunks(100) {
         let topic = format!("/contractMarket/tickerV2:{}", chunk.join(","));
-        let topic_l2 = format!("/contractMarket/level2Depth50:{}", chunk.join(","));
         ws.send(Message::Text(json!({"id":"sub","type":"subscribe","topic":topic,"privateChannel":false,"response":true}).to_string().into())).await?;
+    }
+    for chunk in needed_symbols.chunks(100) {
+        let topic_l2 = format!("/contractMarket/level2Depth50:{}", chunk.join(","));
         ws.send(Message::Text(json!({"id":"subL2","type":"subscribe","topic":topic_l2,"privateChannel":false,"response":true}).to_string().into())).await?;
     }
 

@@ -106,21 +106,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         let map = price_map.get("bingx");
         match map { Some(m) => m.keys().cloned().collect(), None => vec![] }
     };
-        // Filter symbols: only subscribe to L2 depth if the symbol exists on at least one OTHER exchange
-        let mut needed_symbols = Vec::new();
-        for sym in symbols {
-            let mut count = 0;
-            for ex in price_map.iter() {
-                if ex.key() != "bingx" && ex.value().contains_key(&sym) {
-                    count += 1;
-                    break;
-                }
-            }
-            if count > 0 {
-                needed_symbols.push(sym);
-            }
-        }
-        let symbols = needed_symbols;
+let needed_symbols = symbols.clone(); // Temp, will rewrite logic below
 
     if symbols.is_empty() { return Err(anyhow::anyhow!("No BingX symbols loaded")); }
 
@@ -132,17 +118,29 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
     price_map.entry("bingx".to_string()).or_default();
 
+    let mut needed_symbols = Vec::new();
+    for sym in &symbols {
+        let mut count = 0;
+        for ex in price_map.iter() {
+            if ex.key() != "bingx" && ex.value().contains_key(sym.as_str()) {
+                count += 1;
+                break;
+            }
+        }
+        if count > 0 { needed_symbols.push(sym.clone()); }
+    }
+
     // Subscribe in chunks of 30
     for chunk in symbols.chunks(30) {
         let subs: Vec<Value> = chunk.iter().flat_map(|s| {
-            // BingX WS symbol format: "BTC-USDT"
             let ws_sym = if s.ends_with("USDT") && !s.contains('-') {
                 format!("{}-USDT", &s[..s.len()-4])
             } else { s.clone() };
-            vec![
-                json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.PRICE_FEED", ws_sym)}),
-                json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.DEPTH.step0", ws_sym)})
-            ]
+            let mut res = vec![json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.PRICE_FEED", ws_sym)})];
+            if needed_symbols.contains(s) {
+                res.push(json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.DEPTH.step0", ws_sym)}));
+            }
+            res
         }).collect();
         for sub in subs {
             ws.send(Message::Text(sub.to_string().into())).await?;
