@@ -330,26 +330,38 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
                         break;
                     }
                     if let Ok(Message::Text(text)) = msg {
-                        // Raw stream format without combined stream wrapper:
-                        // {"e":"depthUpdate","E":123,"s":"BTCUSDT","b":[["1.0","2.0"]],"a":[["1.0","2.0"]]}
-                        // Wait, if we use /ws, the format is NOT wrapped in {"stream": "...", "data": {...}}!
-                        // It is just the raw event! Wait, depth5@100ms is not depthUpdate (diff depth), it's partial book depth.
-                        // Partial book depth format: {"lastUpdateId":161111,"E":161111,"T":161111,"s":"BTCUSDT","b":[["1.0","2.0"]],"a":[["1.0","2.0"]]}
                         if let Ok(data) = serde_json::from_str::<Value>(&text) {
-                            if let Some(sym) = data["s"].as_str() {
-                                let bids = parse_levels(&data, "b");
-                                let asks = parse_levels(&data, "a");
+                            // SUBSCRIBE on /ws wraps responses: {"stream":"btcusdt@depth5@100ms","data":{...}}
+                            // Extract symbol from stream name, and depth data from "data" sub-object.
+                            // Also handle unwrapped format (raw event with "s" field) as fallback.
+                            let (sym_str, depth_data) = if let Some(stream) = data["stream"].as_str() {
+                                // Wrapped format: extract symbol from "btcusdt@depth5@100ms"
+                                let sym = stream.split('@').next().unwrap_or("").to_uppercase();
+                                (sym, data["data"].clone())
+                            } else if let Some(s) = data["s"].as_str() {
+                                // Unwrapped raw event format
+                                (s.to_uppercase(), data.clone())
+                            } else {
+                                continue;
+                            };
 
-                                if !bids.is_empty() || !asks.is_empty() {
-                                    let now_ms = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis() as i64;
-                                    l2_books.insert(
-                                        format!("binance:{}", sym.to_uppercase()),
-                                        L2Snapshot { bids, asks, updated_ms: now_ms },
-                                    );
-                                }
+                            if sym_str.is_empty() || !sym_str.ends_with("USDT") { continue; }
+
+                            // Partial book depth uses "bids"/"asks" (not "b"/"a")
+                            let mut bids = parse_levels(&depth_data, "bids");
+                            if bids.is_empty() { bids = parse_levels(&depth_data, "b"); }
+                            let mut asks = parse_levels(&depth_data, "asks");
+                            if asks.is_empty() { asks = parse_levels(&depth_data, "a"); }
+
+                            if !bids.is_empty() || !asks.is_empty() {
+                                let now_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as i64;
+                                l2_books.insert(
+                                    format!("binance:{}", sym_str),
+                                    L2Snapshot { bids, asks, updated_ms: now_ms },
+                                );
                             }
                         }
                     }
