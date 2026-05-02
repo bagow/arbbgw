@@ -38,7 +38,7 @@ fn to_ascendex_symbol(pair: &str) -> String {
     }
 }
 
-const ACCOUNT_GROUP: &str = "6"; // AscendEX account group (default, updated per-user if needed)
+const ACCOUNT_GROUP: &str = "0"; // AscendEX account group (user's is 0)
 const BASE_URL: &str = "https://ascendex.com";
 
 async fn ascendex_request(

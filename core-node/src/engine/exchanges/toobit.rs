@@ -62,7 +62,7 @@ async fn toobit_request(
     };
 
     let resp = builder
-        .header("X-BX-APIKEY", &keys.toobit_key)
+        .header("X-BB-APIKEY", &keys.toobit_key)
         .timeout(Duration::from_millis(timeout_ms))
         .send()
         .await

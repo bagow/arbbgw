@@ -22,11 +22,10 @@ fn now_ms() -> i64 {
 }
 
 fn xt_sign(secret: &str, api_key: &str, ts: i64, body: &str) -> String {
-    let recv_window = "5000";
     let msg = format!(
-        "xt-validate-appkey={}&xt-validate-timestamp={}&xt-validate-recvwindow={}&xt-validate-algorithms=HmacSHA256{}",
-        api_key, ts, recv_window,
-        if body.is_empty() { String::new() } else { format!("&body={}", body) }
+        "xt-validate-appkey={}&xt-validate-timestamp={}{}",
+        api_key, ts,
+        if body.is_empty() { String::new() } else { format!("&{}", body) }
     );
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(msg.as_bytes());
