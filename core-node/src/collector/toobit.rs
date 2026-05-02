@@ -52,7 +52,7 @@ pub async fn run(
     }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2OrderbookMap) -> Result<()> {
+async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
     let http = Client::new();
 
     // Top USDT-M perp pairs on Toobit (fallback when REST is unreachable)
@@ -190,6 +190,15 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                                     });
                                 }
                             }
+                            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                            l2_books.insert(
+                                format!("toobit:{}", sym),
+                                crate::state::L2Snapshot {
+                                    bids: vec![(bid, 1.0)],
+                                    asks: vec![(ask, 1.0)],
+                                    updated_ms: now_ms,
+                                }
+                            );
                             signal.notify_one();
                         }
                     }

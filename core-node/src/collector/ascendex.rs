@@ -52,7 +52,7 @@ pub async fn run(
     }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2OrderbookMap) -> Result<()> {
+async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
     let http = Client::new();
 
     // Seed from REST: get all futures contracts
@@ -174,12 +174,21 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                                         entry.bid_size = bid_sz * mid; entry.ask_size = ask_sz * mid;
                                         entry.last_updated = ts;
                                     } else {
-                                        ex_map.insert(std_sym, TickerData {
+                                        ex_map.insert(std_sym.clone(), TickerData {
                                             bid, ask, price: mid, vol: 0.0, funding_rate: 0.0,
                                             bid_size: bid_sz * mid, ask_size: ask_sz * mid, last_updated: ts,
                                         });
                                     }
                                 }
+                                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                                l2_books.insert(
+                                    format!("ascendex:{}", std_sym),
+                                    crate::state::L2Snapshot {
+                                        bids: vec![(bid, bid_sz)],
+                                        asks: vec![(ask, ask_sz)],
+                                        updated_ms: now_ms,
+                                    }
+                                );
                                 signal.notify_one();
                             }
                         }
