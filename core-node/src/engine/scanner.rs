@@ -117,13 +117,13 @@ pub fn generate_signals(
             let intra_b = (db.ask - db.bid) / db.bid.max(1e-12) * 100.0;
             if intra_a > ts.intra_spread_max_pct || intra_b > ts.intra_spread_max_pct {
                 if worth_diag {
-                    tracing::info!("[scanner] REJECT {} spread={:.4}% -> intra_spread too wide ({:.2}%/{:.2}% > max {:.2}%)", row.pair, row.spread, intra_a, intra_b, ts.intra_spread_max_pct);
+                    tracing::debug!("[scanner] REJECT {} spread={:.4}% -> intra_spread too wide ({:.2}%/{:.2}% > max {:.2}%)", row.pair, row.spread, intra_a, intra_b, ts.intra_spread_max_pct);
                 }
                 continue;
             }
         } else {
             if worth_diag {
-                tracing::info!(
+                tracing::debug!(
                     "[scanner] REJECT {} spread={:.4}% -> no price data for {}/{}",
                     row.pair,
                     row.spread,
@@ -140,7 +140,7 @@ pub fn generate_signals(
             Some(v) => *v,
             None => {
                 if worth_diag {
-                    tracing::info!(
+                    tracing::debug!(
                         "[scanner] REJECT {} spread={:.4}% -> no multiplier for {}:{}",
                         row.pair,
                         row.spread,
@@ -155,7 +155,7 @@ pub fn generate_signals(
             Some(v) => *v,
             None => {
                 if worth_diag {
-                    tracing::info!(
+                    tracing::debug!(
                         "[scanner] REJECT {} spread={:.4}% -> no multiplier for {}:{}",
                         row.pair,
                         row.spread,
@@ -175,7 +175,7 @@ pub fn generate_signals(
             .contains_key(&format!("{}:{}", row.exchange_b, row.pair));
         if !has_tick_a || !has_tick_b {
             if worth_diag {
-                tracing::info!(
+                tracing::debug!(
                     "[scanner] REJECT {} spread={:.4}% -> missing tick_size (a={} b={})",
                     row.pair,
                     row.spread,
@@ -247,7 +247,7 @@ pub fn generate_signals(
 
         if final_oldest_elapsed < min_age_secs {
             if worth_diag {
-                tracing::info!(
+                tracing::debug!(
                     "[scanner] REJECT {} ({} vs {}) spread={:.4}% -> listing too young",
                     row.pair,
                     row.exchange_a,
@@ -301,7 +301,7 @@ pub fn generate_signals(
             // could be a guaranteed loss if the pair has a hidden structural premium.
             if !row.structural_verified {
                 if let Some(p) = &diag_prefix {
-                    tracing::info!("{} -> structural NOT VERIFIED (failed historical warmup - insufficient candles or API error)", p);
+                    tracing::debug!("{} -> structural NOT VERIFIED (failed historical warmup - insufficient candles or API error)", p);
                 }
                 continue;
             }
@@ -344,7 +344,7 @@ pub fn generate_signals(
                 let profit_potential = row.spread - row.structural_spread - break_even_pct;
                 if profit_potential <= 0.0 {
                     if let Some(p) = &diag_prefix {
-                        tracing::info!("{} -> structural_guard: profit impossible (spread={:.4}% - structural={:.4}% - BE={:.4}% = {:.4}%)",
+                        tracing::debug!("{} -> structural_guard: profit impossible (spread={:.4}% - structural={:.4}% - BE={:.4}% = {:.4}%)",
                             p, row.spread, row.structural_spread, break_even_pct, profit_potential);
                     }
                     continue;
