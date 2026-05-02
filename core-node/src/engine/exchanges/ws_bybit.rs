@@ -101,7 +101,7 @@ async fn bybit_ws_loop(
         let pending: Arc<Mutex<HashMap<String, ResponseSender>>> = Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = pending.clone();
 
-        let mut reader_handle = tokio::spawn(async move {
+        let reader_handle = tokio::spawn(async move {
             while let Some(msg) = read.next().await {
                 match msg {
                     Ok(Message::Text(t)) => {

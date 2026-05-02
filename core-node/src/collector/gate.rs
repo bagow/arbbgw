@@ -3,7 +3,6 @@
 //! Gate resetting connections due to too many subscriptions per socket.
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;

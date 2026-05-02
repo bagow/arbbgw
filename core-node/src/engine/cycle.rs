@@ -33,7 +33,7 @@ fn is_position_missing_or_liquidated_error(err: &str) -> bool {
 
 pub async fn run_cycle(
     signals: Vec<shared::TradeSignal>,
-    spreads: Vec<SpreadRow>,
+    _spreads: Vec<SpreadRow>,
     prices: crate::state::PriceMap,
     settings: TradingSettings,
     http: Client,
@@ -321,7 +321,7 @@ pub async fn run_cycle(
             let c_a = trade.contracts_a;
             let c_b = trade.contracts_b;
             let id = trade.id;
-            let vol = trade.volume;
+            let _vol = trade.volume;
             let entry_a = trade.entry_price_a;
             let entry_b = trade.entry_price_b;
             let tc = trade_coins;

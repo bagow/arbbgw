@@ -185,8 +185,8 @@ pub async fn run_hft_cycle(
             let q_b = trade.contracts_b as f64 * mult_b;
             let closing_guard = Arc::clone(&e_ctx.closing_in_flight);
             let trade_id_for_guard = trade.id;
-            let comm_cost = trade.commission_cost;
-            let slip_cost = trade.slippage_cost;
+            let _comm_cost = trade.commission_cost;
+            let _slip_cost = trade.slippage_cost;
 
             tokio::spawn(async move {
                 let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();

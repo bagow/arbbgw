@@ -12,7 +12,7 @@ pub struct BybitConnector;
 
 /// Try placing order via WS, return Ok(orderId) or Err to trigger REST fallback
 async fn try_bybit_ws_order(
-    keys: &ExchangeKeys,
+    _keys: &ExchangeKeys,
     order_args: &Value,
 ) -> Result<String, String> {
     use super::ws_bybit::send_bybit_ws_request;

@@ -84,7 +84,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     }
 
     if let Ok(r) = resp {
-        if let Ok(arr) = resp.json::<Vec<Value>>().await {
+        if let Ok(arr) = r.json::<Vec<Value>>().await {
             for t in &arr {
                 let sym = t["symbol"].as_str().unwrap_or("");
                 if !sym.ends_with("USDT") {
@@ -276,7 +276,7 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
             }
         };
         vol_syms.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut symbols: Vec<String> = if vol_syms.is_empty() {
+        let symbols: Vec<String> = if vol_syms.is_empty() {
             FALLBACK.iter().map(|s| s.to_string()).collect()
         } else {
             vol_syms.into_iter().map(|(_, s)| s).collect()

@@ -52,7 +52,7 @@ pub async fn run(
     }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
+async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2OrderbookMap) -> Result<()> {
     let http = Client::new();
 
     // Top USDT-M perp pairs on Toobit (fallback when REST is unreachable)

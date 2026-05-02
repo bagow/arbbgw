@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
 
-use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
+use crate::state::{L2OrderbookMap, PriceMap, TickerData, UpdateSignal};
 
 const SYMBOL_CACHE_PATH: &str = "/home/ubuntu/core-node/bybit_symbols_cache.json";
 

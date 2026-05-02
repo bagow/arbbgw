@@ -37,7 +37,7 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>) {
         
         let pending_clone = pending.clone();
         
-        let mut reader_handle = tokio::spawn(async move {
+        let reader_handle = tokio::spawn(async move {
             while let Some(msg) = read.next().await {
                 match msg {
                     Ok(Message::Text(t)) => {
@@ -49,7 +49,7 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>) {
                             }
                         }
                     }
-                    Ok(Message::Ping(p)) => {
+                    Ok(Message::Ping(_p)) => {
                         // handled automatically by tungstenite usually, but can be intercepted
                     }
                     Err(e) => {

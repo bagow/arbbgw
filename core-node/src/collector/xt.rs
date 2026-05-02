@@ -57,7 +57,7 @@ fn xt_to_standard(sym: &str) -> String {
     sym.replace('_', "").to_uppercase()
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
+async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2OrderbookMap) -> Result<()> {
     let http = Client::new();
 
     // Seed from REST
