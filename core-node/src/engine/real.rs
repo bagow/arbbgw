@@ -424,6 +424,8 @@ pub fn has_sufficient_margin(
             ok
         }
         None => {
+            // Balance not fetched yet — let the trade through.
+            // The exchange itself will reject if margin is truly insufficient.
             use std::sync::atomic::{AtomicI64, Ordering};
             static LAST_NONE_LOG: AtomicI64 = AtomicI64::new(0);
             let now = std::time::SystemTime::now()
@@ -431,9 +433,9 @@ pub fn has_sufficient_margin(
                 .unwrap_or_default().as_millis() as i64;
             if now - LAST_NONE_LOG.load(Ordering::Relaxed) > 15_000 {
                 LAST_NONE_LOG.store(now, Ordering::Relaxed);
-                tracing::warn!("[margin] {} NOT in margin_balances — balance fetch failed or pending", exchange);
+                tracing::warn!("[margin] {} NOT in margin_balances — allowing trade (exchange will reject if no margin)", exchange);
             }
-            false
+            true
         }
     }
 }
