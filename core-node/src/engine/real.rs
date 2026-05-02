@@ -801,7 +801,7 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!(\"[multipliers] Bybit: FAILED to load, retrying in 90s\");
+                    tracing::warn!("[multipliers] Bybit: FAILED to load, retrying in 90s");
                     tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
@@ -882,7 +882,7 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!(\"[multipliers] Bitget: FAILED to load, retrying in 90s\");
+                    tracing::warn!("[multipliers] Bitget: FAILED to load, retrying in 90s");
                     tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
@@ -969,7 +969,7 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!(\"[multipliers] BingX: FAILED to load, retrying in 90s\");
+                    tracing::warn!("[multipliers] BingX: FAILED to load, retrying in 90s");
                     tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
@@ -1050,7 +1050,7 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!(\"[multipliers] BitMEX: FAILED to load, retrying in 90s\");
+                    tracing::warn!("[multipliers] BitMEX: FAILED to load, retrying in 90s");
                     tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
@@ -1130,7 +1130,7 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!(\"[multipliers] AscendEX: FAILED to load, retrying in 90s\");
+                    tracing::warn!("[multipliers] AscendEX: FAILED to load, retrying in 90s");
                     tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
@@ -1217,7 +1217,7 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!(\"[multipliers] XT: FAILED to load, retrying in 90s\");
+                    tracing::warn!("[multipliers] XT: FAILED to load, retrying in 90s");
                     tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
@@ -1293,7 +1293,7 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!(\"[multipliers] Toobit: FAILED to load, retrying in 90s\");
+                    tracing::warn!("[multipliers] Toobit: FAILED to load, retrying in 90s");
                     tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
