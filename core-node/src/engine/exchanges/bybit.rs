@@ -635,26 +635,26 @@ impl ExchangeConnector for BybitConnector {
                 }
             });
 
-        let Some(coin_ref) = coin_obj else {
-            // No USDT coin found — could be rate limit response, empty account type, or API error.
-            // Return Err to preserve the previously known balance rather than overwriting with 0.0.
-            let ret = v["retCode"].as_i64().unwrap_or(-999);
-            let msg = v["retMsg"].as_str()
-                .or_else(|| v["error"].as_str())
-                .unwrap_or("unknown");
-            return Err(format!("Bybit: USDT not in wallet response (retCode={ret}, msg={msg})"));
-        };
-
-        let wallet: f64 = coin_ref["walletBalance"]
-            .as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-        let equity: f64 = coin_ref["equity"]
-            .as_str().and_then(|s| s.parse().ok()).unwrap_or(wallet);
-        let available: f64 = coin_ref["availableToWithdraw"]
-            .as_str().and_then(|s| s.parse().ok())
-            .or_else(|| coin_ref["availableBalance"].as_str().and_then(|s| s.parse().ok()))
-            .unwrap_or(wallet);
-
-        Ok((equity, available))
+        if let Some(coin_ref) = coin_obj {
+            let wallet: f64 = coin_ref["walletBalance"]
+                .as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let equity: f64 = coin_ref["equity"]
+                .as_str().and_then(|s| s.parse().ok()).unwrap_or(wallet);
+            let available: f64 = coin_ref["availableToWithdraw"]
+                .as_str().and_then(|s| s.parse().ok())
+                .or_else(|| coin_ref["availableBalance"].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(wallet);
+            return Ok((equity, available));
+        }
+        
+        let ret = v["retCode"].as_i64().unwrap_or(-999);
+        if ret == 0 {
+            // Success but no USDT means exactly 0 balance
+            Ok((0.0, 0.0))
+        } else {
+            let msg = v["retMsg"].as_str().or_else(|| v["error"].as_str()).unwrap_or("unknown");
+            Err(format!("Bybit API error (retCode={ret}, msg={msg})"))
+        }
     }
 
     async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {

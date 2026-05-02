@@ -263,12 +263,27 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
             }
         };
         vol_syms.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let symbols: Vec<String> = if vol_syms.is_empty() {
-            // price_map not yet seeded — use fallback list
+        let mut symbols: Vec<String> = if vol_syms.is_empty() {
             FALLBACK.iter().map(|s| s.to_string()).collect()
         } else {
-            vol_syms.into_iter().map(|(_, s)| s).collect() // Subscribing to ALL symbols
+            vol_syms.into_iter().map(|(_, s)| s).collect()
         };
+        // Filter symbols: only subscribe to L2 depth if the symbol exists on at least one OTHER exchange
+        let mut needed_symbols = Vec::new();
+        for sym in symbols {
+            let mut count = 0;
+            for ex in price_map.iter() {
+                if ex.key() != "binance" && ex.value().contains_key(&sym) {
+                    count += 1;
+                    break;
+                }
+            }
+            if count > 0 {
+                needed_symbols.push(sym);
+            }
+        }
+        let symbols = needed_symbols;
+
 
         // Connect to the base WS URL
         match connect_async_tls_with_config("wss://fstream.binance.com/ws", None, false, None).await {
@@ -278,7 +293,7 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
                 
                 use futures_util::SinkExt;
                 let mut chunk_id = 1;
-                for chunk in symbols.chunks(50) {
+                for chunk in symbols.chunks(200) {
                     let streams: Vec<String> = chunk.iter().map(|s| format!("{}@depth5@100ms", s.to_lowercase())).collect();
                     let msg = serde_json::json!({
                         "method": "SUBSCRIBE",
@@ -289,7 +304,7 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
                         error!("[binance_l2] Subscribe failed: {}", e);
                     }
                     chunk_id += 1;
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    tokio::time::sleep(Duration::from_millis(1000)).await;
                 }
                 
                 let conn_start = std::time::Instant::now();

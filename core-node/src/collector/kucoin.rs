@@ -104,6 +104,22 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         "[kucoin] Found {} USDT-M contracts (volumes seeded)",
         symbols.len()
     );
+        // Filter symbols: only subscribe to L2 depth if the symbol exists on at least one OTHER exchange
+        let mut needed_symbols = Vec::new();
+        for sym in symbols {
+            let mut count = 0;
+            for ex in price_map.iter() {
+                if ex.key() != "kucoin" && ex.value().contains_key(&sym) {
+                    count += 1;
+                    break;
+                }
+            }
+            if count > 0 {
+                needed_symbols.push(sym);
+            }
+        }
+        let symbols = needed_symbols;
+
 
     let resp: Value = http
         .post("https://api-futures.kucoin.com/api/v1/bullet-public")

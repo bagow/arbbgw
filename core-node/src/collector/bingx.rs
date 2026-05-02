@@ -106,6 +106,22 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         let map = price_map.get("bingx");
         match map { Some(m) => m.keys().cloned().collect(), None => vec![] }
     };
+        // Filter symbols: only subscribe to L2 depth if the symbol exists on at least one OTHER exchange
+        let mut needed_symbols = Vec::new();
+        for sym in symbols {
+            let mut count = 0;
+            for ex in price_map.iter() {
+                if ex.key() != "bingx" && ex.value().contains_key(&sym) {
+                    count += 1;
+                    break;
+                }
+            }
+            if count > 0 {
+                needed_symbols.push(sym);
+            }
+        }
+        let symbols = needed_symbols;
+
     if symbols.is_empty() { return Err(anyhow::anyhow!("No BingX symbols loaded")); }
 
     let (mut ws, _) = connect_async_tls_with_config(

@@ -178,6 +178,22 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     // Sort by 24h volume desc so top-volume symbols get L2 coverage
     symbols.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let symbols: Vec<String> = symbols.into_iter().map(|(_, s)| s).collect();
+        // Filter symbols: only subscribe to L2 depth if the symbol exists on at least one OTHER exchange
+        let mut needed_symbols = Vec::new();
+        for sym in symbols {
+            let mut count = 0;
+            for ex in price_map.iter() {
+                if ex.key() != "bybit" && ex.value().contains_key(&sym) {
+                    count += 1;
+                    break;
+                }
+            }
+            if count > 0 {
+                needed_symbols.push(sym);
+            }
+        }
+        let symbols = needed_symbols;
+
     info!("[bybit] Seeded {} USDT linear tickers", symbols.len());
 
     // WS: subscribe to tickers in batches of 10

@@ -222,16 +222,16 @@ impl ExchangeConnector for AscendexConnector {
 
     async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
         let v = ascendex_request(http, keys, "GET", "futures/balance", "", 10_000).await?;
-        let equity: f64 = v["data"].as_array()
+        let equity: f64 = v["data"]["assetBalance"].as_array().or_else(|| v["data"].as_array())
             .and_then(|arr| arr.iter().find(|b| b["asset"].as_str() == Some("USDT")))
             .and_then(|b| b["totalBalance"].as_str())
             .and_then(|s| s.parse().ok())
-            .unwrap_or(0.0);
-        let available: f64 = v["data"].as_array()
+            .unwrap_or_else(|| v["data"]["totalMarginBalance"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0));
+        let available: f64 = v["data"]["assetBalance"].as_array().or_else(|| v["data"].as_array())
             .and_then(|arr| arr.iter().find(|b| b["asset"].as_str() == Some("USDT")))
             .and_then(|b| b["availableBalance"].as_str())
             .and_then(|s| s.parse().ok())
-            .unwrap_or(0.0);
+            .unwrap_or(equity);
         Ok((equity, available))
     }
 
