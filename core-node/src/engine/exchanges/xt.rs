@@ -21,11 +21,11 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-fn xt_sign(secret: &str, api_key: &str, ts: i64, body: &str) -> String {
+fn xt_sign(secret: &str, api_key: &str, ts: i64, path: &str, body: &str) -> String {
     let msg = format!(
-        "xt-validate-appkey={}&xt-validate-timestamp={}{}",
-        api_key, ts,
-        if body.is_empty() { String::new() } else { format!("&{}", body) }
+        "xt-validate-appkey={}&xt-validate-timestamp={}#{}{}",
+        api_key, ts, path,
+        if body.is_empty() { String::new() } else { format!("#{}", body) }
     );
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(msg.as_bytes());
@@ -51,7 +51,7 @@ async fn xt_request(
     timeout_ms: u64,
 ) -> Result<Value, String> {
     let ts = now_ms();
-    let sig = xt_sign(&keys.xt_secret, &keys.xt_key, ts, body);
+    let sig = xt_sign(&keys.xt_secret, &keys.xt_key, ts, path, body);
     let url = format!("https://fapi.xt.com{}", path);
 
     let builder = match method {
