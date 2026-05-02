@@ -211,18 +211,22 @@ impl ExchangeConnector for ToobitConnector {
     }
 
     async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
+        let parse_f64 = |v: &serde_json::Value| -> Option<f64> {
+            v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        };
+
         let v = toobit_request(http, keys, "GET", "/openApi/swap/v2/user/balance", "", "", 10_000).await?;
         let arr = v["data"].as_array().or_else(|| v.as_array());
         let (equity, available) = if let Some(a) = arr {
             let b = a.iter().find(|x| x["asset"].as_str() == Some("USDT"));
             if let Some(bal) = b {
-                let eq = bal["equity"].as_str().or(bal["balance"].as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let av = bal["availableMargin"].as_str().or(bal["availableBalance"].as_str()).or(bal["balance"].as_str()).and_then(|s| s.parse().ok()).unwrap_or(eq);
+                let eq = parse_f64(&bal["equity"]).or_else(|| parse_f64(&bal["balance"])).unwrap_or(0.0);
+                let av = parse_f64(&bal["availableMargin"]).or_else(|| parse_f64(&bal["availableBalance"])).or_else(|| parse_f64(&bal["balance"])).unwrap_or(eq);
                 (eq, av)
             } else { (0.0, 0.0) }
         } else {
-            let eq = v["data"]["balance"]["equity"].as_str().or(v["data"]["equity"].as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let av = v["data"]["balance"]["availableMargin"].as_str().or(v["data"]["availableMargin"].as_str()).and_then(|s| s.parse().ok()).unwrap_or(eq);
+            let eq = parse_f64(&v["data"]["balance"]["equity"]).or_else(|| parse_f64(&v["data"]["equity"])).unwrap_or(0.0);
+            let av = parse_f64(&v["data"]["balance"]["availableMargin"]).or_else(|| parse_f64(&v["data"]["availableMargin"])).unwrap_or(eq);
             (eq, av)
         };
         Ok((equity, available))

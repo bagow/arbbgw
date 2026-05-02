@@ -223,6 +223,10 @@ impl ExchangeConnector for XtConnector {
     }
 
     async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
+        let parse_f64 = |v: &serde_json::Value| -> Option<f64> {
+            v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        };
+
         let v = xt_request(http, keys, "GET", "/future/user/v1/balance/list", "", 10_000).await?;
         let equity: f64 = v["result"].as_array()
             .and_then(|arr| arr.iter().find(|b| b["coin"].as_str() == Some("usdt")))

@@ -226,9 +226,13 @@ impl ExchangeConnector for BitmexConnector {
     }
 
     async fn fetch_balances(&self, http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
+        let parse_f64 = |v: &serde_json::Value| -> Option<f64> {
+            v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        };
+
         let v = bitmex_request(http, keys, "GET", "/api/v1/user/margin?currency=USDt", "", 10_000).await?;
-        let wallet_balance: f64 = v["walletBalance"].as_f64().unwrap_or(0.0) / 1_000_000.0; // satoshis → USD
-        let available_margin: f64 = v["availableMargin"].as_f64().unwrap_or(0.0) / 1_000_000.0;
+        let wallet_balance: f64 = parse_f64(&v["walletBalance"]).unwrap_or(0.0) / 1_000_000.0; // satoshis → USD
+        let available_margin: f64 = parse_f64(&v["availableMargin"]).unwrap_or(0.0) / 1_000_000.0;
         Ok((wallet_balance, available_margin))
     }
 

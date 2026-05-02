@@ -231,6 +231,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         #[serde(borrow)]
         topic: Option<&'a str>,
         #[serde(borrow)]
+        r#type: Option<&'a str>,
+        #[serde(borrow)]
         data: Option<BybitData<'a>>,
     }
 
@@ -262,25 +264,59 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
                                 // L2 depth (orderbook.25) → update l2_books cache
                                 if topic.starts_with("orderbook.25.") {
+                                    let type_str = v.r#type.unwrap_or("");
                                     let now_ms = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_default()
                                         .as_millis() as i64;
-                                    let bids: Vec<(f64, f64)> = d.b.as_ref().map(|levels| {
+                                        
+                                    let new_bids: Vec<(f64, f64)> = d.b.as_ref().map(|levels| {
                                         levels.iter().filter_map(|&(p, q)| {
                                             Some((p.parse::<f64>().ok()?, q.parse::<f64>().ok()?))
                                         }).collect()
                                     }).unwrap_or_default();
-                                    let asks: Vec<(f64, f64)> = d.a.as_ref().map(|levels| {
+                                    let new_asks: Vec<(f64, f64)> = d.a.as_ref().map(|levels| {
                                         levels.iter().filter_map(|&(p, q)| {
                                             Some((p.parse::<f64>().ok()?, q.parse::<f64>().ok()?))
                                         }).collect()
                                     }).unwrap_or_default();
-                                    if !bids.is_empty() || !asks.is_empty() {
-                                        l2_books.insert(
-                                            format!("bybit:{}", sym),
-                                            L2Snapshot { bids, asks, updated_ms: now_ms },
-                                        );
+
+                                    let key = format!("bybit:{}", sym);
+                                    
+                                    if type_str == "snapshot" {
+                                        l2_books.insert(key, crate::state::L2Snapshot { bids: new_bids, asks: new_asks, updated_ms: now_ms });
+                                    } else if type_str == "delta" {
+                                        if let Some(mut book) = l2_books.get_mut(&key) {
+                                            // Apply bids
+                                            for (p, q) in new_bids {
+                                                if q == 0.0 {
+                                                    book.bids.retain(|&(bp, _)| (bp - p).abs() > 1e-8);
+                                                } else {
+                                                    if let Some(idx) = book.bids.iter().position(|&(bp, _)| (bp - p).abs() <= 1e-8) {
+                                                        book.bids[idx].1 = q;
+                                                    } else {
+                                                        book.bids.push((p, q));
+                                                    }
+                                                }
+                                            }
+                                            book.bids.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                                            
+                                            // Apply asks
+                                            for (p, q) in new_asks {
+                                                if q == 0.0 {
+                                                    book.asks.retain(|&(ap, _)| (ap - p).abs() > 1e-8);
+                                                } else {
+                                                    if let Some(idx) = book.asks.iter().position(|&(ap, _)| (ap - p).abs() <= 1e-8) {
+                                                        book.asks[idx].1 = q;
+                                                    } else {
+                                                        book.asks.push((p, q));
+                                                    }
+                                                }
+                                            }
+                                            book.asks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                                            
+                                            book.updated_ms = now_ms;
+                                        }
                                     }
                                     continue;
                                 }
