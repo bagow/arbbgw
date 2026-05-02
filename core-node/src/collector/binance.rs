@@ -296,86 +296,99 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
             }
         }
         
-        // Binance Futures strictly limits to 200 streams per WebSocket connection.
-        // Take top 200 by volume to avoid immediate disconnects.
-        let symbols: Vec<String> = needed_symbols.into_iter().take(200).collect();
+        let symbols = needed_symbols;
 
-        // Connect to the base WS URL
-        match connect_async_tls_with_config("wss://fstream.binance.com/ws", None, false, None).await {
-            Ok((mut ws, _)) => {
-                info!("[binance_l2] Connected. Subscribing to {} depth streams...", symbols.len());
-                backoff = Duration::from_secs(1);
-                
-                use futures_util::SinkExt;
-                let mut chunk_id = 1;
-                for chunk in symbols.chunks(200) {
-                    let streams: Vec<String> = chunk.iter().map(|s| format!("{}@depth5@100ms", s.to_lowercase())).collect();
-                    let msg = serde_json::json!({
-                        "method": "SUBSCRIBE",
-                        "params": streams,
-                        "id": chunk_id
-                    });
-                    if let Err(e) = ws.send(tokio_tungstenite::tungstenite::Message::Text(msg.to_string().into())).await {
-                        error!("[binance_l2] Subscribe failed: {}", e);
-                    }
-                    chunk_id += 1;
-                    tokio::time::sleep(Duration::from_millis(1000)).await;
-                }
-                
-                let conn_start = std::time::Instant::now();
-                // Reconnect every 30 min to refresh the symbol list
+        info!("[binance_l2] Starting L2 subscriptions for {} symbols (requires {} connections)", symbols.len(), (symbols.len() + 199) / 200);
+
+        let mut handles = Vec::new();
+
+        for chunk in symbols.chunks(200) {
+            let chunk_symbols = chunk.to_vec();
+            let l2_books_clone = l2_books.clone();
+
+            let handle = tokio::spawn(async move {
+                let mut backoff = Duration::from_secs(1);
                 let max_age = Duration::from_secs(1800);
-
-                while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+                let conn_start = std::time::Instant::now();
+                
+                loop {
                     if conn_start.elapsed() > max_age {
-                        info!("[binance_l2] Refreshing symbol list after 30min...");
                         break;
                     }
-                    if let Ok(Message::Text(text)) = msg {
-                        if let Ok(data) = serde_json::from_str::<Value>(&text) {
-                            // SUBSCRIBE on /ws wraps responses: {"stream":"btcusdt@depth5@100ms","data":{...}}
-                            // Extract symbol from stream name, and depth data from "data" sub-object.
-                            // Also handle unwrapped format (raw event with "s" field) as fallback.
-                            let (sym_str, depth_data) = if let Some(stream) = data["stream"].as_str() {
-                                // Wrapped format: extract symbol from "btcusdt@depth5@100ms"
-                                let sym = stream.split('@').next().unwrap_or("").to_uppercase();
-                                (sym, data["data"].clone())
-                            } else if let Some(s) = data["s"].as_str() {
-                                // Unwrapped raw event format
-                                (s.to_uppercase(), data.clone())
-                            } else {
+                    
+                    match connect_async_tls_with_config("wss://fstream.binance.com/ws", None, false, None).await {
+                        Ok((mut ws, _)) => {
+                            use futures_util::SinkExt;
+                            let streams: Vec<String> = chunk_symbols.iter().map(|s| format!("{}@depth5@100ms", s.to_lowercase())).collect();
+                            let msg = serde_json::json!({
+                                "method": "SUBSCRIBE",
+                                "params": streams,
+                                "id": 1
+                            });
+                            
+                            if let Err(e) = ws.send(tokio_tungstenite::tungstenite::Message::Text(msg.to_string().into())).await {
+                                error!("[binance_l2_chunk] Subscribe failed: {}", e);
+                                tokio::time::sleep(Duration::from_secs(1)).await;
                                 continue;
-                            };
-
-                            if sym_str.is_empty() || !sym_str.ends_with("USDT") { continue; }
-
-                            // Partial book depth uses "bids"/"asks" (not "b"/"a")
-                            let mut bids = parse_levels(&depth_data, "bids");
-                            if bids.is_empty() { bids = parse_levels(&depth_data, "b"); }
-                            let mut asks = parse_levels(&depth_data, "asks");
-                            if asks.is_empty() { asks = parse_levels(&depth_data, "a"); }
-
-                            if !bids.is_empty() || !asks.is_empty() {
-                                let now_ms = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis() as i64;
-                                l2_books.insert(
-                                    format!("binance:{}", sym_str),
-                                    L2Snapshot { bids, asks, updated_ms: now_ms },
-                                );
                             }
+                            
+                            backoff = Duration::from_secs(1);
+                            
+                            while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+                                if conn_start.elapsed() > max_age {
+                                    break;
+                                }
+                                if let Ok(Message::Text(text)) = msg {
+                                    if let Ok(data) = serde_json::from_str::<Value>(&text) {
+                                        let (sym_str, depth_data) = if let Some(stream) = data["stream"].as_str() {
+                                            let sym = stream.split('@').next().unwrap_or("").to_uppercase();
+                                            (sym, data["data"].clone())
+                                        } else if let Some(s) = data["s"].as_str() {
+                                            (s.to_uppercase(), data.clone())
+                                        } else {
+                                            continue;
+                                        };
+
+                                        if sym_str.is_empty() || !sym_str.ends_with("USDT") { continue; }
+
+                                        let mut bids = parse_levels(&depth_data, "bids");
+                                        if bids.is_empty() { bids = parse_levels(&depth_data, "b"); }
+                                        let mut asks = parse_levels(&depth_data, "asks");
+                                        if asks.is_empty() { asks = parse_levels(&depth_data, "a"); }
+
+                                        if !bids.is_empty() || !asks.is_empty() {
+                                            let now_ms = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_millis() as i64;
+                                            l2_books_clone.insert(
+                                                format!("binance:{}", sym_str),
+                                                L2Snapshot { bids, asks, updated_ms: now_ms },
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            // Connection lost or max_age reached.
+                        }
+                        Err(e) => {
+                            error!("[binance_l2_chunk] Connect failed: {}. Retry in {:?}", e, backoff);
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2).min(Duration::from_secs(60));
                         }
                     }
                 }
-                warn!("[binance_l2] WS closed, reconnecting...");
-            }
-            Err(e) => {
-                error!("[binance_l2] Connect failed: {}. Retry in {:?}", e, backoff);
-            }
+            });
+            handles.push(handle);
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(60));
+
+        // Wait 30 minutes, then kill all handles and restart the main loop to refresh symbols
+        tokio::time::sleep(Duration::from_secs(1800)).await;
+        info!("[binance_l2] 30m elapsed. Refreshing all L2 subscriptions...");
+        for h in handles {
+            h.abort();
+        }
     }
 }
 
