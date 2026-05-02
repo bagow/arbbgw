@@ -100,9 +100,12 @@ pub fn start_balance_fetcher(
                     }
                     match *ex {
                         "binance" => {
-                            if let Ok((w, a)) = binance.fetch_balances(&http, &keys).await {
-                                e_ctx.balances.insert(ex.to_string(), w);
-                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            match binance.fetch_balances(&http, &keys).await {
+                                Ok((w, a)) => {
+                                    e_ctx.balances.insert(ex.to_string(), w);
+                                    e_ctx.margin_balances.insert(ex.to_string(), a);
+                                }
+                                Err(e) => error!("[binance] balance fetch err: {}", e),
                             }
                             if let Ok(pos) = binance.fetch_positions(&http, &keys).await {
                                 e_ctx.positions.insert(ex.to_string(), pos);
@@ -112,9 +115,12 @@ pub fn start_balance_fetcher(
                             }
                         }
                         "gate" => {
-                            if let Ok((w, a)) = gate.fetch_balances(&http, &keys).await {
-                                e_ctx.balances.insert(ex.to_string(), w);
-                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            match gate.fetch_balances(&http, &keys).await {
+                                Ok((w, a)) => {
+                                    e_ctx.balances.insert(ex.to_string(), w);
+                                    e_ctx.margin_balances.insert(ex.to_string(), a);
+                                }
+                                Err(e) => error!("[gate] balance fetch err: {}", e),
                             }
                             if let Ok(pos) = gate.fetch_positions(&http, &keys).await {
                                 e_ctx.positions.insert(ex.to_string(), pos);
@@ -124,9 +130,12 @@ pub fn start_balance_fetcher(
                             }
                         }
                         "kucoin" => {
-                            if let Ok((w, a)) = kucoin.fetch_balances(&http, &keys).await {
-                                e_ctx.balances.insert(ex.to_string(), w);
-                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            match kucoin.fetch_balances(&http, &keys).await {
+                                Ok((w, a)) => {
+                                    e_ctx.balances.insert(ex.to_string(), w);
+                                    e_ctx.margin_balances.insert(ex.to_string(), a);
+                                }
+                                Err(e) => error!("[kucoin] balance fetch err: {}", e),
                             }
                             if let Ok(pos) = kucoin.fetch_positions(&http, &keys).await {
                                 e_ctx.positions.insert(ex.to_string(), pos);
@@ -136,9 +145,12 @@ pub fn start_balance_fetcher(
                             }
                         }
                         "bitget" => {
-                            if let Ok((w, a)) = bitget.fetch_balances(&http, &keys).await {
-                                e_ctx.balances.insert(ex.to_string(), w);
-                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            match bitget.fetch_balances(&http, &keys).await {
+                                Ok((w, a)) => {
+                                    e_ctx.balances.insert(ex.to_string(), w);
+                                    e_ctx.margin_balances.insert(ex.to_string(), a);
+                                }
+                                Err(e) => error!("[bitget] balance fetch err: {}", e),
                             }
                             if let Ok(pos) = bitget.fetch_positions(&http, &keys).await {
                                 e_ctx.positions.insert(ex.to_string(), pos);
@@ -148,9 +160,12 @@ pub fn start_balance_fetcher(
                             }
                         }
                         "bybit" => {
-                            if let Ok((w, a)) = bybit.fetch_balances(&http, &keys).await {
-                                e_ctx.balances.insert(ex.to_string(), w);
-                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            match bybit.fetch_balances(&http, &keys).await {
+                                Ok((w, a)) => {
+                                    e_ctx.balances.insert(ex.to_string(), w);
+                                    e_ctx.margin_balances.insert(ex.to_string(), a);
+                                }
+                                Err(e) => error!("[bybit] balance fetch err: {}", e),
                             }
                             if let Ok(pos) = bybit.fetch_positions(&http, &keys).await {
                                 e_ctx.positions.insert(ex.to_string(), pos);
@@ -160,9 +175,12 @@ pub fn start_balance_fetcher(
                             }
                         }
                         "bingx" => {
-                            if let Ok((w, a)) = bingx.fetch_balances(&http, &keys).await {
-                                e_ctx.balances.insert(ex.to_string(), w);
-                                e_ctx.margin_balances.insert(ex.to_string(), a);
+                            match bingx.fetch_balances(&http, &keys).await {
+                                Ok((w, a)) => {
+                                    e_ctx.balances.insert(ex.to_string(), w);
+                                    e_ctx.margin_balances.insert(ex.to_string(), a);
+                                }
+                                Err(e) => error!("[bingx] balance fetch err: {}", e),
                             }
                             if let Ok(pos) = bingx.fetch_positions(&http, &keys).await {
                                 e_ctx.positions.insert(ex.to_string(), pos);
