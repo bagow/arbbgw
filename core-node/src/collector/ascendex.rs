@@ -86,6 +86,49 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
         }
     }
 
+    // Seed 24h volume from REST tickers
+    if let Ok(resp) = http
+        .get("https://ascendex.com/api/pro/v2/futures/ticker")
+        .timeout(Duration::from_secs(15))
+        .send().await
+    {
+        if let Ok(body) = resp.json::<Value>().await {
+            if let Some(arr) = body["data"].as_array() {
+                let mut vol_seeded = 0usize;
+                for t in arr {
+                    let ws_sym = t["symbol"].as_str().unwrap_or(""); // "BTC-PERP"
+                    let std_sym = match sym_map.get(ws_sym) {
+                        Some(s) => s.clone(),
+                        None => continue,
+                    };
+                    let base_vol: f64 = t["baseVol"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let close: f64 = t["close"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let bid: f64 = t["bid"].as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let ask: f64 = t["ask"].as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let bid_sz: f64 = t["bid"].as_array().and_then(|a| a.get(1)).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let ask_sz: f64 = t["ask"].as_array().and_then(|a| a.get(1)).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let quote_vol = base_vol * close;
+                    if quote_vol > 0.0 {
+                        let mid = if bid > 0.0 && ask > 0.0 { (bid + ask) / 2.0 } else { close };
+                        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                        if let Some(mut ex_map) = price_map.get_mut("ascendex") {
+                            if let Some(entry) = ex_map.get_mut(&std_sym) {
+                                entry.vol = quote_vol;
+                                if bid > 0.0 && ask > 0.0 {
+                                    entry.bid = bid; entry.ask = ask; entry.price = mid;
+                                    entry.bid_size = bid_sz * mid; entry.ask_size = ask_sz * mid;
+                                    entry.last_updated = ts;
+                                }
+                            }
+                        }
+                        vol_seeded += 1;
+                    }
+                }
+                info!("[ascendex] Seeded 24h volume for {} symbols", vol_seeded);
+            }
+        }
+    }
+
     if ws_symbols.is_empty() { return Err(anyhow::anyhow!("No AscendEX USDT futures symbols")); }
 
     let (mut ws, _) = connect_async_tls_with_config(

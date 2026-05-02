@@ -89,6 +89,36 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
             }
         }
     }
+    // Seed 24h volume and prices from REST tickers
+    if let Ok(resp) = http
+        .get("https://fapi.xt.com/future/market/v1/public/q/tickers")
+        .timeout(Duration::from_secs(15))
+        .send().await
+    {
+        if let Ok(body) = resp.json::<Value>().await {
+            if let Some(arr) = body["result"].as_array() {
+                let mut vol_seeded = 0usize;
+                for t in arr {
+                    let sym = t["s"].as_str().unwrap_or(""); // "btc_usdt"
+                    let std_sym = xt_to_standard(sym); // "BTCUSDT"
+                    if !std_sym.ends_with("USDT") { continue; }
+                    let vol: f64 = t["v"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0); // quote volume
+                    let close: f64 = t["c"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    if vol > 0.0 || close > 0.0 {
+                        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                        if let Some(mut ex_map) = price_map.get_mut("xt") {
+                            if let Some(entry) = ex_map.get_mut(&std_sym) {
+                                entry.vol = vol;
+                                if close > 0.0 { entry.price = close; }
+                            }
+                        }
+                        vol_seeded += 1;
+                    }
+                }
+                info!("[xt] Seeded 24h volume for {} symbols", vol_seeded);
+            }
+        }
+    }
 
     if xt_symbols.is_empty() { return Err(anyhow::anyhow!("No XT USDT perp symbols")); }
 

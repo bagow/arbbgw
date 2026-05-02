@@ -89,7 +89,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                     let bid: f64 = t["bestBidPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                     let ask: f64 = t["bestAskPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                     let price: f64 = t["lastPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let vol: f64 = t["volume"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let vol: f64 = t["quoteVolume"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                     if price > 0.0 {
                         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                         price_map.entry("bingx".to_string()).or_default().insert(sym, TickerData {

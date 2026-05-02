@@ -111,6 +111,35 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
     };
     if symbols.is_empty() { return Err(anyhow::anyhow!("No Toobit symbols loaded")); }
 
+    // Seed 24h volume from REST tickers
+    if let Ok(resp) = http
+        .get("https://api.toobit.com/quote/v1/ticker/24hr")
+        .timeout(Duration::from_secs(15))
+        .send().await
+    {
+        if let Ok(body) = resp.json::<Value>().await {
+            if let Some(arr) = body.as_array() {
+                let mut vol_seeded = 0usize;
+                for t in arr {
+                    let sym = t["s"].as_str().unwrap_or("");
+                    if !sym.ends_with("USDT") { continue; }
+                    let qv: f64 = t["qv"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let close: f64 = t["c"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    if qv > 0.0 {
+                        if let Some(mut ex_map) = price_map.get_mut("toobit") {
+                            if let Some(entry) = ex_map.get_mut(sym) {
+                                entry.vol = qv;
+                                if close > 0.0 && entry.price == 0.0 { entry.price = close; }
+                            }
+                        }
+                        vol_seeded += 1;
+                    }
+                }
+                info!("[toobit] Seeded 24h volume for {} symbols", vol_seeded);
+            }
+        }
+    }
+
     let (mut ws, _) = connect_async_tls_with_config(
         "wss://stream.toobit.com/swap-market",
         None, false, None,

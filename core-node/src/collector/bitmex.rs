@@ -79,7 +79,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                 let bid: f64 = inst["bidPrice"].as_f64().unwrap_or(0.0);
                 let ask: f64 = inst["askPrice"].as_f64().unwrap_or(0.0);
                 let last: f64 = inst["lastPrice"].as_f64().unwrap_or(0.0);
-                let vol: f64 = inst["volume24h"].as_f64().unwrap_or(0.0);
+                let vol: f64 = inst["foreignNotional24h"].as_f64().unwrap_or(0.0);
                 let mid = if bid > 0.0 && ask > 0.0 { (bid + ask) / 2.0 } else { last };
                 let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                 price_map.entry("bitmex".to_string()).or_default().insert(std_sym.clone(), TickerData {
