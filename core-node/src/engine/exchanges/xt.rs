@@ -64,8 +64,6 @@ async fn xt_request(
     let resp = builder
         .header("xt-validate-appkey", &keys.xt_key)
         .header("xt-validate-timestamp", &ts.to_string())
-        .header("xt-validate-recvwindow", "5000")
-        .header("xt-validate-algorithms", "HmacSHA256")
         .header("xt-validate-signature", &sig)
         .timeout(Duration::from_millis(timeout_ms))
         .send()

@@ -50,7 +50,8 @@ async fn ascendex_request(
     timeout_ms: u64,
 ) -> Result<Value, String> {
     let ts = now_ms();
-    let sig = ascendex_sign(&keys.ascendex_secret, ts, path);
+    let sign_path = format!("v2/{}", path);
+    let sig = ascendex_sign(&keys.ascendex_secret, ts, &sign_path);
     let url = format!("{}/{}/api/pro/v2/{}", BASE_URL, ACCOUNT_GROUP, path);
 
     let builder = match method {

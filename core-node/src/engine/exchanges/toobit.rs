@@ -69,6 +69,9 @@ async fn toobit_request(
         .map_err(|e| format!("Toobit HTTP error: {}", e))?;
 
     let v: Value = resp.json().await.map_err(|e| format!("Toobit JSON parse error: {}", e))?;
+    if v.is_array() {
+        return Ok(v);
+    }
     let code = v["code"].as_i64().unwrap_or(-1);
     if code != 0 {
         let msg = v["msg"].as_str().unwrap_or("unknown");
