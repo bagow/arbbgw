@@ -267,21 +267,33 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
             // price_map not yet seeded — use fallback list
             FALLBACK.iter().map(|s| s.to_string()).collect()
         } else {
-            vol_syms.into_iter().take(200).map(|(_, s)| s).collect()
+            vol_syms.into_iter().map(|(_, s)| s).collect() // Subscribing to ALL symbols
         };
 
-        let streams: Vec<String> = symbols
-            .iter()
-            .map(|s| format!("{}@depth5@100ms", s.to_lowercase()))
-            .collect();
-        let url = format!("wss://fstream.binance.com/stream?streams={}", streams.join("/"));
-
-        match connect_async_tls_with_config(&url, None, false, None).await {
+        // Connect to the base WS URL
+        match connect_async_tls_with_config("wss://fstream.binance.com/ws", None, false, None).await {
             Ok((mut ws, _)) => {
-                info!("[binance_l2] Connected — {} depth streams", symbols.len());
+                info!("[binance_l2] Connected. Subscribing to {} depth streams...", symbols.len());
                 backoff = Duration::from_secs(1);
+                
+                use futures_util::SinkExt;
+                let mut chunk_id = 1;
+                for chunk in symbols.chunks(50) {
+                    let streams: Vec<String> = chunk.iter().map(|s| format!("{}@depth5@100ms", s.to_lowercase())).collect();
+                    let msg = serde_json::json!({
+                        "method": "SUBSCRIBE",
+                        "params": streams,
+                        "id": chunk_id
+                    });
+                    if let Err(e) = ws.send(tokio_tungstenite::tungstenite::Message::Text(msg.to_string().into())).await {
+                        error!("[binance_l2] Subscribe failed: {}", e);
+                    }
+                    chunk_id += 1;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                
                 let conn_start = std::time::Instant::now();
-                // Reconnect every 30 min to refresh the top-200 symbol list
+                // Reconnect every 30 min to refresh the symbol list
                 let max_age = Duration::from_secs(1800);
 
                 while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
@@ -290,16 +302,15 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
                         break;
                     }
                     if let Ok(Message::Text(text)) = msg {
-                        // Combined stream format: {"stream":"btcusdt@depth5@100ms","data":{...}}
-                        if let Ok(wrapper) = serde_json::from_str::<Value>(&text) {
-                            if let Some(stream_name) = wrapper["stream"].as_str() {
-                                // Extract symbol from stream name: "btcusdt@depth5@100ms" → "BTCUSDT"
-                                let sym = stream_name.split('@').next().unwrap_or("").to_uppercase();
-                                if sym.is_empty() { continue; }
-
-                                let data = &wrapper["data"];
-                                let bids = parse_levels(data, "b");
-                                let asks = parse_levels(data, "a");
+                        // Raw stream format without combined stream wrapper:
+                        // {"e":"depthUpdate","E":123,"s":"BTCUSDT","b":[["1.0","2.0"]],"a":[["1.0","2.0"]]}
+                        // Wait, if we use /ws, the format is NOT wrapped in {"stream": "...", "data": {...}}!
+                        // It is just the raw event! Wait, depth5@100ms is not depthUpdate (diff depth), it's partial book depth.
+                        // Partial book depth format: {"lastUpdateId":161111,"E":161111,"T":161111,"s":"BTCUSDT","b":[["1.0","2.0"]],"a":[["1.0","2.0"]]}
+                        if let Ok(data) = serde_json::from_str::<Value>(&text) {
+                            if let Some(sym) = data["s"].as_str() {
+                                let bids = parse_levels(&data, "b");
+                                let asks = parse_levels(&data, "a");
 
                                 if !bids.is_empty() || !asks.is_empty() {
                                     let now_ms = std::time::SystemTime::now()
@@ -307,7 +318,7 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
                                         .unwrap_or_default()
                                         .as_millis() as i64;
                                     l2_books.insert(
-                                        format!("binance:{}", sym),
+                                        format!("binance:{}", sym.to_uppercase()),
                                         L2Snapshot { bids, asks, updated_ms: now_ms },
                                     );
                                 }

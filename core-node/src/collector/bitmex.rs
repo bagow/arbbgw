@@ -58,7 +58,7 @@ fn normalize_bitmex(sym: &str) -> String {
     else { sym.replace('_', "") }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2OrderbookMap) -> Result<()> {
+async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
     let http = Client::new();
 
     // Seed symbols and prices from REST

@@ -13,7 +13,7 @@ use crate::state::{L2OrderbookMap, PriceMap, TickerData, UpdateSignal};
 pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
-    _l2_books: L2OrderbookMap,
+    l2_books: L2OrderbookMap,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -51,7 +51,7 @@ pub async fn run(
         };
 
         tokio::select! {
-            res = handler(&prices, &signal) => {
+            res = handler(&prices, &signal, &l2_books) => {
                 match res {
                     Ok(_)  => { warn!("[kucoin] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
                     Err(e) => error!("[kucoin] Error: {}. Reconnecting in {:?}", e, backoff),
@@ -67,7 +67,7 @@ pub async fn run(
     }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
+async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
     let http = Client::new();
     let contracts: Value = http
         .get("https://api-futures.kucoin.com/api/v1/contracts/active")
@@ -129,11 +129,14 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
 
     for chunk in symbols.chunks(100) {
         let topic = format!("/contractMarket/tickerV2:{}", chunk.join(","));
+        let topic_l2 = format!("/contractMarket/level2Depth50:{}", chunk.join(","));
         ws.send(Message::Text(json!({"id":"sub","type":"subscribe","topic":topic,"privateChannel":false,"response":true}).to_string().into())).await?;
+        ws.send(Message::Text(json!({"id":"subL2","type":"subscribe","topic":topic_l2,"privateChannel":false,"response":true}).to_string().into())).await?;
     }
 
     #[derive(Deserialize)]
     struct KucoinMsg<'a> {
+        topic: Option<String>,
         #[serde(rename = "type")]
         msg_type: &'a str,
         #[serde(borrow)]
@@ -142,6 +145,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
 
     #[derive(Deserialize)]
     struct KucoinData<'a> {
+        bids: Option<Vec<Vec<String>>>,
+        asks: Option<Vec<Vec<String>>>,
         symbol: Option<&'a str>,
         #[serde(
             deserialize_with = "de_opt_f64_or_str",
@@ -201,6 +206,15 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal) -> Result<()> {
                         if let Some(d) = v.data {
                             if let Some(raw_sym) = d.symbol {
                                 if let Some(sym) = sym_map.get(raw_sym) {
+                                    if v.topic.as_deref().unwrap_or("").starts_with("/contractMarket/level2Depth50:") {
+                                        let bids: Vec<(f64, f64)> = d.bids.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse().ok()?))).collect()).unwrap_or_default();
+                                        let asks: Vec<(f64, f64)> = d.asks.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse().ok()?))).collect()).unwrap_or_default();
+                                        if !bids.is_empty() || !asks.is_empty() {
+                                            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                                            l2_books.insert(format!("kucoin:{}", sym), crate::state::L2Snapshot { bids, asks, updated_ms: now_ms });
+                                        }
+                                        continue;
+                                    }
                                     let bid: f64 = match d.bid { Some(v) if v > 0.0 => v, _ => continue };
                                     let ask: f64 = match d.ask { Some(v) if v > 0.0 => v, _ => continue };
                                     let bid_qty = d.bid_qty.unwrap_or(0.0);

@@ -841,32 +841,18 @@ pub async fn run_cycle(
         let cached_b = e_ctx.l2_books.get(&l2_key_b).map(|v| v.clone());
         let now_cache = now_ms();
 
-        // L2 cache or fallback to L1 if missing/stale (for exchanges without L2 streams)
-        let l1_a = prices.get(&exa).and_then(|m| m.get(&pair).cloned());
-        let l1_b = prices.get(&exb).and_then(|m| m.get(&pair).cloned());
-
-        let get_ob = |cached: Option<crate::state::L2Snapshot>, l1: Option<crate::state::TickerData>| -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
-            if let Some(c) = cached {
-                if (now_cache - c.updated_ms) < 2_000 {
-                    return Ok((c.bids, c.asks));
-                }
+        // L2 cache must exist AND be fresh (< 2s). No REST fallback.
+        let (ob_a_res, ob_b_res) = match (&cached_a, &cached_b) {
+            (Some(a), Some(b)) if (now_cache - a.updated_ms) < 2_000 && (now_cache - b.updated_ms) < 2_000 => {
+                (Ok((a.bids.clone(), a.asks.clone())), Ok((b.bids.clone(), b.asks.clone())))
+            },
+            _ => {
+                // No fresh L2 data from WS — skip this pair entirely
+                tracing::info!("[real] ⏭️ SKIP {} — no fresh L2 WS data for {}/{}", pair, exa, exb);
+                e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 3_000);
+                continue;
             }
-            if let Some(t) = l1 {
-                let bid_qty = if t.bid > 0.0 { t.bid_size / t.bid } else { 0.0 };
-                let ask_qty = if t.ask > 0.0 { t.ask_size / t.ask } else { 0.0 };
-                return Ok((vec![(t.bid, bid_qty)], vec![(t.ask, ask_qty)]));
-            }
-            Err("No L1 or L2 data".to_string())
         };
-
-        let ob_a_res = get_ob(cached_a, l1_a);
-        let ob_b_res = get_ob(cached_b, l1_b);
-
-        if ob_a_res.is_err() || ob_b_res.is_err() {
-            tracing::info!("[real] ⏭️ SKIP {} — no fresh L2/L1 WS data for {}/{}", pair, exa, exb);
-            e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 3_000);
-            continue;
-        }
 
         let analyze_depth = |ob_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>,
                              is_buy: bool,

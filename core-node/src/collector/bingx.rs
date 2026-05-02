@@ -118,12 +118,15 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
     // Subscribe in chunks of 30
     for chunk in symbols.chunks(30) {
-        let subs: Vec<Value> = chunk.iter().map(|s| {
+        let subs: Vec<Value> = chunk.iter().flat_map(|s| {
             // BingX WS symbol format: "BTC-USDT"
             let ws_sym = if s.ends_with("USDT") && !s.contains('-') {
                 format!("{}-USDT", &s[..s.len()-4])
             } else { s.clone() };
-            json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.PRICE_FEED", ws_sym)})
+            vec![
+                json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.PRICE_FEED", ws_sym)}),
+                json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.DEPTH.step0", ws_sym)})
+            ]
         }).collect();
         for sub in subs {
             ws.send(Message::Text(sub.to_string().into())).await?;
@@ -142,6 +145,29 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let data_type = v["dataType"].as_str().unwrap_or("");
                         // MARKET.PRICE_FEED.BTC-USDT
+                        if data_type.starts_with("MARKET.DEPTH.step0.") {
+                            let sym_raw = data_type.trim_start_matches("MARKET.DEPTH.step0.").replace('-', "");
+                            if sym_raw.ends_with("USDT") {
+                                let bids: Vec<(f64, f64)> = v["data"]["bids"].as_array().map(|arr| {
+                                    arr.iter().filter_map(|x| {
+                                        let p = x[0].as_str()?.parse().ok()?;
+                                        let q = x[1].as_str()?.parse().ok()?;
+                                        Some((p, q))
+                                    }).collect()
+                                }).unwrap_or_default();
+                                let asks: Vec<(f64, f64)> = v["data"]["asks"].as_array().map(|arr| {
+                                    arr.iter().filter_map(|x| {
+                                        let p = x[0].as_str()?.parse().ok()?;
+                                        let q = x[1].as_str()?.parse().ok()?;
+                                        Some((p, q))
+                                    }).collect()
+                                }).unwrap_or_default();
+                                if !bids.is_empty() || !asks.is_empty() {
+                                    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                                    l2_books.insert(format!("bingx:{}", sym_raw), crate::state::L2Snapshot { bids, asks, updated_ms: now_ms });
+                                }
+                            }
+                        }
                         if data_type.starts_with("MARKET.PRICE_FEED.") {
                             let sym_raw = data_type.trim_start_matches("MARKET.PRICE_FEED.").replace('-', "");
                             if sym_raw.ends_with("USDT") {
