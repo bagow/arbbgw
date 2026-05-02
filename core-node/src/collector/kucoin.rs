@@ -128,17 +128,23 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     .await
     .context("KuCoin WS connect failed")?;
     info!("[kucoin] Connected, subscribing...");
-        // Filter symbols: only subscribe to L2 depth if the symbol exists on at least one OTHER exchange
+        // Filter symbols: only subscribe to L2 depth if the NORMALIZED symbol exists on at least one OTHER exchange.
+        // KuCoin raw symbols are like ORCAUSDTM, but other exchanges store ORCAUSDT.
+        // We must use sym_map to normalize before checking.
         let mut needed_symbols = Vec::new();
         for sym in &symbols {
-            let mut count = 0;
+            let normalized = match sym_map.get(sym.as_str()) {
+                Some(n) => n.as_str(),
+                None => continue,
+            };
+            let mut found = false;
             for ex in price_map.iter() {
-                if ex.key() != "kucoin" && ex.value().contains_key(sym.as_str()) {
-                    count += 1;
+                if ex.key() != "kucoin" && ex.value().contains_key(normalized) {
+                    found = true;
                     break;
                 }
             }
-            if count > 0 {
+            if found {
                 needed_symbols.push(sym.clone());
             }
         }
@@ -152,6 +158,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         let topic_l2 = format!("/contractMarket/level2Depth50:{}", chunk.join(","));
         ws.send(Message::Text(json!({"id":"subL2","type":"subscribe","topic":topic_l2,"privateChannel":false,"response":true}).to_string().into())).await?;
     }
+    info!("[kucoin] Subscribed L1 tickers for {} symbols, L2 depth for {} cross-exchange symbols", symbols.len(), needed_symbols.len());
+
+    // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
+    let conn_start = std::time::Instant::now();
+    let max_conn_age = Duration::from_secs(1800);
 
     #[derive(Deserialize)]
     struct KucoinMsg<'a> {
@@ -217,6 +228,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
     let mut ping = tokio::time::interval(Duration::from_secs(20));
     loop {
+        // Reconnect periodically to refresh L2 subscriptions (new pairs may appear)
+        if conn_start.elapsed() > max_conn_age {
+            info!("[kucoin] Refreshing L2 subscriptions after 30min...");
+            break;
+        }
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {

@@ -106,7 +106,6 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         let map = price_map.get("bingx");
         match map { Some(m) => m.keys().cloned().collect(), None => vec![] }
     };
-let needed_symbols = symbols.clone(); // Temp, will rewrite logic below
 
     if symbols.is_empty() { return Err(anyhow::anyhow!("No BingX symbols loaded")); }
 
@@ -148,9 +147,19 @@ let needed_symbols = symbols.clone(); // Temp, will rewrite logic below
         }
     }
 
+    info!("[bingx] Subscribed L1 tickers for {} symbols, L2 depth for {} cross-exchange symbols", symbols.len(), needed_symbols.len());
+
     let mut ping = tokio::time::interval(Duration::from_secs(25));
+    
+    // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
+    let conn_start = std::time::Instant::now();
+    let max_conn_age = Duration::from_secs(1800);
 
     loop {
+        if conn_start.elapsed() > max_conn_age {
+            info!("[bingx] Refreshing L2 subscriptions after 30min...");
+            break;
+        }
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {

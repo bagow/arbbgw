@@ -224,7 +224,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         .await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
-    info!("[bybit] Subscribed L2 depth for ALL {} symbols", symbols.len());
+    info!("[bybit] Subscribed L1 tickers for {} symbols, L2 depth for {} cross-exchange symbols", symbols.len(), needed_symbols.len());
+
+    // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
+    let conn_start = std::time::Instant::now();
+    let max_conn_age = Duration::from_secs(1800);
 
     let mut _ping = tokio::time::interval(Duration::from_secs(20));
     #[derive(Deserialize)]
@@ -251,6 +255,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
     let mut ping = tokio::time::interval(Duration::from_secs(20));
     loop {
+        // Reconnect periodically to refresh L2 subscriptions (new pairs may appear)
+        if conn_start.elapsed() > max_conn_age {
+            info!("[bybit] Refreshing L2 subscriptions after 30min...");
+            break;
+        }
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
