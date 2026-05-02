@@ -741,6 +741,7 @@ pub fn start_multiplier_fetcher(
         let e_ctx = e_ctx.clone();
         let settings = settings.clone();
         async move {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             loop {
                 // Check if bybit is enabled
                 let is_disabled = {
@@ -800,8 +801,8 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!("[multipliers] Bybit: FAILED to load, retrying in 30s");
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tracing::warn!(\"[multipliers] Bybit: FAILED to load, retrying in 90s\");
+                    tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
         }
@@ -813,6 +814,7 @@ pub fn start_multiplier_fetcher(
         let e_ctx = e_ctx.clone();
         let settings = settings.clone();
         async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             loop {
                 let is_disabled = {
                     let p = settings.read().await;
@@ -880,8 +882,8 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!("[multipliers] Bitget: FAILED to load, retrying in 30s");
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tracing::warn!(\"[multipliers] Bitget: FAILED to load, retrying in 90s\");
+                    tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
         }
@@ -893,6 +895,7 @@ pub fn start_multiplier_fetcher(
         let e_ctx = e_ctx.clone();
         let settings = settings.clone();
         async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             loop {
                 let is_disabled = {
                     let p = settings.read().await;
@@ -966,8 +969,8 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!("[multipliers] BingX: FAILED to load, retrying in 30s");
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tracing::warn!(\"[multipliers] BingX: FAILED to load, retrying in 90s\");
+                    tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
         }
@@ -979,6 +982,7 @@ pub fn start_multiplier_fetcher(
         let e_ctx = e_ctx.clone();
         let settings = settings.clone();
         async move {
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
             loop {
                 let is_disabled = {
                     let p = settings.read().await;
@@ -1046,8 +1050,8 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!("[multipliers] BitMEX: FAILED to load, retrying in 30s");
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tracing::warn!(\"[multipliers] BitMEX: FAILED to load, retrying in 90s\");
+                    tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
         }
@@ -1059,6 +1063,7 @@ pub fn start_multiplier_fetcher(
         let e_ctx = e_ctx.clone();
         let settings = settings.clone();
         async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             loop {
                 let is_disabled = {
                     let p = settings.read().await;
@@ -1125,8 +1130,8 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!("[multipliers] AscendEX: FAILED to load, retrying in 30s");
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tracing::warn!(\"[multipliers] AscendEX: FAILED to load, retrying in 90s\");
+                    tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
         }
@@ -1138,6 +1143,7 @@ pub fn start_multiplier_fetcher(
         let e_ctx = e_ctx.clone();
         let settings = settings.clone();
         async move {
+            tokio::time::sleep(std::time::Duration::from_secs(6)).await;
             loop {
                 let is_disabled = {
                     let p = settings.read().await;
@@ -1211,8 +1217,8 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!("[multipliers] XT: FAILED to load, retrying in 30s");
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tracing::warn!(\"[multipliers] XT: FAILED to load, retrying in 90s\");
+                    tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
         }
@@ -1224,6 +1230,7 @@ pub fn start_multiplier_fetcher(
         let e_ctx = e_ctx.clone();
         let settings = settings.clone();
         async move {
+            tokio::time::sleep(std::time::Duration::from_secs(7)).await;
             loop {
                 let is_disabled = {
                     let p = settings.read().await;
@@ -1286,8 +1293,8 @@ pub fn start_multiplier_fetcher(
                 if loaded > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 } else {
-                    tracing::warn!("[multipliers] Toobit: FAILED to load, retrying in 30s");
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tracing::warn!(\"[multipliers] Toobit: FAILED to load, retrying in 90s\");
+                    tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 }
             }
         }
