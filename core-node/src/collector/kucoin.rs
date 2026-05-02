@@ -243,8 +243,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                             if let Some(raw_sym) = d.symbol {
                                 if let Some((sym, mult)) = sym_map.get(raw_sym) {
                                     if v.topic.as_deref().unwrap_or("").starts_with("/contractMarket/level2Depth50:") {
-                                        let bids: Vec<(f64, f64)> = d.bids.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse().ok()?))).collect()).unwrap_or_default();
-                                        let asks: Vec<(f64, f64)> = d.asks.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse().ok()?))).collect()).unwrap_or_default();
+                                        let bids: Vec<(f64, f64)> = d.bids.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse::<f64>().ok()? * mult))).collect()).unwrap_or_default();
+                                        let asks: Vec<(f64, f64)> = d.asks.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse::<f64>().ok()? * mult))).collect()).unwrap_or_default();
                                         if !bids.is_empty() || !asks.is_empty() {
                                             let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
                                             l2_books.insert(format!("kucoin:{}", sym), crate::state::L2Snapshot { bids, asks, updated_ms: now_ms });

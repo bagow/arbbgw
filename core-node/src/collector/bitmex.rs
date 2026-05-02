@@ -157,12 +157,21 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                                             entry.bid_size = bid_sz * mult * mid; entry.ask_size = ask_sz * mult * mid;
                                             entry.last_updated = ts;
                                         } else {
-                                            ex_map.insert(std_sym, TickerData {
+                                            ex_map.insert(std_sym.clone(), TickerData {
                                                 bid, ask, price: mid, vol: 0.0, funding_rate: 0.0,
                                                 bid_size: bid_sz * mult * mid, ask_size: ask_sz * mult * mid, last_updated: ts,
                                             });
                                         }
                                     }
+                                    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                                    _l2_books.insert(
+                                        format!("bitmex:{}", std_sym),
+                                        crate::state::L2Snapshot {
+                                            bids: vec![(bid, bid_sz * mult)],
+                                            asks: vec![(ask, ask_sz * mult)],
+                                            updated_ms: now_ms,
+                                        }
+                                    );
                                     signal.notify_one();
                                 }
                             }

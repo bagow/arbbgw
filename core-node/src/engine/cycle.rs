@@ -856,8 +856,7 @@ pub async fn run_cycle(
 
         let analyze_depth = |ob_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>,
                              is_buy: bool,
-                             limit_price: f64,
-                             m: f64|
+                             limit_price: f64|
          -> f64 {
             if let Ok((bids, asks)) = ob_res {
                 let levels = if is_buy { asks } else { bids };
@@ -871,11 +870,7 @@ pub async fn run_cycle(
                             continue;
                         }
                     }
-                    if m > 0.0 && m != 1.0 {
-                        cum_vol += sz * m;
-                    } else {
-                        cum_vol += sz;
-                    }
+                    cum_vol += sz; // Collectors natively store size in coins
                 }
                 cum_vol
             } else {
@@ -883,8 +878,8 @@ pub async fn run_cycle(
             }
         };
 
-        let depth_a = analyze_depth(ob_a_res, !is_a_higher, limit_price_a, mult_a);
-        let depth_b = analyze_depth(ob_b_res, is_a_higher, limit_price_b, mult_b);
+        let depth_a = analyze_depth(ob_a_res, !is_a_higher, limit_price_a);
+        let depth_b = analyze_depth(ob_b_res, is_a_higher, limit_price_b);
 
         if depth_a < qty_a || depth_b < qty_b {
             tracing::warn!("[real] 🛑 ABORT {}: Insufficient L2 depth! req A={} (has {:.2}), req B={} (has {:.2})", pair, qty_a, depth_a, qty_b, depth_b);

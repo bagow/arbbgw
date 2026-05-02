@@ -281,8 +281,9 @@ async fn handler(
                             // L2 depth update (top 5 levels)
                             if let Some(data_arr) = v["data"].as_array() {
                                 for d in data_arr {
-                                    let bids = parse_levels(&d["bids"]);
-                                    let asks = parse_levels(&d["asks"]);
+                                    let mult = sym_map.get(inst_id).copied().unwrap_or(1.0);
+                                    let bids = parse_levels(&d["bids"], mult);
+                                    let asks = parse_levels(&d["asks"], mult);
                                     if !bids.is_empty() || !asks.is_empty() {
                                         let now_ms = std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
@@ -321,7 +322,7 @@ async fn handler(
 }
 
 /// Parse [[price, qty, ...], ...] depth levels
-fn parse_levels(val: &Value) -> Vec<(f64, f64)> {
+fn parse_levels(val: &Value, mult: f64) -> Vec<(f64, f64)> {
     val.as_array()
         .map(|arr| {
             arr.iter()
@@ -329,7 +330,7 @@ fn parse_levels(val: &Value) -> Vec<(f64, f64)> {
                     let px: f64 = level[0].as_str()?.parse().ok()?;
                     let sz: f64 = level[1].as_str()?.parse().ok()?;
                     if px > 0.0 && sz > 0.0 {
-                        Some((px, sz))
+                        Some((px, sz * mult))
                     } else {
                         None
                     }

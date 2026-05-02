@@ -333,22 +333,35 @@ async fn ws_shard(
                             // L2: order book depth
                             if let Some(result) = v["result"].as_object() {
                                 let raw_sym = result.get("s").and_then(|v| v.as_str()).unwrap_or("");
-                                if let Some((std_sym, _)) = sym_map.get(raw_sym) {
+                                if let Some((std_sym, mult)) = sym_map.get(raw_sym) {
                                     let now_ms = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_default().as_millis() as i64;
                                     let parse_level = |arr: &Value| -> Vec<(f64, f64)> {
                                         arr.as_array().map(|levels| {
                                             levels.iter().filter_map(|l| {
-                                                let p = l[0].as_str().and_then(|s| s.parse::<f64>().ok())?;
+                                                // Handle {"p": "...", "s": ...} format
+                                                if let Some(obj) = l.as_object() {
+                                                    let p = obj.get("p").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok())
+                                                        .or_else(|| obj.get("p").and_then(|v| v.as_f64()))?;
+                                                    let q = obj.get("s").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok())
+                                                        .or_else(|| obj.get("s").and_then(|v| v.as_f64()))
+                                                        .or_else(|| obj.get("s").and_then(|v| v.as_i64()).map(|v| v as f64))?;
+                                                    return Some((p, q * mult));
+                                                }
+                                                // Handle ["...", "..."] format
+                                                let p = l[0].as_str().and_then(|s| s.parse::<f64>().ok())
+                                                    .or_else(|| l[0].as_f64())?;
                                                 let q = l[1].as_str().and_then(|s| s.parse::<f64>().ok())
                                                     .or_else(|| l[1].as_f64())?;
-                                                Some((p, q))
+                                                Some((p, q * mult))
                                             }).collect()
                                         }).unwrap_or_default()
                                     };
-                                    let bids = parse_level(&v["result"]["b"]);
-                                    let asks = parse_level(&v["result"]["a"]);
+                                    let mut bids = parse_level(&v["result"]["bids"]);
+                                    if bids.is_empty() { bids = parse_level(&v["result"]["b"]); }
+                                    let mut asks = parse_level(&v["result"]["asks"]);
+                                    if asks.is_empty() { asks = parse_level(&v["result"]["a"]); }
                                     if !bids.is_empty() || !asks.is_empty() {
                                         l2_books.insert(
                                             format!("gate:{}", std_sym),
