@@ -70,7 +70,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     // Try REST first (may be blocked from some regions)
     let mut rest_ok = false;
     if let Ok(resp) = http
-        .get("https://openapi.toobit.com/openApi/swap/v2/quote/contracts")
+        .get("https://api.toobit.com/openApi/swap/v2/quote/contracts")
         .timeout(Duration::from_secs(8))
         .send().await
     {

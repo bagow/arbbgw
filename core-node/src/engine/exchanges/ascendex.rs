@@ -225,17 +225,15 @@ impl ExchangeConnector for AscendexConnector {
             v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         };
 
-        let v = ascendex_request(http, keys, "GET", "futures/balance", "", 10_000).await?;
-        let equity: f64 = v["data"]["assetBalance"].as_array().or_else(|| v["data"].as_array())
-            .and_then(|arr| arr.iter().find(|b| b["asset"].as_str() == Some("USDT")))
-            .and_then(|b| b["totalBalance"].as_str())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| parse_f64(&v["data"]["totalMarginBalance"]).unwrap_or(0.0));
-        let available: f64 = v["data"]["assetBalance"].as_array().or_else(|| v["data"].as_array())
-            .and_then(|arr| arr.iter().find(|b| b["asset"].as_str() == Some("USDT")))
-            .and_then(|b| b["availableBalance"].as_str())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(equity);
+        let v = ascendex_request(http, keys, "GET", "futures/position", "", 10_000).await?;
+        let mut equity = 0.0;
+        let mut available = 0.0;
+        if let Some(colls) = v["data"]["collaterals"].as_array() {
+            if let Some(b) = colls.iter().find(|c| c["asset"].as_str() == Some("USDT")) {
+                equity = parse_f64(&b["balance"]).unwrap_or(0.0);
+                available = equity; // AscendEX collateral balance is total
+            }
+        }
         Ok((equity, available))
     }
 

@@ -1,6 +1,6 @@
 //! Toobit USDT-M Perpetual connector
 //! Auth: HMAC-SHA256, similar to Binance-style
-//! API endpoint: https://openapi.toobit.com
+//! API endpoint: https://api.toobit.com
 
 use crate::engine::exchanges::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
 use crate::engine::real::ExchangeKeys;
@@ -37,19 +37,21 @@ async fn toobit_request(
     timeout_ms: u64,
 ) -> Result<Value, String> {
     let ts = now_ms().to_string();
-    let sign_str = format!("{}&timestamp={}", params, ts);
+    let sign_str = if params.is_empty() {
+        format!("timestamp={}", ts)
+    } else {
+        format!("{}&timestamp={}", params, ts)
+    };
     let sig = toobit_sign(&keys.toobit_secret, &sign_str);
 
     let url = if method == "GET" {
-        format!(
-            "https://openapi.toobit.com{}?{}&timestamp={}&signature={}",
-            path, params, ts, sig
-        )
+        if params.is_empty() {
+            format!("https://api.toobit.com{}?timestamp={}&signature={}", path, ts, sig)
+        } else {
+            format!("https://api.toobit.com{}?{}&timestamp={}&signature={}", path, params, ts, sig)
+        }
     } else {
-        format!(
-            "https://openapi.toobit.com{}?timestamp={}&signature={}",
-            path, ts, sig
-        )
+        format!("https://api.toobit.com{}?timestamp={}&signature={}", path, ts, sig)
     };
 
     let builder = match method {
@@ -215,19 +217,17 @@ impl ExchangeConnector for ToobitConnector {
             v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         };
 
-        let v = toobit_request(http, keys, "GET", "/openApi/swap/v2/user/balance", "", "", 10_000).await?;
-        let arr = v["data"].as_array().or_else(|| v.as_array());
+        let v = toobit_request(http, keys, "GET", "/api/v1/futures/balance", "", "", 10_000).await?;
+        let arr = v.as_array();
         let (equity, available) = if let Some(a) = arr {
             let b = a.iter().find(|x| x["asset"].as_str() == Some("USDT"));
             if let Some(bal) = b {
-                let eq = parse_f64(&bal["equity"]).or_else(|| parse_f64(&bal["balance"])).unwrap_or(0.0);
-                let av = parse_f64(&bal["availableMargin"]).or_else(|| parse_f64(&bal["availableBalance"])).or_else(|| parse_f64(&bal["balance"])).unwrap_or(eq);
+                let eq = parse_f64(&bal["balance"]).unwrap_or(0.0);
+                let av = parse_f64(&bal["availableBalance"]).unwrap_or(eq);
                 (eq, av)
             } else { (0.0, 0.0) }
         } else {
-            let eq = parse_f64(&v["data"]["balance"]["equity"]).or_else(|| parse_f64(&v["data"]["equity"])).unwrap_or(0.0);
-            let av = parse_f64(&v["data"]["balance"]["availableMargin"]).or_else(|| parse_f64(&v["data"]["availableMargin"])).unwrap_or(eq);
-            (eq, av)
+            (0.0, 0.0)
         };
         Ok((equity, available))
     }
@@ -247,7 +247,7 @@ impl ExchangeConnector for ToobitConnector {
     }
 
     async fn get_funding_rate(&self, http: &Client, pair: &str) -> Result<(f64, i64), String> {
-        let url = format!("https://openapi.toobit.com/openApi/swap/v2/quote/premiumIndex?symbol={}", pair);
+        let url = format!("https://api.toobit.com/openApi/swap/v2/quote/premiumIndex?symbol={}", pair);
         let resp = http.get(&url).timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         let rate: f64 = v["data"]["lastFundingRate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
@@ -275,7 +275,7 @@ impl ExchangeConnector for ToobitConnector {
     }
 
     async fn fetch_orderbook(&self, http: &Client, pair: &str, depth: u32) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
-        let url = format!("https://openapi.toobit.com/openApi/swap/v2/quote/depth?symbol={}&limit={}", pair, depth);
+        let url = format!("https://api.toobit.com/openApi/swap/v2/quote/depth?symbol={}&limit={}", pair, depth);
         let resp = http.get(&url).timeout(Duration::from_secs(5)).send().await.map_err(|e| e.to_string())?;
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         let parse = |key: &str| -> Vec<(f64, f64)> {
