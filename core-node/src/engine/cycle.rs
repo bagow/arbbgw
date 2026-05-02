@@ -851,8 +851,9 @@ pub async fn run_cycle(
                 (Ok((a.bids.clone(), a.asks.clone())), Ok((b.bids.clone(), b.asks.clone())))
             },
             _ => {
-                // No fresh L2 data from WS — skip this pair entirely
-                tracing::info!("[real] ⏭️ SKIP {} — no fresh L2 WS data for {}/{}", pair, exa, exb);
+                let a_age = cached_a.as_ref().map(|a| now_cache - a.updated_ms).unwrap_or(-1);
+                let b_age = cached_b.as_ref().map(|b| now_cache - b.updated_ms).unwrap_or(-1);
+                tracing::info!("[real] ⏭️ SKIP {} — no fresh L2 WS data for {} (age: {}ms) / {} (age: {}ms)", pair, exa, a_age, exb, b_age);
                 e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 3_000);
                 continue;
             }
