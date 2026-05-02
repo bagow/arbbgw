@@ -107,6 +107,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             }
             info!("[binance] Seeded volume for {} symbols", arr.len());
         }
+    } else {
+        warn!("[binance] Failed to fetch volume from REST/Proxy. Using fallback volumes via WS discovery.");
     }
 
     // WS: !bookTicker — instant bid/ask for every USDT future
@@ -223,6 +225,9 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                         entry.bid_size = bid_qty * mid;
                         entry.ask_size = ask_qty * mid;
                         entry.last_updated = ts;
+                        if entry.vol == 0.0 {
+                            entry.vol = 100_000_000.0; // Fallback volume
+                        }
                     } else {
                         ex_map.insert(
                             t.symbol.to_string(),
@@ -230,7 +235,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                 bid,
                                 ask,
                                 price: mid,
-                                vol: 0.0,
+                                vol: 100_000_000.0, // Fallback volume
                                 funding_rate: 0.0,
                                 bid_size: bid_qty * mid,
                                 ask_size: ask_qty * mid,
