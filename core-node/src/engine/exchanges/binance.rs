@@ -51,12 +51,15 @@ async fn execute_binance_order(
 ) -> Result<Value, String> {
     use crate::engine::exchanges::ws_trader::send_ws_request;
     
-    // Build alphabetically sorted query string from params (required by WS API)
-    let mut sorted_keys: Vec<&String> = params.keys().collect();
-    sorted_keys.sort();
-    let qs: String = sorted_keys.iter()
+    // 1. Build signature for WS (must include apiKey)
+    let mut ws_params = params.clone();
+    ws_params.insert("apiKey".to_string(), serde_json::json!(keys.binance_key));
+    
+    let mut ws_sorted_keys: Vec<&String> = ws_params.keys().collect();
+    ws_sorted_keys.sort();
+    let ws_qs: String = ws_sorted_keys.iter()
         .map(|k| {
-            let v = &params[k.as_str()];
+            let v = &ws_params[k.as_str()];
             let vs = match v {
                 Value::String(s) => s.clone(),
                 Value::Number(n) => n.to_string(),
@@ -67,10 +70,8 @@ async fn execute_binance_order(
         .collect::<Vec<_>>()
         .join("&");
     
-    let sig = binance_sign(&keys.binance_secret, &qs);
-    let mut ws_params = params.clone();
-    ws_params.insert("apiKey".to_string(), serde_json::json!(keys.binance_key));
-    ws_params.insert("signature".to_string(), serde_json::json!(sig));
+    let ws_sig = binance_sign(&keys.binance_secret, &ws_qs);
+    ws_params.insert("signature".to_string(), serde_json::json!(ws_sig));
     
     let req_id = uuid::Uuid::new_v4().to_string();
     let ws_req = serde_json::json!({
@@ -95,11 +96,36 @@ async fn execute_binance_order(
             Ok(v_ws.get("result").cloned().unwrap_or(v_ws))
         },
         Err(e) => {
-            tracing::warn!("[binance_ws] WS order failed ({}). Falling back to REST.", e);
-            let url = format!("https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
-            let resp = http.post(&url).header("X-MBX-APIKEY", &keys.binance_key).timeout(Duration::from_millis(api_timeout_ms)).send().await.map_err(|e| e.to_string())?;
+            tracing::warn!("[binance_ws] WS order failed ({}). Falling back to REST proxy.", e);
+            
+            // 2. Build signature for REST (does NOT include apiKey in QS)
+            let mut sorted_keys: Vec<&String> = params.keys().collect();
+            sorted_keys.sort();
+            let qs: String = sorted_keys.iter()
+                .map(|k| {
+                    let v = &params[k.as_str()];
+                    let vs = match v {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        _ => v.to_string(),
+                    };
+                    format!("{}={}", k, vs)
+                })
+                .collect::<Vec<_>>()
+                .join("&");
+            let sig = binance_sign(&keys.binance_secret, &qs);
+            
+            // Use proxy for REST to avoid geo-block
+            let url = format!("https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
+            let resp = http.post(&url)
+                .header("X-MBX-APIKEY", &keys.binance_key)
+                .timeout(Duration::from_millis(api_timeout_ms + 2000))
+                .send()
+                .await
+                .map_err(|err| err.to_string())?;
+                
             check_rate_limits(resp.status(), resp.headers()).await?;
-            let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+            let v: Value = resp.json().await.map_err(|err| format!("Failed to parse REST JSON: {}", err))?;
             if let Some(msg) = v["msg"].as_str() {
                 return Err(format!("Binance REST API Error: {}", msg));
             }
