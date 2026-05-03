@@ -44,33 +44,7 @@ async fn try_bybit_ws_order(
     Err(format!("Bybit WS retCode={}: {}", resp["retCode"], msg))
 }
 
-/// REST fallback for placing order (existing logic)
-async fn rest_bybit_order(
-    http: &Client,
-    keys: &ExchangeKeys,
-    body: &Value,
-    api_timeout_ms: u64,
-) -> Result<Value, String> {
-    let ts = now_ms().to_string();
-    let recv = "5000";
-    let body_str = body.to_string();
-    let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &body_str);
 
-    let resp = http
-        .post("https://api.bybit.com/v5/order/create")
-        .header("X-BAPI-API-KEY", &keys.bybit_key)
-        .header("X-BAPI-SIGN", &sig)
-        .header("X-BAPI-TIMESTAMP", &ts)
-        .header("X-BAPI-RECV-WINDOW", recv)
-        .header("Content-Type", "application/json")
-        .body(body_str)
-        .timeout(Duration::from_millis(api_timeout_ms))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    resp.json().await.map_err(|e| e.to_string())
-}
 
 #[async_trait]
 impl ExchangeConnector for BybitConnector {
@@ -163,7 +137,7 @@ impl ExchangeConnector for BybitConnector {
             ));
         }
 
-        // ── TRY WS FIRST ──
+        // ── ONLY WS ──
         // Initialize WS on first call (lazy)
         let _ = super::ws_bybit::get_or_init_bybit_ws(
             keys.bybit_key.clone(),
@@ -179,30 +153,9 @@ impl ExchangeConnector for BybitConnector {
                 return Ok((Some(oid), 0.0, 0.0));
             }
             Err(e) => {
-                tracing::warn!("[bybit_ws] WS order failed ({}). Falling back to REST.", e);
+                tracing::error!("[bybit_ws] WS order failed ({}). No REST fallback available.", e);
+                return Err(format!("Bybit WS connection error: {}", e));
             }
-        }
-
-        // ── REST FALLBACK ──
-        let v = rest_bybit_order(http, keys, &body, api_timeout_ms).await?;
-
-        let resp_oid = v["result"]["orderId"].as_str().unwrap_or("none");
-        tracing::info!(
-            "[bybit] place_order {} → orderId={} retCode={} (REST fallback)",
-            pair,
-            resp_oid,
-            v["retCode"]
-        );
-
-        if v["retCode"].as_i64() != Some(0) {
-            return Err(format!("Bybit API Error: {}", v));
-        }
-
-        let order_id = v["result"]["orderId"].as_str().map(|s| s.to_string());
-        if order_id.is_some() {
-            Ok((order_id, 0.0, 0.0))
-        } else {
-            Err("Bybit failed to return orderId".to_string())
         }
     }
 
@@ -301,7 +254,7 @@ impl ExchangeConnector for BybitConnector {
 
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
 
-        // ── TRY WS FIRST for close ──
+        // ── ONLY WS for close ──
         let _ = super::ws_bybit::get_or_init_bybit_ws(
             keys.bybit_key.clone(),
             keys.bybit_secret.clone(),
@@ -313,13 +266,8 @@ impl ExchangeConnector for BybitConnector {
                 Some(oid)
             }
             Err(e) => {
-                tracing::warn!("[bybit_ws] WS close failed ({}). Falling back to REST.", e);
-                // REST fallback
-                let v = rest_bybit_order(http, keys, &body, api_timeout_ms).await?;
-                if v["retCode"].as_i64() != Some(0) {
-                    tracing::error!("[bybit] close rejected: {}", v);
-                }
-                v["result"]["orderId"].as_str().map(|s| s.to_string())
+                tracing::error!("[bybit_ws] WS close failed ({}). No REST fallback available.", e);
+                None
             }
         };
         if let Some(ref oid) = ws_order_id {
@@ -380,29 +328,15 @@ impl ExchangeConnector for BybitConnector {
                 "reduceOnly": true
             })
         };
-        let fb_str = fb_body.to_string();
-        let ts_fb = now_ms().to_string();
-        let recv_fb = "5000";
-        let sig_fb = bybit_sign(&keys.bybit_secret, &ts_fb, &keys.bybit_key, recv_fb, &fb_str);
-
-        let resp_fb = http
-            .post("https://api.bybit.com/v5/order/create")
-            .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-SIGN", &sig_fb)
-            .header("X-BAPI-TIMESTAMP", &ts_fb)
-            .header("X-BAPI-RECV-WINDOW", recv_fb)
-            .header("Content-Type", "application/json")
-            .body(fb_str)
-            .timeout(Duration::from_millis(api_timeout_ms))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let v_fb: Value = resp_fb.json().await.map_err(|e| e.to_string())?;
-        let oid_fb = v_fb["result"]["orderId"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| "Bybit fallack rejected".to_string())?;
+        let oid_fb = match try_bybit_ws_order(keys, &fb_body).await {
+            Ok(oid) => {
+                tracing::info!("[bybit_ws] ✅ fallback close {} orderId={} (WS)", pair, oid);
+                oid
+            }
+            Err(e) => {
+                return Err(format!("Bybit fallback close WS failed: {}", e));
+            }
+        };
 
         for _ in 0..5 {
             if let Ok((p, f, _)) = self
