@@ -109,7 +109,7 @@ async fn handler(
                     if !sym.ends_with("USDT") {
                         continue;
                     }
-                    let vol: f64 = t["usdtVolume"]
+                    let vol: f64 = t["quoteVolume"]
                         .as_str()
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.0);

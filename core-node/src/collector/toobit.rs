@@ -141,7 +141,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     }
 
     let (mut ws, _) = connect_async_tls_with_config(
-        "wss://stream.toobit.com/quote/ws/v1",
+        "wss://stream.toobit.com/swap-market",
         None, false, None,
     ).await.context("Toobit WS connect failed")?;
     info!("[toobit] Connected, subscribing {} symbols...", symbols.len());

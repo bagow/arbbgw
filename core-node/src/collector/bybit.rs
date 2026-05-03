@@ -114,6 +114,14 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     if let Some(cached) = load_disk_cache(false) {
         symbols = cached;
         info!("[bybit] Using disk-cached symbol list ({} symbols)", symbols.len());
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let mut ex_map = price_map.entry("bybit".to_string()).or_default();
+        for (vol, sym) in &symbols {
+            ex_map.insert(sym.clone(), TickerData {
+                bid: 0.0, ask: 0.0, price: 0.0, vol: *vol, funding_rate: 0.0,
+                bid_size: 0.0, ask_size: 0.0, last_updated: ts
+            });
+        }
     } else {
         // Fetch from REST
         let rest_ok = match http
@@ -168,6 +176,14 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             if let Some(cached) = load_disk_cache(true) {
                 symbols = cached;
                 warn!("[bybit] REST failed, using stale disk cache ({} symbols)", symbols.len());
+                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                let mut ex_map = price_map.entry("bybit".to_string()).or_default();
+                for (vol, sym) in &symbols {
+                    ex_map.insert(sym.clone(), TickerData {
+                        bid: 0.0, ask: 0.0, price: 0.0, vol: *vol, funding_rate: 0.0,
+                        bid_size: 0.0, ask_size: 0.0, last_updated: ts
+                    });
+                }
             }
         }
     }

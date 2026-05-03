@@ -137,7 +137,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
     info!("[bingx] Subscribed L1 tickers & L2 depth for {} symbols", symbols.len());
 
-    let mut ping = tokio::time::interval(Duration::from_secs(25));
+    let mut ping = tokio::time::interval(Duration::from_secs(15));
     
     // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
     let conn_start = std::time::Instant::now();
@@ -163,6 +163,14 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                         }
                         Message::Close(_) => break,
                         _ => continue,
+                    }
+                    if text == "Ping" {
+                        let _ = ws.send(Message::Text("Pong".into())).await;
+                        continue;
+                    }
+                    if text.contains("\"Ping\"") || text.contains("\"ping\"") {
+                        let _ = ws.send(Message::Text("Pong".into())).await;
+                        continue;
                     }
                     if text.is_empty() { continue; }
                     if text == "Pong" { continue; }
@@ -223,7 +231,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                 _ => {}
             },
             _ = ping.tick() => {
-                ws.send(Message::Text("Ping".into())).await?;
+                let _ = ws.send(Message::Text("Ping".into())).await;
                 // WS heartbeat: update last_updated for all pairs with valid prices.
                 // If the WS is alive, the exchange would notify us of price changes —
                 // so existing bid/ask data is as current as the last received update.

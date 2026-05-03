@@ -141,7 +141,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
     price_map.entry("xt".to_string()).or_default();
 
-    let mut ping = tokio::time::interval(Duration::from_secs(25));
+    let mut ping = tokio::time::interval(Duration::from_secs(15));
 
     loop {
         tokio::select! {
@@ -191,6 +191,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             },
             _ = ping.tick() => {
                 ws.send(Message::Text(json!({"method":"ping","id":2}).to_string().into())).await?;
+                let _ = ws.send(Message::Text("ping".into())).await; // Fallback text ping
             }
         }
     }
