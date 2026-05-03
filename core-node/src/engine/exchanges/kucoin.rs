@@ -104,6 +104,8 @@ impl ExchangeConnector for KucoinConnector {
             ));
         }
 
+        super::ws_kucoin_private::ensure_private_ws(&keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase).await;
+
         let v = super::ws_kucoin::send_kucoin_request(
             &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
             "POST", path, &body_str, api_timeout_ms,
@@ -242,6 +244,8 @@ impl ExchangeConnector for KucoinConnector {
                 closed_volume: phys_amount,
             });
         }
+
+        super::ws_kucoin_private::ensure_private_ws(&keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase).await;
 
         let v_resp = super::ws_kucoin::send_kucoin_request(
             &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
@@ -405,12 +409,30 @@ impl ExchangeConnector for KucoinConnector {
     ) -> Result<(f64, f64, f64), String> {
         let path = format!("/api/v1/orders/{}", order_id);
         
-        let mut retries = 5;
         let mut final_size = 0.0;
         let mut final_val = 0.0;
         let mut final_fee = 0.0;
+        let mut resolved_via_ws = false;
 
-        loop {
+        // 1. Fast path: Wait for WS execution report (up to 1000ms)
+        let cache = super::ws_kucoin_private::get_order_cache();
+        for _ in 0..50 { // 50 * 20ms = 1000ms
+            if let Some(state) = cache.get(order_id) {
+                if state.status == "done" || state.filled_size > 0.0 {
+                    final_size = state.filled_size;
+                    final_val = state.deal_value;
+                    final_fee = state.fee;
+                    resolved_via_ws = true;
+                    tracing::debug!("[kucoin] fetch_order {} resolved via WS in <1s!", order_id);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let mut retries = if resolved_via_ws { 0 } else { 5 };
+
+        while !resolved_via_ws {
             let v = super::ws_kucoin::send_kucoin_request(
                 &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
                 "GET", &path, "", 10000,
@@ -482,7 +504,7 @@ impl ExchangeConnector for KucoinConnector {
         };
 
         let mut fee = final_fee;
-        if price > 0.0 {
+        if price > 0.0 && !resolved_via_ws && fee <= 1e-9 {
             let path_fills = format!("/api/v1/fills?orderId={}", order_id);
             if let Ok(v2) = super::ws_kucoin::send_kucoin_request(
                 &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
