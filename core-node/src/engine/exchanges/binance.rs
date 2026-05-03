@@ -559,94 +559,83 @@ impl ExchangeConnector for BinanceConnector {
 
     async fn fetch_balances(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String> {
+        // Use WS-FAPI to bypass geo-restrictions (REST fapi.binance.com is blocked from Japan)
+        use crate::engine::exchanges::ws_trader::send_ws_request;
+        
         let ts = now_ms();
         let qs = format!("timestamp={}", ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
-
-        // Try direct Binance first, then Cloudflare proxy on geo-block (403/418/429)
-        let url = format!(
-            "https://fapi.binance.com/fapi/v2/account?{}&signature={}",
-            qs, sig
-        );
-        let mut resp = http
-            .get(&url)
-            .header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await;
-
-        let mut used_proxy = false;
-        if let Ok(ref r) = resp {
-            let status = r.status().as_u16();
-            if status == 403 || status == 418 || status == 429 || status == 451 {
-                tracing::warn!("[binance] fetch_balances HTTP {}. Retrying via Cloudflare proxy.", status);
-                let proxy_url = format!(
-                    "https://api.arb.bagow.com/api/proxy/binance/fapi/v2/account?{}&signature={}",
-                    qs, sig
-                );
-                resp = http
-                    .get(&proxy_url)
-                    .header("X-MBX-APIKEY", &keys.binance_key)
-                    .timeout(Duration::from_secs(10))
-                    .send()
-                    .await;
-                used_proxy = true;
+        
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "id": req_id,
+            "method": "v2/account.balance",
+            "params": {
+                "apiKey": keys.binance_key,
+                "timestamp": ts,
+                "signature": sig
+            }
+        });
+        
+        let resp = send_ws_request(ws_req).await?;
+        
+        // Check for WS API errors
+        if let Some(err) = resp.get("error") {
+            let code = err["code"].as_i64().unwrap_or(0);
+            let msg = err["msg"].as_str().unwrap_or("unknown");
+            return Err(format!("Binance WS balance error (code={}): {}", code, msg));
+        }
+        
+        // Parse response: {"id":"...","status":200,"result":[{"asset":"USDT","balance":"16.05",...}]}
+        let result = resp["result"].as_array()
+            .ok_or_else(|| format!("Binance WS balance: no result array in response: {}", 
+                &resp.to_string()[..resp.to_string().len().min(300)]))?;
+        
+        let mut total_balance = 0.0f64;
+        let mut available_balance = 0.0f64;
+        
+        for item in result {
+            let asset = item["asset"].as_str().unwrap_or("");
+            if asset == "USDT" {
+                total_balance = item["balance"].as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                available_balance = item["availableBalance"].as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                break;
             }
         }
-
-        let resp = resp.map_err(|e| e.to_string())?;
-        let status = resp.status().as_u16();
-        if status != 200 {
-            let body_preview = resp.text().await.unwrap_or_default();
-            let src = if used_proxy { "proxy" } else { "direct" };
-            return Err(format!(
-                "Binance balance HTTP {} via {}: {}",
-                status, src, &body_preview[..body_preview.len().min(200)]
-            ));
-        }
-
-        let data: BinanceBalanceAccountResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Binance balance json parse err: {}", e))?;
-        let avail = data
-            .availableBalance
-            .parse::<f64>()
-            .map_err(|_| "Failed to parse Binance availableBalance as f64".to_string())?;
-        let equity = data
-            .totalMarginBalance
-            .as_deref()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or_else(|| data.totalWalletBalance.parse::<f64>().unwrap_or(0.0));
-        Ok((equity, avail))
+        
+        Ok((total_balance, available_balance))
     }
 
-    async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+    async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+        use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
         let qs = format!("symbol=BTCUSDT&timestamp={}", ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
-        let url = format!(
-            "https://fapi.binance.com/fapi/v1/commissionRate?{}&signature={}",
-            qs, sig
-        );
-        let resp = http
-            .get(&url)
-            .header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let data: BinanceFeeResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Binance fee json parse err: {}", e))?;
-        data.takerCommissionRate
-            .parse::<f64>()
-            .map_err(|_| "Failed to parse Binance fee as f64".to_string())
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "id": req_id,
+            "method": "v1/account.commissionRate",
+            "params": {
+                "apiKey": keys.binance_key,
+                "symbol": "BTCUSDT",
+                "timestamp": ts,
+                "signature": sig
+            }
+        });
+        let resp = send_ws_request(ws_req).await?;
+        if let Some(err) = resp.get("error") {
+            return Err(format!("Binance WS fee error: {}", err));
+        }
+        resp["result"]["takerCommissionRate"].as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .ok_or_else(|| "Failed to parse Binance fee from WS".to_string())
     }
 
     async fn ensure_leverage(
@@ -697,32 +686,29 @@ impl ExchangeConnector for BinanceConnector {
 
     async fn fetch_positions(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<Vec<PositionInfo>, String> {
+        use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
         let qs = format!("timestamp={}", ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
-        let url = format!(
-            "https://fapi.binance.com/fapi/v2/positionRisk?{}&signature={}",
-            qs, sig
-        );
-        let resp = http
-            .get(&url)
-            .header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !resp.status().is_success() {
-            let err_txt = resp.text().await.unwrap_or_default();
-            return Err(format!("Binance position API error: {}", err_txt));
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "id": req_id,
+            "method": "v2/account.position",
+            "params": {
+                "apiKey": keys.binance_key,
+                "timestamp": ts,
+                "signature": sig
+            }
+        });
+        let resp = send_ws_request(ws_req).await?;
+        if let Some(err) = resp.get("error") {
+            return Err(format!("Binance WS position error: {}", err));
         }
-
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         let mut positions = Vec::new();
-        if let Some(arr) = v.as_array() {
+        if let Some(arr) = resp["result"].as_array() {
             for p in arr {
                 let amt: f64 = p["positionAmt"]
                     .as_str()
