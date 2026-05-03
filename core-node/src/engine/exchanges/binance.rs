@@ -506,7 +506,7 @@ impl ExchangeConnector for BinanceConnector {
 
     async fn fetch_order(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
         pair: &str,
         order_id: &str,
@@ -515,21 +515,30 @@ impl ExchangeConnector for BinanceConnector {
         if order_id.starts_with("dry_") {
             return Ok((0.0, 0.0, 0.0));
         }
+        use crate::engine::exchanges::ws_trader::send_ws_request;
+
+        // Step 1: Get order status via WS
         let ts = now_ms();
-        let qs = format!("symbol={}&orderId={}&timestamp={}", pair, order_id, ts);
+        let oid: i64 = order_id.parse().map_err(|_| "Invalid orderId".to_string())?;
+        let qs = format!("apiKey={}&orderId={}&symbol={}&timestamp={}", keys.binance_key, oid, pair, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
-        let url = format!(
-            "https://fapi.binance.com/fapi/v1/order?{}&signature={}",
-            qs, sig
-        );
-        let resp = http
-            .get(&url)
-            .header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "id": req_id,
+            "method": "v1/order.status",
+            "params": {
+                "apiKey": keys.binance_key,
+                "symbol": pair,
+                "orderId": oid,
+                "timestamp": ts,
+                "signature": sig
+            }
+        });
+        let resp = send_ws_request(ws_req).await?;
+        if let Some(err) = resp.get("error") {
+            return Err(format!("Binance WS order.status error: {}", err));
+        }
+        let v = &resp["result"];
 
         let exec_qty: f64 = v["executedQty"]
             .as_str()
@@ -537,18 +546,14 @@ impl ExchangeConnector for BinanceConnector {
             .unwrap_or(0.0);
         let status = v["status"].as_str().unwrap_or("");
 
-        // IMPORTANT: Binance marks IOC orders that partially fill as "EXPIRED".
-        // We MUST verify executedQty first before blindly assuming the order was un-filled.
         if exec_qty < 1e-12 {
             if status == "EXPIRED" || status == "CANCELED" || status == "REJECTED" {
                 tracing::warn!(
                     "[binance] fetch_order {} status={} — definitively unfilled",
-                    order_id,
-                    status
+                    order_id, status
                 );
                 return Ok((0.0, 0.0, 0.0));
             }
-            // Order exists but hasn't filled yet (or was partially cancelled)
             return Err("Not filled yet".to_string());
         }
 
@@ -560,30 +565,27 @@ impl ExchangeConnector for BinanceConnector {
             return Ok((0.0, 0.0, 0.0));
         }
 
-        // Step 2: Fetch real commission from userTrades endpoint
+        // Step 2: Fetch commission via WS myTrades
         let ts2 = now_ms();
-        let qs2 = format!("symbol={}&orderId={}&timestamp={}", pair, order_id, ts2);
+        let qs2 = format!("apiKey={}&orderId={}&symbol={}&timestamp={}", keys.binance_key, oid, pair, ts2);
         let sig2 = binance_sign(&keys.binance_secret, &qs2);
-        let url2 = format!(
-            "https://fapi.binance.com/fapi/v1/userTrades?{}&signature={}",
-            qs2, sig2
-        );
-        let fee = match http
-            .get(&url2)
-            .header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-        {
-            Ok(resp2) => match resp2.json::<Value>().await {
-                Ok(v2) => v2
-                    .as_array()
+        let req_id2 = uuid::Uuid::new_v4().to_string();
+        let ws_req2 = serde_json::json!({
+            "id": req_id2,
+            "method": "v1/myTrades",
+            "params": {
+                "apiKey": keys.binance_key,
+                "symbol": pair,
+                "orderId": oid,
+                "timestamp": ts2,
+                "signature": sig2
+            }
+        });
+        let fee = match send_ws_request(ws_req2).await {
+            Ok(resp2) => {
+                resp2["result"].as_array()
                     .map(|arr| {
                         arr.iter()
-                            .filter(|t| {
-                                t["orderId"].as_i64().map(|id| id.to_string()).as_deref()
-                                    == Some(order_id)
-                            })
                             .fold(0.0_f64, |acc, t| {
                                 let comm = t["commission"]
                                     .as_str()
@@ -593,20 +595,13 @@ impl ExchangeConnector for BinanceConnector {
                                 acc + match asset {
                                     "USDT" => comm,
                                     _ => {
-                                        if price > 0.0 {
-                                            comm * price
-                                        } else {
-                                            comm
-                                        }
+                                        if price > 0.0 { comm * price } else { comm }
                                     }
                                 }
                             })
-                        // Replace only if the userTrades endpoint yielded a real fee
-                        // Note: For Binance USDT-M, executedQty is physical coin volume, DO NOT divide by multiplier!
                     })
-                    .unwrap_or(0.0),
-                Err(_) => 0.0,
-            },
+                    .unwrap_or(0.0)
+            }
             Err(_) => 0.0,
         };
         Ok((price, fee, exec_qty))
@@ -695,48 +690,60 @@ impl ExchangeConnector for BinanceConnector {
 
     async fn ensure_leverage(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
         pair: &str,
         leverage: f64,
     ) -> Result<(), String> {
-        // Only set leverage — do NOT force margin type here.
-        // Margin type (CROSSED/ISOLATED) should be configured once on the exchange or via
-        // the full ensure_leverage in warmup_leverages (real.rs) which has access to profile settings.
+        use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
-        let qs = format!(
-            "symbol={}&leverage={}&timestamp={}",
-            pair, leverage as i64, ts
-        );
+        let lev = leverage as i64;
+        let qs = format!("apiKey={}&leverage={}&symbol={}&timestamp={}", keys.binance_key, lev, pair, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
-        let _ = http
-            .post(format!(
-                "https://fapi.binance.com/fapi/v1/leverage?{}&signature={}",
-                qs, sig
-            ))
-            .header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await;
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "id": req_id,
+            "method": "v1/account.setLeverage",
+            "params": {
+                "apiKey": keys.binance_key,
+                "symbol": pair,
+                "leverage": lev,
+                "timestamp": ts,
+                "signature": sig
+            }
+        });
+        let _ = send_ws_request(ws_req).await;
         Ok(())
     }
 
-    async fn get_funding_rate(&self, http: &Client, pair: &str) -> Result<(f64, i64), String> {
-        let url = format!(
-            "https://fapi.binance.com/fapi/v1/premiumIndex?symbol={}",
-            pair
-        );
-        if let Ok(resp) = http.get(&url).timeout(Duration::from_secs(5)).send().await {
-            if let Ok(json) = resp.json::<Value>().await {
-                if let Some(rate_str) = json["lastFundingRate"].as_str() {
-                    if let Ok(rate) = rate_str.parse::<f64>() {
-                        let next_ts = json["nextFundingTime"].as_i64().unwrap_or(0);
-                        return Ok((rate, next_ts));
-                    }
-                }
+    async fn get_funding_rate(&self, _http: &Client, pair: &str) -> Result<(f64, i64), String> {
+        use crate::engine::exchanges::ws_trader::send_ws_request;
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "id": req_id,
+            "method": "v1/ticker.price",
+            "params": {
+                "symbol": pair
+            }
+        });
+        // v1/ticker.price is a public method, no auth needed
+        // If this doesn't return funding data, fallback to 0.0 (non-critical)
+        match send_ws_request(ws_req).await {
+            Ok(resp) => {
+                let rate = resp["result"]["lastFundingRate"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let next_ts = resp["result"]["nextFundingTime"]
+                    .as_i64()
+                    .unwrap_or(0);
+                Ok((rate, next_ts))
+            }
+            Err(_) => {
+                // Funding rate is non-critical background data
+                Ok((0.0, 0))
             }
         }
-        Err("Binance funding rate fetch failed".to_string())
     }
 
     async fn fetch_positions(
@@ -794,32 +801,25 @@ impl ExchangeConnector for BinanceConnector {
 
     async fn fetch_orderbook(
         &self,
-        http: &Client,
+        _http: &Client,
         pair: &str,
         depth: u32,
     ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
-        let url = format!(
-            "https://fapi.binance.com/fapi/v1/depth?symbol={}&limit={}",
-            pair, depth
-        );
-        let res = http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Binance depth error: {}", e))?;
-
-        let status = res.status();
-        let body = res
-            .text()
-            .await
-            .map_err(|e| format!("Body read error: {}", e))?;
-
-        if !status.is_success() {
-            return Err(format!("Binance API HTTP {}: {}", status, body));
+        use crate::engine::exchanges::ws_trader::send_ws_request;
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "id": req_id,
+            "method": "v2/depth",
+            "params": {
+                "symbol": pair,
+                "limit": depth
+            }
+        });
+        let resp = send_ws_request(ws_req).await?;
+        if let Some(err) = resp.get("error") {
+            return Err(format!("Binance WS depth error: {}", err));
         }
-
-        let json: Value =
-            serde_json::from_str(&body).map_err(|e| format!("Binance Parse error: {}", e))?;
+        let json = &resp["result"];
 
         let parse_levels = |levels: &Value| -> Vec<(f64, f64)> {
             let mut out = Vec::new();
