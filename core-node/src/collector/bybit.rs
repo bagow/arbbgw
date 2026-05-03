@@ -181,21 +181,6 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
 
     info!("[bybit] Seeded {} USDT linear tickers", symbols.len());
-        // Filter symbols: only subscribe to L2 depth if the symbol exists on at least one OTHER exchange
-        let mut needed_symbols = Vec::new();
-        for sym in &symbols {
-            let mut count = 0;
-            for ex in price_map.iter() {
-                if ex.key() != "bybit" && ex.value().contains_key(sym.as_str()) {
-                    count += 1;
-                    break;
-                }
-            }
-            if count > 0 {
-                needed_symbols.push(sym.clone());
-            }
-        }
-        let needed_symbols = needed_symbols;
 
     // WS: subscribe to tickers in batches of 10
     let (mut ws, _) =
@@ -214,17 +199,16 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
-    // Subscribe to L2 (orderbook.25) for ALL symbols — arb opportunities
-    // are often in low-volume pairs, so we can't cap by volume rank.
-    for chunk in needed_symbols.chunks(10) {
-        let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.25.{}", s)).collect();
-        ws.send(Message::Text(
-            json!({"op":"subscribe","args":args}).to_string().into(),
-        ))
-        .await?;
-        tokio::time::sleep(Duration::from_millis(150)).await;
+    // Subscribe to L2 (orderbook.50) for ALL symbols
+    for chunk in symbols.chunks(10) {
+        let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.50.{}", s)).collect();
+        ws.send(Message::Text(json!({
+            "op": "subscribe",
+            "args": args
+        }).to_string().into())).await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    info!("[bybit] Subscribed L1 tickers for {} symbols, L2 depth for {} cross-exchange symbols", symbols.len(), needed_symbols.len());
+    info!("[bybit] Subscribed L1 tickers & L2 depth for {} symbols", symbols.len());
 
     // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
     let conn_start = std::time::Instant::now();

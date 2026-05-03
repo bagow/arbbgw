@@ -129,37 +129,17 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     .await
     .context("KuCoin WS connect failed")?;
     info!("[kucoin] Connected, subscribing...");
-        // Filter symbols: only subscribe to L2 depth if the NORMALIZED symbol exists on at least one OTHER exchange.
-        // KuCoin raw symbols are like ORCAUSDTM, but other exchanges store ORCAUSDT.
-        // We must use sym_map to normalize before checking.
-        let mut needed_symbols = Vec::new();
-        for sym in &symbols {
-            let normalized = match sym_map.get(sym.as_str()) {
-                Some(n) => n.0.as_str(),
-                None => continue,
-            };
-            let mut found = false;
-            for ex in price_map.iter() {
-                if ex.key() != "kucoin" && ex.value().contains_key(normalized) {
-                    found = true;
-                    break;
-                }
-            }
-            if found {
-                needed_symbols.push(sym.clone());
-            }
-        }
-        let needed_symbols = needed_symbols;
-
     for chunk in symbols.chunks(100) {
         let topic = format!("/contractMarket/tickerV2:{}", chunk.join(","));
         ws.send(Message::Text(json!({"id":"sub","type":"subscribe","topic":topic,"privateChannel":false,"response":true}).to_string().into())).await?;
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
-    for chunk in needed_symbols.chunks(100) {
-        let topic_l2 = format!("/contractMarket/level2Depth50:{}", chunk.join(","));
+    for chunk in symbols.chunks(100) {
+        let topic_l2 = format!("/contractMarket/level2Depth5:{}", chunk.join(","));
         ws.send(Message::Text(json!({"id":"subL2","type":"subscribe","topic":topic_l2,"privateChannel":false,"response":true}).to_string().into())).await?;
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
-    info!("[kucoin] Subscribed L1 tickers for {} symbols, L2 depth for {} cross-exchange symbols", symbols.len(), needed_symbols.len());
+    info!("[kucoin] Subscribed L1 tickers & L2 depth for {} symbols", symbols.len());
 
     // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
     let conn_start = std::time::Instant::now();
@@ -242,7 +222,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                         if let Some(d) = v.data {
                             if let Some(raw_sym) = d.symbol {
                                 if let Some((sym, mult)) = sym_map.get(raw_sym) {
-                                    if v.topic.as_deref().unwrap_or("").starts_with("/contractMarket/level2Depth50:") {
+                                    if v.topic.as_deref().unwrap_or("").starts_with("/contractMarket/level2Depth5:") {
                                         let bids: Vec<(f64, f64)> = d.bids.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse::<f64>().ok()? * mult))).collect()).unwrap_or_default();
                                         let asks: Vec<(f64, f64)> = d.asks.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse::<f64>().ok()? * mult))).collect()).unwrap_or_default();
                                         if !bids.is_empty() || !asks.is_empty() {

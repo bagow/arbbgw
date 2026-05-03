@@ -117,17 +117,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
     price_map.entry("bingx".to_string()).or_default();
 
-    let mut needed_symbols = Vec::new();
-    for sym in &symbols {
-        let mut count = 0;
-        for ex in price_map.iter() {
-            if ex.key() != "bingx" && ex.value().contains_key(sym.as_str()) {
-                count += 1;
-                break;
-            }
-        }
-        if count > 0 { needed_symbols.push(sym.clone()); }
-    }
+
 
     // Subscribe in chunks of 30
     for chunk in symbols.chunks(30) {
@@ -136,9 +126,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                 format!("{}-USDT", &s[..s.len()-4])
             } else { s.clone() };
             let mut res = vec![json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.PRICE_FEED", ws_sym)})];
-            if needed_symbols.contains(s) {
-                res.push(json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.DEPTH.step0", ws_sym)}));
-            }
+            res.push(json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.DEPTH.step0", ws_sym)}));
             res
         }).collect();
         for sub in subs {
@@ -147,7 +135,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         }
     }
 
-    info!("[bingx] Subscribed L1 tickers for {} symbols, L2 depth for {} cross-exchange symbols", symbols.len(), needed_symbols.len());
+    info!("[bingx] Subscribed L1 tickers & L2 depth for {} symbols", symbols.len());
 
     let mut ping = tokio::time::interval(Duration::from_secs(25));
     

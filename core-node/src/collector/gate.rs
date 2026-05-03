@@ -332,7 +332,9 @@ async fn ws_shard(
                         } else if channel == "futures.order_book" {
                             // L2: order book depth
                             if let Some(result) = v["result"].as_object() {
-                                let raw_sym = result.get("s").and_then(|v| v.as_str()).unwrap_or("");
+                                let raw_sym = result.get("contract").and_then(|v| v.as_str())
+                                    .or_else(|| result.get("s").and_then(|v| v.as_str()))
+                                    .unwrap_or("");
                                 if let Some((std_sym, mult)) = sym_map.get(raw_sym) {
                                     let now_ms = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
