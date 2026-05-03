@@ -1083,7 +1083,7 @@ pub fn start_multiplier_fetcher(
                 }
 
                 if let Ok(resp) = http
-                    .get("https://cex-spread-scanner.tech-b92.workers.dev/api/proxy/ascendex/api/pro/v2/futures/contract")
+                    .get("https://ascendex.com/api/pro/v1/futures/contracts")
                     .send()
                     .await
                 {
