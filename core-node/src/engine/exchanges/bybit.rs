@@ -51,39 +51,49 @@ async fn do_bybit_balance_fetch(
     keys: &ExchangeKeys,
     account_type: &str,
 ) -> Result<Value, String> {
-    let ts = now_ms().to_string();
-    let recv = "5000";
     let qs = format!("accountType={}", account_type);
-    let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
-    
-    // Try api.bybit.com
-    let mut url = format!("https://api.bybit.com/v5/account/wallet-balance?{}", qs);
-    let mut resp = http.get(&url)
-        .header("X-BAPI-API-KEY", &keys.bybit_key)
-        .header("X-BAPI-SIGN", &sig)
-        .header("X-BAPI-TIMESTAMP", &ts)
-        .header("X-BAPI-RECV-WINDOW", recv)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await;
-        
-    // Fallback to proxy if failed or Cloudflare block
-    if resp.is_err() || resp.as_ref().map(|r| !r.status().is_success()).unwrap_or(false) {
-        tracing::warn!("[bybit] fetch_balances ({}): api.bybit.com failed, trying proxy...", account_type);
-        url = format!("https://api.codetabs.com/v1/proxy/?quest=https://api.bybit.com/v5/account/wallet-balance?{}", qs);
-        resp = http.get(&url)
+
+    // Try multiple Bybit API domains (same HMAC signature works across all)
+    let domains = ["api.bybit.com", "api.bytick.com"];
+    let mut last_err = String::new();
+
+    for domain in &domains {
+        let ts = now_ms().to_string();
+        let recv = "5000";
+        let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
+        let url = format!("https://{}/v5/account/wallet-balance?{}", domain, qs);
+
+        let resp = http.get(&url)
             .header("X-BAPI-API-KEY", &keys.bybit_key)
             .header("X-BAPI-SIGN", &sig)
             .header("X-BAPI-TIMESTAMP", &ts)
             .header("X-BAPI-RECV-WINDOW", recv)
-            .timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(5))
             .send()
             .await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                match r.json::<Value>().await {
+                    Ok(v) => return Ok(v),
+                    Err(e) => {
+                        last_err = format!("{}: JSON parse error: {}", domain, e);
+                        tracing::warn!("[bybit] fetch_balances ({}): {} — {}", account_type, domain, last_err);
+                    }
+                }
+            }
+            Ok(r) => {
+                last_err = format!("{}: HTTP {}", domain, r.status());
+                tracing::warn!("[bybit] fetch_balances ({}): {}", account_type, last_err);
+            }
+            Err(e) => {
+                last_err = format!("{}: {}", domain, e);
+                tracing::warn!("[bybit] fetch_balances ({}): {}", account_type, last_err);
+            }
+        }
     }
-    
-    let r = resp.map_err(|e| e.to_string())?;
-    let v: Value = r.json().await.map_err(|e| format!("Failed to parse Bybit JSON: {}", e))?;
-    Ok(v)
+
+    Err(format!("All Bybit API domains failed for fetch_balances: {}", last_err))
 }
 
 #[async_trait]
@@ -692,43 +702,48 @@ impl ExchangeConnector for BybitConnector {
         let mut cursor = String::new();
 
         loop {
-            let ts = now_ms().to_string();
-            let recv = "5000";
             let mut qs = "category=linear&settleCoin=USDT&limit=50".to_string();
             if !cursor.is_empty() {
                 qs.push_str(&format!("&cursor={}", cursor));
             }
-            let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
-            
-            let mut url = format!("https://api.bybit.com/v5/position/list?{}", qs);
-            let mut resp = http.get(&url)
-                .header("X-BAPI-API-KEY", &keys.bybit_key)
-                .header("X-BAPI-SIGN", &sig)
-                .header("X-BAPI-TIMESTAMP", &ts)
-                .header("X-BAPI-RECV-WINDOW", recv)
-                .timeout(Duration::from_secs(5))
-                .send()
-                .await;
 
-            if resp.is_err() || resp.as_ref().map(|r| !r.status().is_success()).unwrap_or(false) {
-                tracing::warn!("[bybit] fetch_positions: api.bybit.com failed, trying proxy...");
-                url = format!("https://api.codetabs.com/v1/proxy/?quest=https://api.bybit.com/v5/position/list?{}", qs);
-                resp = http.get(&url)
+            let domains = ["api.bybit.com", "api.bytick.com"];
+            let mut v: Option<Value> = None;
+
+            for domain in &domains {
+                let ts = now_ms().to_string();
+                let recv = "5000";
+                let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
+                let url = format!("https://{}/v5/position/list?{}", domain, qs);
+
+                let resp = http.get(&url)
                     .header("X-BAPI-API-KEY", &keys.bybit_key)
                     .header("X-BAPI-SIGN", &sig)
                     .header("X-BAPI-TIMESTAMP", &ts)
                     .header("X-BAPI-RECV-WINDOW", recv)
-                    .timeout(Duration::from_secs(8))
+                    .timeout(Duration::from_secs(5))
                     .send()
                     .await;
+
+                match resp {
+                    Ok(r) if r.status().is_success() => {
+                        match r.json::<Value>().await {
+                            Ok(parsed) => { v = Some(parsed); break; }
+                            Err(e) => {
+                                tracing::warn!("[bybit] fetch_positions: {}: JSON parse error: {}", domain, e);
+                            }
+                        }
+                    }
+                    Ok(r) => {
+                        tracing::warn!("[bybit] fetch_positions: {}: HTTP {}", domain, r.status());
+                    }
+                    Err(e) => {
+                        tracing::warn!("[bybit] fetch_positions: {}: {}", domain, e);
+                    }
+                }
             }
 
-            let r = match resp {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Bybit position API request failed: {}", e)),
-            };
-
-            let v: Value = r.json().await.map_err(|e| format!("Failed to parse Bybit position JSON: {}", e))?;
+            let v = v.ok_or_else(|| "All Bybit API domains failed for fetch_positions".to_string())?;
 
             if v["retCode"].as_i64().unwrap_or(-1) != 0 {
                 return Err(format!("Bybit API returned error: {}", v));

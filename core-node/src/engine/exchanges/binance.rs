@@ -218,7 +218,32 @@ impl ExchangeConnector for BinanceConnector {
 
         let order_id = v["orderId"].as_i64().map(|id| id.to_string());
         if order_id.is_some() {
-            Ok((order_id, 0.0, 0.0))
+            // Extract inline fill data from WS response (MARKET orders fill immediately)
+            let exec_qty: f64 = v["executedQty"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| v["executedQty"].as_f64())
+                .unwrap_or(0.0);
+            let avg_price: f64 = v["avgPrice"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| v["avgPrice"].as_f64())
+                .unwrap_or(0.0);
+            let cum_fee: f64 = v["cumCommission"]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| v["cumCommission"].as_f64())
+                .unwrap_or(0.0)
+                .abs();
+
+            if exec_qty > 1e-12 && avg_price > 0.0 {
+                tracing::info!(
+                    "[binance] place_order {} INLINE FILL: execQty={} avgPrice={} fee={}",
+                    pair, exec_qty, avg_price, cum_fee
+                );
+            }
+
+            Ok((order_id, avg_price, cum_fee))
         } else {
             Err("Binance failed to return orderId".to_string())
         }
