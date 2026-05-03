@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
 
     // ── HTTP client ──────────────────────────────────────────────────────────
     let http = Client::builder()
-        .user_agent("core-node/1.0")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
         .timeout(Duration::from_secs(15))
         .http1_only()  // Force HTTP/1.1: avoids H2 "locally-reset streams reached limit (1024)"
         .pool_max_idle_per_host(10)

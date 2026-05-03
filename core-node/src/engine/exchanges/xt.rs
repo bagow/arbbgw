@@ -228,7 +228,7 @@ impl ExchangeConnector for XtConnector {
         let v = xt_request(http, keys, "GET", "/future/user/v1/balance/list", "", 10_000).await?;
         let equity: f64 = v["result"].as_array()
             .and_then(|arr| arr.iter().find(|b| b["coin"].as_str() == Some("usdt") || b["coin"].as_str() == Some("USDT")))
-            .and_then(|b| parse_f64(&b["accountBalance"]))
+            .and_then(|b| parse_f64(&b["walletBalance"]))
             .unwrap_or(0.0);
         let available: f64 = v["result"].as_array()
             .and_then(|arr| arr.iter().find(|b| b["coin"].as_str() == Some("usdt") || b["coin"].as_str() == Some("USDT")))

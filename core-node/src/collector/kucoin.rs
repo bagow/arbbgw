@@ -68,7 +68,7 @@ pub async fn run(
 }
 
 async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
-    let http = Client::new();
+    let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
     let contracts: Value = http
         .get("https://api-futures.kucoin.com/api/v1/contracts/active")
         .timeout(Duration::from_secs(10))

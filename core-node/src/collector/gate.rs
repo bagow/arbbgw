@@ -75,7 +75,7 @@ pub async fn run(
 /// connections (each handling ~100 symbols). If ANY connection dies, all are
 /// cancelled and the whole orchestrator returns (triggering full reconnect).
 async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
     let res = client
         .get("https://api.gateio.ws/api/v4/futures/usdt/contracts")
         .send()
@@ -179,7 +179,7 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2
         interval.tick().await; // skip immediate
         loop {
             interval.tick().await;
-            let c = reqwest::Client::new();
+            let c = reqwest::Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
             if let Ok(resp) = c
                 .get("https://api.gateio.ws/api/v4/futures/usdt/tickers")
                 .timeout(Duration::from_secs(10))

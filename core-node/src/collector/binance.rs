@@ -70,7 +70,7 @@ pub async fn run(
 
 async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
     // Seed 24h volume from REST miniTicker snapshot
-    let http = Client::new();
+    let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
     let mut target_url = "https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
     let mut resp = http.get(&target_url).timeout(Duration::from_secs(15)).send().await;
     
@@ -137,7 +137,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     // so Binance doesn't disappear from the spread scanner after long uptime.
     {
         let pm = price_map.clone();
-        let http2 = Client::new();
+        let http2 = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(1800)).await;

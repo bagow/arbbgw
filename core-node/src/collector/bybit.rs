@@ -102,7 +102,7 @@ pub async fn run(
 }
 
 async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
-    let http = Client::new();
+    let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
 
     // ── SYMBOL LIST: disk cache → REST fetch → stale disk fallback ──────────
     // Rapid restarts + REST rate limits require a disk-backed symbol cache.
