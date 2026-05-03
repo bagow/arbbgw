@@ -214,8 +214,18 @@ pub async fn run_cycle(
             let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
 
             // 🛡️ JIT L2 VERIFICATION FOR EXITS (TP / ZERO_SPREAD) ───────────────────
-            if !closing_retry && !manual_close && !triggered_stop && (reason_str == "TP" || reason_str == "ZERO_SPREAD") {
-                tracing::info!("[real] 🔍 JIT Exit Verification (VWAP) for {} on {}/{}...", pair, exa, exb);
+            // Force close after 5 minutes of MIRAGE to avoid holding positions forever
+            let trade_age_ms = now_ms() - trade.entry_time;
+            let force_close_after_mirage = trade_age_ms > 300_000; // 5 minutes
+
+            if !closing_retry && !manual_close && !triggered_stop && (reason_str == "TP" || reason_str == "ZERO_SPREAD") && !force_close_after_mirage {
+                // MIRAGE cooldown: skip this check if we already logged MIRAGE for this trade recently (10s)
+                let last_mirage = e_ctx.mirage_cooldown.get(&trade.id).map(|v| *v).unwrap_or(0);
+                let now_cd = now_ms();
+                if (now_cd - last_mirage) < 10_000 {
+                    // Still in MIRAGE cooldown — skip silently (no log spam)
+                    continue;
+                }
 
                 // L2 WS cache only — zero REST calls
                 let l2_key_a = format!("{}:{}", exa, pair);
@@ -293,8 +303,10 @@ pub async fn run_cycle(
                     let still_zero = reason_str == "ZERO_SPREAD" && vwap_exit_spread <= 0.0 && vwap_net_pnl >= 0.0;
 
                     if !still_tp && !still_zero {
-                        tracing::warn!("[real] 🛑 MIRAGE DETECTED ({}): L1 spread={:.2}%, VWAP spread={:.2}%, L1 PnL={:.2}%, VWAP PnL={:.2}%. Aborting close.", 
-                            reason_str, exit_spread, vwap_exit_spread, exec_net_pct, vwap_net_pct);
+                        // Throttled MIRAGE log: max 1 per 10 seconds per trade
+                        e_ctx.mirage_cooldown.insert(trade.id, now_cd);
+                        tracing::warn!("[real] 🛑 MIRAGE DETECTED ({}): L1 spread={:.2}%, VWAP spread={:.2}%, L1 PnL={:.2}%, VWAP PnL={:.2}%. Cooldown 10s. Age={}s.", 
+                            reason_str, exit_spread, vwap_exit_spread, exec_net_pct, vwap_net_pct, trade_age_ms / 1000);
                         continue;
                     } else {
                         tracing::info!("[real] ✅ VWAP Confirmed: VWAP spread={:.2}%, VWAP PnL={:.2}%", vwap_exit_spread, vwap_net_pct);
@@ -302,9 +314,18 @@ pub async fn run_cycle(
                         exit_price_b = px_b;
                     }
                 } else {
-                    tracing::warn!("[real] 🛑 MIRAGE DETECTED ({}): Insufficient L2 depth for {:.4} phys coins on {}/{}. Aborting close.", reason_str, trade_coins, exa, exb);
+                    // Throttled log for depth issues too
+                    e_ctx.mirage_cooldown.insert(trade.id, now_cd);
+                    tracing::warn!("[real] 🛑 MIRAGE DETECTED ({}): Insufficient L2 depth for {:.4} phys coins on {}/{}. Cooldown 10s.", reason_str, trade_coins, exa, exb);
                     continue;
                 }
+            }
+
+            // Force close after 5 minutes of MIRAGE — position is stuck, close at any price
+            if force_close_after_mirage && reason_str == "ZERO_SPREAD" && !closing_retry && !manual_close {
+                tracing::warn!("[real] ⏰ FORCE CLOSE {} after {}s of MIRAGE — accepting loss to avoid holding forever", pair, trade_age_ms / 1000);
+                // Clear mirage cooldown since we're forcing close
+                e_ctx.mirage_cooldown.remove(&trade.id);
             }
 
             let reason = if reason_str.is_empty() {
@@ -1005,6 +1026,13 @@ pub async fn run_cycle(
             fee_a_val = inline_fee_a;
             let mut got_a = dry_run || fill_a > 0.0;
 
+            // LATENCY OPTIMIZATION: If place_order returned inline fill data (e.g. Binance WS RESULT),
+            // skip the entire fill_verify REST polling loop — saves 150-400ms
+            if got_a && fill_a > 0.0 && actual_vol_phys_a.is_none() {
+                actual_vol_phys_a = Some(qty_a);
+                tracing::info!("[real] ⚡ Inline fill A: price={:.6} fee={:.6} — skipping verify loop", fill_a, fee_a_val);
+            }
+
             for attempt in 0..ts.fill_verify_retries {
                 if got_a && actual_vol_phys_a.is_some() {
                     break;
@@ -1131,6 +1159,12 @@ pub async fn run_cycle(
             fill_b = inline_fill_b;
             fee_b_val = inline_fee_b;
             let mut got_b = dry_run || fill_b > 0.0;
+
+            // LATENCY OPTIMIZATION: skip verify loop if inline fill available
+            if got_b && fill_b > 0.0 && actual_vol_phys_b.is_none() {
+                actual_vol_phys_b = Some(final_qty_b);
+                tracing::info!("[real] ⚡ Inline fill B: price={:.6} fee={:.6} — skipping verify loop", fill_b, fee_b_val);
+            }
 
             // Fast verification loop (standard)
             for attempt in 0..ts.fill_verify_retries {
@@ -1307,6 +1341,12 @@ pub async fn run_cycle(
             fee_b_val = inline_fee_b;
             let mut got_b = dry_run || fill_b > 0.0;
 
+            // LATENCY OPTIMIZATION: skip verify loop if inline fill available
+            if got_b && fill_b > 0.0 && actual_vol_phys_b.is_none() {
+                actual_vol_phys_b = Some(qty_b);
+                tracing::info!("[real] ⚡ Inline fill B: price={:.6} fee={:.6} — skipping verify loop", fill_b, fee_b_val);
+            }
+
             for attempt in 0..ts.fill_verify_retries {
                 if got_b && actual_vol_phys_b.is_some() {
                     break;
@@ -1433,6 +1473,12 @@ pub async fn run_cycle(
             fill_a = inline_fill_a;
             fee_a_val = inline_fee_a;
             let mut got_a = dry_run || fill_a > 0.0;
+
+            // LATENCY OPTIMIZATION: skip verify loop if inline fill available
+            if got_a && fill_a > 0.0 && actual_vol_phys_a.is_none() {
+                actual_vol_phys_a = Some(final_qty_a);
+                tracing::info!("[real] ⚡ Inline fill A: price={:.6} fee={:.6} — skipping verify loop", fill_a, fee_a_val);
+            }
 
             // Fast verification loop (standard)
             for attempt in 0..ts.fill_verify_retries {

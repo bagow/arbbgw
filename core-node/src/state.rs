@@ -74,6 +74,9 @@ pub struct EngineContext {
     pub price_history: Arc<DashMap<String, (f64, i64)>>,
     /// Live L2 orderbook depth cache — updated by WS collectors in real-time.
     pub l2_books: L2OrderbookMap,
+    /// Per-trade MIRAGE cooldown: trade_id → last_mirage_log_ms.
+    /// Prevents logging MIRAGE spam (was 10+ per second, now max 1 per 10s).
+    pub mirage_cooldown: Arc<DashMap<i64, i64>>,
 }
 
 impl Default for EngineContext {
@@ -98,6 +101,7 @@ impl Default for EngineContext {
             high_latency_strikes: Arc::new(DashMap::new()),
             price_history: Arc::new(DashMap::new()),
             l2_books: Arc::new(DashMap::new()),
+            mirage_cooldown: Arc::new(DashMap::new()),
         }
     }
 }
