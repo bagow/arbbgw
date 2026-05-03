@@ -251,13 +251,8 @@ impl ExchangeConnector for AscendexConnector {
         }
     }
 
-    async fn get_funding_rate(&self, http: &Client, pair: &str) -> Result<(f64, i64), String> {
-        let sym = to_ascendex_symbol(pair);
-        let url = format!("{}/api/pro/v2/futures/funding-rates?symbol={}", BASE_URL, sym);
-        let resp = http.get(&url).timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let rate: f64 = v["data"]["fundingRate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-        Ok((rate, 0))
+    async fn get_funding_rate(&self, _http: &Client, _pair: &str) -> Result<(f64, i64), String> {
+        Ok((0.0, 0))
     }
 
     async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {

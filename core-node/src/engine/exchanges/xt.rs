@@ -250,13 +250,8 @@ impl ExchangeConnector for XtConnector {
         }
     }
 
-    async fn get_funding_rate(&self, http: &Client, pair: &str) -> Result<(f64, i64), String> {
-        let sym = to_xt_symbol(pair);
-        let url = format!("https://fapi.xt.com/future/market/v1/public/q/index-funding-rate?symbol={}", sym);
-        let resp = http.get(&url).timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let rate: f64 = v["result"]["lastFundingRate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-        Ok((rate, 0))
+    async fn get_funding_rate(&self, _http: &Client, _pair: &str) -> Result<(f64, i64), String> {
+        Ok((0.0, 0))
     }
 
     async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {

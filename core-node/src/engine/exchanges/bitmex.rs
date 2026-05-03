@@ -249,17 +249,7 @@ impl ExchangeConnector for BitmexConnector {
         }
     }
 
-    async fn get_funding_rate(&self, http: &Client, pair: &str) -> Result<(f64, i64), String> {
-        let sym = to_bitmex_symbol(pair);
-        let url = format!("https://www.bitmex.com/api/v1/instrument?symbol={}&count=1&columns=fundingRate,nextFundingTimestamp", sym);
-        let resp = http.get(&url).timeout(Duration::from_secs(10)).send().await.map_err(|e| e.to_string())?;
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        if let Some(arr) = v.as_array() {
-            if let Some(inst) = arr.first() {
-                let rate: f64 = inst["fundingRate"].as_f64().unwrap_or(0.0);
-                return Ok((rate, 0));
-            }
-        }
+    async fn get_funding_rate(&self, _http: &Client, _pair: &str) -> Result<(f64, i64), String> {
         Ok((0.0, 0))
     }
 
