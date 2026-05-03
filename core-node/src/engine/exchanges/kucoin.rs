@@ -608,7 +608,7 @@ impl ExchangeConnector for KucoinConnector {
             }
         }
 
-        Ok((price, final_fee, size * mult))
+        Ok((price, final_fee, final_size * mult))
     }
 
     async fn fetch_balances(
