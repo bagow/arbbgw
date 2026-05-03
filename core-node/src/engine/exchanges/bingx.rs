@@ -132,6 +132,9 @@ impl ExchangeConnector for BingxConnector {
         if dry_run {
             return Ok((Some(format!("dry_bingx_{}", now_ms())), 0.0, 0.0));
         }
+
+        super::ws_bingx_private::ensure_private_ws(&keys.bingx_key, &keys.bingx_secret).await;
+
         let sym = to_bingx_symbol(pair);
         let side = if is_buy { "BUY" } else { "SELL" };
         // BingX: positionSide=LONG for buy open, SHORT for sell open
@@ -185,6 +188,8 @@ impl ExchangeConnector for BingxConnector {
         if dry_run {
             return Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount });
         }
+
+        super::ws_bingx_private::ensure_private_ws(&keys.bingx_key, &keys.bingx_secret).await;
 
         let sym = to_bingx_symbol(pair);
         // Closing: reverse side, reverse positionSide
@@ -261,6 +266,26 @@ impl ExchangeConnector for BingxConnector {
         _multiplier: f64,
     ) -> Result<(f64, f64, f64), String> {
         if order_id.starts_with("dry_") { return Ok((0.0, 0.0, 0.0)); }
+
+        // 1. Fast path: Wait for WS execution report (up to 1000ms)
+        let cache = super::ws_bingx_private::get_order_cache();
+        for _ in 0..50 {
+            if let Some(state) = cache.get(order_id) {
+                if state.status == "FILLED" || state.status == "PARTIALLY_FILLED" || state.status == "CANCELED" || state.filled > 0.0 {
+                    tracing::debug!("[bingx] fetch_order {} resolved via WS in <1s!", order_id);
+                    let fee = state.fee;
+                    let filled = state.filled;
+                    let avg_price = state.avg_price;
+                    if filled < 1e-12 && state.status == "CANCELED" {
+                        return Ok((0.0, 0.0, 0.0));
+                    }
+                    return Ok((avg_price, fee, filled));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // 2. Slow path: Fallback to REST API
         let sym = to_bingx_symbol(pair);
         let params = format!("symbol={}&orderId={}", sym, order_id);
         let v = bingx_request(http, keys, "GET", "/openApi/swap/v2/trade/order", &params, "", 10_000).await?;
