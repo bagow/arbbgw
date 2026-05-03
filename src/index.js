@@ -239,6 +239,29 @@ async function handleRequest(request, env, ctx) {
         }
     }
 
+    // ── PROXY EXTENSIONS /api/proxy/binance/* ─────────────────────────────────
+    if (path.startsWith('/api/proxy/binance/')) {
+        const binancePath = path.slice('/api/proxy/binance/'.length);
+        const binanceUrl = new URL(`https://fapi.binance.com/${binancePath}`);
+        binanceUrl.search = url.search;
+        
+        const proxyReq = new Request(binanceUrl.toString(), new Request(request));
+        proxyReq.headers.set('Host', 'fapi.binance.com');
+        proxyReq.headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+        
+        try {
+            const resp = await fetch(proxyReq);
+            const newResp = new Response(resp.body, resp);
+            const corsDirs = corsHeaders();
+            for (const key of Object.keys(corsDirs)) {
+                newResp.headers.set(key, corsDirs[key]);
+            }
+            return newResp;
+        } catch (e) {
+            return jsonResponse({ error: 'Binance API Unreachable via Proxy', message: e.message }, 502);
+        }
+    }
+
     // ── PROXY EXTENSIONS /api/* -> vps-api (via Cloudflare Tunnel) ───────────
     
     // Forward every API request to api.arb.bagow.com which routes via

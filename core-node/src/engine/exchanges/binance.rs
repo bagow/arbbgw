@@ -569,13 +569,31 @@ impl ExchangeConnector for BinanceConnector {
             "https://fapi.binance.com/fapi/v2/account?{}&signature={}",
             qs, sig
         );
-        let resp = http
+        let mut resp = http
             .get(&url)
             .header("X-MBX-APIKEY", &keys.binance_key)
             .timeout(Duration::from_secs(10))
             .send()
-            .await
-            .map_err(|e| e.to_string())?;
+            .await;
+
+        if let Ok(ref r) = resp {
+            let status = r.status().as_u16();
+            if status == 403 || status == 418 || status == 429 {
+                tracing::warn!("[binance] fetch_balances HTTP {}. Retrying via Cloudflare proxy.", status);
+                let proxy_url = format!(
+                    "https://api.arb.bagow.com/api/proxy/binance/fapi/v2/account?{}&signature={}",
+                    qs, sig
+                );
+                resp = http
+                    .get(&proxy_url)
+                    .header("X-MBX-APIKEY", &keys.binance_key)
+                    .timeout(Duration::from_secs(10))
+                    .send()
+                    .await;
+            }
+        }
+
+        let resp = resp.map_err(|e| e.to_string())?;
 
         let data: BinanceBalanceAccountResponse = resp
             .json()
