@@ -217,8 +217,10 @@ impl ExchangeConnector for BinanceConnector {
         );
 
         let order_id = v["orderId"].as_i64().map(|id| id.to_string());
+        let order_status = v["status"].as_str().unwrap_or("?");
+
         if order_id.is_some() {
-            // Extract inline fill data from WS response (MARKET orders fill immediately)
+            // Extract inline fill data from WS response
             let exec_qty: f64 = v["executedQty"]
                 .as_str()
                 .and_then(|s| s.parse().ok())
@@ -236,15 +238,28 @@ impl ExchangeConnector for BinanceConnector {
                 .unwrap_or(0.0)
                 .abs();
 
-            if exec_qty > 1e-12 && avg_price > 0.0 {
-                tracing::info!(
-                    "[binance] place_order {} INLINE FILL: execQty={} avgPrice={} fee={}",
-                    pair, exec_qty, avg_price, cum_fee
+            // Log FULL WS response for diagnostics
+            tracing::info!(
+                "[binance] place_order {} WS result: status={} execQty={} avgPrice={} fee={} | raw_keys={:?}",
+                pair, order_status, exec_qty, avg_price, cum_fee,
+                v.as_object().map(|m| m.keys().collect::<Vec<_>>()).unwrap_or_default()
+            );
+
+            // For IOC/EXPIRED: if order was cancelled without any fill, return None (no orderId)
+            // so the engine knows the order didn't execute
+            if (order_status == "EXPIRED" || order_status == "CANCELED" || order_status == "REJECTED")
+                && exec_qty < 1e-12
+            {
+                tracing::warn!(
+                    "[binance] place_order {} IOC order {} — NOT FILLED (status={})",
+                    pair, order_id.as_deref().unwrap_or("?"), order_status
                 );
+                return Ok((None, 0.0, 0.0));
             }
 
             Ok((order_id, avg_price, cum_fee))
         } else {
+            tracing::error!("[binance] place_order {} — no orderId in WS response: {:?}", pair, v);
             Err("Binance failed to return orderId".to_string())
         }
     }
