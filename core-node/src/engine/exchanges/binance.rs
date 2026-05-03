@@ -566,7 +566,7 @@ impl ExchangeConnector for BinanceConnector {
         use crate::engine::exchanges::ws_trader::send_ws_request;
         
         let ts = now_ms();
-        let qs = format!("timestamp={}", ts);
+        let qs = format!("apiKey={}&timestamp={}", keys.binance_key, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
         
         let req_id = uuid::Uuid::new_v4().to_string();
@@ -616,7 +616,7 @@ impl ExchangeConnector for BinanceConnector {
     async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
         use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
-        let qs = format!("symbol=BTCUSDT&timestamp={}", ts);
+        let qs = format!("apiKey={}&symbol=BTCUSDT&timestamp={}", keys.binance_key, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
         let req_id = uuid::Uuid::new_v4().to_string();
         let ws_req = serde_json::json!({
@@ -691,7 +691,7 @@ impl ExchangeConnector for BinanceConnector {
     ) -> Result<Vec<PositionInfo>, String> {
         use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
-        let qs = format!("timestamp={}", ts);
+        let qs = format!("apiKey={}&timestamp={}", keys.binance_key, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
         let req_id = uuid::Uuid::new_v4().to_string();
         let ws_req = serde_json::json!({
