@@ -231,7 +231,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                 _ => {}
             },
             _ = ping.tick() => {
-                let _ = ws.send(Message::Text("Ping".into())).await;
+                let _ = ws.send(Message::Ping(vec![])).await;
                 // WS heartbeat: update last_updated for all pairs with valid prices.
                 // If the WS is alive, the exchange would notify us of price changes —
                 // so existing bid/ask data is as current as the last received update.
