@@ -44,10 +44,10 @@ async fn check_rate_limits(
 }
 
 async fn execute_binance_order(
-    http: &Client,
+    _http: &Client,
     keys: &ExchangeKeys,
     params: &serde_json::Map<String, Value>,
-    api_timeout_ms: u64,
+    _api_timeout_ms: u64,
 ) -> Result<Value, String> {
     use crate::engine::exchanges::ws_trader::send_ws_request;
     
@@ -96,40 +96,8 @@ async fn execute_binance_order(
             Ok(v_ws.get("result").cloned().unwrap_or(v_ws))
         },
         Err(e) => {
-            tracing::warn!("[binance_ws] WS order failed ({}). Falling back to REST proxy.", e);
-            
-            // 2. Build signature for REST (does NOT include apiKey in QS)
-            let mut sorted_keys: Vec<&String> = params.keys().collect();
-            sorted_keys.sort();
-            let qs: String = sorted_keys.iter()
-                .map(|k| {
-                    let v = &params[k.as_str()];
-                    let vs = match v {
-                        Value::String(s) => s.clone(),
-                        Value::Number(n) => n.to_string(),
-                        _ => v.to_string(),
-                    };
-                    format!("{}={}", k, vs)
-                })
-                .collect::<Vec<_>>()
-                .join("&");
-            let sig = binance_sign(&keys.binance_secret, &qs);
-            
-            // Use proxy for REST to avoid geo-block
-            let url = format!("https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/order?{}&signature={}", qs, sig);
-            let resp = http.post(&url)
-                .header("X-MBX-APIKEY", &keys.binance_key)
-                .timeout(Duration::from_millis(api_timeout_ms + 2000))
-                .send()
-                .await
-                .map_err(|err| err.to_string())?;
-                
-            check_rate_limits(resp.status(), resp.headers()).await?;
-            let v: Value = resp.json().await.map_err(|err| format!("Failed to parse REST JSON: {}", err))?;
-            if let Some(msg) = v["msg"].as_str() {
-                return Err(format!("Binance REST API Error: {}", msg));
-            }
-            Ok(v)
+            tracing::error!("[binance_ws] WS order failed ({}). No REST fallback available.", e);
+            Err(format!("Binance WS connection error: {}", e))
         }
     }
 }
