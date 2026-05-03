@@ -133,6 +133,110 @@ async fn fetch_htx_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>>
     Some(res)
 }
 
+// ─── BingX: fetch 15-min klines ───────────────────────────────────────────────
+
+async fn fetch_bingx_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
+    let sym = pair.replace("USDT", "-USDT");
+    let url = format!(
+        "https://open-api.bingx.com/openApi/swap/v3/quote/klines?symbol={}&interval=15m&limit=100",
+        sym
+    );
+    let v: Value = match http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(j) => j,
+            Err(_) => return None,
+        },
+        _ => return None,
+    };
+    let arr = match v["data"].as_array() {
+        Some(a) => a,
+        None => return Some(vec![]),
+    };
+    let res: Vec<(f64, f64)> = arr
+        .iter()
+        .filter_map(|c| {
+            let ts = c["time"].as_f64()? / 1000.0;
+            let close = c["close"].as_f64()?;
+            Some((ts, close))
+        })
+        .collect();
+    Some(res)
+}
+
+// ─── Bitget: fetch 15-min klines ──────────────────────────────────────────────
+
+async fn fetch_bitget_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
+    let url = format!(
+        "https://api.bitget.com/api/v2/mix/market/candles?symbol={}&productType=USDT-FUTURES&granularity=15m&limit=100",
+        pair
+    );
+    let v: Value = match http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(j) => j,
+            Err(_) => return None,
+        },
+        _ => return None,
+    };
+    let arr = match v["data"].as_array() {
+        Some(a) => a,
+        None => return Some(vec![]),
+    };
+    let res: Vec<(f64, f64)> = arr
+        .iter()
+        .filter_map(|c| {
+            let ts = c[0].as_str().and_then(|s| s.parse::<f64>().ok())? / 1000.0;
+            let close = c[4].as_str().and_then(|s| s.parse::<f64>().ok())?;
+            Some((ts, close))
+        })
+        .collect();
+    Some(res)
+}
+
+// ─── XT.COM: fetch 15-min klines ──────────────────────────────────────────────
+
+async fn fetch_xt_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
+    let sym = pair.to_lowercase().replace("usdt", "_usdt");
+    let url = format!(
+        "https://fapi.xt.com/fapi/v1/kline?symbol={}&interval=15m&limit=100",
+        sym
+    );
+    let v: Value = match http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(j) => j,
+            Err(_) => return None,
+        },
+        _ => return None,
+    };
+    let arr = match v["result"].as_array() {
+        Some(a) => a,
+        None => return Some(vec![]),
+    };
+    let res: Vec<(f64, f64)> = arr
+        .iter()
+        .filter_map(|c| {
+            let ts = c["t"].as_f64()? / 1000.0;
+            let close = c["c"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| c["c"].as_f64())?;
+            Some((ts, close))
+        })
+        .collect();
+    Some(res)
+}
+
 // ─── Binance: fetch 15-min klines ─────────────────────────────────────────────
 
 async fn fetch_binance_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
@@ -445,6 +549,9 @@ async fn fetch_candles_for(http: &Client, exchange: &str, pair: &str) -> Option<
         "htx" => fetch_htx_candles(http, pair).await,
         "binance" => fetch_binance_candles(http, pair).await,
         "bybit" => fetch_bybit_candles(http, pair).await,
+        "bingx" => fetch_bingx_candles(http, pair).await,
+        "bitget" => fetch_bitget_candles(http, pair).await,
+        "xt" => fetch_xt_candles(http, pair).await,
         _ => Some(vec![]),
     }
 }

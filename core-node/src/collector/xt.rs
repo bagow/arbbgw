@@ -123,7 +123,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     if xt_symbols.is_empty() { return Err(anyhow::anyhow!("No XT USDT perp symbols")); }
 
     let (mut ws, _) = connect_async_tls_with_config(
-        "wss://fapi.xt.com/ws/market",
+        "wss://fstream.xt.com/ws/market",
         None, false, None,
     ).await.context("XT WS connect failed")?;
     info!("[xt] Connected, subscribing {} symbols...", xt_symbols.len());

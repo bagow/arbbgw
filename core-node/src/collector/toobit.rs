@@ -141,7 +141,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     }
 
     let (mut ws, _) = connect_async_tls_with_config(
-        "wss://stream.toobit.com/swap-market",
+        "wss://stream.toobit.com/quote/ws/v1",
         None, false, None,
     ).await.context("Toobit WS connect failed")?;
     info!("[toobit] Connected, subscribing {} symbols...", symbols.len());
@@ -151,7 +151,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     // Subscribe in chunks of 30
     for chunk in symbols.chunks(30) {
         let subs: Vec<Value> = chunk.iter().map(|s| {
-            json!({"id": format!("toobit_{}", s), "dataType": format!("MARKET.PRICE_FEED.{}", s)})
+            json!({"symbol": s, "topic": "depth", "event": "sub"})
         }).collect();
         for sub in subs {
             ws.send(Message::Text(sub.to_string().into())).await?;
@@ -165,37 +165,58 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
-                    if text.as_str() == "Pong" { continue; }
+                    if text.contains("\"ping\"") {
+                        let _ = ws.send(Message::Text(text.replace("ping", "pong"))).await;
+                        continue;
+                    }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                        let data_type = v["dataType"].as_str().unwrap_or("");
-                        if data_type.starts_with("MARKET.PRICE_FEED.") {
-                            let sym = data_type.trim_start_matches("MARKET.PRICE_FEED.");
+                        if v["topic"].as_str() == Some("depth") {
+                            let sym = v["symbol"].as_str().unwrap_or("");
                             if !sym.ends_with("USDT") { continue; }
-                            let bid: f64 = v["data"]["bidPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                            let ask: f64 = v["data"]["askPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                            let last: f64 = v["data"]["lastPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                            if bid <= 0.0 || ask <= 0.0 { continue; }
+                            
+                            let parse_levels = |key: &str| -> Vec<(f64, f64)> {
+                                v["data"][key].as_array().map(|arr| {
+                                    arr.iter().filter_map(|l| {
+                                        let px: f64 = l[0].as_str()?.parse().ok()?;
+                                        let sz: f64 = l[1].as_str()?.parse().ok()?;
+                                        Some((px, sz))
+                                    }).collect()
+                                }).unwrap_or_default()
+                            };
+                            
+                            let bids = parse_levels("b");
+                            let asks = parse_levels("a");
+                            if bids.is_empty() || asks.is_empty() { continue; }
+                            
+                            let bid = bids[0].0;
+                            let ask = asks[0].0;
                             let mid = (bid + ask) / 2.0;
+                            let bid_sz = bids[0].1 * bid;
+                            let ask_sz = asks[0].1 * ask;
                             let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                            
                             if let Some(mut ex_map) = price_map.get_mut("toobit") {
                                 if let Some(entry) = ex_map.get_mut(sym) {
                                     entry.bid = bid; entry.ask = ask;
-                                    entry.price = if last > 0.0 { last } else { mid };
+                                    entry.price = mid;
+                                    entry.bid_size = bid_sz; entry.ask_size = ask_sz;
                                     entry.last_updated = ts;
                                 } else {
                                     ex_map.insert(sym.to_string(), TickerData {
-                                        bid, ask, price: if last > 0.0 { last } else { mid },
-                                        vol: 0.0, funding_rate: 0.0, bid_size: 0.0, ask_size: 0.0,
+                                        bid, ask, price: mid,
+                                        vol: 0.0, funding_rate: 0.0, bid_size: bid_sz, ask_size: ask_sz,
                                         last_updated: ts,
                                     });
                                 }
                             }
                             let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                            let limited_bids = bids.into_iter().take(5).collect();
+                            let limited_asks = asks.into_iter().take(5).collect();
                             l2_books.insert(
                                 format!("toobit:{}", sym),
                                 crate::state::L2Snapshot {
-                                    bids: vec![(bid, 1.0)],
-                                    asks: vec![(ask, 1.0)],
+                                    bids: limited_bids,
+                                    asks: limited_asks,
                                     updated_ms: now_ms,
                                 }
                             );

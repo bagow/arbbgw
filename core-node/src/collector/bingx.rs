@@ -162,9 +162,22 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         }
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
-                Some(Ok(Message::Text(text))) => {
-                    // BingX sends "Pong" as text
-                    if text.as_str() == "Pong" { continue; }
+                Some(Ok(msg)) => {
+                    let mut text = String::new();
+                    match msg {
+                        Message::Text(t) => text = t,
+                        Message::Binary(b) => {
+                            use std::io::Read;
+                            let mut decoder = flate2::read::GzDecoder::new(&b[..]);
+                            if let Err(_) = decoder.read_to_string(&mut text) {
+                                continue;
+                            }
+                        }
+                        Message::Close(_) => break,
+                        _ => continue,
+                    }
+                    if text.is_empty() { continue; }
+                    if text == "Pong" { continue; }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let data_type = v["dataType"].as_str().unwrap_or("");
                         // MARKET.PRICE_FEED.BTC-USDT
@@ -218,8 +231,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                         }
                     }
                 }
-                Some(Ok(Message::Close(_))) | None => break,
-                Some(Err(e)) => return Err(e.into()),
+                None | Some(Err(_)) => break,
                 _ => {}
             },
             _ = ping.tick() => {
