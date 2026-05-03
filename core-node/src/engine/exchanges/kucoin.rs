@@ -113,21 +113,10 @@ impl ExchangeConnector for KucoinConnector {
             &body_str,
         );
 
-        let resp = http
-            .post(format!("https://api-futures.kucoin.com{}", path))
-            .header("KC-API-KEY", &keys.kucoin_key)
-            .header("KC-API-SIGN", sig)
-            .header("KC-API-TIMESTAMP", &ts)
-            .header("KC-API-PASSPHRASE", pass_sig)
-            .header("KC-API-KEY-VERSION", "2")
-            .header("Content-Type", "application/json")
-            .body(body_str.clone())
-            .timeout(Duration::from_millis(api_timeout_ms))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let v = super::ws_kucoin::send_kucoin_request(
+            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
+            "POST", path, &body_str, api_timeout_ms,
+        ).await?;
 
         // Diagnostic: log order request and response
         let resp_oid = v["data"]["orderId"].as_str().unwrap_or("none");
@@ -389,7 +378,10 @@ impl ExchangeConnector for KucoinConnector {
         let oid_fb = v_fb["data"]["orderId"]
             .as_str()
             .map(|s| s.to_string())
-            .ok_or_else(|| "Kucoin Fallback rejected".to_string())?;
+            .ok_or_else(|| {
+                tracing::error!("[kucoin] Fallback rejected, response: {}", v_fb);
+                "Kucoin Fallback rejected".to_string()
+            })?;
 
         for _ in 0..5 {
             if let Ok((p, f, _)) = self
@@ -447,9 +439,9 @@ impl ExchangeConnector for KucoinConnector {
             phys_excess,
             dry_run,
             1.0,
-            _fallback_price,
+            0.0,              // target_price = 0.0 (triggers aggressive L1 limit fallback)
             true,
-            0.0,
+            0.0,              // slippage_percent (not used when target_price is 0.0)
             multiplier,
             tick_size,
             15,

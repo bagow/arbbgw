@@ -12,6 +12,7 @@ pub mod traits;
 pub mod ws_trader;
 pub mod ws_bybit;
 pub mod ws_gate;
+pub mod ws_kucoin;
 
 use std::sync::Arc;
 use traits::ExchangeConnector;
