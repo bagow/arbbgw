@@ -156,8 +156,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
     #[derive(Deserialize)]
     struct KucoinData<'a> {
-        bids: Option<Vec<Vec<String>>>,
-        asks: Option<Vec<Vec<String>>>,
+        bids: Option<Vec<Vec<serde_json::Value>>>,
+        asks: Option<Vec<Vec<serde_json::Value>>>,
         symbol: Option<&'a str>,
         #[serde(
             deserialize_with = "de_opt_f64_or_str",
@@ -223,8 +223,15 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                             if let Some(raw_sym) = d.symbol {
                                 if let Some((sym, mult)) = sym_map.get(raw_sym) {
                                     if v.topic.as_deref().unwrap_or("").starts_with("/contractMarket/level2Depth5:") {
-                                        let bids: Vec<(f64, f64)> = d.bids.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse::<f64>().ok()? * mult))).collect()).unwrap_or_default();
-                                        let asks: Vec<(f64, f64)> = d.asks.as_ref().map(|arr| arr.iter().filter_map(|x| Some((x[0].parse().ok()?, x[1].parse::<f64>().ok()? * mult))).collect()).unwrap_or_default();
+                                        let parse_level = |arr: &Vec<Vec<serde_json::Value>>| -> Vec<(f64, f64)> {
+                                            arr.iter().filter_map(|x| {
+                                                let p = x.get(0)?.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| x.get(0)?.as_f64())?;
+                                                let q = x.get(1)?.as_f64().or_else(|| x.get(1)?.as_str().and_then(|s| s.parse::<f64>().ok()))?;
+                                                Some((p, q * mult))
+                                            }).collect()
+                                        };
+                                        let bids = d.bids.as_ref().map(parse_level).unwrap_or_default();
+                                        let asks = d.asks.as_ref().map(parse_level).unwrap_or_default();
                                         if !bids.is_empty() || !asks.is_empty() {
                                             let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
                                             l2_books.insert(format!("kucoin:{}", sym), crate::state::L2Snapshot { bids, asks, updated_ms: now_ms });

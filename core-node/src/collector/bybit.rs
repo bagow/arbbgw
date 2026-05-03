@@ -256,8 +256,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                             if let Some(sym) = d.s {
                                 if !sym.ends_with("USDT") { continue; }
 
-                                // L2 depth (orderbook.25) → update l2_books cache
-                                if topic.starts_with("orderbook.25.") {
+                                // L2 depth (orderbook.50) → update l2_books cache
+                                if topic.starts_with("orderbook.50.") {
                                     let type_str = v.r#type.unwrap_or("");
                                     let now_ms = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
