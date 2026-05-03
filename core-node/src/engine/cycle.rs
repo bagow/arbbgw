@@ -1132,6 +1132,7 @@ pub async fn run_cycle(
             fee_b_val = inline_fee_b;
             let mut got_b = dry_run || fill_b > 0.0;
 
+            // Fast verification loop (standard)
             for attempt in 0..ts.fill_verify_retries {
                 if got_b && actual_vol_phys_b.is_some() {
                     break;
@@ -1158,6 +1159,50 @@ pub async fn run_cycle(
                             if ev > 1e-12 {
                                 actual_vol_phys_b = Some(ev);
                                 got_b = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // SLOW verification: if order was accepted but fill not confirmed yet,
+            // give the exchange more time (MARKET orders fill in 100-500ms but REST may lag)
+            if !got_b && oid_b.is_some() && !dry_run {
+                tracing::warn!(
+                    "[real] ⏳ {}: Leg 2 orderId={} accepted but fill not yet confirmed. Extended wait...",
+                    pair, oid_b.as_deref().unwrap_or("?")
+                );
+                for slow_attempt in 0..5 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if let Some(ref oid) = oid_b {
+                        match conn_ensure_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
+                            Ok((p, f, ev)) => {
+                                if ev > 1e-12 {
+                                    actual_vol_phys_b = Some(ev);
+                                    got_b = true;
+                                    if p > 0.0 { fill_b = p; }
+                                    if f > 1e-9 { fee_b_val = f; }
+                                    tracing::info!(
+                                        "[real] ✅ {}: Leg 2 fill confirmed on slow attempt {} — qty={}, price={}",
+                                        pair, slow_attempt + 1, ev, p
+                                    );
+                                    break;
+                                }
+                                // If order returned Ok with qty=0 AND definitively unfilled (price=0, fee=0),
+                                // the exchange explicitly says it's cancelled/rejected
+                                if p == 0.0 && f == 0.0 && ev == 0.0 {
+                                    tracing::warn!(
+                                        "[real] {}: Leg 2 order definitively unfilled (returned 0,0,0) on attempt {}",
+                                        pair, slow_attempt + 1
+                                    );
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[real] {}: Leg 2 slow verify attempt {} err: {}",
+                                    pair, slow_attempt + 1, e
+                                );
                             }
                         }
                     }
@@ -1389,6 +1434,7 @@ pub async fn run_cycle(
             fee_a_val = inline_fee_a;
             let mut got_a = dry_run || fill_a > 0.0;
 
+            // Fast verification loop (standard)
             for attempt in 0..ts.fill_verify_retries {
                 if got_a && actual_vol_phys_a.is_some() {
                     break;
@@ -1415,6 +1461,47 @@ pub async fn run_cycle(
                             if ev > 1e-12 {
                                 actual_vol_phys_a = Some(ev);
                                 got_a = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // SLOW verification: if order was accepted but fill not confirmed yet
+            if !got_a && oid_a.is_some() && !dry_run {
+                tracing::warn!(
+                    "[real] ⏳ {}: Leg 2 orderId={} accepted but fill not yet confirmed. Extended wait...",
+                    pair, oid_a.as_deref().unwrap_or("?")
+                );
+                for slow_attempt in 0..5 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if let Some(ref oid) = oid_a {
+                        match conn_ensure_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
+                            Ok((p, f, ev)) => {
+                                if ev > 1e-12 {
+                                    actual_vol_phys_a = Some(ev);
+                                    got_a = true;
+                                    if p > 0.0 { fill_a = p; }
+                                    if f > 1e-9 { fee_a_val = f; }
+                                    tracing::info!(
+                                        "[real] ✅ {}: Leg 2 fill confirmed on slow attempt {} — qty={}, price={}",
+                                        pair, slow_attempt + 1, ev, p
+                                    );
+                                    break;
+                                }
+                                if p == 0.0 && f == 0.0 && ev == 0.0 {
+                                    tracing::warn!(
+                                        "[real] {}: Leg 2 order definitively unfilled (returned 0,0,0) on attempt {}",
+                                        pair, slow_attempt + 1
+                                    );
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[real] {}: Leg 2 slow verify attempt {} err: {}",
+                                    pair, slow_attempt + 1, e
+                                );
                             }
                         }
                     }
