@@ -538,13 +538,13 @@ impl ExchangeConnector for KucoinConnector {
             let status = v["data"]["status"].as_str().unwrap_or("");
             
             if size <= 0.0 {
-                if status == "done" {
-                    return Ok((0.0, 0.0, 0.0));
-                }
                 if retries > 0 {
                     retries -= 1;
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     continue;
+                }
+                if status == "done" {
+                    return Ok((0.0, 0.0, 0.0));
                 }
                 return Err("Not filled yet".to_string());
             }
