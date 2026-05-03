@@ -1,5 +1,6 @@
 /**
  * index.js – Cloudflare Worker entry point (Rust-collector mode)
+ * @version 2026-05-03 — includes /api/proxy/binance/* route
  *
  * Data flow:
  *   Rust collector → POST /api/update  → D1 (server_cache + spread_history)

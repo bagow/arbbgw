@@ -108,6 +108,41 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
 
 
+    // Split symbols into chunks of 150 to stay under Kucoin's 400 topics per WS limit
+    // 150 symbols * 2 topics (L1 + L2) = 300 topics per connection
+    
+    let sym_map = std::sync::Arc::new(sym_map);
+    let mut join_handles = Vec::new();
+    
+    for chunk in symbols.chunks(150) {
+        let chunk_symbols = chunk.to_vec();
+        let p_map = price_map.clone();
+        let sig = signal.clone();
+        let l2 = l2_books.clone();
+        let s_map = sym_map.clone();
+
+        join_handles.push(tokio::spawn(async move {
+            loop {
+                if let Err(e) = run_ws(&chunk_symbols, &p_map, &sig, &l2, &*s_map).await {
+                    tracing::warn!("[kucoin] WS chunk task error: {}. Reconnecting in 5s...", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
+            }
+        }));
+    }
+    
+    futures_util::future::join_all(join_handles).await;
+    Ok(())
+}
+
+async fn run_ws(
+    symbols: &[String],
+    price_map: &PriceMap,
+    signal: &UpdateSignal,
+    l2_books: &L2OrderbookMap,
+    sym_map: &std::collections::HashMap<String, (String, f64)>,
+) -> Result<()> {
+    let http = Client::new();
     let resp: Value = http
         .post("https://api-futures.kucoin.com/api/v1/bullet-public")
         .send()
@@ -128,7 +163,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     )
     .await
     .context("KuCoin WS connect failed")?;
-    info!("[kucoin] Connected, subscribing...");
+    
     for chunk in symbols.chunks(100) {
         let topic = format!("/contractMarket/tickerV2:{}", chunk.join(","));
         ws.send(Message::Text(json!({"id":"sub","type":"subscribe","topic":topic,"privateChannel":false,"response":true}).to_string().into())).await?;
@@ -139,7 +174,6 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         ws.send(Message::Text(json!({"id":"subL2","type":"subscribe","topic":topic_l2,"privateChannel":false,"response":true}).to_string().into())).await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
-    info!("[kucoin] Subscribed L1 tickers & L2 depth for {} symbols", symbols.len());
 
     // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
     let conn_start = std::time::Instant::now();

@@ -565,6 +565,8 @@ impl ExchangeConnector for BinanceConnector {
         let ts = now_ms();
         let qs = format!("timestamp={}", ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
+
+        // Try direct Binance first, then Cloudflare proxy on geo-block (403/418/429)
         let url = format!(
             "https://fapi.binance.com/fapi/v2/account?{}&signature={}",
             qs, sig
@@ -576,9 +578,10 @@ impl ExchangeConnector for BinanceConnector {
             .send()
             .await;
 
+        let mut used_proxy = false;
         if let Ok(ref r) = resp {
             let status = r.status().as_u16();
-            if status == 403 || status == 418 || status == 429 {
+            if status == 403 || status == 418 || status == 429 || status == 451 {
                 tracing::warn!("[binance] fetch_balances HTTP {}. Retrying via Cloudflare proxy.", status);
                 let proxy_url = format!(
                     "https://api.arb.bagow.com/api/proxy/binance/fapi/v2/account?{}&signature={}",
@@ -590,10 +593,20 @@ impl ExchangeConnector for BinanceConnector {
                     .timeout(Duration::from_secs(10))
                     .send()
                     .await;
+                used_proxy = true;
             }
         }
 
         let resp = resp.map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        if status != 200 {
+            let body_preview = resp.text().await.unwrap_or_default();
+            let src = if used_proxy { "proxy" } else { "direct" };
+            return Err(format!(
+                "Binance balance HTTP {} via {}: {}",
+                status, src, &body_preview[..body_preview.len().min(200)]
+            ));
+        }
 
         let data: BinanceBalanceAccountResponse = resp
             .json()
