@@ -166,18 +166,12 @@ impl ExchangeConnector for KucoinConnector {
 
         let mut final_price = target_price;
         if final_price <= 0.0 {
-            // 🚨 "подмена price=0.0 на агрессивный лимитный ордер"
-            let ticker_url = format!("https://api-futures.kucoin.com/api/v1/level1?symbol={}", sym);
-            if let Ok(resp) = http.get(&ticker_url).send().await {
-                if let Ok(v) = resp.json::<Value>().await {
-                    if let Some(mark) = v["data"]["price"]
-                        .as_str()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .or_else(|| v["data"]["price"].as_f64())
-                    {
-                        if mark > 0.0 {
-                            final_price = if is_buy { mark * 1.05 } else { mark * 0.95 };
-                        }
+            // Fetch mark price via transport layer
+            let ticker_path = format!("/api/v1/level1?symbol={}", sym);
+            if let Ok(v) = super::ws_kucoin::send_kucoin_public(&ticker_path).await {
+                if let Some(mark) = v["data"]["price"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v["data"]["price"].as_f64()) {
+                    if mark > 0.0 {
+                        final_price = if is_buy { mark * 1.05 } else { mark * 0.95 };
                     }
                 }
             }
@@ -258,31 +252,10 @@ impl ExchangeConnector for KucoinConnector {
             });
         }
 
-        let ts = now_ms().to_string();
-        let (sig, pass_sig) = kucoin_sign(
-            &keys.kucoin_secret,
-            &keys.kucoin_passphrase,
-            &ts,
-            "POST",
-            path,
-            &body_str,
-        );
-
-        let resp = http
-            .post(format!("https://api-futures.kucoin.com{}", path))
-            .header("KC-API-KEY", &keys.kucoin_key)
-            .header("KC-API-SIGN", sig)
-            .header("KC-API-TIMESTAMP", &ts)
-            .header("KC-API-PASSPHRASE", pass_sig)
-            .header("KC-API-KEY-VERSION", "2")
-            .header("Content-Type", "application/json")
-            .body(body_str)
-            .timeout(Duration::from_millis(api_timeout_ms))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let v_resp: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let v_resp = super::ws_kucoin::send_kucoin_request(
+            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
+            "POST", path, &body_str, api_timeout_ms,
+        ).await?;
 
         if v_resp["code"].as_str() != Some("200000") {
             tracing::error!("[kucoin] close rejected: {}", v_resp);
@@ -350,31 +323,11 @@ impl ExchangeConnector for KucoinConnector {
             })
         };
         let fb_str = fb_body.to_string();
-        let ts_fb = now_ms().to_string();
-        let (sig_fb, pass_sig_fb) = kucoin_sign(
-            &keys.kucoin_secret,
-            &keys.kucoin_passphrase,
-            &ts_fb,
-            "POST",
-            path,
-            &fb_str,
-        );
 
-        let resp_fb = http
-            .post(format!("https://api-futures.kucoin.com{}", path))
-            .header("KC-API-KEY", &keys.kucoin_key)
-            .header("KC-API-SIGN", sig_fb)
-            .header("KC-API-TIMESTAMP", &ts_fb)
-            .header("KC-API-PASSPHRASE", pass_sig_fb)
-            .header("KC-API-KEY-VERSION", "2")
-            .header("Content-Type", "application/json")
-            .body(fb_str)
-            .timeout(Duration::from_millis(api_timeout_ms))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let v_fb: Value = resp_fb.json().await.map_err(|e| e.to_string())?;
+        let v_fb = super::ws_kucoin::send_kucoin_request(
+            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
+            "POST", path, &fb_str, api_timeout_ms,
+        ).await?;
         let oid_fb = v_fb["data"]["orderId"]
             .as_str()
             .map(|s| s.to_string())
@@ -467,29 +420,10 @@ impl ExchangeConnector for KucoinConnector {
         let mut final_fee = 0.0;
 
         loop {
-            let ts = now_ms().to_string();
-            let (sig, pass_sig) = kucoin_sign(
-                &keys.kucoin_secret,
-                &keys.kucoin_passphrase,
-                &ts,
-                "GET",
-                &path,
-                "",
-            );
-
-            let resp = http
-                .get(format!("https://api-futures.kucoin.com{}", path))
-                .header("KC-API-KEY", &keys.kucoin_key)
-                .header("KC-API-SIGN", sig)
-                .header("KC-API-TIMESTAMP", &ts)
-                .header("KC-API-PASSPHRASE", pass_sig)
-                .header("KC-API-KEY-VERSION", "2")
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-
-            let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+            let v = super::ws_kucoin::send_kucoin_request(
+                &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
+                "GET", &path, "", 10000,
+            ).await?;
 
             if v["code"].as_str() != Some("200000") {
                 if retries > 0 {
@@ -559,43 +493,16 @@ impl ExchangeConnector for KucoinConnector {
         let mut fee = final_fee;
         if price > 0.0 {
             let path_fills = format!("/api/v1/fills?orderId={}", order_id);
-            let ts2 = now_ms().to_string();
-            let (sig2, pass_sig2) = kucoin_sign(
-                &keys.kucoin_secret,
-                &keys.kucoin_passphrase,
-                &ts2,
-                "GET",
-                &path_fills,
-                "",
-            );
-            if let Ok(resp2) = http
-                .get(format!("https://api-futures.kucoin.com{}", path_fills))
-                .header("KC-API-KEY", &keys.kucoin_key)
-                .header("KC-API-SIGN", sig2)
-                .header("KC-API-TIMESTAMP", &ts2)
-                .header("KC-API-PASSPHRASE", pass_sig2)
-                .header("KC-API-KEY-VERSION", "2")
-                .timeout(Duration::from_secs(5))
-                .send()
-                .await
-            {
-                if let Ok(v2) = resp2.json::<Value>().await {
-                    if let Some(items) = v2["data"]["data"]
-                        .as_array()
-                        .or_else(|| v2["data"]["items"].as_array())
-                    {
-                        let mut sum_fee = 0.0;
-                        for item in items {
-                            sum_fee += item["fee"]
-                                .as_f64()
-                                .or_else(|| item["fee"].as_str().and_then(|s| s.parse().ok()))
-                                .unwrap_or(0.0);
-                        }
-                        // Replace only if the fills endpoint yielded a real fee
-                        if sum_fee > 1e-9 {
-                            final_fee = sum_fee;
-                        }
+            if let Ok(v2) = super::ws_kucoin::send_kucoin_request(
+                &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
+                "GET", &path_fills, "", 5000,
+            ).await {
+                if let Some(items) = v2["data"]["data"].as_array().or_else(|| v2["data"]["items"].as_array()) {
+                    let mut sum_fee = 0.0;
+                    for item in items {
+                        sum_fee += item["fee"].as_f64().or_else(|| item["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
                     }
+                    if sum_fee > 1e-9 { final_fee = sum_fee; }
                 }
             }
         }
@@ -603,86 +510,24 @@ impl ExchangeConnector for KucoinConnector {
         Ok((price, final_fee, final_size * mult))
     }
 
-    async fn fetch_balances(
-        &self,
-        http: &Client,
-        keys: &ExchangeKeys,
-    ) -> Result<(f64, f64), String> {
-        let ts = now_ms().to_string();
+    async fn fetch_balances(&self, _http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
         let path = "/api/v1/account-overview?currency=USDT";
-        let (sig, pass_sig) = kucoin_sign(
-            &keys.kucoin_secret,
-            &keys.kucoin_passphrase,
-            &ts,
-            "GET",
-            path,
-            "",
-        );
-
-        let resp = http
-            .get(format!("https://api-futures.kucoin.com{}", path))
-            .header("KC-API-KEY", &keys.kucoin_key)
-            .header("KC-API-SIGN", sig)
-            .header("KC-API-TIMESTAMP", &ts)
-            .header("KC-API-PASSPHRASE", pass_sig)
-            .header("KC-API-KEY-VERSION", "2")
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let avail = v["data"]["availableBalance"]
-            .as_f64()
-            .or_else(|| {
-                v["data"]["availableBalance"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-            })
-            .unwrap_or(0.0);
-        let equity = v["data"]["accountEquity"]
-            .as_f64()
-            .or_else(|| {
-                v["data"]["accountEquity"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-            })
-            .unwrap_or(0.0);
-
+        let v = super::ws_kucoin::send_kucoin_request(
+            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
+            "GET", path, "", 10000,
+        ).await?;
+        let avail = v["data"]["availableBalance"].as_f64().or_else(|| v["data"]["availableBalance"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+        let equity = v["data"]["accountEquity"].as_f64().or_else(|| v["data"]["accountEquity"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
         Ok((equity, avail))
     }
 
-    async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
-        let ts = now_ms().to_string();
+    async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
         let path = "/api/v1/trade-fees?symbol=XBTUSDTM";
-        let (sig, pass_sig) = kucoin_sign(
-            &keys.kucoin_secret,
-            &keys.kucoin_passphrase,
-            &ts,
-            "GET",
-            path,
-            "",
-        );
-
-        let resp = http
-            .get(format!("https://api-futures.kucoin.com{}", path))
-            .header("KC-API-KEY", &keys.kucoin_key)
-            .header("KC-API-SIGN", sig)
-            .header("KC-API-TIMESTAMP", &ts)
-            .header("KC-API-PASSPHRASE", pass_sig)
-            .header("KC-API-KEY-VERSION", "2")
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let taker = v["data"]["takerFeeRate"]
-            .as_str()
-            .and_then(|s| s.parse().ok())
-            .or_else(|| v["data"]["takerFeeRate"].as_f64())
-            .unwrap_or(0.0006);
-
+        let v = super::ws_kucoin::send_kucoin_request(
+            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
+            "GET", path, "", 10000,
+        ).await?;
+        let taker = v["data"]["takerFeeRate"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["data"]["takerFeeRate"].as_f64()).unwrap_or(0.0006);
         Ok(taker)
     }
 
@@ -697,164 +542,69 @@ impl ExchangeConnector for KucoinConnector {
         Ok(())
     }
 
-    async fn get_funding_rate(&self, http: &Client, pair: &str) -> Result<(f64, i64), String> {
+    async fn get_funding_rate(&self, _http: &Client, pair: &str) -> Result<(f64, i64), String> {
         let sym = format!("{}M", pair);
-        let url = format!(
-            "https://api-futures.kucoin.com/api/v1/funding-rate/{}/current",
-            sym
-        );
-        if let Ok(resp) = http.get(&url).timeout(Duration::from_secs(5)).send().await {
-            if let Ok(json) = resp.json::<Value>().await {
-                if let Some(rate) = json["data"]["value"].as_f64() {
-                    let next = json["data"]["timePoint"].as_i64().unwrap_or(0) + 8 * 3600 * 1000;
-                    return Ok((rate, next));
-                }
+        let path = format!("/api/v1/funding-rate/{}/current", sym);
+        match super::ws_kucoin::send_kucoin_public(&path).await {
+            Ok(json) => {
+                let rate = json["data"]["value"].as_f64().unwrap_or(0.0);
+                let next = json["data"]["timePoint"].as_i64().unwrap_or(0) + 8 * 3600 * 1000;
+                Ok((rate, next))
             }
+            Err(_) => Ok((0.0, 0))
         }
-        Err("KuCoin funding rate fetch failed".to_string())
     }
 
-    async fn fetch_positions(
-        &self,
-        http: &Client,
-        keys: &ExchangeKeys,
-    ) -> Result<Vec<PositionInfo>, String> {
-        let ts = now_ms().to_string();
+    async fn fetch_positions(&self, _http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {
         let path = "/api/v1/positions";
-        let (sig, pass_sig) = kucoin_sign(
-            &keys.kucoin_secret,
-            &keys.kucoin_passphrase,
-            &ts,
-            "GET",
-            path,
-            "",
-        );
-        let resp = http
-            .get(format!("https://api-futures.kucoin.com{}", path))
-            .header("KC-API-KEY", &keys.kucoin_key)
-            .header("KC-API-SIGN", sig)
-            .header("KC-API-TIMESTAMP", &ts)
-            .header("KC-API-PASSPHRASE", pass_sig)
-            .header("KC-API-KEY-VERSION", "2")
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !resp.status().is_success() {
-            let err_txt = resp.text().await.unwrap_or_default();
-            return Err(format!("Kucoin position API error: {}", err_txt));
-        }
-
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-
+        let v = super::ws_kucoin::send_kucoin_request(
+            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
+            "GET", path, "", 10000,
+        ).await?;
         let code = v["code"].as_str().unwrap_or("");
-        if code != "200000" {
-            return Err(format!("Kucoin API returned error: {}", v));
-        }
-
+        if code != "200000" { return Err(format!("Kucoin API returned error: {}", v)); }
         let mut positions = Vec::new();
         if let Some(arr) = v["data"].as_array() {
             for p in arr {
-                let qty: f64 = p["currentQty"]
-                    .as_f64()
-                    .or_else(|| p["currentQty"].as_i64().map(|i| i as f64))
-                    .unwrap_or(0.0);
-                if qty.abs() < 1e-12 {
-                    continue;
-                }
-                // KuCoin symbol: "XBTUSDTM" → "BTCUSDT", "ETHUSDTM" → "ETHUSDT"
+                let qty: f64 = p["currentQty"].as_f64().or_else(|| p["currentQty"].as_i64().map(|i| i as f64)).unwrap_or(0.0);
+                if qty.abs() < 1e-12 { continue; }
                 let raw_sym = p["symbol"].as_str().unwrap_or("");
                 let mut std_sym = raw_sym.replace("USDTM", "USDT").replace("USDM", "USDT");
-                if std_sym == "XBTUSDT" {
-                    std_sym = "BTCUSDT".to_string();
-                }
-                let realized = p["realisedPnl"]
-                    .as_f64()
-                    .or_else(|| p["realisedPnl"].as_str().and_then(|s| s.parse().ok()))
-                    .unwrap_or(0.0);
+                if std_sym == "XBTUSDT" { std_sym = "BTCUSDT".to_string(); }
+                let realized = p["realisedPnl"].as_f64().or_else(|| p["realisedPnl"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
                 positions.push(PositionInfo {
-                    symbol: std_sym,
-                    size: qty,
-                    entry_price: p["avgEntryPrice"]
-                        .as_f64()
-                        .or_else(|| p["avgEntryPrice"].as_str().and_then(|s| s.parse().ok()))
-                        .unwrap_or(0.0),
-                    unrealized_pnl: p["unrealisedPnl"]
-                        .as_f64()
-                        .or_else(|| p["unrealisedPnl"].as_str().and_then(|s| s.parse().ok()))
-                        .unwrap_or(0.0),
-                    realized_pnl: realized,
-                    accumulated_fee: 0.0,
-                    accumulated_funding: 0.0,
+                    symbol: std_sym, size: qty,
+                    entry_price: p["avgEntryPrice"].as_f64().or_else(|| p["avgEntryPrice"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0),
+                    unrealized_pnl: p["unrealisedPnl"].as_f64().or_else(|| p["unrealisedPnl"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0),
+                    realized_pnl: realized, accumulated_fee: 0.0, accumulated_funding: 0.0,
                 });
             }
         }
         Ok(positions)
     }
 
-    async fn fetch_orderbook(
-        &self,
-        http: &Client,
-        pair: &str,
-        _depth: u32,
-    ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
+    async fn fetch_orderbook(&self, _http: &Client, pair: &str, _depth: u32) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
         let sym = format!("{}M", pair);
-        // KuCoin futures has depth20 and depth100. Let's use depth20 for speed.
-        let url = format!(
-            "https://api-futures.kucoin.com/api/v1/level2/depth20?symbol={}",
-            sym
-        );
-
-        let res = http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Kucoin depth error: {}", e))?;
-
-        let status = res.status();
-        let body = res
-            .text()
-            .await
-            .map_err(|e| format!("Body read error: {}", e))?;
-
-        if !status.is_success() {
-            return Err(format!("Kucoin API HTTP {}: {}", status, body));
-        }
-
-        let json: Value =
-            serde_json::from_str(&body).map_err(|e| format!("Kucoin Parse error: {}", e))?;
-
+        let path = format!("/api/v1/level2/depth20?symbol={}", sym);
+        let json = super::ws_kucoin::send_kucoin_public(&path).await?;
         if json["code"].as_str() != Some("200000") {
             return Err(format!("Kucoin API returned error: {}", json));
         }
-
         let parse_levels = |levels: &Value| -> Vec<(f64, f64)> {
             let mut out = Vec::new();
             if let Some(arr) = levels.as_array() {
                 for item in arr {
                     if let (Some(px_val), Some(sz_val)) = (item.get(0), item.get(1)) {
-                        // Kucoin returns numbers in arrays instead of strings sometimes, but normally arrays of arrays of numbers or strings
-                        let px = px_val
-                            .as_f64()
-                            .or_else(|| px_val.as_str().and_then(|s| s.parse().ok()));
-                        let sz = sz_val
-                            .as_f64()
-                            .or_else(|| sz_val.as_str().and_then(|s| s.parse().ok()))
-                            .or_else(|| sz_val.as_i64().map(|i| i as f64));
-
-                        if let (Some(p), Some(s)) = (px, sz) {
-                            out.push((p, s));
-                        }
+                        let px = px_val.as_f64().or_else(|| px_val.as_str().and_then(|s| s.parse().ok()));
+                        let sz = sz_val.as_f64().or_else(|| sz_val.as_str().and_then(|s| s.parse().ok())).or_else(|| sz_val.as_i64().map(|i| i as f64));
+                        if let (Some(p), Some(s)) = (px, sz) { out.push((p, s)); }
                     }
                 }
             }
             out
         };
-
         let bids = parse_levels(&json["data"]["bids"]);
         let asks = parse_levels(&json["data"]["asks"]);
-
         Ok((bids, asks))
     }
 }
