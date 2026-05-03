@@ -925,6 +925,54 @@ pub async fn run_cycle(
             continue;
         }
 
+        // ── VWAP ENTRY VERIFICATION ───────────────────────────────────────────
+        // Check that the VWAP spread (actual fill prices) is still above break-even.
+        // This prevents opening structurally loss-making positions.
+        {
+            let compute_vwap = |book: &crate::state::L2Snapshot, is_buy: bool, required_coins: f64, m: f64| -> Option<f64> {
+                let levels = if is_buy { &book.asks } else { &book.bids };
+                let mut cum_vol = 0.0;
+                let mut cum_cost = 0.0;
+                for &(px, sz) in levels {
+                    let base_sz = if m > 0.0 && m != 1.0 { sz * m } else { sz };
+                    let remaining = required_coins - cum_vol;
+                    if remaining <= 0.0 { break; }
+                    let take = if base_sz > remaining { remaining } else { base_sz };
+                    cum_vol += take;
+                    cum_cost += take * px;
+                }
+                if cum_vol >= required_coins * 0.99 {
+                    Some(cum_cost / cum_vol)
+                } else {
+                    None
+                }
+            };
+
+            if let (Some(ref ca), Some(ref cb)) = (&cached_a, &cached_b) {
+                // Entry: A = short (sell) if is_a_higher, B = long (buy) if is_a_higher
+                let vwap_a = compute_vwap(ca, !is_a_higher, qty_a, mult_a);
+                let vwap_b = compute_vwap(cb, is_a_higher, qty_b, mult_b);
+
+                if let (Some(pa), Some(pb)) = (vwap_a, vwap_b) {
+                    let vwap_spread = if is_a_higher {
+                        (pa - pb) / pb.max(1e-12) * 100.0
+                    } else {
+                        (pb - pa) / pa.max(1e-12) * 100.0
+                    };
+
+                    if vwap_spread < break_even_pct {
+                        tracing::warn!(
+                            "[real] 🛑 ABORT {}: VWAP spread {:.4}% < break-even {:.4}% (L1 spread={:.4}%). Structural loss.",
+                            pair, vwap_spread, break_even_pct, sig.spread
+                        );
+                        e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 5_000);
+                        continue;
+                    }
+                    tracing::info!("[real] ✅ VWAP entry OK {}: VWAP spread={:.4}% > BE={:.4}%", pair, vwap_spread, break_even_pct);
+                }
+            }
+        }
+
         // ── ALL CHECKS PASSED — log FIRE and execute ─────────────────────────
         info!(
             "[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}%",
