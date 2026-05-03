@@ -377,20 +377,10 @@ impl ExchangeConnector for GateConnector {
 
     async fn fetch_balances(
         &self,
-        _http: &Client,
+        http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String> {
-        use super::ws_gate::send_gate_ws_request;
-        let _ = super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "request_id": req_id,
-            "channel": "futures.account_balance",
-            "event": "api",
-            "payload": []
-        });
-        let resp = send_gate_ws_request(ws_req).await?;
-        let v = &resp["data"]["result"];
+        let v = gate_request(http, keys, "GET", "/api/v4/futures/usdt/accounts", "", "", 10_000).await?;
         let total = v["total"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v["total"].as_f64()).unwrap_or(0.0);
         let avail = v["available"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v["available"].as_f64()).unwrap_or(0.0);
         Ok((total, avail))

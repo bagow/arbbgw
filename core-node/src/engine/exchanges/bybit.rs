@@ -465,19 +465,11 @@ impl ExchangeConnector for BybitConnector {
 
     async fn fetch_balances(
         &self,
-        _http: &Client,
+        http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String> {
-        use super::ws_bybit::send_bybit_ws_request;
-        let _ = super::ws_bybit::get_or_init_bybit_ws(keys.bybit_key.clone(), keys.bybit_secret.clone());
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "reqId": req_id,
-            "header": {"X-BAPI-TIMESTAMP": now_ms().to_string(), "X-BAPI-RECV-WINDOW": "5000"},
-            "op": "wallet.balance",
-            "args": [{"accountType": "UNIFIED"}]
-        });
-        let v = send_bybit_ws_request(ws_req).await?;
+        let qs = "accountType=UNIFIED&coin=USDT";
+        let v = bybit_request(http, keys, "GET", "/v5/account/wallet-balance", qs, "", 10_000).await?;
         let coin_obj = v["data"]["list"].as_array()
             .and_then(|arr| arr.first())
             .and_then(|first| {
