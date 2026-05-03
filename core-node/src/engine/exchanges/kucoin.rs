@@ -6,7 +6,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
-use crate::engine::real::{kucoin_sign, now_ms, ExchangeKeys};
+use crate::engine::real::{now_ms, ExchangeKeys};
 
 pub struct KucoinConnector;
 
@@ -103,15 +103,6 @@ impl ExchangeConnector for KucoinConnector {
                 0.0,
             ));
         }
-
-        let (sig, pass_sig) = kucoin_sign(
-            &keys.kucoin_secret,
-            &keys.kucoin_passphrase,
-            &ts,
-            "POST",
-            path,
-            &body_str,
-        );
 
         let v = super::ws_kucoin::send_kucoin_request(
             &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
