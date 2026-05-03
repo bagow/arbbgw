@@ -198,6 +198,9 @@ impl ExchangeConnector for BinanceConnector {
         } else {
             params.insert("type".to_string(), serde_json::json!("MARKET"));
         }
+        // CRITICAL: Without RESULT, Binance WS returns ACK (status=NEW) with no fill data.
+        // With RESULT, the WS response contains the actual execution result inline.
+        params.insert("newOrderRespType".to_string(), serde_json::json!("RESULT"));
         
         let v = execute_binance_order(http, keys, &params, api_timeout_ms).await?;
 
@@ -347,6 +350,8 @@ impl ExchangeConnector for BinanceConnector {
             params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
             params.insert("price".to_string(), serde_json::json!(price_str));
         }
+        // CRITICAL: request RESULT response type so WS returns fill data inline
+        params.insert("newOrderRespType".to_string(), serde_json::json!("RESULT"));
 
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
 
@@ -354,25 +359,38 @@ impl ExchangeConnector for BinanceConnector {
         if let Err(e) = &v_resp {
             tracing::error!("[binance] normal close rejected: {}", e);
         }
-        let order_id = v_resp.ok().and_then(|v| v["orderId"].as_i64().map(|id| id.to_string()));
 
-        // Polling loop inside connector
-        if let Some(ref oid) = order_id {
-            for _ in 0..retries {
-                if let Ok((p, f, _)) = self.fetch_order(http, keys, pair, oid, multiplier).await {
-                    if p > 0.0 {
-                        return Ok(CloseReceipt {
-                            final_price: p,
-                            total_fee: f,
-                            closed_volume: phys_amount,
-                        });
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        // Extract fill data directly from WS response (no REST needed)
+        if let Ok(ref v) = v_resp {
+            let exec_qty: f64 = v["executedQty"]
+                .as_str().and_then(|s| s.parse().ok())
+                .or_else(|| v["executedQty"].as_f64())
+                .unwrap_or(0.0);
+            let avg_price: f64 = v["avgPrice"]
+                .as_str().and_then(|s| s.parse().ok())
+                .or_else(|| v["avgPrice"].as_f64())
+                .unwrap_or(0.0);
+            let cum_fee: f64 = v["cumCommission"]
+                .as_str().and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| v["cumCommission"].as_f64())
+                .unwrap_or(0.0).abs();
+            let status = v["status"].as_str().unwrap_or("?");
+
+            tracing::info!(
+                "[binance] close {} WS result: status={} execQty={} avgPrice={} fee={}",
+                pair, status, exec_qty, avg_price, cum_fee
+            );
+
+            if exec_qty > 1e-12 && avg_price > 0.0 {
+                return Ok(CloseReceipt {
+                    final_price: avg_price,
+                    total_fee: cum_fee,
+                    closed_volume: exec_qty,
+                });
             }
         }
 
-        // Fallback market close if IOC or limit failed/unverified
+        // Fallback aggressive close if IOC didn't fill
         tracing::error!(
             "[binance] fallback market close triggered for {} (qty {})",
             pair,
@@ -407,6 +425,7 @@ impl ExchangeConnector for BinanceConnector {
         fb_params.insert("quantity".to_string(), serde_json::json!(qty_str));
         fb_params.insert("reduceOnly".to_string(), serde_json::json!("true"));
         fb_params.insert("timestamp".to_string(), serde_json::json!(ts_fb));
+        fb_params.insert("newOrderRespType".to_string(), serde_json::json!("RESULT"));
         
         if !fb_price_str.is_empty() {
             fb_params.insert("price".to_string(), serde_json::json!(fb_price_str));
@@ -414,25 +433,27 @@ impl ExchangeConnector for BinanceConnector {
         }
         
         let v_fb = execute_binance_order(http, keys, &fb_params, api_timeout_ms).await.map_err(|e| format!("Fallback close rejected: {}", e))?;
-        let oid_fb = v_fb["orderId"]
-            .as_i64()
-            .map(|id| id.to_string())
-            .ok_or_else(|| "Fallback close rejected: no orderId".to_string())?;
+        
+        // Extract fill from fallback WS response
+        let fb_exec_qty: f64 = v_fb["executedQty"]
+            .as_str().and_then(|s| s.parse().ok())
+            .or_else(|| v_fb["executedQty"].as_f64())
+            .unwrap_or(0.0);
+        let fb_avg_price: f64 = v_fb["avgPrice"]
+            .as_str().and_then(|s| s.parse().ok())
+            .or_else(|| v_fb["avgPrice"].as_f64())
+            .unwrap_or(0.0);
+        let fb_fee: f64 = v_fb["cumCommission"]
+            .as_str().and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| v_fb["cumCommission"].as_f64())
+            .unwrap_or(0.0).abs();
 
-        for _ in 0..5 {
-            if let Ok((p, f, _)) = self
-                .fetch_order(http, keys, pair, &oid_fb, multiplier)
-                .await
-            {
-                if p > 0.0 {
-                    return Ok(CloseReceipt {
-                        final_price: p,
-                        total_fee: f,
-                        closed_volume: phys_amount,
-                    });
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        if fb_exec_qty > 1e-12 && fb_avg_price > 0.0 {
+            return Ok(CloseReceipt {
+                final_price: fb_avg_price,
+                total_fee: fb_fee,
+                closed_volume: fb_exec_qty,
+            });
         }
 
         // Deep verification

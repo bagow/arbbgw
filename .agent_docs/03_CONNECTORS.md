@@ -2,6 +2,13 @@
 
 Все взаимодействие с криптобиржами изолировано в коннекторах. Движок не знает ни о форматах подписи (HMAC, RSA), ни о структуре JSON-ответов бирж.
 
+> [!CAUTION]
+> 🚨 **ЗАПРЕТ REST API [ОБЯЗАТЕЛЬНО К ИСПОЛНЕНИЮ]** 🚨
+> **REST API (`http.get()`, `http.post()` к API бирж) СТРОГО ЗАПРЕЩЁН.**
+> Все операции (ордера, проверка заливки, закрытие позиций, баланс, позиции, ордербуки) должны выполняться **ИСКЛЮЧИТЕЛЬНО через WebSocket**.
+> REST блокируется Cloudflare, создаёт задержку 50-200мс, вызывает рейт-лимиты, и является **единственной причиной** "one-legged" сделок и ASYMMETRIC_CLOSE.
+> Для Binance: обязательно использовать `newOrderRespType=RESULT` чтобы WS возвращал данные заливки inline.
+
 ## 🔌 Архитектура Коннектора (`ExchangeConnector` trait)
 
 Любая биржа имплементирует единый трейт `ExchangeConnector` (находится в `core-node/src/engine/exchanges/traits.rs`). 
@@ -75,9 +82,10 @@
    Используется `OnceLock` для singleton-инициализации.
 2. **Persistent Connection**: Одно WS соединение переиспользуется для всех ордеров.
    Auto-reconnect при обрыве (бесконечный loop с задержкой).
-3. **WS Primary → REST Fallback**: Каждый `place_order()` / `close_position()` сначала 
-   пробует отправить ордер через WS. Если WS недоступен или вернул ошибку → автоматический
-   fallback на REST API. Это гарантирует zero-downtime.
+3. **WS-ONLY (NO REST FALLBACK)**: Каждый `place_order()` / `close_position()` отправляет 
+   ордер **ИСКЛЮЧИТЕЛЬНО через WS**. REST fallback **ЗАПРЕЩЁН**. Если WS недоступен или 
+   вернул ошибку → ордер считается неисполненным (fail-fast). Данные о заливке (price, fee, qty)
+   извлекаются **из WS-ответа** (`newOrderRespType=RESULT`), а не через отдельный REST-запрос.
 4. **Request Correlation**:
    - Binance: поле `id` (UUID)
    - Bybit: поле `reqId` (UUID)  
