@@ -360,15 +360,51 @@ async fn ws_shard(
                                             }).collect()
                                         }).unwrap_or_default()
                                     };
-                                    let mut bids = parse_level(&v["result"]["bids"]);
-                                    if bids.is_empty() { bids = parse_level(&v["result"]["b"]); }
-                                    let mut asks = parse_level(&v["result"]["asks"]);
-                                    if asks.is_empty() { asks = parse_level(&v["result"]["a"]); }
-                                    if !bids.is_empty() || !asks.is_empty() {
-                                        l2_books.insert(
-                                            format!("gate:{}", std_sym),
-                                            L2Snapshot { bids, asks, updated_ms: now_ms },
-                                        );
+                                    let mut new_bids = parse_level(&v["result"]["bids"]);
+                                    if new_bids.is_empty() { new_bids = parse_level(&v["result"]["b"]); }
+                                    let mut new_asks = parse_level(&v["result"]["asks"]);
+                                    if new_asks.is_empty() { new_asks = parse_level(&v["result"]["a"]); }
+                                    
+                                    if !new_bids.is_empty() || !new_asks.is_empty() {
+                                        let key = format!("gate:{}", std_sym);
+                                        if event == "all" || !l2_books.contains_key(&key) {
+                                            l2_books.insert(
+                                                key,
+                                                L2Snapshot { bids: new_bids, asks: new_asks, updated_ms: now_ms },
+                                            );
+                                        } else {
+                                            if let Some(mut book) = l2_books.get_mut(&key) {
+                                                // Apply bids
+                                                for (p, q) in new_bids {
+                                                    if q == 0.0 {
+                                                        book.bids.retain(|&(bp, _)| (bp - p).abs() > 1e-8);
+                                                    } else {
+                                                        if let Some(idx) = book.bids.iter().position(|&(bp, _)| (bp - p).abs() <= 1e-8) {
+                                                            book.bids[idx].1 = q;
+                                                        } else {
+                                                            book.bids.push((p, q));
+                                                        }
+                                                    }
+                                                }
+                                                book.bids.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                                                
+                                                // Apply asks
+                                                for (p, q) in new_asks {
+                                                    if q == 0.0 {
+                                                        book.asks.retain(|&(ap, _)| (ap - p).abs() > 1e-8);
+                                                    } else {
+                                                        if let Some(idx) = book.asks.iter().position(|&(ap, _)| (ap - p).abs() <= 1e-8) {
+                                                            book.asks[idx].1 = q;
+                                                        } else {
+                                                            book.asks.push((p, q));
+                                                        }
+                                                    }
+                                                }
+                                                book.asks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                                                
+                                                book.updated_ms = now_ms;
+                                            }
+                                        }
                                     }
                                 }
                             }
