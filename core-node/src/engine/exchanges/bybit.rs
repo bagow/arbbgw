@@ -522,7 +522,7 @@ impl ExchangeConnector for BybitConnector {
 
         let order = match order {
             Some(o) => o,
-            None => return Ok((0.0, 0.0, 0.0)),
+            None => return Err("Order not found in API yet".to_string()),
         };
 
         // Check order status — if Cancelled/Rejected/Deactivated, but might have partial fill!
