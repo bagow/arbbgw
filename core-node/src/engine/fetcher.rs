@@ -17,7 +17,7 @@ pub fn start_balance_fetcher(
     settings: Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     tokio::spawn(async move {
-        let fast_interval_ms = 2_000u64;
+        let fast_interval_ms = 5_000u64;
         let normal_interval_s = 25u64;
         let all_exchanges = [
             "binance", "gate", "kucoin", "bybit", "bitget",

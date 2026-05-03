@@ -467,74 +467,104 @@ impl ExchangeConnector for KucoinConnector {
         order_id: &str,
         multiplier: f64,
     ) -> Result<(f64, f64, f64), String> {
-        let ts = now_ms().to_string();
         let path = format!("/api/v1/orders/{}", order_id);
-        let (sig, pass_sig) = kucoin_sign(
-            &keys.kucoin_secret,
-            &keys.kucoin_passphrase,
-            &ts,
-            "GET",
-            &path,
-            "",
-        );
+        
+        let mut retries = 5;
+        let mut final_size = 0.0;
+        let mut final_val = 0.0;
+        let mut final_fee = 0.0;
 
-        let resp = http
-            .get(format!("https://api-futures.kucoin.com{}", path))
-            .header("KC-API-KEY", &keys.kucoin_key)
-            .header("KC-API-SIGN", sig)
-            .header("KC-API-TIMESTAMP", &ts)
-            .header("KC-API-PASSPHRASE", pass_sig)
-            .header("KC-API-KEY-VERSION", "2")
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+        loop {
+            let ts = now_ms().to_string();
+            let (sig, pass_sig) = kucoin_sign(
+                &keys.kucoin_secret,
+                &keys.kucoin_passphrase,
+                &ts,
+                "GET",
+                &path,
+                "",
+            );
 
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+            let resp = http
+                .get(format!("https://api-futures.kucoin.com{}", path))
+                .header("KC-API-KEY", &keys.kucoin_key)
+                .header("KC-API-SIGN", sig)
+                .header("KC-API-TIMESTAMP", &ts)
+                .header("KC-API-PASSPHRASE", pass_sig)
+                .header("KC-API-KEY-VERSION", "2")
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
 
-        let size = v["data"]["dealSize"]
-            .as_f64()
-            .or_else(|| v["data"]["filledSize"].as_f64())
-            .or_else(|| v["data"]["dealSize"].as_str().and_then(|s| s.parse().ok()))
-            .or_else(|| {
-                v["data"]["filledSize"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-            })
-            .unwrap_or(0.0);
-        let val = v["data"]["dealValue"]
-            .as_f64()
-            .or_else(|| v["data"]["filledValue"].as_f64())
-            .or_else(|| v["data"]["dealValue"].as_str().and_then(|s| s.parse().ok()))
-            .or_else(|| {
-                v["data"]["filledValue"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-            })
-            .unwrap_or(0.0);
-        let fee = v["data"]["fee"]
-            .as_f64()
-            .or_else(|| v["data"]["fee"].as_str().and_then(|s| s.parse().ok()))
-            .unwrap_or(0.0);
+            let v: Value = resp.json().await.map_err(|e| e.to_string())?;
 
-        let status = v["data"]["status"].as_str().unwrap_or("");
-        if size <= 0.0 {
-            if status == "done" {
-                return Ok((0.0, 0.0, 0.0));
+            if v["code"].as_str() != Some("200000") {
+                if retries > 0 {
+                    retries -= 1;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+                return Err(format!("Kucoin fetch_order error: {}", v));
             }
-            return Err("Not filled yet".to_string());
+
+            let size = v["data"]["dealSize"]
+                .as_f64()
+                .or_else(|| v["data"]["filledSize"].as_f64())
+                .or_else(|| v["data"]["dealSize"].as_str().and_then(|s| s.parse().ok()))
+                .or_else(|| {
+                    v["data"]["filledSize"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                })
+                .unwrap_or(0.0);
+            
+            let val = v["data"]["dealValue"]
+                .as_f64()
+                .or_else(|| v["data"]["filledValue"].as_f64())
+                .or_else(|| v["data"]["dealValue"].as_str().and_then(|s| s.parse().ok()))
+                .or_else(|| {
+                    v["data"]["filledValue"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                })
+                .unwrap_or(0.0);
+            
+            let fee = v["data"]["fee"]
+                .as_f64()
+                .or_else(|| v["data"]["fee"].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0.0);
+
+            let status = v["data"]["status"].as_str().unwrap_or("");
+            
+            if size <= 0.0 {
+                if status == "done" {
+                    return Ok((0.0, 0.0, 0.0));
+                }
+                if retries > 0 {
+                    retries -= 1;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+                return Err("Not filled yet".to_string());
+            }
+
+            final_size = size;
+            final_val = val;
+            final_fee = fee;
+            break;
         }
 
         // Note: KuCoin multiplier is dynamically passed to correctly compute price
         let mult = if multiplier > 0.0 { multiplier } else { 1.0 };
 
-        let price = if size > 0.0 && mult > 0.0 {
-            val / (size * mult)
+        let price = if final_size > 0.0 && mult > 0.0 {
+            final_val / (final_size * mult)
         } else {
             0.0
         };
 
-        let mut final_fee = fee;
+        let mut fee = final_fee;
         if price > 0.0 {
             let path_fills = format!("/api/v1/fills?orderId={}", order_id);
             let ts2 = now_ms().to_string();

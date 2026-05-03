@@ -591,14 +591,15 @@ impl ExchangeConnector for BybitConnector {
 
         let mut v: Value = resp1.json().await.map_err(|e| e.to_string())?;
 
-        // If the account is a Classic/Standard account, retCode will be 10001 or list empty
         let ret_code = v["retCode"].as_i64().unwrap_or(-1);
-        if ret_code != 0
-            || v["result"]["list"]
-                .as_array()
-                .map(|a| a.is_empty())
-                .unwrap_or(true)
-        {
+        let list_empty = v["result"]["list"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true);
+        
+        let should_fallback = ret_code == 10001 || ret_code == 140022 || (ret_code == 0 && list_empty);
+
+        if should_fallback {
             // 2. Fallback to CONTRACT (Classic Account)
             let qs2 = "accountType=CONTRACT";
             let sig2 = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs2);
