@@ -102,6 +102,9 @@ impl ExchangeConnector for BitmexConnector {
         if dry_run {
             return Ok((Some(format!("dry_bitmex_{}", now_ms())), 0.0, 0.0));
         }
+
+        super::ws_bitmex_private::ensure_private_ws(&keys.bitmex_key, &keys.bitmex_secret).await;
+
         let sym = to_bitmex_symbol(pair);
         let side = if is_buy { "Buy" } else { "Sell" };
         let slip = slippage_percent / 100.0;
@@ -157,6 +160,9 @@ impl ExchangeConnector for BitmexConnector {
         if dry_run {
             return Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: 0.0 });
         }
+
+        super::ws_bitmex_private::ensure_private_ws(&keys.bitmex_key, &keys.bitmex_secret).await;
+
         let sym = to_bitmex_symbol(pair);
         // BitMEX "Close" instruction closes the entire position
         let body = serde_json::json!({
@@ -210,6 +216,26 @@ impl ExchangeConnector for BitmexConnector {
         _multiplier: f64,
     ) -> Result<(f64, f64, f64), String> {
         if order_id.starts_with("dry_") { return Ok((0.0, 0.0, 0.0)); }
+        
+        // 1. Fast path: Wait for WS execution report (up to 1000ms)
+        let cache = super::ws_bitmex_private::get_order_cache();
+        for _ in 0..50 {
+            if let Some(state) = cache.get(order_id) {
+                if state.status == "Filled" || state.status == "PartiallyFilled" || state.status == "Canceled" || state.cum_qty > 0.0 {
+                    tracing::debug!("[bitmex] fetch_order {} resolved via WS in <1s!", order_id);
+                    let fee = state.fee;
+                    let filled = state.cum_qty;
+                    let avg_price = state.avg_px;
+                    if filled < 1e-12 && state.status == "Canceled" {
+                        return Ok((0.0, 0.0, 0.0));
+                    }
+                    return Ok((avg_price, fee, filled));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // 2. Slow path: Fallback to REST API
         let sym = to_bitmex_symbol(pair);
         let path = format!("/api/v1/order?filter={{\"orderID\":\"{}\",\"symbol\":\"{}\"}}", order_id, sym);
         let v = bitmex_request(http, keys, "GET", &path, "", 10_000).await?;
