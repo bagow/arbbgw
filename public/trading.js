@@ -1573,7 +1573,7 @@ window.fetchLogs = async function(isBackground = false) {
     
     try {
         const creds = localStorage.getItem('cex_auth') || '';
-        const res = await fetch('/api/logs/core-node', {
+        const res = await fetch(`${API_BASE}/api/logs/core-node`, {
             headers: { 'Authorization': 'Basic ' + creds }
         });
         if (res.status === 401) throw new Error("Unauthorized");
