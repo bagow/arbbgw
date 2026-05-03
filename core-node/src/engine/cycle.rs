@@ -861,17 +861,28 @@ pub async fn run_cycle(
 
         let analyze_depth = |ob_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>,
                              is_buy: bool,
-                             limit_price: f64|
+                             limit_price: f64,
+                             slippage_pct: f64|
          -> f64 {
             if let Ok((bids, asks)) = ob_res {
                 let levels = if is_buy { asks } else { bids };
                 let mut cum_vol = 0.0;
+                let actual_limit = if limit_price > 0.0 {
+                    if is_buy {
+                        limit_price * (1.0 + slippage_pct / 100.0)
+                    } else {
+                        limit_price * (1.0 - slippage_pct / 100.0)
+                    }
+                } else {
+                    0.0
+                };
+                
                 for (px, sz) in levels {
-                    if limit_price > 0.0 {
-                        if is_buy && px > limit_price {
+                    if actual_limit > 0.0 {
+                        if is_buy && px > actual_limit {
                             continue;
                         }
-                        if !is_buy && px < limit_price {
+                        if !is_buy && px < actual_limit {
                             continue;
                         }
                     }
@@ -883,8 +894,8 @@ pub async fn run_cycle(
             }
         };
 
-        let depth_a = analyze_depth(ob_a_res, !is_a_higher, limit_price_a);
-        let depth_b = analyze_depth(ob_b_res, is_a_higher, limit_price_b);
+        let depth_a = analyze_depth(ob_a_res, !is_a_higher, limit_price_a, settings.slippage_percent);
+        let depth_b = analyze_depth(ob_b_res, is_a_higher, limit_price_b, settings.slippage_percent);
 
         if depth_a < qty_a || depth_b < qty_b {
             tracing::warn!("[real] 🛑 ABORT {}: Insufficient L2 depth! req A={} (has {:.2}), req B={} (has {:.2})", pair, qty_a, depth_a, qty_b, depth_b);
