@@ -219,8 +219,12 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(v) = serde_json::from_str::<KucoinMsg>(&text) {
                         if v.msg_type != "message" { continue; }
+                        let topic = v.topic.as_deref().unwrap_or("");
+                        let raw_sym_from_topic = topic.split(':').nth(1);
+                        
                         if let Some(d) = v.data {
-                            if let Some(raw_sym) = d.symbol {
+                            let raw_sym = d.symbol.or(raw_sym_from_topic);
+                            if let Some(raw_sym) = raw_sym {
                                 if let Some((sym, mult)) = sym_map.get(raw_sym) {
                                     if v.topic.as_deref().unwrap_or("").starts_with("/contractMarket/level2Depth5:") {
                                         let parse_level = |arr: &Vec<Vec<serde_json::Value>>| -> Vec<(f64, f64)> {
