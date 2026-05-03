@@ -1083,7 +1083,7 @@ pub fn start_multiplier_fetcher(
                 }
 
                 if let Ok(resp) = http
-                    .get("https://ascendex.com/api/pro/v1/futures/contracts")
+                    .get("https://ascendex.com/api/pro/v2/futures/contract")
                     .send()
                     .await
                 {

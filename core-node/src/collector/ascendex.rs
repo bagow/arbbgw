@@ -60,7 +60,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     let mut ws_symbols: Vec<String> = Vec::new(); // "BTC-PERP" format for WS
     let mut sym_map: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // "BTC-PERP" → "BTCUSDT"
     if let Ok(resp) = http
-        .get("https://ascendex.com/api/pro/v1/futures/contracts")
+        .get("https://ascendex.com/api/pro/v2/futures/contract")
         .timeout(Duration::from_secs(15))
         .send().await
     {
