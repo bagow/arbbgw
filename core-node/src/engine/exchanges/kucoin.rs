@@ -175,25 +175,51 @@ impl ExchangeConnector for KucoinConnector {
 
         let lev_str = (leverage.max(1.0) as i64).to_string();
 
-        let price = if is_buy {
-            target_price * (1.0 + slippage_percent / 100.0)
+        let mut final_price = target_price;
+        if final_price <= 0.0 {
+            // 🚨 "подмена price=0.0 на агрессивный лимитный ордер"
+            let ticker_url = format!("https://api-futures.kucoin.com/api/v1/level1?symbol={}", sym);
+            if let Ok(resp) = http.get(&ticker_url).send().await {
+                if let Ok(v) = resp.json::<Value>().await {
+                    if let Some(mark) = v["data"]["price"]
+                        .as_str()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .or_else(|| v["data"]["price"].as_f64())
+                    {
+                        if mark > 0.0 {
+                            final_price = if is_buy { mark * 1.05 } else { mark * 0.95 };
+                        }
+                    }
+                }
+            }
+        }
+
+        let price = if final_price > 0.0 {
+            if is_buy {
+                final_price * (1.0 + slippage_percent / 100.0)
+            } else {
+                final_price * (1.0 - slippage_percent / 100.0)
+            }
         } else {
-            target_price * (1.0 - slippage_percent / 100.0)
-        };
-        let rounded_price = if is_buy {
-            (price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
-        } else {
-            (price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+            0.0
         };
 
-        let mut price_str = format!("{:.8}", rounded_price)
-            .trim_end_matches('0')
-            .to_string();
-        if price_str.ends_with('.') {
-            price_str.pop();
-        }
-        if price_str.is_empty() {
-            price_str = "0".to_string();
+        let mut price_str = "".to_string();
+        if price > 0.0 {
+            let rounded_price = if is_buy {
+                (price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+            } else {
+                (price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+            };
+            let mut s = format!("{:.8}", rounded_price)
+                .trim_end_matches('0')
+                .to_string();
+            if s.ends_with('.') {
+                s.pop();
+            }
+            if !s.is_empty() && s != "0" {
+                price_str = s;
+            }
         }
 
         let req_size = if multiplier == 0.0 {
@@ -205,14 +231,14 @@ impl ExchangeConnector for KucoinConnector {
             return Err("Amount too small to close".to_string());
         }
 
-        let body_json = if use_ioc && target_price > 0.0 {
+        let is_market = price_str.is_empty();
+
+        let body_json = if is_market {
             json!({
                 "clientOid": Uuid::new_v4().to_string(),
                 "symbol": sym,
                 "side": side,
-                "type": "limit",
-                "timeInForce": "IOC",
-                "price": price_str,
+                "type": "market",
                 "size": req_size,
                 "leverage": lev_str,
                 "marginMode": "CROSS",
@@ -223,7 +249,9 @@ impl ExchangeConnector for KucoinConnector {
                 "clientOid": Uuid::new_v4().to_string(),
                 "symbol": sym,
                 "side": side,
-                "type": "market",
+                "type": "limit",
+                "timeInForce": "IOC",
+                "price": price_str,
                 "size": req_size,
                 "leverage": lev_str,
                 "marginMode": "CROSS",
@@ -288,13 +316,13 @@ impl ExchangeConnector for KucoinConnector {
         }
 
         tracing::error!(
-            "[kucoin] fallback market close triggered for {} (qty {})",
+            "[kucoin] fallback close triggered for {} (qty {})",
             pair,
             phys_amount
         );
         let mut fb_price_str = "".to_string();
-        if target_price > 0.0 {
-            let p = if is_buy { target_price * 1.02 } else { target_price * 0.98 };
+        if final_price > 0.0 {
+            let p = if is_buy { final_price * 1.02 } else { final_price * 0.98 };
             let rp = if is_buy {
                 (p / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
             } else {
@@ -419,9 +447,9 @@ impl ExchangeConnector for KucoinConnector {
             phys_excess,
             dry_run,
             1.0,
-            0.0,
-            false,
             _fallback_price,
+            true,
+            0.0,
             multiplier,
             tick_size,
             15,
@@ -491,7 +519,7 @@ impl ExchangeConnector for KucoinConnector {
 
         let status = v["data"]["status"].as_str().unwrap_or("");
         if size <= 0.0 {
-            if status == "done" || status == "match" {
+            if status == "done" {
                 return Ok((0.0, 0.0, 0.0));
             }
             return Err("Not filled yet".to_string());
