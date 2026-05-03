@@ -505,25 +505,45 @@ impl ExchangeConnector for BybitConnector {
         let ts = now_ms().to_string();
         let recv = "5000";
 
+        let try_fetch = |account_type: &str| async move {
+            let qs = format!("accountType={}", account_type);
+            let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
+            
+            // Try api.bybit.com
+            let mut url = format!("https://api.bybit.com/v5/account/wallet-balance?{}", qs);
+            let mut resp = http.get(&url)
+                .header("X-BAPI-API-KEY", &keys.bybit_key)
+                .header("X-BAPI-SIGN", &sig)
+                .header("X-BAPI-TIMESTAMP", &ts)
+                .header("X-BAPI-RECV-WINDOW", recv)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await;
+                
+            // Fallback to proxy if failed or Cloudflare block
+            if resp.is_err() || resp.as_ref().map(|r| !r.status().is_success()).unwrap_or(false) {
+                tracing::warn!("[bybit] fetch_balances ({}): api.bybit.com failed, trying proxy...", account_type);
+                url = format!("https://api.codetabs.com/v1/proxy/?quest=https://api.bybit.com/v5/account/wallet-balance?{}", qs);
+                resp = http.get(&url)
+                    .header("X-BAPI-API-KEY", &keys.bybit_key)
+                    .header("X-BAPI-SIGN", &sig)
+                    .header("X-BAPI-TIMESTAMP", &ts)
+                    .header("X-BAPI-RECV-WINDOW", recv)
+                    .timeout(Duration::from_secs(8))
+                    .send()
+                    .await;
+            }
+            
+            let r = resp.map_err(|e| e.to_string())?;
+            let v: Value = r.json().await.map_err(|e| format!("Failed to parse Bybit JSON: {}", e))?;
+            Ok::<Value, String>(v)
+        };
+
         // 1. Try UNIFIED (Unified Trading Account)
-        let qs1 = "accountType=UNIFIED";
-        let sig1 = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs1);
-
-        let resp1 = http
-            .get(format!(
-                "https://api.bybit.com/v5/account/wallet-balance?{}",
-                qs1
-            ))
-            .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-SIGN", &sig1)
-            .header("X-BAPI-TIMESTAMP", &ts)
-            .header("X-BAPI-RECV-WINDOW", recv)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let mut v: Value = resp1.json().await.map_err(|e| e.to_string())?;
+        let mut v = match try_fetch("UNIFIED").await {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        };
 
         let ret_code = v["retCode"].as_i64().unwrap_or(-1);
         let list_empty = v["result"]["list"]
@@ -535,24 +555,7 @@ impl ExchangeConnector for BybitConnector {
 
         if should_fallback {
             // 2. Fallback to CONTRACT (Classic Account)
-            let qs2 = "accountType=CONTRACT";
-            let sig2 = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs2);
-
-            let resp2 = http
-                .get(format!(
-                    "https://api.bybit.com/v5/account/wallet-balance?{}",
-                    qs2
-                ))
-                .header("X-BAPI-API-KEY", &keys.bybit_key)
-                .header("X-BAPI-SIGN", &sig2)
-                .header("X-BAPI-TIMESTAMP", &ts)
-                .header("X-BAPI-RECV-WINDOW", recv)
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-
-            v = resp2.json().await.map_err(|e| e.to_string())?;
+            v = try_fetch("CONTRACT").await?;
         }
 
         let coin_obj = v["result"]["list"]
@@ -693,23 +696,36 @@ impl ExchangeConnector for BybitConnector {
                 qs.push_str(&format!("&cursor={}", cursor));
             }
             let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
-            let resp = http
-                .get(format!("https://api.bybit.com/v5/position/list?{}", qs))
+            
+            let mut url = format!("https://api.bybit.com/v5/position/list?{}", qs);
+            let mut resp = http.get(&url)
                 .header("X-BAPI-API-KEY", &keys.bybit_key)
                 .header("X-BAPI-SIGN", &sig)
                 .header("X-BAPI-TIMESTAMP", &ts)
                 .header("X-BAPI-RECV-WINDOW", recv)
-                .timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(5))
                 .send()
-                .await
-                .map_err(|e| e.to_string())?;
+                .await;
 
-            if !resp.status().is_success() {
-                let err_txt = resp.text().await.unwrap_or_default();
-                return Err(format!("Bybit position API error: {}", err_txt));
+            if resp.is_err() || resp.as_ref().map(|r| !r.status().is_success()).unwrap_or(false) {
+                tracing::warn!("[bybit] fetch_positions: api.bybit.com failed, trying proxy...");
+                url = format!("https://api.codetabs.com/v1/proxy/?quest=https://api.bybit.com/v5/position/list?{}", qs);
+                resp = http.get(&url)
+                    .header("X-BAPI-API-KEY", &keys.bybit_key)
+                    .header("X-BAPI-SIGN", &sig)
+                    .header("X-BAPI-TIMESTAMP", &ts)
+                    .header("X-BAPI-RECV-WINDOW", recv)
+                    .timeout(Duration::from_secs(8))
+                    .send()
+                    .await;
             }
 
-            let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+            let r = match resp {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Bybit position API request failed: {}", e)),
+            };
+
+            let v: Value = r.json().await.map_err(|e| format!("Failed to parse Bybit position JSON: {}", e))?;
 
             if v["retCode"].as_i64().unwrap_or(-1) != 0 {
                 return Err(format!("Bybit API returned error: {}", v));
