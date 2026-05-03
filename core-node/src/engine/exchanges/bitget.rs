@@ -227,6 +227,8 @@ impl ExchangeConnector for BitgetConnector {
             });
         }
 
+        super::ws_bitget_private::ensure_private_ws(&keys.bitget_key, &keys.bitget_secret, &keys.bitget_passphrase).await;
+
         let side = if is_buy { "buy" } else { "sell" };
         let trade_side = "close";
 
@@ -379,6 +381,25 @@ impl ExchangeConnector for BitgetConnector {
             return Ok((0.0, 0.0, 0.0));
         }
 
+        // 1. Fast path: Wait for WS execution report (up to 1000ms)
+        let cache = super::ws_bitget_private::get_order_cache();
+        for _ in 0..50 {
+            if let Some(state) = cache.get(order_id) {
+                if state.status == "filled" || state.status == "canceled" || state.base_volume > 0.0 {
+                    tracing::debug!("[bitget] fetch_order {} resolved via WS in <1s!", order_id);
+                    let fee = state.fee;
+                    let filled = state.base_volume;
+                    let avg_price = state.price_avg;
+                    if filled < 1e-12 && (state.status == "canceled" || state.status == "expired") {
+                        return Ok((0.0, 0.0, 0.0));
+                    }
+                    return Ok((avg_price, fee, filled));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // 2. Slow path: Fallback to REST API
         let path = format!(
             "/api/v2/mix/order/detail?symbol={}&productType=USDT-FUTURES&orderId={}",
             pair, order_id
