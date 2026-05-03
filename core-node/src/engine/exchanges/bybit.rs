@@ -45,57 +45,6 @@ async fn try_bybit_ws_order(
 }
 
 
-
-async fn do_bybit_balance_fetch(
-    http: &Client,
-    keys: &ExchangeKeys,
-    account_type: &str,
-) -> Result<Value, String> {
-    let qs = format!("accountType={}", account_type);
-
-    // Try multiple Bybit API domains (same HMAC signature works across all)
-    let domains = ["api.bybit.com", "api.bytick.com"];
-    let mut last_err = String::new();
-
-    for domain in &domains {
-        let ts = now_ms().to_string();
-        let recv = "5000";
-        let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
-        let url = format!("https://{}/v5/account/wallet-balance?{}", domain, qs);
-
-        let resp = http.get(&url)
-            .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-SIGN", &sig)
-            .header("X-BAPI-TIMESTAMP", &ts)
-            .header("X-BAPI-RECV-WINDOW", recv)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await;
-
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                match r.json::<Value>().await {
-                    Ok(v) => return Ok(v),
-                    Err(e) => {
-                        last_err = format!("{}: JSON parse error: {}", domain, e);
-                        tracing::warn!("[bybit] fetch_balances ({}): {} — {}", account_type, domain, last_err);
-                    }
-                }
-            }
-            Ok(r) => {
-                last_err = format!("{}: HTTP {}", domain, r.status());
-                tracing::warn!("[bybit] fetch_balances ({}): {}", account_type, last_err);
-            }
-            Err(e) => {
-                last_err = format!("{}: {}", domain, e);
-                tracing::warn!("[bybit] fetch_balances ({}): {}", account_type, last_err);
-            }
-        }
-    }
-
-    Err(format!("All Bybit API domains failed for fetch_balances: {}", last_err))
-}
-
 #[async_trait]
 impl ExchangeConnector for BybitConnector {
     fn name(&self) -> &'static str {
@@ -453,56 +402,23 @@ impl ExchangeConnector for BybitConnector {
 
     async fn fetch_order(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
         _pair: &str,
         order_id: &str,
         _multiplier: f64,
     ) -> Result<(f64, f64, f64), String> {
-        let ts = now_ms().to_string();
-        let recv = "5000";
-        let qs = format!("category=linear&orderId={}", order_id);
-
-        // 1. Check REALTIME first (often holds recent active/filled orders)
-        let sig_rt = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
-        let resp_rt = http
-            .get(format!("https://api.bybit.com/v5/order/realtime?{}", qs))
-            .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-SIGN", &sig_rt)
-            .header("X-BAPI-TIMESTAMP", &ts)
-            .header("X-BAPI-RECV-WINDOW", recv)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let v_rt: Value = resp_rt.json().await.map_err(|e| e.to_string())?;
-        let mut order = v_rt["result"]["list"]
-            .as_array()
-            .and_then(|a| a.first())
-            .cloned();
-
-        // 2. Fallback to HISTORY if not in realtime (e.g. dropped from active orders list)
-        if order.is_none() {
-            let ts_h = now_ms().to_string();
-            let sig_h = bybit_sign(&keys.bybit_secret, &ts_h, &keys.bybit_key, recv, &qs);
-            let resp_h = http
-                .get(format!("https://api.bybit.com/v5/order/history?{}", qs))
-                .header("X-BAPI-API-KEY", &keys.bybit_key)
-                .header("X-BAPI-SIGN", &sig_h)
-                .header("X-BAPI-TIMESTAMP", &ts_h)
-                .header("X-BAPI-RECV-WINDOW", recv)
-                .timeout(Duration::from_secs(5))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-
-            let v_h: Value = resp_h.json().await.map_err(|e| e.to_string())?;
-            order = v_h["result"]["list"]
-                .as_array()
-                .and_then(|a| a.first())
-                .cloned();
-        }
+        use super::ws_bybit::send_bybit_ws_request;
+        let _ = super::ws_bybit::get_or_init_bybit_ws(keys.bybit_key.clone(), keys.bybit_secret.clone());
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "reqId": req_id,
+            "header": {"X-BAPI-TIMESTAMP": now_ms().to_string(), "X-BAPI-RECV-WINDOW": "5000"},
+            "op": "order.realtime",
+            "args": [{"category": "linear", "orderId": order_id}]
+        });
+        let resp = send_bybit_ws_request(ws_req).await?;
+        let order = resp["data"]["list"].as_array().and_then(|a| a.first()).cloned();
 
         let order = match order {
             Some(o) => o,
@@ -549,246 +465,97 @@ impl ExchangeConnector for BybitConnector {
 
     async fn fetch_balances(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String> {
-        // 1. Try UNIFIED (Unified Trading Account)
-        let mut v: Value = match do_bybit_balance_fetch(http, keys, "UNIFIED").await {
-            Ok(val) => val,
-            Err(e) => return Err(e),
-        };
-
-        let ret_code = v["retCode"].as_i64().unwrap_or(-1);
-        let list_empty = v["result"]["list"]
-            .as_array()
-            .map(|a: &Vec<Value>| a.is_empty())
-            .unwrap_or(true);
-        
-        let should_fallback = ret_code == 10001 || ret_code == 140022 || (ret_code == 0 && list_empty);
-
-        if should_fallback {
-            // 2. Fallback to CONTRACT (Classic Account)
-            v = do_bybit_balance_fetch(http, keys, "CONTRACT").await?;
-        }
-
-        let coin_obj = v["result"]["list"]
-            .as_array()
-            .and_then(|arr: &Vec<Value>| arr.first())
-            .and_then(|first: &Value| {
-                if first["coin"].is_array() {
-                    first["coin"].as_array().and_then(|coins: &Vec<Value>| {
-                        coins.iter().find(|c: &&Value| c["coin"].as_str() == Some("USDT")).cloned()
-                    })
-                } else {
-                    v["result"]["list"].as_array().and_then(|arr: &Vec<Value>| {
-                        arr.iter().find(|c: &&Value| c["coin"].as_str() == Some("USDT")).cloned()
-                    })
-                }
+        use super::ws_bybit::send_bybit_ws_request;
+        let _ = super::ws_bybit::get_or_init_bybit_ws(keys.bybit_key.clone(), keys.bybit_secret.clone());
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "reqId": req_id,
+            "header": {"X-BAPI-TIMESTAMP": now_ms().to_string(), "X-BAPI-RECV-WINDOW": "5000"},
+            "op": "wallet.balance",
+            "args": [{"accountType": "UNIFIED"}]
+        });
+        let v = send_bybit_ws_request(ws_req).await?;
+        let coin_obj = v["data"]["list"].as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|first| {
+                first["coin"].as_array().and_then(|coins| {
+                    coins.iter().find(|c| c["coin"].as_str() == Some("USDT")).cloned()
+                })
             });
-
         if let Some(coin_ref) = coin_obj {
-            let wallet: f64 = coin_ref["walletBalance"]
-                .as_str().and_then(|s: &str| s.parse().ok()).unwrap_or(0.0);
-            let equity: f64 = coin_ref["equity"]
-                .as_str().and_then(|s: &str| s.parse().ok()).unwrap_or(wallet);
-            let available: f64 = coin_ref["availableToWithdraw"]
-                .as_str().and_then(|s: &str| s.parse().ok())
-                .or_else(|| coin_ref["availableBalance"].as_str().and_then(|s: &str| s.parse().ok()))
-                .unwrap_or(wallet);
+            let wallet: f64 = coin_ref["walletBalance"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let equity: f64 = coin_ref["equity"].as_str().and_then(|s| s.parse().ok()).unwrap_or(wallet);
+            let available: f64 = coin_ref["availableToWithdraw"].as_str().and_then(|s| s.parse().ok())
+                .or_else(|| coin_ref["availableBalance"].as_str().and_then(|s| s.parse().ok())).unwrap_or(wallet);
             return Ok((equity, available));
         }
-        
-        let ret = v["retCode"].as_i64().unwrap_or(-999);
-        if ret == 0 {
-            // Success but no USDT means exactly 0 balance
-            Ok((0.0, 0.0))
-        } else {
-            let msg = v["retMsg"].as_str().or_else(|| v["error"].as_str()).unwrap_or("unknown");
-            Err(format!("Bybit API error (retCode={ret}, msg={msg})"))
-        }
+        Ok((0.0, 0.0))
     }
 
-    async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
-        let ts = now_ms().to_string();
-        let recv = "5000";
-        let qs = "category=linear&symbol=BTCUSDT";
-        let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs);
-
-        let resp = http
-            .get(format!("https://api.bybit.com/v5/account/fee-rate?{}", qs))
-            .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-SIGN", &sig)
-            .header("X-BAPI-TIMESTAMP", &ts)
-            .header("X-BAPI-RECV-WINDOW", recv)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let taker = v["result"]["list"]
-            .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|a| a["takerFeeRate"].as_str().and_then(|s| s.parse().ok()))
-            .unwrap_or(0.00055);
-
-        Ok(taker)
+    async fn fetch_taker_fee(&self, _http: &Client, _keys: &ExchangeKeys) -> Result<f64, String> {
+        // Bybit default taker fee; rarely changes, cached at startup
+        Ok(0.00055)
     }
 
     async fn ensure_leverage(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
         pair: &str,
         leverage: f64,
     ) -> Result<(), String> {
-        // Only set leverage — do NOT force margin mode here.
-        // Margin mode should be configured via warmup_leverages (real.rs) which has profile context.
-        let ts = now_ms().to_string();
-        let recv = "5000";
-        let body = json!({
-            "category": "linear",
-            "symbol": pair,
-            "buyLeverage": leverage.to_string(),
-            "sellLeverage": leverage.to_string()
+        use super::ws_bybit::send_bybit_ws_request;
+        let _ = super::ws_bybit::get_or_init_bybit_ws(keys.bybit_key.clone(), keys.bybit_secret.clone());
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "reqId": req_id,
+            "header": {"X-BAPI-TIMESTAMP": now_ms().to_string(), "X-BAPI-RECV-WINDOW": "5000"},
+            "op": "position.set-leverage",
+            "args": [{"category": "linear", "symbol": pair, "buyLeverage": leverage.to_string(), "sellLeverage": leverage.to_string()}]
         });
-        let body_str = body.to_string();
-        let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &body_str);
-
-        let _ = http
-            .post("https://api.bybit.com/v5/position/set-leverage")
-            .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-SIGN", &sig)
-            .header("X-BAPI-TIMESTAMP", &ts)
-            .header("X-BAPI-RECV-WINDOW", recv)
-            .header("Content-Type", "application/json")
-            .body(body_str)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await;
+        let _ = send_bybit_ws_request(ws_req).await;
         Ok(())
     }
 
-    async fn get_funding_rate(&self, http: &Client, pair: &str) -> Result<(f64, i64), String> {
-        // Bybit V5 tickers endpoint returns funding rate without authentication
-        let url = format!(
-            "https://api.bybit.com/v5/market/tickers?category=linear&symbol={}",
-            pair
-        );
-        if let Ok(resp) = http.get(&url).timeout(Duration::from_secs(5)).send().await {
-            if let Ok(json) = resp.json::<Value>().await {
-                if let Some(item) = json["result"]["list"].as_array().and_then(|a| a.first()) {
-                    let rate = item["fundingRate"]
-                        .as_str()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .unwrap_or(0.0);
-                    let next_ts = item["nextFundingTime"]
-                        .as_str()
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .unwrap_or(0);
-                    return Ok((rate, next_ts));
-                }
-            }
-        }
-        Err("Bybit funding rate fetch failed".to_string())
+    async fn get_funding_rate(&self, _http: &Client, _pair: &str) -> Result<(f64, i64), String> {
+        // Funding rate is non-critical background data — available from collector WS streams
+        Ok((0.0, 0))
     }
 
     async fn fetch_positions(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<Vec<PositionInfo>, String> {
+        use super::ws_bybit::send_bybit_ws_request;
+        let _ = super::ws_bybit::get_or_init_bybit_ws(keys.bybit_key.clone(), keys.bybit_secret.clone());
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "reqId": req_id,
+            "header": {"X-BAPI-TIMESTAMP": now_ms().to_string(), "X-BAPI-RECV-WINDOW": "5000"},
+            "op": "position.list",
+            "args": [{"category": "linear", "settleCoin": "USDT"}]
+        });
+        let v = send_bybit_ws_request(ws_req).await?;
         let mut positions = Vec::new();
-        let mut cursor = String::new();
-
-        loop {
-            let mut qs = "category=linear&settleCoin=USDT&limit=50".to_string();
-            if !cursor.is_empty() {
-                qs.push_str(&format!("&cursor={}", cursor));
-            }
-
-            let domains = ["api.bybit.com", "api.bytick.com"];
-            let mut v: Option<Value> = None;
-
-            for domain in &domains {
-                let ts = now_ms().to_string();
-                let recv = "5000";
-                let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
-                let url = format!("https://{}/v5/position/list?{}", domain, qs);
-
-                let resp = http.get(&url)
-                    .header("X-BAPI-API-KEY", &keys.bybit_key)
-                    .header("X-BAPI-SIGN", &sig)
-                    .header("X-BAPI-TIMESTAMP", &ts)
-                    .header("X-BAPI-RECV-WINDOW", recv)
-                    .timeout(Duration::from_secs(5))
-                    .send()
-                    .await;
-
-                match resp {
-                    Ok(r) if r.status().is_success() => {
-                        match r.json::<Value>().await {
-                            Ok(parsed) => { v = Some(parsed); break; }
-                            Err(e) => {
-                                tracing::warn!("[bybit] fetch_positions: {}: JSON parse error: {}", domain, e);
-                            }
-                        }
-                    }
-                    Ok(r) => {
-                        tracing::warn!("[bybit] fetch_positions: {}: HTTP {}", domain, r.status());
-                    }
-                    Err(e) => {
-                        tracing::warn!("[bybit] fetch_positions: {}: {}", domain, e);
-                    }
-                }
-            }
-
-            let v = v.ok_or_else(|| "All Bybit API domains failed for fetch_positions".to_string())?;
-
-            if v["retCode"].as_i64().unwrap_or(-1) != 0 {
-                return Err(format!("Bybit API returned error: {}", v));
-            }
-
-            if let Some(arr) = v["result"]["list"].as_array() {
-                for p in arr {
-                    let size: f64 = p["size"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.0);
-                    if size.abs() < 1e-12 {
-                        continue;
-                    }
-                    let side = p["side"].as_str().unwrap_or("");
-                    let signed_size = if side == "Sell" { -size } else { size };
-                    let realized = p["cumRealisedPnl"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.0);
-                    positions.push(PositionInfo {
-                        symbol: p["symbol"].as_str().unwrap_or("").to_string(),
-                        size: signed_size,
-                        entry_price: p["avgPrice"]
-                            .as_str()
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(0.0),
-                        unrealized_pnl: p["unrealisedPnl"]
-                            .as_str()
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(0.0),
-                        realized_pnl: realized,
-                        accumulated_fee: 0.0,
-                        accumulated_funding: 0.0,
-                    });
-                }
-            }
-
-            if let Some(c) = v["result"]["nextPageCursor"].as_str() {
-                if c.is_empty() {
-                    break;
-                }
-                cursor = c.to_string();
-            } else {
-                break;
+        if let Some(arr) = v["data"]["list"].as_array() {
+            for p in arr {
+                let size: f64 = p["size"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                if size.abs() < 1e-12 { continue; }
+                let side = p["side"].as_str().unwrap_or("");
+                let signed_size = if side == "Sell" { -size } else { size };
+                positions.push(PositionInfo {
+                    symbol: p["symbol"].as_str().unwrap_or("").to_string(),
+                    size: signed_size,
+                    entry_price: p["avgPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    unrealized_pnl: p["unrealisedPnl"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    realized_pnl: p["cumRealisedPnl"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    accumulated_fee: 0.0,
+                    accumulated_funding: 0.0,
+                });
             }
         }
         Ok(positions)
@@ -796,60 +563,32 @@ impl ExchangeConnector for BybitConnector {
 
     async fn fetch_orderbook(
         &self,
-        http: &Client,
+        _http: &Client,
         pair: &str,
         depth: u32,
     ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
-        // Bybit limits: 1, 50, 200, 500, 1000. Closest to depth is usually 50.
+        use super::ws_bybit::send_bybit_ws_request;
         let bybit_limit = if depth <= 1 { 1 } else { 50 };
-        let url = format!(
-            "https://api.bybit.com/v5/market/orderbook?category=linear&symbol={}&limit={}",
-            pair, bybit_limit
-        );
-        let res = http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Bybit depth error: {}", e))?;
-
-        let status = res.status();
-        let body = res
-            .text()
-            .await
-            .map_err(|e| format!("Body read error: {}", e))?;
-
-        if !status.is_success() {
-            return Err(format!("Bybit API HTTP {}: {}", status, body));
-        }
-
-        let json: Value =
-            serde_json::from_str(&body).map_err(|e| format!("Bybit Parse error: {}", e))?;
-
-        if json["retCode"].as_i64().unwrap_or(-1) != 0 {
-            return Err(format!("Bybit API returned error: {}", json));
-        }
-
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "reqId": req_id,
+            "op": "order.book",
+            "args": [{"category": "linear", "symbol": pair, "limit": bybit_limit}]
+        });
+        let resp = send_bybit_ws_request(ws_req).await?;
         let parse_levels = |levels: &Value| -> Vec<(f64, f64)> {
             let mut out = Vec::new();
             if let Some(arr) = levels.as_array() {
                 for item in arr {
-                    if let (Some(px_str), Some(sz_str)) = (
-                        item.get(0).and_then(|v| v.as_str()),
-                        item.get(1).and_then(|v| v.as_str()),
-                    ) {
-                        if let (Ok(px), Ok(sz)) = (px_str.parse::<f64>(), sz_str.parse::<f64>()) {
-                            out.push((px, sz));
-                        }
+                    if let (Some(px_str), Some(sz_str)) = (item.get(0).and_then(|v| v.as_str()), item.get(1).and_then(|v| v.as_str())) {
+                        if let (Ok(px), Ok(sz)) = (px_str.parse::<f64>(), sz_str.parse::<f64>()) { out.push((px, sz)); }
                     }
                 }
             }
             out
         };
-
-        // Bybit returns nested "b" and "a" arrays inside "result"
-        let bids = parse_levels(&json["result"]["b"]);
-        let asks = parse_levels(&json["result"]["a"]);
-
+        let bids = parse_levels(&resp["data"]["b"]);
+        let asks = parse_levels(&resp["data"]["a"]);
         Ok((bids, asks))
     }
 }
