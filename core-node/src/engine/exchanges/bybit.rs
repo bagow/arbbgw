@@ -46,6 +46,46 @@ async fn try_bybit_ws_order(
 
 
 
+async fn do_bybit_balance_fetch(
+    http: &Client,
+    keys: &ExchangeKeys,
+    account_type: &str,
+) -> Result<Value, String> {
+    let ts = now_ms().to_string();
+    let recv = "5000";
+    let qs = format!("accountType={}", account_type);
+    let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
+    
+    // Try api.bybit.com
+    let mut url = format!("https://api.bybit.com/v5/account/wallet-balance?{}", qs);
+    let mut resp = http.get(&url)
+        .header("X-BAPI-API-KEY", &keys.bybit_key)
+        .header("X-BAPI-SIGN", &sig)
+        .header("X-BAPI-TIMESTAMP", &ts)
+        .header("X-BAPI-RECV-WINDOW", recv)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+        
+    // Fallback to proxy if failed or Cloudflare block
+    if resp.is_err() || resp.as_ref().map(|r| !r.status().is_success()).unwrap_or(false) {
+        tracing::warn!("[bybit] fetch_balances ({}): api.bybit.com failed, trying proxy...", account_type);
+        url = format!("https://api.codetabs.com/v1/proxy/?quest=https://api.bybit.com/v5/account/wallet-balance?{}", qs);
+        resp = http.get(&url)
+            .header("X-BAPI-API-KEY", &keys.bybit_key)
+            .header("X-BAPI-SIGN", &sig)
+            .header("X-BAPI-TIMESTAMP", &ts)
+            .header("X-BAPI-RECV-WINDOW", recv)
+            .timeout(Duration::from_secs(8))
+            .send()
+            .await;
+    }
+    
+    let r = resp.map_err(|e| e.to_string())?;
+    let v: Value = r.json().await.map_err(|e| format!("Failed to parse Bybit JSON: {}", e))?;
+    Ok(v)
+}
+
 #[async_trait]
 impl ExchangeConnector for BybitConnector {
     fn name(&self) -> &'static str {
@@ -502,85 +542,48 @@ impl ExchangeConnector for BybitConnector {
         http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String> {
-        let ts = now_ms().to_string();
-        let recv = "5000";
-
-        let try_fetch = |account_type: &str| async move {
-            let qs = format!("accountType={}", account_type);
-            let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, &qs);
-            
-            // Try api.bybit.com
-            let mut url = format!("https://api.bybit.com/v5/account/wallet-balance?{}", qs);
-            let mut resp = http.get(&url)
-                .header("X-BAPI-API-KEY", &keys.bybit_key)
-                .header("X-BAPI-SIGN", &sig)
-                .header("X-BAPI-TIMESTAMP", &ts)
-                .header("X-BAPI-RECV-WINDOW", recv)
-                .timeout(Duration::from_secs(5))
-                .send()
-                .await;
-                
-            // Fallback to proxy if failed or Cloudflare block
-            if resp.is_err() || resp.as_ref().map(|r| !r.status().is_success()).unwrap_or(false) {
-                tracing::warn!("[bybit] fetch_balances ({}): api.bybit.com failed, trying proxy...", account_type);
-                url = format!("https://api.codetabs.com/v1/proxy/?quest=https://api.bybit.com/v5/account/wallet-balance?{}", qs);
-                resp = http.get(&url)
-                    .header("X-BAPI-API-KEY", &keys.bybit_key)
-                    .header("X-BAPI-SIGN", &sig)
-                    .header("X-BAPI-TIMESTAMP", &ts)
-                    .header("X-BAPI-RECV-WINDOW", recv)
-                    .timeout(Duration::from_secs(8))
-                    .send()
-                    .await;
-            }
-            
-            let r = resp.map_err(|e| e.to_string())?;
-            let v: Value = r.json().await.map_err(|e| format!("Failed to parse Bybit JSON: {}", e))?;
-            Ok::<Value, String>(v)
-        };
-
         // 1. Try UNIFIED (Unified Trading Account)
-        let mut v = match try_fetch("UNIFIED").await {
-            Ok(v) => v,
+        let mut v: Value = match do_bybit_balance_fetch(http, keys, "UNIFIED").await {
+            Ok(val) => val,
             Err(e) => return Err(e),
         };
 
         let ret_code = v["retCode"].as_i64().unwrap_or(-1);
         let list_empty = v["result"]["list"]
             .as_array()
-            .map(|a| a.is_empty())
+            .map(|a: &Vec<Value>| a.is_empty())
             .unwrap_or(true);
         
         let should_fallback = ret_code == 10001 || ret_code == 140022 || (ret_code == 0 && list_empty);
 
         if should_fallback {
             // 2. Fallback to CONTRACT (Classic Account)
-            v = try_fetch("CONTRACT").await?;
+            v = do_bybit_balance_fetch(http, keys, "CONTRACT").await?;
         }
 
         let coin_obj = v["result"]["list"]
             .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|first| {
+            .and_then(|arr: &Vec<Value>| arr.first())
+            .and_then(|first: &Value| {
                 if first["coin"].is_array() {
-                    first["coin"].as_array().and_then(|coins| {
-                        coins.iter().find(|c| c["coin"].as_str() == Some("USDT")).cloned()
+                    first["coin"].as_array().and_then(|coins: &Vec<Value>| {
+                        coins.iter().find(|c: &&Value| c["coin"].as_str() == Some("USDT")).cloned()
                     })
                 } else {
-                    v["result"]["list"].as_array().and_then(|arr| {
-                        arr.iter().find(|c| c["coin"].as_str() == Some("USDT")).cloned()
+                    v["result"]["list"].as_array().and_then(|arr: &Vec<Value>| {
+                        arr.iter().find(|c: &&Value| c["coin"].as_str() == Some("USDT")).cloned()
                     })
                 }
             });
 
         if let Some(coin_ref) = coin_obj {
             let wallet: f64 = coin_ref["walletBalance"]
-                .as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                .as_str().and_then(|s: &str| s.parse().ok()).unwrap_or(0.0);
             let equity: f64 = coin_ref["equity"]
-                .as_str().and_then(|s| s.parse().ok()).unwrap_or(wallet);
+                .as_str().and_then(|s: &str| s.parse().ok()).unwrap_or(wallet);
             let available: f64 = coin_ref["availableToWithdraw"]
-                .as_str().and_then(|s| s.parse().ok())
-                .or_else(|| coin_ref["availableBalance"].as_str().and_then(|s| s.parse().ok()))
+                .as_str().and_then(|s: &str| s.parse().ok())
+                .or_else(|| coin_ref["availableBalance"].as_str().and_then(|s: &str| s.parse().ok()))
                 .unwrap_or(wallet);
             return Ok((equity, available));
         }
