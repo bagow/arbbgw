@@ -380,7 +380,18 @@ impl ExchangeConnector for GateConnector {
         http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String> {
-        let v = gate_request(http, keys, "GET", "/api/v4/futures/usdt/accounts", "", "", 10_000).await?;
+        let path = "/api/v4/futures/usdt/accounts";
+        let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, "");
+
+        let url = format!("https://api.gateio.ws{}", path);
+        let resp = http.get(&url)
+            .headers(headers)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("Gate HTTP error: {}", e))?;
+
+        let v: Value = resp.json().await.map_err(|e| format!("Gate JSON error: {}", e))?;
         let total = v["total"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v["total"].as_f64()).unwrap_or(0.0);
         let avail = v["available"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v["available"].as_f64()).unwrap_or(0.0);
         Ok((total, avail))

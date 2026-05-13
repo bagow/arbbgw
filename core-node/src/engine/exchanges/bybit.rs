@@ -468,9 +468,28 @@ impl ExchangeConnector for BybitConnector {
         http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String> {
+        let ts = now_ms().to_string();
+        let recv = "10000";
         let qs = "accountType=UNIFIED&coin=USDT";
-        let v = bybit_request(http, keys, "GET", "/v5/account/wallet-balance", qs, "", 10_000).await?;
-        let coin_obj = v["data"]["list"].as_array()
+        let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs);
+
+        let url = format!("https://api.bybit.com/v5/account/wallet-balance?{}", qs);
+        let resp = http.get(&url)
+            .header("X-BAPI-API-KEY", &keys.bybit_key)
+            .header("X-BAPI-TIMESTAMP", &ts)
+            .header("X-BAPI-RECV-WINDOW", recv)
+            .header("X-BAPI-SIGN", &sig)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("Bybit HTTP error: {}", e))?;
+
+        let v: Value = resp.json().await.map_err(|e| format!("Bybit JSON error: {}", e))?;
+        if v["retCode"].as_i64() != Some(0) {
+            return Err(format!("Bybit API error: {}", v["retMsg"].as_str().unwrap_or("?")));
+        }
+
+        let coin_obj = v["result"]["list"].as_array()
             .and_then(|arr| arr.first())
             .and_then(|first| {
                 first["coin"].as_array().and_then(|coins| {

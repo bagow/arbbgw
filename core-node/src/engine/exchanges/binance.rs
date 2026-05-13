@@ -609,33 +609,46 @@ impl ExchangeConnector for BinanceConnector {
 
     async fn fetch_balances(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String> {
+        use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
-        let qs = format!("timestamp={}", ts);
-        let v = binance_request(http, keys, "GET", "/fapi/v2/account", &qs, "", 5000).await?;
-        
-        let result = v["assets"].as_array()
-            .ok_or_else(|| format!("Binance balance: no assets array in response: {}", 
-                &v.to_string()[..v.to_string().len().min(300)]))?;
-        
+        let qs = format!("apiKey={}&timestamp={}", keys.binance_key, ts);
+        let sig = binance_sign(&keys.binance_secret, &qs);
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "id": req_id,
+            "method": "v2/account.balance",
+            "params": {
+                "apiKey": keys.binance_key,
+                "timestamp": ts,
+                "signature": sig
+            }
+        });
+        let resp = send_ws_request(ws_req).await?;
+        if let Some(err) = resp.get("error") {
+            return Err(format!("Binance WS balance error: {}", err));
+        }
+
         let mut total_balance = 0.0f64;
         let mut available_balance = 0.0f64;
-        
-        for item in result {
-            let asset = item["asset"].as_str().unwrap_or("");
-            if asset == "USDT" {
-                total_balance = item["balance"].as_str()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(0.0);
-                available_balance = item["availableBalance"].as_str()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(0.0);
-                break;
+
+        if let Some(arr) = resp["result"].as_array() {
+            for item in arr {
+                let asset = item["asset"].as_str().unwrap_or("");
+                if asset == "USDT" {
+                    total_balance = item["balance"].as_str()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    available_balance = item["availableBalance"].as_str()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    break;
+                }
             }
         }
-        
+
         Ok((total_balance, available_balance))
     }
 
