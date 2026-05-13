@@ -866,9 +866,9 @@ pub async fn run_cycle(
         let cached_b = e_ctx.l2_books.get(&l2_key_b).map(|v| v.clone());
         let now_cache = now_ms();
 
-        // L2 cache must exist AND be fresh (< 2s). No REST fallback.
+        // L2 cache must exist AND be fresh (< 5s). No REST fallback.
         let (ob_a_res, ob_b_res) = match (&cached_a, &cached_b) {
-            (Some(a), Some(b)) if (now_cache - a.updated_ms) < 2_000 && (now_cache - b.updated_ms) < 2_000 => {
+            (Some(a), Some(b)) if (now_cache - a.updated_ms) < 5_000 && (now_cache - b.updated_ms) < 5_000 => {
                 (Ok((a.bids.clone(), a.asks.clone())), Ok((b.bids.clone(), b.asks.clone())))
             },
             _ => {
