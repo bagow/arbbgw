@@ -19,14 +19,27 @@ pub fn get_or_init_ws() -> mpsc::Sender<(Value, ResponseSender)> {
 }
 
 async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>) {
+    let mut backoff_secs: u64 = 2;
     loop {
         let url = "wss://ws-fapi.binance.com/ws-fapi/v1";
         
         let (ws_stream, _) = match connect_async(url).await {
-            Ok(res) => res,
+            Ok(res) => {
+                backoff_secs = 2; // Reset on success
+                res
+            },
             Err(e) => {
-                tracing::error!("[binance_ws] connection failed: {}. Retrying in 2s...", e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                let err_str = e.to_string();
+                // 418 = IP banned by Binance. Back off aggressively.
+                if err_str.contains("418") {
+                    tracing::error!("[binance_ws] IP BANNED (418). Backing off {}s...", backoff_secs);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(300); // max 5 min
+                } else {
+                    tracing::error!("[binance_ws] connection failed: {}. Retrying in {}s...", e, backoff_secs);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(60);
+                }
                 continue;
             }
         };
