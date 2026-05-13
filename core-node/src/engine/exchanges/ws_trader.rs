@@ -96,7 +96,9 @@ pub async fn send_ws_request(req: Value) -> Result<Value, String> {
     let tx = get_or_init_ws();
     let (resp_tx, resp_rx) = oneshot::channel();
     
-    tx.send((req, resp_tx)).await.map_err(|_| "WS trader loop channel closed")?;
+    // try_send: if the WS is disconnected and channel is full, fail immediately
+    // instead of blocking the entire trade cycle forever
+    tx.try_send((req, resp_tx)).map_err(|e| format!("WS channel full/closed (is Binance WS connected?): {}", e))?;
     
     match tokio::time::timeout(tokio::time::Duration::from_secs(5), resp_rx).await {
         Ok(Ok(val)) => Ok(val),
