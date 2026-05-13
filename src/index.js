@@ -313,7 +313,7 @@ async function handleRequest(request, env, ctx) {
     } catch (e) {
         return jsonResponse({ 
             error: 'VPS API Unavailable', 
-            details: 'Could not reach VPS backend at 92.5.127.87:4000. Ensure vps-api is running.',
+            details: 'Could not reach VPS backend at 140.238.217.190:4000. Ensure vps-api is running.',
             message: e.message 
         }, 502);
     }

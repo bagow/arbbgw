@@ -4,15 +4,15 @@ set -e
 LOCAL_DIR="/media/bagow/files/home/bagow/Dev/bagow/cryptoarb/cex-arb"
 
 echo "Stopping service on VPS..."
-ssh opc@92.5.127.87 "sudo systemctl stop real-trader || true"
+ssh opc@140.238.217.190 "sudo systemctl stop real-trader || true"
 
 echo "Uploading binary and config..."
-scp $LOCAL_DIR/real-trader/target/release/real-trader opc@92.5.127.87:/tmp/real-trader_bin
-scp $LOCAL_DIR/real-trader/.env opc@92.5.127.87:/tmp/real-trader_env
-scp $LOCAL_DIR/real-trader.service opc@92.5.127.87:/tmp/real-trader.service
+scp $LOCAL_DIR/real-trader/target/release/real-trader opc@140.238.217.190:/tmp/real-trader_bin
+scp $LOCAL_DIR/real-trader/.env opc@140.238.217.190:/tmp/real-trader_env
+scp $LOCAL_DIR/real-trader.service opc@140.238.217.190:/tmp/real-trader.service
 
 echo "Setting permissions and moving files on VPS..."
-ssh opc@92.5.127.87 "sudo mv /tmp/real-trader_bin /usr/local/bin/real-trader && \
+ssh opc@140.238.217.190 "sudo mv /tmp/real-trader_bin /usr/local/bin/real-trader && \
 sudo chmod +x /usr/local/bin/real-trader && \
 sudo mv /tmp/real-trader_env /etc/real-trader.env && \
 sudo chmod 600 /etc/real-trader.env && \
@@ -23,4 +23,4 @@ sudo systemctl enable real-trader && \
 sudo systemctl start real-trader"
 
 echo "Checking logs..."
-ssh opc@92.5.127.87 "sudo journalctl -u real-trader -n 20 --no-pager"
+ssh opc@140.238.217.190 "sudo journalctl -u real-trader -n 20 --no-pager"
