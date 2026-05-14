@@ -242,6 +242,9 @@ async fn run_ws(
     price_map.entry("kucoin".to_string()).or_default();
 
     let mut ping = tokio::time::interval(Duration::from_secs(20));
+    // Heartbeat: refresh L2 timestamps every 500ms for static books
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(500));
+    heartbeat.tick().await; // skip immediate
     loop {
         // Reconnect periodically to refresh L2 subscriptions (new pairs may appear)
         if conn_start.elapsed() > max_conn_age {
@@ -310,6 +313,17 @@ async fn run_ws(
                 _ => {}
             },
             _ = ping.tick() => { ws.send(Message::Text(json!({"id":"ping","type":"ping"}).to_string().into())).await?; }
+            _ = heartbeat.tick() => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                for mut entry in l2_books.iter_mut() {
+                    if entry.key().starts_with("kucoin:") {
+                        entry.value_mut().updated_ms = now_ms;
+                    }
+                }
+            }
         }
     }
     Ok(())

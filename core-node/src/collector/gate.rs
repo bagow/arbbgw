@@ -300,6 +300,9 @@ async fn ws_shard(
     price_map.entry("gate".to_string()).or_default();
 
     let mut ping = tokio::time::interval(Duration::from_secs(20));
+    // Heartbeat: refresh L2 timestamps every 500ms for static books
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(500));
+    heartbeat.tick().await; // skip immediate
 
     loop {
         tokio::select! {
@@ -432,6 +435,17 @@ async fn ws_shard(
             _ = ping.tick() => {
                 let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                 ws.send(Message::Text(json!({"time":ts, "channel":"futures.ping"}).to_string().into())).await?;
+            }
+            _ = heartbeat.tick() => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                for mut entry in l2_books.iter_mut() {
+                    if entry.key().starts_with("gate:") {
+                        entry.value_mut().updated_ms = now_ms;
+                    }
+                }
             }
         }
     }
