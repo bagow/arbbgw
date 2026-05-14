@@ -246,10 +246,14 @@ impl ExchangeConnector for BinanceConnector {
                 .abs();
 
             // Log FULL WS response for diagnostics
+            let resp_price = v["price"].as_str().unwrap_or("?");
+            let resp_side = v["side"].as_str().unwrap_or("?");
+            let resp_orig_qty = v["origQty"].as_str().unwrap_or("?");
+            let resp_tif = v["timeInForce"].as_str().unwrap_or("?");
             tracing::info!(
-                "[binance] place_order {} WS result: status={} execQty={} avgPrice={} fee={} | raw_keys={:?}",
+                "[binance] place_order {} WS result: status={} execQty={} avgPrice={} fee={} | sent_price={} side={} origQty={} tif={}",
                 pair, order_status, exec_qty, avg_price, cum_fee,
-                v.as_object().map(|m| m.keys().collect::<Vec<_>>()).unwrap_or_default()
+                resp_price, resp_side, resp_orig_qty, resp_tif
             );
 
             // For IOC/EXPIRED: if order was cancelled without any fill, return None (no orderId)
