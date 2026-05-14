@@ -192,6 +192,10 @@ impl ExchangeConnector for BinanceConnector {
             if price_str.is_empty() {
                 price_str = "0".to_string();
             }
+            tracing::info!(
+                "[binance] IOC {} {} target={:.8} slip={}% → raw={:.8} rounded={:.8} sent={}  tick={}",
+                pair, side, target_price, slippage_percent, price, rounded_price, price_str, tick_size
+            );
             params.insert("type".to_string(), serde_json::json!("LIMIT"));
             params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
             params.insert("price".to_string(), serde_json::json!(price_str));
