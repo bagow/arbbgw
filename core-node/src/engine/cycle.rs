@@ -883,16 +883,21 @@ pub async fn run_cycle(
         let analyze_depth = |ob_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>,
                              is_buy: bool,
                              limit_price: f64,
-                             slippage_pct: f64|
+                             _slippage_pct: f64|
          -> f64 {
             if let Ok((bids, asks)) = ob_res {
                 let levels = if is_buy { asks } else { bids };
                 let mut cum_vol = 0.0;
+                // Use a wide tolerance (2%) for depth existence check.
+                // This is NOT a fill-price check — VWAP verification handles that.
+                // slippage_percent (0.05%) was causing false 0.0 depth when L2
+                // prices diverged even slightly from L1 scan-time prices.
+                let depth_tolerance_pct = 2.0;
                 let actual_limit = if limit_price > 0.0 {
                     if is_buy {
-                        limit_price * (1.0 + slippage_pct / 100.0)
+                        limit_price * (1.0 + depth_tolerance_pct / 100.0)
                     } else {
-                        limit_price * (1.0 - slippage_pct / 100.0)
+                        limit_price * (1.0 - depth_tolerance_pct / 100.0)
                     }
                 } else {
                     0.0
