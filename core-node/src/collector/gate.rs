@@ -159,7 +159,7 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2
         n_conns, SYMBOLS_PER_WS
     );
 
-    // Spawn one WS handler per chunk. If any one dies, we cancel all and restart.
+    // Spawn self-healing WS shards — each reconnects independently on failure
     let mut handles = Vec::with_capacity(n_conns);
     for (idx, chunk) in sym_chunks.into_iter().enumerate() {
         let pm = price_map.clone();
@@ -167,7 +167,20 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2
         let sm = sym_map_arc.clone();
         let l2 = l2_books.clone();
         handles.push(tokio::spawn(async move {
-            ws_shard(idx, chunk, &pm, &sig, sm, &l2).await
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                match ws_shard(idx, chunk.clone(), &pm, &sig, sm.clone(), &l2).await {
+                    Ok(()) => {
+                        info!("[gate] Shard {} closed cleanly, reconnecting...", idx);
+                        backoff = Duration::from_secs(1);
+                    }
+                    Err(e) => {
+                        error!("[gate] Shard {} error: {}. Reconnecting in {:?}", idx, e, backoff);
+                    }
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+            }
         }));
     }
 
@@ -213,18 +226,12 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2
         }
     });
 
-    // Wait for ANY handle to complete (= die). Then cancel all others.
-    let (result, _idx, remaining) = futures_util::future::select_all(handles).await;
+    // Run forever — shards self-heal. Only returns if ALL shards somehow exit
+    // (which won't happen because each has an infinite reconnect loop).
+    // This keeps the orchestrator alive so the outer run() loop doesn't churn.
+    futures_util::future::join_all(handles).await;
     refresh_handle.abort();
-    for h in remaining {
-        h.abort();
-    }
-
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(e) => Err(anyhow::anyhow!("WS shard task panicked: {}", e)),
-    }
+    Ok(())
 }
 
 
@@ -261,11 +268,14 @@ async fn ws_shard(
                 .into(),
         ))
         .await?;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
+    // Pause between L1 and L2 subscription phases to avoid overwhelming Gate
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
     // Subscribe to L2 order_book (20 levels) for all symbols in this shard
-    for chunk in symbols.chunks(20) {
+    for chunk in symbols.chunks(10) {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -281,7 +291,7 @@ async fn ws_shard(
                     .into(),
             ))
             .await?;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
         }
     }
     info!("[gate] Shard {} subscribed L1+L2 OK", idx);
