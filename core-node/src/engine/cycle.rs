@@ -1722,10 +1722,13 @@ pub async fn run_cycle(
                 {
                     Ok(rc) => {
                         trimming_fee += rc.total_fee;
+                        // If exchange didn't report fill price (0), assume closed at entry → loss ≈ 0.
+                        // Without this guard, final_price=0 makes the entire position look like a 100% loss.
+                        let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_a };
                         let gross_loss = if is_buy {
-                            (fill_a - rc.final_price) * delta_a
+                            (fill_a - close_price) * delta_a
                         } else {
-                            (rc.final_price - fill_a) * delta_a
+                            (close_price - fill_a) * delta_a
                         };
                         trimming_loss += gross_loss.min(0.0).abs();
                     }
@@ -1768,10 +1771,12 @@ pub async fn run_cycle(
                 {
                     Ok(rc) => {
                         trimming_fee += rc.total_fee;
+                        // If exchange didn't report fill price (0), assume closed at entry → loss ≈ 0.
+                        let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_b };
                         let gross_loss = if is_buy {
-                            (fill_b - rc.final_price) * delta_b
+                            (fill_b - close_price) * delta_b
                         } else {
-                            (rc.final_price - fill_b) * delta_b
+                            (close_price - fill_b) * delta_b
                         };
                         trimming_loss += gross_loss.min(0.0).abs();
                     }
