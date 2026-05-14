@@ -89,7 +89,7 @@ jobs:
       - name: Build vps-api
         run: cargo build --release -p vps-api
       - name: Copy Binary to VPS
-        timeout-minutes: 3
+        timeout-minutes: 10
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
@@ -97,6 +97,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           source: "target/release/vps-api"
           target: "/tmp/deploy/"
+          command_timeout: 10m
           strip_components: 2
       - name: Copy Service to VPS
         timeout-minutes: 3
