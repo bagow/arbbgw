@@ -1260,8 +1260,10 @@ pub async fn run_cycle(
                     "[real] ⏳ {}: Leg 2 orderId={} accepted but fill not yet confirmed. Extended wait...",
                     pair, oid_b.as_deref().unwrap_or("?")
                 );
-                for slow_attempt in 0..5 {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                // Bybit IOC orders can take 3-5s to appear in order.history.
+                // 8 retries × 800ms = 6.4s total, enough for Bybit settlement.
+                for slow_attempt in 0..8 {
+                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                     if let Some(ref oid) = oid_b {
                         match conn_ensure_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
                             Ok((p, f, ev)) => {
@@ -1573,8 +1575,8 @@ pub async fn run_cycle(
                     "[real] ⏳ {}: Leg 2 orderId={} accepted but fill not yet confirmed. Extended wait...",
                     pair, oid_a.as_deref().unwrap_or("?")
                 );
-                for slow_attempt in 0..5 {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                for slow_attempt in 0..8 {
+                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                     if let Some(ref oid) = oid_a {
                         match conn_ensure_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
                             Ok((p, f, ev)) => {
