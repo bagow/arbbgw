@@ -423,22 +423,18 @@ impl ExchangeConnector for BinanceConnector {
             }
         }
 
-        let type_fb = if fb_price_str.is_empty() { "MARKET" } else { "LIMIT" };
-
+        // CRITICAL: fallback MUST be a true MARKET order to guarantee closure.
+        // Previous LIMIT IOC with 2% slippage still expired on thin pairs,
+        // leaving unhedged positions open and triggering kill-switch.
         let ts_fb = now_ms();
         let mut fb_params = serde_json::Map::new();
         fb_params.insert("symbol".to_string(), serde_json::json!(pair));
         fb_params.insert("side".to_string(), serde_json::json!(side));
-        fb_params.insert("type".to_string(), serde_json::json!(type_fb));
+        fb_params.insert("type".to_string(), serde_json::json!("MARKET"));
         fb_params.insert("quantity".to_string(), serde_json::json!(qty_str));
         fb_params.insert("reduceOnly".to_string(), serde_json::json!("true"));
         fb_params.insert("timestamp".to_string(), serde_json::json!(ts_fb));
         fb_params.insert("newOrderRespType".to_string(), serde_json::json!("RESULT"));
-        
-        if !fb_price_str.is_empty() {
-            fb_params.insert("price".to_string(), serde_json::json!(fb_price_str));
-            fb_params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
-        }
         
         let v_fb = execute_binance_order(http, keys, &fb_params, api_timeout_ms).await.map_err(|e| format!("Fallback close rejected: {}", e))?;
         
