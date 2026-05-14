@@ -1237,3 +1237,237 @@ pub async fn handle_close_exchange_position(
         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
+
+// ─── GET /api/klines/:exchange/:pair/:interval/:limit ───
+// Proxy to exchange REST kline APIs for chart rendering
+#[derive(serde::Deserialize)]
+pub struct KlinesQuery {
+    #[serde(rename = "endTime")]
+    end_time: Option<i64>,
+}
+
+pub async fn handle_get_klines(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((exchange, pair, interval, limit)): Path<(String, String, String, i32)>,
+    Query(query): Query<KlinesQuery>,
+) -> Response {
+    if check_basic_auth(&headers, &state).is_none() {
+        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
+    }
+
+    let limit = limit.min(1500).max(1);
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    let klines = match exchange.as_str() {
+        "binance" => fetch_binance_klines(&client, &pair, &interval, limit, query.end_time).await,
+        "bybit" => fetch_bybit_klines(&client, &pair, &interval, limit, query.end_time).await,
+        "gate" => fetch_gate_klines(&client, &pair, &interval, limit, query.end_time).await,
+        "kucoin" => fetch_kucoin_klines(&client, &pair, &interval, limit, query.end_time).await,
+        "okx" => fetch_okx_klines(&client, &pair, &interval, limit, query.end_time).await,
+        "htx" => fetch_htx_klines(&client, &pair, &interval, limit, query.end_time).await,
+        _ => Ok(vec![]),
+    };
+
+    match klines {
+        Ok(k) => (StatusCode::OK, Json(json!({ "klines": k }))).into_response(),
+        Err(e) => {
+            tracing::warn!("[klines] {} {} error: {}", exchange, pair, e);
+            (StatusCode::OK, Json(json!({ "klines": [], "error": e }))).into_response()
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct Kline {
+    ts: i64,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: f64,
+}
+
+async fn fetch_binance_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    let mut url = format!(
+        "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval={}&limit={}",
+        pair, interval, limit
+    );
+    if let Some(et) = end_time { url.push_str(&format!("&endTime={}", et)); }
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let data: Vec<Vec<Value>> = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(data.iter().filter_map(|c| {
+        Some(Kline {
+            ts: c.get(0)?.as_i64()?,
+            open: c.get(1)?.as_str()?.parse().ok()?,
+            high: c.get(2)?.as_str()?.parse().ok()?,
+            low: c.get(3)?.as_str()?.parse().ok()?,
+            close: c.get(4)?.as_str()?.parse().ok()?,
+            volume: c.get(5)?.as_str()?.parse().ok()?,
+        })
+    }).collect())
+}
+
+async fn fetch_bybit_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    let bybit_iv = match interval {
+        "1m" => "1", "3m" => "3", "5m" => "5", "15m" => "15", "1h" => "60",
+        _ => "1",
+    };
+    let mut url = format!(
+        "https://api.bybit.com/v5/market/kline?category=linear&symbol={}&interval={}&limit={}",
+        pair, bybit_iv, limit
+    );
+    if let Some(et) = end_time { url.push_str(&format!("&end={}", et)); }
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let data: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let list = data["result"]["list"].as_array().cloned().unwrap_or_default();
+    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
+        let arr = c.as_array()?;
+        Some(Kline {
+            ts: arr.get(0)?.as_str()?.parse().ok()?,
+            open: arr.get(1)?.as_str()?.parse().ok()?,
+            high: arr.get(2)?.as_str()?.parse().ok()?,
+            low: arr.get(3)?.as_str()?.parse().ok()?,
+            close: arr.get(4)?.as_str()?.parse().ok()?,
+            volume: arr.get(5)?.as_str()?.parse().ok()?,
+        })
+    }).collect();
+    klines.sort_by_key(|k| k.ts);
+    Ok(klines)
+}
+
+async fn fetch_gate_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    // Gate uses underscore format: BTC_USDT
+    let gate_pair = if pair.ends_with("USDT") {
+        format!("{}_USDT", &pair[..pair.len()-4])
+    } else {
+        pair.to_string()
+    };
+    let gate_iv = match interval {
+        "1m" => "1m", "3m" => "3m", "5m" => "5m", "15m" => "15m", "1h" => "1h",
+        _ => "1m",
+    };
+    let mut url = format!(
+        "https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={}&interval={}&limit={}",
+        gate_pair, gate_iv, limit
+    );
+    if let Some(et) = end_time { url.push_str(&format!("&to={}", et / 1000)); }
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let data: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(data.iter().filter_map(|c| {
+        Some(Kline {
+            ts: c["t"].as_f64().or_else(|| c["t"].as_i64().map(|v| v as f64))? as i64 * 1000,
+            open: c["o"].as_str()?.parse().ok()?,
+            high: c["h"].as_str()?.parse().ok()?,
+            low: c["l"].as_str()?.parse().ok()?,
+            close: c["c"].as_str()?.parse().ok()?,
+            volume: c["v"].as_f64().or_else(|| c["v"].as_i64().map(|v| v as f64)).unwrap_or(0.0),
+        })
+    }).collect())
+}
+
+async fn fetch_kucoin_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    let kc_pair = if pair.ends_with("USDT") {
+        format!("{}USDTM", &pair[..pair.len()-4])
+    } else {
+        pair.to_string()
+    };
+    let kc_iv = match interval {
+        "1m" => "1", "3m" => "3", "5m" => "5", "15m" => "15", "1h" => "60",
+        _ => "1",
+    };
+    let now_s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let end_s = end_time.map(|et| et / 1000).unwrap_or(now_s);
+    // KuCoin granularity is in minutes
+    let granularity_min: i64 = kc_iv.parse().unwrap_or(1);
+    let start_s = end_s - (limit as i64 * granularity_min * 60);
+    let url = format!(
+        "https://api-futures.kucoin.com/api/v1/kline/query?symbol={}&granularity={}&from={}&to={}",
+        kc_pair, granularity_min, start_s * 1000, end_s * 1000
+    );
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let data: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let list = data["data"].as_array().cloned().unwrap_or_default();
+    Ok(list.iter().filter_map(|c| {
+        let arr = c.as_array()?;
+        Some(Kline {
+            ts: arr.get(0)?.as_f64().or_else(|| arr.get(0)?.as_i64().map(|v| v as f64))? as i64,
+            open: arr.get(1)?.as_f64()?,
+            high: arr.get(2)?.as_f64()?,
+            low: arr.get(3)?.as_f64()?,
+            close: arr.get(4)?.as_f64()?,
+            volume: arr.get(5)?.as_f64().unwrap_or(0.0),
+        })
+    }).collect())
+}
+
+async fn fetch_okx_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    // OKX uses format: BTC-USDT-SWAP
+    let okx_pair = if pair.ends_with("USDT") {
+        format!("{}-USDT-SWAP", &pair[..pair.len()-4])
+    } else {
+        pair.to_string()
+    };
+    let mut url = format!(
+        "https://www.okx.com/api/v5/market/candles?instId={}&bar={}&limit={}",
+        okx_pair, interval, limit.min(300)
+    );
+    if let Some(et) = end_time { url.push_str(&format!("&after={}", et)); }
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let data: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let list = data["data"].as_array().cloned().unwrap_or_default();
+    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
+        let arr = c.as_array()?;
+        Some(Kline {
+            ts: arr.get(0)?.as_str()?.parse().ok()?,
+            open: arr.get(1)?.as_str()?.parse().ok()?,
+            high: arr.get(2)?.as_str()?.parse().ok()?,
+            low: arr.get(3)?.as_str()?.parse().ok()?,
+            close: arr.get(4)?.as_str()?.parse().ok()?,
+            volume: arr.get(5)?.as_str()?.parse().unwrap_or(0.0),
+        })
+    }).collect();
+    klines.sort_by_key(|k| k.ts);
+    Ok(klines)
+}
+
+async fn fetch_htx_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, _end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    let htx_pair = pair.to_lowercase();
+    let htx_iv = match interval {
+        "1m" => "1min", "3m" => "3min", "5m" => "5min", "15m" => "15min", "1h" => "60min",
+        _ => "1min",
+    };
+    let url = format!(
+        "https://api.hbdm.com/linear-swap-ex/market/history/kline?contract_code={}&period={}&size={}",
+        htx_pair, htx_iv, limit.min(2000)
+    );
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let data: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let list = data["data"].as_array().cloned().unwrap_or_default();
+    Ok(list.iter().filter_map(|c| {
+        Some(Kline {
+            ts: c["id"].as_i64()? * 1000,
+            open: c["open"].as_f64()?,
+            high: c["high"].as_f64()?,
+            low: c["low"].as_f64()?,
+            close: c["close"].as_f64()?,
+            volume: c["vol"].as_f64().unwrap_or(0.0),
+        })
+    }).collect())
+}
