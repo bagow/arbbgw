@@ -410,6 +410,8 @@ impl ExchangeConnector for BybitConnector {
     ) -> Result<(f64, f64, f64), String> {
         use super::ws_bybit::send_bybit_ws_request;
         let _ = super::ws_bybit::get_or_init_bybit_ws(keys.bybit_key.clone(), keys.bybit_secret.clone());
+
+        // Try order.realtime first (active orders)
         let req_id = uuid::Uuid::new_v4().to_string();
         let ws_req = serde_json::json!({
             "reqId": req_id,
@@ -418,7 +420,30 @@ impl ExchangeConnector for BybitConnector {
             "args": [{"category": "linear", "orderId": order_id}]
         });
         let resp = send_bybit_ws_request(ws_req).await?;
-        let order = resp["data"]["list"].as_array().and_then(|a| a.first()).cloned();
+        let mut order = resp["data"]["list"].as_array().and_then(|a| a.first()).cloned();
+
+        // Fallback: IOC orders execute instantly and move to history.
+        // order.realtime only shows active orders, so completed IOC won't appear there.
+        if order.is_none() {
+            let req_id2 = uuid::Uuid::new_v4().to_string();
+            let ws_req2 = serde_json::json!({
+                "reqId": req_id2,
+                "header": {"X-BAPI-TIMESTAMP": now_ms().to_string(), "X-BAPI-RECV-WINDOW": "5000"},
+                "op": "order.history",
+                "args": [{"category": "linear", "orderId": order_id}]
+            });
+            match send_bybit_ws_request(ws_req2).await {
+                Ok(resp2) => {
+                    order = resp2["data"]["list"].as_array().and_then(|a| a.first()).cloned();
+                    if order.is_some() {
+                        tracing::debug!("[bybit] fetch_order {} found via order.history fallback", order_id);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("[bybit] order.history fallback failed for {}: {}", order_id, e);
+                }
+            }
+        }
 
         let order = match order {
             Some(o) => o,
