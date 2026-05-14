@@ -199,10 +199,10 @@ impl TradingSettings {
     /// since real engine reads actual fees from exchange API.
     /// Slippage is still from settings since it varies by market conditions.
     ///
-    /// Formula: 4 × (taker_fee + slippage) — both occur on all 4 legs.
+    /// Formula: 2 × (2×taker_fee + slippage) — fees on all 4 legs, slippage on 2 entry legs only.
     pub fn break_even_fraction(&self) -> f64 {
         const TAKER_FEE: f64 = 0.05 / 100.0; // 0.05% — typical CEX futures taker rate
-        4.0 * (TAKER_FEE + self.slippage_percent / 100.0)
+        4.0 * TAKER_FEE + 2.0 * (self.slippage_percent / 100.0)
     }
 }
 

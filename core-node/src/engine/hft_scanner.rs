@@ -335,7 +335,7 @@ pub fn generate_hft_signals(
             }
 
             let slippage_frac = profile.slippage_percent / 100.0;
-            let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
+            let break_even_pct = (2.0 * (fee_a + fee_b) + 2.0 * slippage_frac) * 100.0;
 
             // HFT CORE: raw spread must exceed break-even (NO structural guard)
             if row.spread <= break_even_pct {

@@ -334,7 +334,10 @@ pub fn generate_signals(
             }
 
             let slippage_frac = profile.slippage_percent / 100.0;
-            let break_even_pct = (2.0 * (fee_a + fee_b) + 4.0 * slippage_frac) * 100.0;
+            // Fees apply on all 4 legs (entry + exit on both exchanges).
+            // Slippage only applies to 2 ENTRY legs — exit uses limit orders
+            // at convergence prices, so exit slippage ≈ 0.
+            let break_even_pct = (2.0 * (fee_a + fee_b) + 2.0 * slippage_frac) * 100.0;
 
             // ── ABSOLUTE STRUCTURAL GUARD ──
             // Active ONLY when structural spread is reliable (legs did NOT swap in 24h+).
