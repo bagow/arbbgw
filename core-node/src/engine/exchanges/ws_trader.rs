@@ -77,16 +77,43 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>) {
         // Loop over local messages to send
         while let Some((req_json, sender)) = rx.recv().await {
             let id = req_json["id"].as_str().unwrap().to_string();
-            pending.lock().await.insert(id, sender);
+            pending.lock().await.insert(id.clone(), sender);
             
             let msg = Message::Text(req_json.to_string());
-            if let Err(e) = write.send(msg).await {
-                tracing::error!("[binance_ws] write error: {}", e);
-                break; // Connection lost, restart
+            // Timeout prevents hanging forever on a silently-dead connection.
+            // Without this, a stuck write.send() blocks channel consumption,
+            // filling the 1000-capacity mpsc and rejecting ALL new orders.
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                write.send(msg),
+            ).await {
+                Ok(Ok(())) => {},
+                Ok(Err(e)) => {
+                    tracing::error!("[binance_ws] write error: {}", e);
+                    // Remove the pending sender so caller gets an error instead of hanging
+                    if let Some(s) = pending.lock().await.remove(&id) {
+                        let _ = s.send(serde_json::json!({"error": {"msg": format!("WS write failed: {}", e)}}));
+                    }
+                    break; // Connection lost, restart
+                }
+                Err(_) => {
+                    tracing::error!("[binance_ws] write TIMEOUT (5s) — connection likely dead");
+                    if let Some(s) = pending.lock().await.remove(&id) {
+                        let _ = s.send(serde_json::json!({"error": {"msg": "WS write timeout"}}));
+                    }
+                    break; // Force reconnect
+                }
             }
         }
         
         reader_handle.abort();
+        // Drain any pending requests that won't get a response (connection is dead)
+        {
+            let mut p = pending.lock().await;
+            for (_, sender) in p.drain() {
+                let _ = sender.send(serde_json::json!({"error": {"msg": "WS connection reset"}}));
+            }
+        }
         tracing::warn!("[binance_ws] connection dropped. Restarting loop...");
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
