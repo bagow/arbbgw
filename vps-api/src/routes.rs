@@ -1389,28 +1389,48 @@ async fn fetch_kucoin_klines(
         _ => "1",
     };
     let now_s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-    let end_s = end_time.map(|et| et / 1000).unwrap_or(now_s);
-    // KuCoin granularity is in minutes
     let granularity_min: i64 = kc_iv.parse().unwrap_or(1);
-    let start_s = end_s - (limit as i64 * granularity_min * 60);
-    let url = format!(
-        "https://api-futures.kucoin.com/api/v1/kline/query?symbol={}&granularity={}&from={}&to={}",
-        kc_pair, granularity_min, start_s * 1000, end_s * 1000
-    );
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
-    let data: Value = resp.json().await.map_err(|e| e.to_string())?;
-    let list = data["data"].as_array().cloned().unwrap_or_default();
-    Ok(list.iter().filter_map(|c| {
-        let arr = c.as_array()?;
-        Some(Kline {
-            ts: arr.get(0)?.as_f64().or_else(|| arr.get(0)?.as_i64().map(|v| v as f64))? as i64,
-            open: arr.get(1)?.as_f64()?,
-            high: arr.get(2)?.as_f64()?,
-            low: arr.get(3)?.as_f64()?,
-            close: arr.get(4)?.as_f64()?,
-            volume: arr.get(5)?.as_f64().unwrap_or(0.0),
-        })
-    }).collect())
+    let interval_ms = granularity_min * 60 * 1000;
+
+    // KuCoin API returns max 200 per request — paginate to reach `limit`
+    let mut all_klines: Vec<Kline> = Vec::new();
+    let mut cursor_end_ms = end_time.unwrap_or(now_s * 1000);
+    let mut remaining = limit;
+    let max_pages = 3; // max 3 pages = 600 candles
+
+    for _ in 0..max_pages {
+        if remaining <= 0 { break; }
+        let batch = remaining.min(200);
+        let cursor_start_ms = cursor_end_ms - (batch as i64 * interval_ms);
+        let url = format!(
+            "https://api-futures.kucoin.com/api/v1/kline/query?symbol={}&granularity={}&from={}&to={}",
+            kc_pair, granularity_min, cursor_start_ms, cursor_end_ms
+        );
+        let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+        let data: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let list = data["data"].as_array().cloned().unwrap_or_default();
+        if list.is_empty() { break; }
+
+        let batch_klines: Vec<Kline> = list.iter().filter_map(|c| {
+            let arr = c.as_array()?;
+            Some(Kline {
+                ts: arr.get(0)?.as_f64().or_else(|| arr.get(0)?.as_i64().map(|v| v as f64))? as i64,
+                open: arr.get(1)?.as_f64()?,
+                high: arr.get(2)?.as_f64()?,
+                low: arr.get(3)?.as_f64()?,
+                close: arr.get(4)?.as_f64()?,
+                volume: arr.get(5)?.as_f64().unwrap_or(0.0),
+            })
+        }).collect();
+
+        remaining -= batch_klines.len() as i32;
+        cursor_end_ms = cursor_start_ms; // next page ends where this one started
+        all_klines.extend(batch_klines);
+    }
+
+    all_klines.sort_by_key(|k| k.ts);
+    all_klines.dedup_by_key(|k| k.ts);
+    Ok(all_klines)
 }
 
 async fn fetch_okx_klines(
