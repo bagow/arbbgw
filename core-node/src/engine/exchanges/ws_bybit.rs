@@ -40,12 +40,13 @@ pub fn remove_cached_fill(order_id: &str) {
     get_exec_cache().remove(order_id);
 }
 
-/// Initialize or get the Bybit WS trading channel.
-/// `api_key` and `api_secret` are needed for auth on first connection.
 pub fn get_or_init_bybit_ws(api_key: String, api_secret: String) -> mpsc::Sender<(Value, ResponseSender)> {
     BYBIT_WS_TX.get_or_init(|| {
         let (tx, rx) = mpsc::channel(1000);
-        tokio::spawn(bybit_ws_loop(rx, api_key, api_secret));
+        // Trade stream for order creation
+        tokio::spawn(bybit_ws_loop(rx, api_key.clone(), api_secret.clone()));
+        // Private stream for execution reports
+        tokio::spawn(bybit_private_ws_loop(api_key, api_secret));
         tx
     }).clone()
 }
@@ -111,6 +112,124 @@ fn process_execution_report(data: &Value) {
     }
 }
 
+async fn bybit_private_ws_loop(api_key: String, api_secret: String) {
+    loop {
+        let url = "wss://stream.bybit.com/v5/private";
+
+        let (ws_stream, _) = match connect_async(url).await {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!("[bybit_ws_private] connection failed: {}. Retrying in 2s...", e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        tracing::info!("[bybit_ws_private] connected to v5/private WS");
+        let (mut write, mut read) = ws_stream.split();
+
+        // ── AUTHENTICATE ──
+        let expires = crate::engine::real::now_ms() + 10_000;
+        let sig = bybit_sign_ws(&api_secret, expires);
+        let auth_msg = serde_json::json!({
+            "op": "auth",
+            "args": [&api_key, expires, &sig]
+        });
+
+        if let Err(e) = write.send(Message::Text(auth_msg.to_string())).await {
+            tracing::error!("[bybit_ws_private] auth send failed: {}", e);
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            continue;
+        }
+
+        // Wait for auth response
+        let mut authed = false;
+        let auth_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        while let Ok(Some(msg)) = tokio::time::timeout_at(auth_deadline, read.next()).await {
+            if let Ok(Message::Text(t)) = msg {
+                if let Ok(val) = serde_json::from_str::<Value>(&t) {
+                    if val["op"].as_str() == Some("auth") {
+                        if val["success"].as_bool() == Some(true) || val["retCode"].as_i64() == Some(0) {
+                            tracing::info!("[bybit_ws_private] authenticated successfully");
+                            authed = true;
+                        } else {
+                            tracing::error!("[bybit_ws_private] auth failed: {}", val);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !authed {
+            tracing::error!("[bybit_ws_private] auth timeout or failed. Reconnecting in 3s...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            continue;
+        }
+
+        // ── SUBSCRIBE TO EXECUTION REPORTS ──
+        let sub_msg = serde_json::json!({
+            "reqId": uuid::Uuid::new_v4().to_string(),
+            "op": "subscribe",
+            "args": ["execution"]
+        });
+        if let Err(e) = write.send(Message::Text(sub_msg.to_string())).await {
+            tracing::error!("[bybit_ws_private] execution subscribe failed: {}", e);
+        } else {
+            tracing::info!("[bybit_ws_private] subscribed to execution reports");
+        }
+
+        // ── PING TASK ──
+        let (ping_tx, mut ping_rx) = mpsc::channel::<()>(1);
+        let ping_handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(18)).await;
+                if ping_tx.send(()).await.is_err() { break; }
+            }
+        });
+
+        // ── READER TASK ──
+        loop {
+            tokio::select! {
+                msg_opt = read.next() => {
+                    match msg_opt {
+                        Some(Ok(Message::Text(t))) => {
+                            if let Ok(val) = serde_json::from_str::<Value>(&t) {
+                                if val["topic"].as_str() == Some("execution") {
+                                    if let Some(data) = val.get("data") {
+                                        process_execution_report(data);
+                                    }
+                                } else if val["op"].as_str() == Some("subscribe") {
+                                    let success = val["success"].as_bool().unwrap_or(false);
+                                    tracing::debug!("[bybit_ws_private] subscribe response: success={}", success);
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Ping(_))) => {}
+                        Some(Err(e)) => {
+                            tracing::error!("[bybit_ws_private] read error: {}", e);
+                            break;
+                        }
+                        None => break,
+                        _ => {}
+                    }
+                }
+                Some(()) = ping_rx.recv() => {
+                    let ping = serde_json::json!({"reqId": uuid::Uuid::new_v4().to_string(), "op": "ping"});
+                    if let Err(e) = write.send(Message::Text(ping.to_string())).await {
+                        tracing::error!("[bybit_ws_private] ping failed: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        ping_handle.abort();
+        tracing::warn!("[bybit_ws_private] connection dropped. Restarting...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+}
+
 async fn bybit_ws_loop(
     mut rx: mpsc::Receiver<(Value, ResponseSender)>,
     api_key: String,
@@ -170,20 +289,6 @@ async fn bybit_ws_loop(
             continue;
         }
 
-        // ── SUBSCRIBE TO EXECUTION REPORTS ──
-        // This gives us real-time fill data for IOC orders that complete instantly
-        // and disappear from order.realtime before we can poll them.
-        let sub_msg = serde_json::json!({
-            "op": "subscribe",
-            "args": ["execution"]
-        });
-        if let Err(e) = write.send(Message::Text(sub_msg.to_string())).await {
-            tracing::error!("[bybit_ws] execution subscribe failed: {}", e);
-            // Non-fatal — continue without execution reports
-        } else {
-            tracing::info!("[bybit_ws] subscribed to execution reports");
-        }
-
         // ── READER TASK ──
         let pending: Arc<Mutex<HashMap<String, ResponseSender>>> = Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = pending.clone();
@@ -193,21 +298,6 @@ async fn bybit_ws_loop(
                 match msg {
                     Ok(Message::Text(t)) => {
                         if let Ok(val) = serde_json::from_str::<Value>(&t) {
-                            // Handle execution report pushes (topic = "execution")
-                            if val["topic"].as_str() == Some("execution") {
-                                if let Some(data) = val.get("data") {
-                                    process_execution_report(data);
-                                }
-                                continue;
-                            }
-
-                            // Handle subscription confirmations
-                            if val["op"].as_str() == Some("subscribe") {
-                                let success = val["success"].as_bool().unwrap_or(false);
-                                tracing::debug!("[bybit_ws] subscribe response: success={}", success);
-                                continue;
-                            }
-
                             // Bybit uses "reqId" for correlation of request-response
                             if let Some(id) = val["reqId"].as_str() {
                                 if let Some(sender) = pending_clone.lock().await.remove(id) {

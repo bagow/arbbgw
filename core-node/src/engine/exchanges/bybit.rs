@@ -431,12 +431,15 @@ impl ExchangeConnector for BybitConnector {
         order_id: &str,
         _multiplier: f64,
     ) -> Result<(f64, f64, f64), String> {
-        use super::ws_bybit::send_bybit_ws_request;
-        let _ = super::ws_bybit::get_or_init_bybit_ws(keys.bybit_key.clone(), keys.bybit_secret.clone());
-
+    async fn fetch_order(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        _pair: &str,
+        order_id: &str,
+        _multiplier: f64,
+    ) -> Result<(f64, f64, f64), String> {
         // ── FAST PATH: Check execution report cache first ──
-        // IOC orders fill instantly and the execution stream delivers fill data
-        // before order.realtime or order.history can return it.
         if let Some((p, f, q)) = super::ws_bybit::get_cached_fill(order_id) {
             if p > 0.0 && q > 1e-12 {
                 tracing::debug!("[bybit] fetch_order {} — found in exec cache: price={:.6} qty={:.6}", order_id, p, q);
@@ -444,36 +447,51 @@ impl ExchangeConnector for BybitConnector {
             }
         }
 
-        // Try order.realtime first (active orders)
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "reqId": req_id,
-            "header": {"X-BAPI-TIMESTAMP": now_ms().to_string(), "X-BAPI-RECV-WINDOW": "5000"},
-            "op": "order.realtime",
-            "args": [{"category": "linear", "orderId": order_id}]
-        });
-        let resp = send_bybit_ws_request(ws_req).await?;
-        let mut order = resp["data"]["list"].as_array().and_then(|a| a.first()).cloned();
+        let ts = now_ms();
+        let qs = format!("category=linear&orderId={}", order_id);
+        let sig = bybit_sign(&keys.bybit_secret, ts, &qs);
 
-        // Fallback: IOC orders execute instantly and move to history.
-        // order.realtime only shows active orders, so completed IOC won't appear there.
+        let url = format!("https://api.bybit.com/v5/order/realtime?{}", qs);
+        let req = http
+            .get(&url)
+            .header("X-BAPI-API-KEY", &keys.bybit_key)
+            .header("X-BAPI-TIMESTAMP", ts.to_string())
+            .header("X-BAPI-SIGN", sig)
+            .header("X-BAPI-RECV-WINDOW", "5000");
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => return Err(format!("Bybit fetch_order network error: {}", e)),
+        };
+
+        let body: Value = match resp.json().await {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Bybit fetch_order JSON error: {}", e)),
+        };
+
+        if body["retCode"].as_i64() != Some(0) {
+            return Err(format!("Bybit API error: {}", body["retMsg"]));
+        }
+
+        let mut order = body["result"]["list"].as_array().and_then(|a| a.first()).cloned();
+
+        // Fallback to history for IOC
         if order.is_none() {
-            let req_id2 = uuid::Uuid::new_v4().to_string();
-            let ws_req2 = serde_json::json!({
-                "reqId": req_id2,
-                "header": {"X-BAPI-TIMESTAMP": now_ms().to_string(), "X-BAPI-RECV-WINDOW": "5000"},
-                "op": "order.history",
-                "args": [{"category": "linear", "orderId": order_id}]
-            });
-            match send_bybit_ws_request(ws_req2).await {
-                Ok(resp2) => {
-                    order = resp2["data"]["list"].as_array().and_then(|a| a.first()).cloned();
-                    if order.is_some() {
-                        tracing::debug!("[bybit] fetch_order {} found via order.history fallback", order_id);
+            let ts2 = now_ms();
+            let sig2 = bybit_sign(&keys.bybit_secret, ts2, &qs);
+            let url2 = format!("https://api.bybit.com/v5/order/history?{}", qs);
+            let req2 = http
+                .get(&url2)
+                .header("X-BAPI-API-KEY", &keys.bybit_key)
+                .header("X-BAPI-TIMESTAMP", ts2.to_string())
+                .header("X-BAPI-SIGN", sig2)
+                .header("X-BAPI-RECV-WINDOW", "5000");
+
+            if let Ok(resp2) = req2.send().await {
+                if let Ok(body2) = resp2.json::<Value>().await {
+                    if body2["retCode"].as_i64() == Some(0) {
+                        order = body2["result"]["list"].as_array().and_then(|a| a.first()).cloned();
                     }
-                }
-                Err(e) => {
-                    tracing::warn!("[bybit] order.history fallback failed for {}: {}", order_id, e);
                 }
             }
         }
@@ -481,7 +499,7 @@ impl ExchangeConnector for BybitConnector {
         let order = match order {
             Some(o) => o,
             None => {
-                // Last resort: re-check execution cache (may have arrived while WS queries ran)
+                // Last resort: re-check execution cache
                 if let Some((p, f, q)) = super::ws_bybit::get_cached_fill(order_id) {
                     if p > 0.0 && q > 1e-12 {
                         tracing::info!("[bybit] fetch_order {} — late exec cache hit: price={:.6} qty={:.6}", order_id, p, q);
@@ -492,7 +510,6 @@ impl ExchangeConnector for BybitConnector {
             }
         };
 
-        // Check order status — if Cancelled/Rejected/Deactivated, but might have partial fill!
         let status = order["orderStatus"].as_str().unwrap_or("");
         if status == "Cancelled" || status == "Rejected" || status == "Deactivated" {
             let exec_qty: f64 = order["cumExecQty"]
@@ -500,16 +517,11 @@ impl ExchangeConnector for BybitConnector {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0.0);
             if exec_qty < 1e-12 {
-                tracing::warn!(
-                    "[bybit] fetch_order {} status={} — definitively unfilled",
-                    order_id,
-                    status
-                );
+                tracing::warn!("[bybit] fetch_order {} status={} — definitively unfilled", order_id, status);
                 return Ok((0.0, 0.0, 0.0));
             }
         }
 
-        // Check cumExecQty
         let exec_qty: f64 = order["cumExecQty"]
             .as_str()
             .and_then(|s| s.parse().ok())
