@@ -425,14 +425,6 @@ impl ExchangeConnector for BybitConnector {
 
     async fn fetch_order(
         &self,
-        _http: &Client,
-        keys: &ExchangeKeys,
-        _pair: &str,
-        order_id: &str,
-        _multiplier: f64,
-    ) -> Result<(f64, f64, f64), String> {
-    async fn fetch_order(
-        &self,
         http: &Client,
         keys: &ExchangeKeys,
         _pair: &str,
