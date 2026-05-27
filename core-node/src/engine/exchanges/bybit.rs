@@ -149,7 +149,30 @@ impl ExchangeConnector for BybitConnector {
                     "[bybit_ws] ✅ place_order {} orderId={} (WS)",
                     pair, oid
                 );
-                return Ok((Some(oid), 0.0, 0.0));
+
+                // Wait up to 500ms for execution report to arrive via the
+                // private 'execution' subscription. IOC orders on Bybit fill
+                // within ~50-200ms, but the execution push may arrive with
+                // a small delay. Polling in 50ms increments keeps latency low
+                // while giving the stream enough time.
+                let mut inline_price = 0.0;
+                let mut inline_fee = 0.0;
+                let mut inline_qty = 0.0;
+                for _wait in 0..10 {
+                    if let Some((p, f, q)) = super::ws_bybit::get_cached_fill(&oid) {
+                        inline_price = p;
+                        inline_fee = f;
+                        inline_qty = q;
+                        tracing::info!(
+                            "[bybit_ws] ⚡ Inline fill {} price={:.6} fee={:.6} qty={:.6}",
+                            pair, p, f, q
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+
+                return Ok((Some(oid), inline_price, inline_fee));
             }
             Err(e) => {
                 tracing::error!("[bybit_ws] WS order failed ({}). No REST fallback available.", e);
@@ -411,6 +434,16 @@ impl ExchangeConnector for BybitConnector {
         use super::ws_bybit::send_bybit_ws_request;
         let _ = super::ws_bybit::get_or_init_bybit_ws(keys.bybit_key.clone(), keys.bybit_secret.clone());
 
+        // ── FAST PATH: Check execution report cache first ──
+        // IOC orders fill instantly and the execution stream delivers fill data
+        // before order.realtime or order.history can return it.
+        if let Some((p, f, q)) = super::ws_bybit::get_cached_fill(order_id) {
+            if p > 0.0 && q > 1e-12 {
+                tracing::debug!("[bybit] fetch_order {} — found in exec cache: price={:.6} qty={:.6}", order_id, p, q);
+                return Ok((p, f, q));
+            }
+        }
+
         // Try order.realtime first (active orders)
         let req_id = uuid::Uuid::new_v4().to_string();
         let ws_req = serde_json::json!({
@@ -447,7 +480,16 @@ impl ExchangeConnector for BybitConnector {
 
         let order = match order {
             Some(o) => o,
-            None => return Err("Order not found in API yet".to_string()),
+            None => {
+                // Last resort: re-check execution cache (may have arrived while WS queries ran)
+                if let Some((p, f, q)) = super::ws_bybit::get_cached_fill(order_id) {
+                    if p > 0.0 && q > 1e-12 {
+                        tracing::info!("[bybit] fetch_order {} — late exec cache hit: price={:.6} qty={:.6}", order_id, p, q);
+                        return Ok((p, f, q));
+                    }
+                }
+                return Err("Order not found in API yet".to_string());
+            }
         };
 
         // Check order status — if Cancelled/Rejected/Deactivated, but might have partial fill!

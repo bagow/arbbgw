@@ -315,12 +315,16 @@ pub fn start_position_sync(
                     trade.id, trade.pair, missing_ex, remaining_ex
                 );
 
-                let is_a_higher = trade.direction == "A>B";
+                // FIX: DB stores direction as "binance>gate", NOT "A>B".
+                // The exchange whose name comes FIRST in direction is the "higher" leg (we shorted it).
+                let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
                 let remaining_is_a = remaining_ex == &trade.exchange_a;
+                // If remaining leg is A and A was shorted (is_a_higher), close by BUYING.
+                // If remaining leg is B and A was higher (B was longed), close by SELLING.
                 let close_is_buy = if remaining_is_a {
-                    is_a_higher
+                    is_a_higher  // A was shorted → buy to close
                 } else {
-                    !is_a_higher
+                    !is_a_higher // B was longed → sell to close
                 };
                 let contracts = if remaining_is_a {
                     trade.contracts_a
@@ -332,7 +336,9 @@ pub fn start_position_sync(
                     .get(&format!("{}:{}", remaining_ex, trade.pair))
                     .map(|v| *v)
                     .unwrap_or(1.0);
-                let q_qty = contracts;
+                // FIX: close_position expects physical volume (coins), not raw contract count.
+                // contracts * multiplier = physical coins.
+                let q_qty = contracts * mult;
                 let tick_for_close = e_ctx
                     .tick_sizes
                     .get(&format!("{}:{}", remaining_ex, trade.pair))

@@ -4,6 +4,10 @@
 //! Auth: HMAC-SHA256 signature of "GET/realtime{expires}"
 //! Orders: {"reqId":"..","header":{..},"op":"order.create","args":[{..}]}
 //! Fallback: if WS fails, caller falls back to REST in bybit.rs
+//!
+//! EXECUTION REPORTS: After auth, subscribes to "execution" topic.
+//! Fill data (price, fee, qty) is cached by orderId for instant retrieval
+//! by `place_order` and `fetch_order`, eliminating the IOC fill detection gap.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +20,25 @@ use std::sync::OnceLock;
 type ResponseSender = oneshot::Sender<Value>;
 
 static BYBIT_WS_TX: OnceLock<mpsc::Sender<(Value, ResponseSender)>> = OnceLock::new();
+
+/// Cached execution fill data from Bybit's private execution stream.
+/// Key: orderId, Value: (avg_price, total_fee, total_exec_qty)
+static BYBIT_EXEC_CACHE: OnceLock<Arc<dashmap::DashMap<String, (f64, f64, f64)>>> = OnceLock::new();
+
+fn get_exec_cache() -> Arc<dashmap::DashMap<String, (f64, f64, f64)>> {
+    BYBIT_EXEC_CACHE.get_or_init(|| Arc::new(dashmap::DashMap::new())).clone()
+}
+
+/// Try to get cached execution fill data for an orderId.
+/// Returns Some((price, fee, exec_qty)) if execution report was received.
+pub fn get_cached_fill(order_id: &str) -> Option<(f64, f64, f64)> {
+    get_exec_cache().get(order_id).map(|v| *v)
+}
+
+/// Remove cached fill (cleanup after use)
+pub fn remove_cached_fill(order_id: &str) {
+    get_exec_cache().remove(order_id);
+}
 
 /// Initialize or get the Bybit WS trading channel.
 /// `api_key` and `api_secret` are needed for auth on first connection.
@@ -36,6 +59,56 @@ fn bybit_sign_ws(secret: &str, expires: i64) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(val.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+/// Process an execution report push from Bybit's private stream.
+/// Aggregates partial fills into a single (weighted_avg_price, total_fee, total_qty) entry.
+fn process_execution_report(data: &Value) {
+    let cache = get_exec_cache();
+
+    if let Some(arr) = data.as_array() {
+        for exec in arr {
+            let order_id = match exec["orderId"].as_str() {
+                Some(id) if !id.is_empty() => id.to_string(),
+                _ => continue,
+            };
+
+            let exec_price: f64 = exec["execPrice"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
+            let exec_qty: f64 = exec["execQty"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
+            let exec_fee: f64 = exec["execFee"]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0)
+                .abs();
+
+            if exec_qty <= 0.0 || exec_price <= 0.0 {
+                continue;
+            }
+
+            // Aggregate partial fills: weighted average price, sum fees, sum qty
+            cache
+                .entry(order_id.clone())
+                .and_modify(|(prev_price, prev_fee, prev_qty)| {
+                    let total_qty = *prev_qty + exec_qty;
+                    // Volume-weighted average price
+                    *prev_price = (*prev_price * *prev_qty + exec_price * exec_qty) / total_qty;
+                    *prev_fee += exec_fee;
+                    *prev_qty = total_qty;
+                })
+                .or_insert((exec_price, exec_fee, exec_qty));
+
+            tracing::debug!(
+                "[bybit_ws] 📊 Execution report: orderId={} price={} qty={} fee={}",
+                order_id, exec_price, exec_qty, exec_fee
+            );
+        }
+    }
 }
 
 async fn bybit_ws_loop(
@@ -97,6 +170,20 @@ async fn bybit_ws_loop(
             continue;
         }
 
+        // ── SUBSCRIBE TO EXECUTION REPORTS ──
+        // This gives us real-time fill data for IOC orders that complete instantly
+        // and disappear from order.realtime before we can poll them.
+        let sub_msg = serde_json::json!({
+            "op": "subscribe",
+            "args": ["execution"]
+        });
+        if let Err(e) = write.send(Message::Text(sub_msg.to_string())).await {
+            tracing::error!("[bybit_ws] execution subscribe failed: {}", e);
+            // Non-fatal — continue without execution reports
+        } else {
+            tracing::info!("[bybit_ws] subscribed to execution reports");
+        }
+
         // ── READER TASK ──
         let pending: Arc<Mutex<HashMap<String, ResponseSender>>> = Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = pending.clone();
@@ -106,7 +193,22 @@ async fn bybit_ws_loop(
                 match msg {
                     Ok(Message::Text(t)) => {
                         if let Ok(val) = serde_json::from_str::<Value>(&t) {
-                            // Bybit uses "reqId" for correlation
+                            // Handle execution report pushes (topic = "execution")
+                            if val["topic"].as_str() == Some("execution") {
+                                if let Some(data) = val.get("data") {
+                                    process_execution_report(data);
+                                }
+                                continue;
+                            }
+
+                            // Handle subscription confirmations
+                            if val["op"].as_str() == Some("subscribe") {
+                                let success = val["success"].as_bool().unwrap_or(false);
+                                tracing::debug!("[bybit_ws] subscribe response: success={}", success);
+                                continue;
+                            }
+
+                            // Bybit uses "reqId" for correlation of request-response
                             if let Some(id) = val["reqId"].as_str() {
                                 if let Some(sender) = pending_clone.lock().await.remove(id) {
                                     let _ = sender.send(val);

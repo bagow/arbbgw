@@ -357,6 +357,13 @@ pub async fn run_hft_cycle(
 
         // Verify fill A
         let mut got_a = dry_run || fill_a > 0.0;
+
+        // LATENCY OPTIMIZATION: skip verify loop if inline fill available (Bybit exec reports)
+        if got_a && fill_a > 0.0 && actual_vol_phys_a.is_none() {
+            actual_vol_phys_a = Some(qty_a);
+            tracing::info!("[hft] ⚡ Inline fill A: price={:.6} fee={:.6} — skipping verify", fill_a, fee_a_val);
+        }
+
         for attempt in 0..ts.fill_verify_retries {
             if got_a && actual_vol_phys_a.is_some() { break; }
             if attempt > 0 { tokio::time::sleep(std::time::Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
@@ -368,6 +375,44 @@ pub async fn run_hft_cycle(
                 }
             }
         }
+
+        // SLOW verify for Leg A (HFT)
+        if !got_a && oid_a.is_some() && !dry_run {
+            tracing::warn!("[hft] ⏳ {}: Leg A orderId={} fill not confirmed. Extended wait...", pair, oid_a.as_deref().unwrap_or("?"));
+            for slow_attempt in 0..6 {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                if let Some(ref oid) = oid_a {
+                    match conn_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
+                        Ok((p, f, ev)) => {
+                            if ev > 1e-12 {
+                                actual_vol_phys_a = Some(ev); got_a = true;
+                                if p > 0.0 { fill_a = p; }
+                                if f > 1e-9 { fee_a_val = f; }
+                                tracing::info!("[hft] ✅ {}: Leg A fill on slow attempt {}", pair, slow_attempt + 1);
+                                break;
+                            }
+                            if p == 0.0 && f == 0.0 && ev == 0.0 { break; }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+
+        // Position fallback for Leg A (HFT)
+        if actual_vol_phys_a.unwrap_or(0.0) <= 1e-12 && oid_a.is_some() && !dry_run {
+            if let Ok(positions) = conn_a.fetch_positions(&http, &keys).await {
+                if let Some(pos) = positions.iter().find(|p| {
+                    crate::engine::real::symbols_match(&p.symbol, &pair) && p.size.abs() > 1e-12
+                }) {
+                    tracing::warn!("[hft] 🚨 {}: Position FOUND on {} despite verify failure!", pair, exa);
+                    actual_vol_phys_a = Some(pos.size.abs());
+                    got_a = true;
+                    if pos.entry_price > 0.0 { fill_a = pos.entry_price; }
+                }
+            }
+        }
+
         let filled_a = actual_vol_phys_a.unwrap_or(0.0);
         if filled_a <= 1e-12 && !dry_run { continue; }
 
@@ -400,6 +445,13 @@ pub async fn run_hft_cycle(
 
         // Verify fill B
         let mut got_b = dry_run || fill_b > 0.0;
+
+        // LATENCY OPTIMIZATION: skip verify loop if inline fill available
+        if got_b && fill_b > 0.0 && actual_vol_phys_b.is_none() {
+            actual_vol_phys_b = Some(final_qty_b);
+            tracing::info!("[hft] ⚡ Inline fill B: price={:.6} fee={:.6} — skipping verify", fill_b, fee_b_val);
+        }
+
         for attempt in 0..ts.fill_verify_retries {
             if got_b && actual_vol_phys_b.is_some() { break; }
             if attempt > 0 { tokio::time::sleep(std::time::Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
@@ -408,6 +460,29 @@ pub async fn run_hft_cycle(
                     if p > 0.0 { fill_b = p; }
                     if f > 1e-9 { fee_b_val = f; }
                     if ev > 1e-12 { actual_vol_phys_b = Some(ev); got_b = true; }
+                }
+            }
+        }
+
+        // SLOW verify for Leg B (HFT)
+        if !got_b && oid_b.is_some() && !dry_run {
+            tracing::warn!("[hft] ⏳ {}: Leg B orderId={} fill not confirmed. Extended wait...", pair, oid_b.as_deref().unwrap_or("?"));
+            for slow_attempt in 0..6 {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                if let Some(ref oid) = oid_b {
+                    match conn_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
+                        Ok((p, f, ev)) => {
+                            if ev > 1e-12 {
+                                actual_vol_phys_b = Some(ev); got_b = true;
+                                if p > 0.0 { fill_b = p; }
+                                if f > 1e-9 { fee_b_val = f; }
+                                tracing::info!("[hft] ✅ {}: Leg B fill on slow attempt {}", pair, slow_attempt + 1);
+                                break;
+                            }
+                            if p == 0.0 && f == 0.0 && ev == 0.0 { break; }
+                        }
+                        Err(_) => {}
+                    }
                 }
             }
         }

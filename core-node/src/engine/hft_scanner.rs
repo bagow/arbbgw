@@ -353,15 +353,17 @@ pub fn generate_hft_signals(
             // L1 depth filter
             if profile.min_depth_percent > 0.0 {
                 let min_depth_usd = profile.trade_volume * (profile.min_depth_percent / 100.0);
+                // bid_size/ask_size from collectors are ALREADY in TRUE USD
+                // (same as EMA scanner). Do NOT multiply by price — that would square the value.
                 let depth_a_usd = if is_a_higher {
-                    data_a.as_ref().unwrap().bid_size * data_a.as_ref().unwrap().bid
+                    data_a.as_ref().unwrap().bid_size
                 } else {
-                    data_a.as_ref().unwrap().ask_size * data_a.as_ref().unwrap().ask
+                    data_a.as_ref().unwrap().ask_size
                 };
                 let depth_b_usd = if is_a_higher {
-                    data_b.as_ref().unwrap().ask_size * data_b.as_ref().unwrap().ask
+                    data_b.as_ref().unwrap().ask_size
                 } else {
-                    data_b.as_ref().unwrap().bid_size * data_b.as_ref().unwrap().bid
+                    data_b.as_ref().unwrap().bid_size
                 };
                 if depth_a_usd < min_depth_usd || depth_b_usd < min_depth_usd {
                     continue;

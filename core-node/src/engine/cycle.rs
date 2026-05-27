@@ -1119,6 +1119,71 @@ pub async fn run_cycle(
                 }
             }
 
+            // SLOW verification for Leg 1: if order was accepted but fill not confirmed yet,
+            // give the exchange more time. Bybit IOC orders can take 500ms-2s to appear
+            // in order.history, and execution reports may arrive with delay.
+            if !got_a && oid_a.is_some() && !dry_run {
+                tracing::warn!(
+                    "[real] ⏳ {}: Leg 1 orderId={} accepted but fill not yet confirmed. Extended wait...",
+                    pair, oid_a.as_deref().unwrap_or("?")
+                );
+                for slow_attempt in 0..8 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if let Some(ref oid) = oid_a {
+                        match conn_ensure_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
+                            Ok((p, f, ev)) => {
+                                if ev > 1e-12 {
+                                    actual_vol_phys_a = Some(ev);
+                                    got_a = true;
+                                    if p > 0.0 { fill_a = p; }
+                                    if f > 1e-9 { fee_a_val = f; }
+                                    tracing::info!(
+                                        "[real] ✅ {}: Leg 1 fill confirmed on slow attempt {} — qty={}, price={}",
+                                        pair, slow_attempt + 1, ev, p
+                                    );
+                                    break;
+                                }
+                                if p == 0.0 && f == 0.0 && ev == 0.0 {
+                                    tracing::warn!(
+                                        "[real] {}: Leg 1 order definitively unfilled (returned 0,0,0) on attempt {}",
+                                        pair, slow_attempt + 1
+                                    );
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[real] {}: Leg 1 slow verify attempt {} err: {}",
+                                    pair, slow_attempt + 1, e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // POSITION FALLBACK: If verify loops didn't confirm fill, but the order was
+            // accepted (oid exists), check if a position actually exists on the exchange.
+            // This catches the case where IOC filled but API didn't return fill data in time.
+            if actual_vol_phys_a.unwrap_or(0.0) <= 1e-12 && oid_a.is_some() && !dry_run {
+                tracing::warn!("[real] 🔍 {}: Leg 1 fill unverified on {}. Checking position...", pair, exa);
+                if let Ok(positions) = conn_ensure_a.fetch_positions(&http, &keys).await {
+                    if let Some(pos) = positions.iter().find(|p| {
+                        crate::engine::real::symbols_match(&p.symbol, &pair) && p.size.abs() > 1e-12
+                    }) {
+                        tracing::warn!(
+                            "[real] 🚨 {}: Position FOUND on {} (size={:.6} entry={:.6}) despite verify failure! Using position data.",
+                            pair, exa, pos.size.abs(), pos.entry_price
+                        );
+                        actual_vol_phys_a = Some(pos.size.abs());
+                        got_a = true;
+                        if pos.entry_price > 0.0 {
+                            fill_a = pos.entry_price;
+                        }
+                    }
+                }
+            }
+
             let filled_a = actual_vol_phys_a.unwrap_or(0.0);
             if filled_a <= 1e-12 && !dry_run {
                 tracing::warn!(
@@ -1197,7 +1262,7 @@ pub async fn run_cycle(
                             &hc,
                             &kc,
                             &p,
-                            !(!is_a_higher),
+                            is_a_higher,
                             final_qty_b,
                             dry_run,
                             mult_a,
@@ -1316,7 +1381,7 @@ pub async fn run_cycle(
                             &hc,
                             &kc,
                             &p,
-                            !(!is_a_higher),
+                            is_a_higher,
                             mismatch,
                             dry_run,
                             mult_a,
@@ -1430,6 +1495,67 @@ pub async fn run_cycle(
                                 actual_vol_phys_b = Some(ev);
                                 got_b = true;
                             }
+                        }
+                    }
+                }
+            }
+
+            // SLOW verification for Leg 1 (B-is-thinner branch)
+            if !got_b && oid_b.is_some() && !dry_run {
+                tracing::warn!(
+                    "[real] ⏳ {}: Leg 1 orderId={} accepted but fill not yet confirmed. Extended wait...",
+                    pair, oid_b.as_deref().unwrap_or("?")
+                );
+                for slow_attempt in 0..8 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if let Some(ref oid) = oid_b {
+                        match conn_ensure_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
+                            Ok((p, f, ev)) => {
+                                if ev > 1e-12 {
+                                    actual_vol_phys_b = Some(ev);
+                                    got_b = true;
+                                    if p > 0.0 { fill_b = p; }
+                                    if f > 1e-9 { fee_b_val = f; }
+                                    tracing::info!(
+                                        "[real] ✅ {}: Leg 1 fill confirmed on slow attempt {} — qty={}, price={}",
+                                        pair, slow_attempt + 1, ev, p
+                                    );
+                                    break;
+                                }
+                                if p == 0.0 && f == 0.0 && ev == 0.0 {
+                                    tracing::warn!(
+                                        "[real] {}: Leg 1 order definitively unfilled (returned 0,0,0) on attempt {}",
+                                        pair, slow_attempt + 1
+                                    );
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[real] {}: Leg 1 slow verify attempt {} err: {}",
+                                    pair, slow_attempt + 1, e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // POSITION FALLBACK for Leg 1 (B-is-thinner branch)
+            if actual_vol_phys_b.unwrap_or(0.0) <= 1e-12 && oid_b.is_some() && !dry_run {
+                tracing::warn!("[real] 🔍 {}: Leg 1 fill unverified on {}. Checking position...", pair, exb);
+                if let Ok(positions) = conn_ensure_b.fetch_positions(&http, &keys).await {
+                    if let Some(pos) = positions.iter().find(|p| {
+                        crate::engine::real::symbols_match(&p.symbol, &pair) && p.size.abs() > 1e-12
+                    }) {
+                        tracing::warn!(
+                            "[real] 🚨 {}: Position FOUND on {} (size={:.6} entry={:.6}) despite verify failure! Using position data.",
+                            pair, exb, pos.size.abs(), pos.entry_price
+                        );
+                        actual_vol_phys_b = Some(pos.size.abs());
+                        got_b = true;
+                        if pos.entry_price > 0.0 {
+                            fill_b = pos.entry_price;
                         }
                     }
                 }
@@ -1879,7 +2005,7 @@ pub async fn run_cycle(
             settings.leverage as f64,
             &e_ctx,
         );
-        opened_this_cycle = true;
+        // opened_this_cycle is already set to true earlier
 
         let dir = sig.direction.clone();
         let actual_entry_spread = if fill_a > 0.0 && fill_b > 0.0 {
