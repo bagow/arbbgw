@@ -173,7 +173,12 @@ pub async fn load_technical_settings(db: &Connection) -> TechnicalSettings {
         })
         .await
         .unwrap_or_default();
-    TechnicalSettings::from_db_rows(&rows)
+    let mut ts = TechnicalSettings::from_db_rows(&rows);
+    // Clamp cooldowns so that a misconfigured DB doesn't freeze the bot for 30 minutes
+    ts.exchange_cooldown_ms = ts.exchange_cooldown_ms.min(60_000);
+    ts.pair_cooldown_ms = ts.pair_cooldown_ms.min(15_000);
+    ts.asymmetric_cooldown_ms = ts.asymmetric_cooldown_ms.min(60_000);
+    ts
 }
 
 /// Spawn background task refreshing technical settings from DB.

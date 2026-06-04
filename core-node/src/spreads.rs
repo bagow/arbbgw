@@ -291,8 +291,8 @@ pub fn compute_spreads(
                     first_seen_map.entry(ema_key.clone()).or_insert(now_f64);
                     let first_ts = *first_seen_map.get(&ema_key).unwrap();
                     let observation_age = now_f64 - first_ts;
-                    // Auto-verify: 5min observation + current EMA still positive
-                    if observation_age > 300.0 && ema_mid_spread > 0.1 {
+                    // Auto-verify: 2min observation (historical warmup fallback)
+                    if observation_age > 120.0 {
                         let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
                         verified.insert(ema_key.clone());
                         tracing::info!(

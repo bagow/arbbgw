@@ -866,9 +866,9 @@ pub async fn run_cycle(
         let cached_b = e_ctx.l2_books.get(&l2_key_b).map(|v| v.clone());
         let now_cache = now_ms();
 
-        // L2 cache must exist AND be fresh (< 2s). No REST fallback.
+        // L2 cache must exist AND be fresh (< 5s). No REST fallback.
         let (ob_a_res, ob_b_res) = match (&cached_a, &cached_b) {
-            (Some(a), Some(b)) if (now_cache - a.updated_ms) < 2_000 && (now_cache - b.updated_ms) < 2_000 => {
+            (Some(a), Some(b)) if (now_cache - a.updated_ms) < 5_000 && (now_cache - b.updated_ms) < 5_000 => {
                 (Ok((a.bids.clone(), a.asks.clone())), Ok((b.bids.clone(), b.asks.clone())))
             },
             _ => {
@@ -997,777 +997,221 @@ pub async fn run_cycle(
             async move { snap_repo.insert_snapshot(sp_pair, sp_exa, sp_exb, snapshot, ts_ms).await; }
         });
 
-        // ── SEQUENTIAL ORDER EXECUTION (THINNER LEG FIRST) ───────────────────
+        // ── PARALLEL ORDER EXECUTION ───────────────────────────────────────────────
         opened_this_cycle = true;
-        let a_is_thinner = depth_a <= depth_b;
+
+        info!(
+            "[real] ⚡ Executing Leg A ({}) and Leg B ({}) IN PARALLEL for {}...",
+            exa, exb, pair
+        );
+
+        let t0_exec = std::time::Instant::now();
+
+        // 1. Fire both legs concurrently
+        let res_a_fut = conn_ensure_a.place_order(
+            &http, &keys, &pair, !is_a_higher, qty_a, dry_run,
+            limit_price_a, limit_price_a > 0.0,
+            settings.leverage as f64, mult_a, settings.slippage_percent, tick_a, ts.api_timeout_ms
+        );
+
+        let res_b_fut = conn_ensure_b.place_order(
+            &http, &keys, &pair, is_a_higher, qty_b, dry_run,
+            limit_price_b, limit_price_b > 0.0,
+            settings.leverage as f64, mult_b, settings.slippage_percent, tick_b, ts.api_timeout_ms
+        );
+
+        let (res_a, res_b) = tokio::join!(res_a_fut, res_b_fut);
+        let total_ms = t0_exec.elapsed().as_millis();
+
+        // Latency checks
+        if total_ms > 800 {
+            let mut strikes_a = e_ctx.high_latency_strikes.entry(exa.clone()).or_insert(0);
+            *strikes_a += 1;
+            if *strikes_a >= 3 {
+                e_ctx.exchange_cooldown.insert(exa.clone(), now_ms() + 60_000);
+                error!("[real] 🐢 LATENCY ALERT: {} RTT >800ms. Cooldown 1m.", exa);
+                *strikes_a = 0;
+            }
+    
+            let mut strikes_b = e_ctx.high_latency_strikes.entry(exb.clone()).or_insert(0);
+            *strikes_b += 1;
+            if *strikes_b >= 3 {
+                e_ctx.exchange_cooldown.insert(exb.clone(), now_ms() + 60_000);
+                error!("[real] 🐢 LATENCY ALERT: {} RTT >800ms. Cooldown 1m.", exb);
+                *strikes_b = 0;
+            }
+        } else {
+            e_ctx.high_latency_strikes.insert(exa.clone(), 0);
+            e_ctx.high_latency_strikes.insert(exb.clone(), 0);
+        }
+
+        // 2. Parse inline results
+        let (oid_a, mut fill_a, mut fee_a_val) = match res_a {
+            Ok(t) => (t.0, t.1, t.2),
+            Err(e) => {
+                error!("[real] LEG_A reject {}/{}: {}", exa, pair, e);
+                let esl = e.to_string().to_lowercase();
+                if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
+                    mark_balance_low(&exa, &e_ctx);
+                }
+                (None, 0.0, 0.0)
+            }
+        };
+
+        let (oid_b, mut fill_b, mut fee_b_val) = match res_b {
+            Ok(t) => (t.0, t.1, t.2),
+            Err(e) => {
+                error!("[real] LEG_B reject {}/{}: {}", exb, pair, e);
+                let esl = e.to_string().to_lowercase();
+                if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
+                    mark_balance_low(&exb, &e_ctx);
+                }
+                (None, 0.0, 0.0)
+            }
+        };
 
         let mut actual_vol_phys_a: Option<f64> = None;
         let mut actual_vol_phys_b: Option<f64> = None;
-        let mut fill_a = 0.0;
-        let mut fill_b = 0.0;
-        let mut fee_a_val = 0.0;
-        let mut fee_b_val = 0.0;
 
-        let mut oid_a_opt: Option<String> = None;
-        let mut oid_b_opt: Option<String> = None;
+        if fill_a > 0.0 { actual_vol_phys_a = Some(qty_a); }
+        if fill_b > 0.0 { actual_vol_phys_b = Some(qty_b); }
 
-        if a_is_thinner {
-            info!(
-                "[real] ⚡ Executing Leg 1 (thinner leg) on {} for {}...",
-                exa, pair
-            );
-            let t_a = std::time::Instant::now();
-            let res_a = conn_ensure_a
-                .place_order(
-                    &http,
-                    &keys,
-                    &pair,
-                    !is_a_higher,
-                    qty_a,
-                    dry_run,
-                    limit_price_a,
-                    limit_price_a > 0.0,
-                    settings.leverage as f64,
-                    mult_a,
-                    settings.slippage_percent,
-                    tick_a,
-                    ts.api_timeout_ms,
-                )
-                .await;
-
-            if t_a.elapsed().as_millis() > 500 {
-                let mut strikes = e_ctx.high_latency_strikes.entry(exa.clone()).or_insert(0);
-                *strikes += 1;
-                if *strikes >= 3 {
-                    e_ctx
-                        .exchange_cooldown
-                        .insert(exa.clone(), now_ms() + 60_000);
-                    error!("[real] 🐢 LATENCY ALERT: {} RTT >500ms. Cooldown 1m.", exa);
-                    *strikes = 0;
-                }
-            } else {
-                e_ctx.high_latency_strikes.insert(exa.clone(), 0);
-            }
-            e_ctx.pair_cooldown.insert(pair.clone(), now_ms());
-
-            let (oid_a, inline_fill_a, inline_fee_a) = match res_a {
-                Ok(t) => (t.0, t.1, t.2),
-                Err(e) => {
-                    error!("[real] LEG_A reject {}/{}: {}", exa, pair, e);
-                    let esl = e.to_string().to_lowercase();
-                    if esl.contains("insufficient")
-                        || esl.contains("balance")
-                        || esl.contains("margin")
-                        || esl.contains("exceed")
-                    {
-                        mark_balance_low(&exa, &e_ctx);
-                    }
-                    (None, 0.0, 0.0)
-                }
-            };
-            oid_a_opt = oid_a.clone();
-
-            if oid_a.is_none() && !dry_run {
-                tracing::warn!(
-                    "[real] 🛑 ABORT {}: Leg 1 rejected by {}. Leg 2 aborted.",
-                    pair,
-                    exa
-                );
-                continue;
-            }
-
-            fill_a = inline_fill_a;
-            fee_a_val = inline_fee_a;
-            let mut got_a = dry_run || fill_a > 0.0;
-
-            // LATENCY OPTIMIZATION: If place_order returned inline fill data (e.g. Binance WS RESULT),
-            // skip the entire fill_verify REST polling loop — saves 150-400ms
-            if got_a && fill_a > 0.0 && actual_vol_phys_a.is_none() {
-                actual_vol_phys_a = Some(qty_a);
-                tracing::info!("[real] ⚡ Inline fill A: price={:.6} fee={:.6} — skipping verify loop", fill_a, fee_a_val);
-            }
-
+        // 3. Parallel verification loops (if needed)
+        let verify_a_fut = async {
+            let mut phys = actual_vol_phys_a;
+            let mut got = dry_run || fill_a > 0.0;
+            if got && phys.is_some() { return (got, phys, fill_a, fee_a_val); }
+    
             for attempt in 0..ts.fill_verify_retries {
-                if got_a && actual_vol_phys_a.is_some() {
-                    break;
-                }
-                if attempt > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        ts.fill_verify_delay_ms as u64,
-                    ))
-                    .await;
-                }
-
-                if !got_a || actual_vol_phys_a.is_none() {
-                    if let Some(ref oid) = oid_a {
-                        if let Ok((p, f, ev)) = conn_ensure_a
-                            .fetch_order(&http, &keys, &pair, oid, mult_a)
-                            .await
-                        {
-                            if p > 0.0 {
-                                fill_a = p;
-                            }
-                            if f > 1e-9 {
-                                fee_a_val = f;
-                            }
-                            if ev > 1e-12 {
-                                actual_vol_phys_a = Some(ev);
-                                got_a = true;
-                            }
-                        }
+                if got && phys.is_some() { break; }
+                if attempt > 0 { tokio::time::sleep(std::time::Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
+        
+                if let Some(ref oid) = oid_a {
+                    if let Ok((p, f, ev)) = conn_ensure_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
+                        if p > 0.0 { fill_a = p; }
+                        if f > 1e-9 { fee_a_val = f; }
+                        if ev > 1e-12 { phys = Some(ev); got = true; }
                     }
                 }
             }
-
-            // SLOW verification for Leg 1: if order was accepted but fill not confirmed yet,
-            // give the exchange more time. Bybit IOC orders can take 500ms-2s to appear
-            // in order.history, and execution reports may arrive with delay.
-            if !got_a && oid_a.is_some() && !dry_run {
-                tracing::warn!(
-                    "[real] ⏳ {}: Leg 1 orderId={} accepted but fill not yet confirmed. Extended wait...",
-                    pair, oid_a.as_deref().unwrap_or("?")
-                );
+    
+            if !got && oid_a.is_some() && !dry_run {
+                tracing::warn!("[real] ⏳ {}: Leg A orderId={} accepted but fill not yet confirmed. Extended wait...", pair, oid_a.as_deref().unwrap_or("?"));
                 for slow_attempt in 0..8 {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     if let Some(ref oid) = oid_a {
-                        match conn_ensure_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
-                            Ok((p, f, ev)) => {
-                                if ev > 1e-12 {
-                                    actual_vol_phys_a = Some(ev);
-                                    got_a = true;
-                                    if p > 0.0 { fill_a = p; }
-                                    if f > 1e-9 { fee_a_val = f; }
-                                    tracing::info!(
-                                        "[real] ✅ {}: Leg 1 fill confirmed on slow attempt {} — qty={}, price={}",
-                                        pair, slow_attempt + 1, ev, p
-                                    );
-                                    break;
-                                }
-                                if p == 0.0 && f == 0.0 && ev == 0.0 {
-                                    tracing::warn!(
-                                        "[real] {}: Leg 1 order definitively unfilled (returned 0,0,0) on attempt {}",
-                                        pair, slow_attempt + 1
-                                    );
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[real] {}: Leg 1 slow verify attempt {} err: {}",
-                                    pair, slow_attempt + 1, e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            // POSITION FALLBACK: If verify loops didn't confirm fill, but the order was
-            // accepted (oid exists), check if a position actually exists on the exchange.
-            // This catches the case where IOC filled but API didn't return fill data in time.
-            if actual_vol_phys_a.unwrap_or(0.0) <= 1e-12 && oid_a.is_some() && !dry_run {
-                tracing::warn!("[real] 🔍 {}: Leg 1 fill unverified on {}. Checking position...", pair, exa);
-                if let Ok(positions) = conn_ensure_a.fetch_positions(&http, &keys).await {
-                    if let Some(pos) = positions.iter().find(|p| {
-                        crate::engine::real::symbols_match(&p.symbol, &pair) && p.size.abs() > 1e-12
-                    }) {
-                        tracing::warn!(
-                            "[real] 🚨 {}: Position FOUND on {} (size={:.6} entry={:.6}) despite verify failure! Using position data.",
-                            pair, exa, pos.size.abs(), pos.entry_price
-                        );
-                        actual_vol_phys_a = Some(pos.size.abs());
-                        got_a = true;
-                        if pos.entry_price > 0.0 {
-                            fill_a = pos.entry_price;
-                        }
-                    }
-                }
-            }
-
-            let filled_a = actual_vol_phys_a.unwrap_or(0.0);
-            if filled_a <= 1e-12 && !dry_run {
-                tracing::warn!(
-                    "[real] 🛑 ABORT {}: Leg 1 filled 0% on {}. Leg 2 aborted.",
-                    pair,
-                    exa
-                );
-                continue;
-            }
-
-            let final_qty_b = if dry_run { qty_b } else { filled_a };
-            tracing::info!(
-                "[real] ⚡ Executing Leg 2 on {} for {}. Re-matching volume: {}",
-                exb,
-                pair,
-                final_qty_b
-            );
-
-            let t_b = std::time::Instant::now();
-            let res_b = conn_ensure_b
-                .place_order(
-                    &http,
-                    &keys,
-                    &pair,
-                    is_a_higher,
-                    final_qty_b,
-                    dry_run,
-                    limit_price_b,
-                    limit_price_b > 0.0,
-                    settings.leverage as f64,
-                    mult_b,
-                    settings.slippage_percent,
-                    tick_b,
-                    ts.api_timeout_ms,
-                )
-                .await;
-
-            if t_b.elapsed().as_millis() > 500 {
-                let mut strikes = e_ctx.high_latency_strikes.entry(exb.clone()).or_insert(0);
-                *strikes += 1;
-                if *strikes >= 3 {
-                    e_ctx
-                        .exchange_cooldown
-                        .insert(exb.clone(), now_ms() + 60_000);
-                    error!("[real] 🐢 LATENCY ALERT: {} RTT >500ms. Cooldown 1m.", exb);
-                    *strikes = 0;
-                }
-            } else {
-                e_ctx.high_latency_strikes.insert(exb.clone(), 0);
-            }
-
-            let (oid_b, inline_fill_b, inline_fee_b) = match res_b {
-                Ok(t) => (t.0, t.1, t.2),
-                Err(e) => {
-                    error!("[real] LEG_B reject {}/{}: {}", exb, pair, e);
-                    (None, 0.0, 0.0)
-                }
-            };
-            oid_b_opt = oid_b.clone();
-
-            if oid_b.is_none() && !dry_run {
-                error!(
-                    "[real] ⚠️ ONE-SIDED REJECTION {}: Leg 2 rejected by {}. Trimming Leg 1.",
-                    pair, exb
-                );
-                let hc = http.clone();
-                let kc = Arc::clone(&keys);
-                let p = pair.clone();
-                let ex = exa.clone();
-                let fall = sig.entry_a;
-                let at = ts.api_timeout_ms;
-                tokio::spawn(async move {
-                    let _ = crate::engine::exchanges::get_connector(&ex)
-                        .unwrap()
-                        .trim_position(
-                            &hc,
-                            &kc,
-                            &p,
-                            is_a_higher,
-                            final_qty_b,
-                            dry_run,
-                            mult_a,
-                            tick_a,
-                            fall,
-                            at,
-                        )
-                        .await;
-                });
-                continue;
-            }
-
-            fill_b = inline_fill_b;
-            fee_b_val = inline_fee_b;
-            let mut got_b = dry_run || fill_b > 0.0;
-
-            // LATENCY OPTIMIZATION: skip verify loop if inline fill available
-            if got_b && fill_b > 0.0 && actual_vol_phys_b.is_none() {
-                actual_vol_phys_b = Some(final_qty_b);
-                tracing::info!("[real] ⚡ Inline fill B: price={:.6} fee={:.6} — skipping verify loop", fill_b, fee_b_val);
-            }
-
-            // Fast verification loop (standard)
-            for attempt in 0..ts.fill_verify_retries {
-                if got_b && actual_vol_phys_b.is_some() {
-                    break;
-                }
-                if attempt > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        ts.fill_verify_delay_ms as u64,
-                    ))
-                    .await;
-                }
-
-                if !got_b || actual_vol_phys_b.is_none() {
-                    if let Some(ref oid) = oid_b {
-                        if let Ok((p, f, ev)) = conn_ensure_b
-                            .fetch_order(&http, &keys, &pair, oid, mult_b)
-                            .await
-                        {
-                            if p > 0.0 {
-                                fill_b = p;
-                            }
-                            if f > 1e-9 {
-                                fee_b_val = f;
-                            }
+                        if let Ok((p, f, ev)) = conn_ensure_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
                             if ev > 1e-12 {
-                                actual_vol_phys_b = Some(ev);
-                                got_b = true;
+                                phys = Some(ev); got = true;
+                                if p > 0.0 { fill_a = p; }
+                                if f > 1e-9 { fee_a_val = f; }
+                                tracing::info!("[real] ✅ {}: Leg A fill confirmed on slow attempt {} — qty={}, price={}", pair, slow_attempt + 1, ev, p);
+                                break;
                             }
+                            if p == 0.0 && f == 0.0 && ev == 0.0 { break; }
+                        }
+                    }
+                }
+        
+                if phys.unwrap_or(0.0) <= 1e-12 {
+                    tracing::warn!("[real] 🔍 {}: Leg A fill unverified. Checking position...", pair);
+                    if let Ok(positions) = conn_ensure_a.fetch_positions(&http, &keys).await {
+                        if let Some(pos) = positions.iter().find(|p| crate::engine::real::symbols_match(&p.symbol, &pair) && p.size.abs() > 1e-12) {
+                            phys = Some(pos.size.abs()); got = true;
+                            if pos.entry_price > 0.0 { fill_a = pos.entry_price; }
                         }
                     }
                 }
             }
+            (got, phys, fill_a, fee_a_val)
+        };
 
-            // SLOW verification: if order was accepted but fill not confirmed yet,
-            // give the exchange more time (MARKET orders fill in 100-500ms but REST may lag)
-            if !got_b && oid_b.is_some() && !dry_run {
-                tracing::warn!(
-                    "[real] ⏳ {}: Leg 2 orderId={} accepted but fill not yet confirmed. Extended wait...",
-                    pair, oid_b.as_deref().unwrap_or("?")
-                );
-                // Bybit IOC orders can take 3-5s to appear in order.history.
-                // 8 retries × 800ms = 6.4s total, enough for Bybit settlement.
-                for slow_attempt in 0..8 {
-                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                    if let Some(ref oid) = oid_b {
-                        match conn_ensure_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
-                            Ok((p, f, ev)) => {
-                                if ev > 1e-12 {
-                                    actual_vol_phys_b = Some(ev);
-                                    got_b = true;
-                                    if p > 0.0 { fill_b = p; }
-                                    if f > 1e-9 { fee_b_val = f; }
-                                    tracing::info!(
-                                        "[real] ✅ {}: Leg 2 fill confirmed on slow attempt {} — qty={}, price={}",
-                                        pair, slow_attempt + 1, ev, p
-                                    );
-                                    break;
-                                }
-                                // If order returned Ok with qty=0 AND definitively unfilled (price=0, fee=0),
-                                // the exchange explicitly says it's cancelled/rejected
-                                if p == 0.0 && f == 0.0 && ev == 0.0 {
-                                    tracing::warn!(
-                                        "[real] {}: Leg 2 order definitively unfilled (returned 0,0,0) on attempt {}",
-                                        pair, slow_attempt + 1
-                                    );
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[real] {}: Leg 2 slow verify attempt {} err: {}",
-                                    pair, slow_attempt + 1, e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            let filled_b = actual_vol_phys_b.unwrap_or(0.0);
-            if (filled_b < filled_a * 0.99) && !dry_run {
-                let mismatch = filled_a - filled_b;
-                error!("[real] ⚠️ ASYMMETRIC FILL {}: Leg 2 {} filled less ({}) than Leg 1 {} ({}). Trimming Leg 1 excess: {}", pair, exb, filled_b, exa, filled_a, mismatch);
-                let hc = http.clone();
-                let kc = Arc::clone(&keys);
-                let p = pair.clone();
-                let ex = exa.clone();
-                let fall = sig.entry_a;
-                let at = ts.api_timeout_ms;
-                tokio::spawn(async move {
-                    let _ = crate::engine::exchanges::get_connector(&ex)
-                        .unwrap()
-                        .trim_position(
-                            &hc,
-                            &kc,
-                            &p,
-                            is_a_higher,
-                            mismatch,
-                            dry_run,
-                            mult_a,
-                            tick_a,
-                            fall,
-                            at,
-                        )
-                        .await;
-                });
-            }
-        } else {
-            // -- B IS THINNER --
-            info!(
-                "[real] ⚡ Executing Leg 1 (thinner leg) on {} for {}...",
-                exb, pair
-            );
-            let t_b = std::time::Instant::now();
-            let res_b = conn_ensure_b
-                .place_order(
-                    &http,
-                    &keys,
-                    &pair,
-                    is_a_higher,
-                    qty_b,
-                    dry_run,
-                    limit_price_b,
-                    limit_price_b > 0.0,
-                    settings.leverage as f64,
-                    mult_b,
-                    settings.slippage_percent,
-                    tick_b,
-                    ts.api_timeout_ms,
-                )
-                .await;
-
-            if t_b.elapsed().as_millis() > 500 {
-                let mut strikes = e_ctx.high_latency_strikes.entry(exb.clone()).or_insert(0);
-                *strikes += 1;
-                if *strikes >= 3 {
-                    e_ctx
-                        .exchange_cooldown
-                        .insert(exb.clone(), now_ms() + 60_000);
-                    error!("[real] 🐢 LATENCY ALERT: {} RTT >500ms. Cooldown 1m.", exb);
-                    *strikes = 0;
-                }
-            } else {
-                e_ctx.high_latency_strikes.insert(exb.clone(), 0);
-            }
-            e_ctx.pair_cooldown.insert(pair.clone(), now_ms());
-
-            let (oid_b, inline_fill_b, inline_fee_b) = match res_b {
-                Ok(t) => (t.0, t.1, t.2),
-                Err(e) => {
-                    error!("[real] LEG_B reject {}/{}: {}", exb, pair, e);
-                    let esl = e.to_string().to_lowercase();
-                    if esl.contains("insufficient")
-                        || esl.contains("balance")
-                        || esl.contains("margin")
-                        || esl.contains("exceed")
-                    {
-                        mark_balance_low(&exb, &e_ctx);
-                    }
-                    (None, 0.0, 0.0)
-                }
-            };
-            oid_b_opt = oid_b.clone();
-
-            if oid_b.is_none() && !dry_run {
-                tracing::warn!(
-                    "[real] 🛑 ABORT {}: Leg 1 rejected by {}. Leg 2 aborted.",
-                    pair,
-                    exb
-                );
-                continue;
-            }
-
-            fill_b = inline_fill_b;
-            fee_b_val = inline_fee_b;
-            let mut got_b = dry_run || fill_b > 0.0;
-
-            // LATENCY OPTIMIZATION: skip verify loop if inline fill available
-            if got_b && fill_b > 0.0 && actual_vol_phys_b.is_none() {
-                actual_vol_phys_b = Some(qty_b);
-                tracing::info!("[real] ⚡ Inline fill B: price={:.6} fee={:.6} — skipping verify loop", fill_b, fee_b_val);
-            }
-
+        let verify_b_fut = async {
+            let mut phys = actual_vol_phys_b;
+            let mut got = dry_run || fill_b > 0.0;
+            if got && phys.is_some() { return (got, phys, fill_b, fee_b_val); }
+    
             for attempt in 0..ts.fill_verify_retries {
-                if got_b && actual_vol_phys_b.is_some() {
-                    break;
-                }
-                if attempt > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        ts.fill_verify_delay_ms as u64,
-                    ))
-                    .await;
-                }
-
-                if !got_b || actual_vol_phys_b.is_none() {
-                    if let Some(ref oid) = oid_b {
-                        if let Ok((p, f, ev)) = conn_ensure_b
-                            .fetch_order(&http, &keys, &pair, oid, mult_b)
-                            .await
-                        {
-                            if p > 0.0 {
-                                fill_b = p;
-                            }
-                            if f > 1e-9 {
-                                fee_b_val = f;
-                            }
-                            if ev > 1e-12 {
-                                actual_vol_phys_b = Some(ev);
-                                got_b = true;
-                            }
-                        }
+                if got && phys.is_some() { break; }
+                if attempt > 0 { tokio::time::sleep(std::time::Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
+        
+                if let Some(ref oid) = oid_b {
+                    if let Ok((p, f, ev)) = conn_ensure_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
+                        if p > 0.0 { fill_b = p; }
+                        if f > 1e-9 { fee_b_val = f; }
+                        if ev > 1e-12 { phys = Some(ev); got = true; }
                     }
                 }
             }
-
-            // SLOW verification for Leg 1 (B-is-thinner branch)
-            if !got_b && oid_b.is_some() && !dry_run {
-                tracing::warn!(
-                    "[real] ⏳ {}: Leg 1 orderId={} accepted but fill not yet confirmed. Extended wait...",
-                    pair, oid_b.as_deref().unwrap_or("?")
-                );
+    
+            if !got && oid_b.is_some() && !dry_run {
+                tracing::warn!("[real] ⏳ {}: Leg B orderId={} accepted but fill not yet confirmed. Extended wait...", pair, oid_b.as_deref().unwrap_or("?"));
                 for slow_attempt in 0..8 {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     if let Some(ref oid) = oid_b {
-                        match conn_ensure_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
-                            Ok((p, f, ev)) => {
-                                if ev > 1e-12 {
-                                    actual_vol_phys_b = Some(ev);
-                                    got_b = true;
-                                    if p > 0.0 { fill_b = p; }
-                                    if f > 1e-9 { fee_b_val = f; }
-                                    tracing::info!(
-                                        "[real] ✅ {}: Leg 1 fill confirmed on slow attempt {} — qty={}, price={}",
-                                        pair, slow_attempt + 1, ev, p
-                                    );
-                                    break;
-                                }
-                                if p == 0.0 && f == 0.0 && ev == 0.0 {
-                                    tracing::warn!(
-                                        "[real] {}: Leg 1 order definitively unfilled (returned 0,0,0) on attempt {}",
-                                        pair, slow_attempt + 1
-                                    );
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[real] {}: Leg 1 slow verify attempt {} err: {}",
-                                    pair, slow_attempt + 1, e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            // POSITION FALLBACK for Leg 1 (B-is-thinner branch)
-            if actual_vol_phys_b.unwrap_or(0.0) <= 1e-12 && oid_b.is_some() && !dry_run {
-                tracing::warn!("[real] 🔍 {}: Leg 1 fill unverified on {}. Checking position...", pair, exb);
-                if let Ok(positions) = conn_ensure_b.fetch_positions(&http, &keys).await {
-                    if let Some(pos) = positions.iter().find(|p| {
-                        crate::engine::real::symbols_match(&p.symbol, &pair) && p.size.abs() > 1e-12
-                    }) {
-                        tracing::warn!(
-                            "[real] 🚨 {}: Position FOUND on {} (size={:.6} entry={:.6}) despite verify failure! Using position data.",
-                            pair, exb, pos.size.abs(), pos.entry_price
-                        );
-                        actual_vol_phys_b = Some(pos.size.abs());
-                        got_b = true;
-                        if pos.entry_price > 0.0 {
-                            fill_b = pos.entry_price;
-                        }
-                    }
-                }
-            }
-
-            let filled_b = actual_vol_phys_b.unwrap_or(0.0);
-            if filled_b <= 1e-12 && !dry_run {
-                tracing::warn!(
-                    "[real] 🛑 ABORT {}: Leg 1 filled 0% on {}. Leg 2 aborted.",
-                    pair,
-                    exb
-                );
-                continue;
-            }
-
-            let final_qty_a = if dry_run { qty_a } else { filled_b };
-            tracing::info!(
-                "[real] ⚡ Executing Leg 2 on {} for {}. Re-matching volume: {}",
-                exa,
-                pair,
-                final_qty_a
-            );
-
-            let t_a = std::time::Instant::now();
-            let res_a = conn_ensure_a
-                .place_order(
-                    &http,
-                    &keys,
-                    &pair,
-                    !is_a_higher,
-                    final_qty_a,
-                    dry_run,
-                    limit_price_a,
-                    limit_price_a > 0.0,
-                    settings.leverage as f64,
-                    mult_a,
-                    settings.slippage_percent,
-                    tick_a,
-                    ts.api_timeout_ms,
-                )
-                .await;
-
-            if t_a.elapsed().as_millis() > 500 {
-                let mut strikes = e_ctx.high_latency_strikes.entry(exa.clone()).or_insert(0);
-                *strikes += 1;
-                if *strikes >= 3 {
-                    e_ctx
-                        .exchange_cooldown
-                        .insert(exa.clone(), now_ms() + 60_000);
-                    error!("[real] 🐢 LATENCY ALERT: {} RTT >500ms. Cooldown 1m.", exa);
-                    *strikes = 0;
-                }
-            } else {
-                e_ctx.high_latency_strikes.insert(exa.clone(), 0);
-            }
-
-            let (oid_a, inline_fill_a, inline_fee_a) = match res_a {
-                Ok(t) => (t.0, t.1, t.2),
-                Err(e) => {
-                    error!("[real] LEG_A reject {}/{}: {}", exa, pair, e);
-                    (None, 0.0, 0.0)
-                }
-            };
-            oid_a_opt = oid_a.clone();
-
-            if oid_a.is_none() && !dry_run {
-                error!(
-                    "[real] ⚠️ ONE-SIDED REJECTION {}: Leg 2 rejected by {}. Trimming Leg 1.",
-                    pair, exa
-                );
-                let hc = http.clone();
-                let kc = Arc::clone(&keys);
-                let p = pair.clone();
-                let ex = exb.clone();
-                let fall = sig.entry_b;
-                let at = ts.api_timeout_ms;
-                tokio::spawn(async move {
-                    let _ = crate::engine::exchanges::get_connector(&ex)
-                        .unwrap()
-                        .trim_position(
-                            &hc,
-                            &kc,
-                            &p,
-                            !is_a_higher,
-                            final_qty_a,
-                            dry_run,
-                            mult_b,
-                            tick_b,
-                            fall,
-                            at,
-                        )
-                        .await;
-                });
-                continue;
-            }
-
-            fill_a = inline_fill_a;
-            fee_a_val = inline_fee_a;
-            let mut got_a = dry_run || fill_a > 0.0;
-
-            // LATENCY OPTIMIZATION: skip verify loop if inline fill available
-            if got_a && fill_a > 0.0 && actual_vol_phys_a.is_none() {
-                actual_vol_phys_a = Some(final_qty_a);
-                tracing::info!("[real] ⚡ Inline fill A: price={:.6} fee={:.6} — skipping verify loop", fill_a, fee_a_val);
-            }
-
-            // Fast verification loop (standard)
-            for attempt in 0..ts.fill_verify_retries {
-                if got_a && actual_vol_phys_a.is_some() {
-                    break;
-                }
-                if attempt > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        ts.fill_verify_delay_ms as u64,
-                    ))
-                    .await;
-                }
-
-                if !got_a || actual_vol_phys_a.is_none() {
-                    if let Some(ref oid) = oid_a {
-                        if let Ok((p, f, ev)) = conn_ensure_a
-                            .fetch_order(&http, &keys, &pair, oid, mult_a)
-                            .await
-                        {
-                            if p > 0.0 {
-                                fill_a = p;
-                            }
-                            if f > 1e-9 {
-                                fee_a_val = f;
-                            }
+                        if let Ok((p, f, ev)) = conn_ensure_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
                             if ev > 1e-12 {
-                                actual_vol_phys_a = Some(ev);
-                                got_a = true;
+                                phys = Some(ev); got = true;
+                                if p > 0.0 { fill_b = p; }
+                                if f > 1e-9 { fee_b_val = f; }
+                                tracing::info!("[real] ✅ {}: Leg B fill confirmed on slow attempt {} — qty={}, price={}", pair, slow_attempt + 1, ev, p);
+                                break;
                             }
+                            if p == 0.0 && f == 0.0 && ev == 0.0 { break; }
+                        }
+                    }
+                }
+        
+                if phys.unwrap_or(0.0) <= 1e-12 {
+                    tracing::warn!("[real] 🔍 {}: Leg B fill unverified. Checking position...", pair);
+                    if let Ok(positions) = conn_ensure_b.fetch_positions(&http, &keys).await {
+                        if let Some(pos) = positions.iter().find(|p| crate::engine::real::symbols_match(&p.symbol, &pair) && p.size.abs() > 1e-12) {
+                            phys = Some(pos.size.abs()); got = true;
+                            if pos.entry_price > 0.0 { fill_b = pos.entry_price; }
                         }
                     }
                 }
             }
+            (got, phys, fill_b, fee_b_val)
+        };
 
-            // SLOW verification: if order was accepted but fill not confirmed yet
-            if !got_a && oid_a.is_some() && !dry_run {
-                tracing::warn!(
-                    "[real] ⏳ {}: Leg 2 orderId={} accepted but fill not yet confirmed. Extended wait...",
-                    pair, oid_a.as_deref().unwrap_or("?")
-                );
-                for slow_attempt in 0..8 {
-                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                    if let Some(ref oid) = oid_a {
-                        match conn_ensure_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
-                            Ok((p, f, ev)) => {
-                                if ev > 1e-12 {
-                                    actual_vol_phys_a = Some(ev);
-                                    got_a = true;
-                                    if p > 0.0 { fill_a = p; }
-                                    if f > 1e-9 { fee_a_val = f; }
-                                    tracing::info!(
-                                        "[real] ✅ {}: Leg 2 fill confirmed on slow attempt {} — qty={}, price={}",
-                                        pair, slow_attempt + 1, ev, p
-                                    );
-                                    break;
-                                }
-                                if p == 0.0 && f == 0.0 && ev == 0.0 {
-                                    tracing::warn!(
-                                        "[real] {}: Leg 2 order definitively unfilled (returned 0,0,0) on attempt {}",
-                                        pair, slow_attempt + 1
-                                    );
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[real] {}: Leg 2 slow verify attempt {} err: {}",
-                                    pair, slow_attempt + 1, e
-                                );
-                            }
-                        }
-                    }
+        let (ver_a, ver_b) = tokio::join!(verify_a_fut, verify_b_fut);
+        actual_vol_phys_a = ver_a.1;
+        fill_a = ver_a.2;
+        fee_a_val = ver_a.3;
+        actual_vol_phys_b = ver_b.1;
+        fill_b = ver_b.2;
+        fee_b_val = ver_b.3;
+
+        // 4. Handle asymmetry (Trimming)
+        let phys_a = actual_vol_phys_a.unwrap_or(0.0);
+        let phys_b = actual_vol_phys_b.unwrap_or(0.0);
+
+        if !dry_run {
+            let diff = (phys_a - phys_b).abs();
+            // Use 1% margin for rounding errors
+            if diff > phys_a.max(phys_b) * 0.01 && diff > 1e-9 {
+                if phys_a > phys_b {
+                    error!("[real] ⚠️ ASYMMETRIC FILL {}: A ({}) filled {}, B ({}) filled {}. Trimming A by {}.", pair, exa, phys_a, exb, phys_b, diff);
+                    let hc = http.clone(); let kc = Arc::clone(&keys); let p = pair.clone(); let ex = exa.clone();
+                    let fall = sig.entry_a; let at = ts.api_timeout_ms;
+                    tokio::spawn(async move {
+                        let _ = crate::engine::exchanges::get_connector(&ex).unwrap()
+                            .trim_position(&hc, &kc, &p, !is_a_higher, diff, dry_run, mult_a, tick_a, fall, at).await;
+                    });
+                } else {
+                    error!("[real] ⚠️ ASYMMETRIC FILL {}: B ({}) filled {}, A ({}) filled {}. Trimming B by {}.", pair, exb, phys_b, exa, phys_a, diff);
+                    let hc = http.clone(); let kc = Arc::clone(&keys); let p = pair.clone(); let ex = exb.clone();
+                    let fall = sig.entry_b; let at = ts.api_timeout_ms;
+                    tokio::spawn(async move {
+                        let _ = crate::engine::exchanges::get_connector(&ex).unwrap()
+                            .trim_position(&hc, &kc, &p, is_a_higher, diff, dry_run, mult_b, tick_b, fall, at).await;
+                    });
                 }
-            }
-
-            let filled_a = actual_vol_phys_a.unwrap_or(0.0);
-            if (filled_a < filled_b * 0.99) && !dry_run {
-                let mismatch = filled_b - filled_a;
-                error!("[real] ⚠️ ASYMMETRIC FILL {}: Leg 2 {} filled less ({}) than Leg 1 {} ({}). Trimming Leg 1 excess: {}", pair, exa, filled_a, exb, filled_b, mismatch);
-                let hc = http.clone();
-                let kc = Arc::clone(&keys);
-                let p = pair.clone();
-                let ex = exb.clone();
-                let fall = sig.entry_b;
-                let at = ts.api_timeout_ms;
-                tokio::spawn(async move {
-                    let _ = crate::engine::exchanges::get_connector(&ex)
-                        .unwrap()
-                        .trim_position(
-                            &hc,
-                            &kc,
-                            &p,
-                            !is_a_higher,
-                            mismatch,
-                            dry_run,
-                            mult_b,
-                            tick_b,
-                            fall,
-                            at,
-                        )
-                        .await;
-                });
+                e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + ts.asymmetric_cooldown_ms as i64);
             }
         }
 
-        let oid_a = oid_a_opt;
-        let oid_b = oid_b_opt;
 
         let total_ms = t0.elapsed().as_millis();
         if dry_run {
