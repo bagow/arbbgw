@@ -441,7 +441,8 @@ impl ExchangeConnector for BybitConnector {
 
         let ts = now_ms();
         let qs = format!("category=linear&orderId={}", order_id);
-        let sig = bybit_sign(&keys.bybit_secret, ts, &qs);
+        let ts_str = ts.to_string();
+        let sig = bybit_sign(&keys.bybit_secret, &ts_str, &keys.bybit_key, "5000", &qs);
 
         let url = format!("https://api.bybit.com/v5/order/realtime?{}", qs);
         let req = http
@@ -470,7 +471,8 @@ impl ExchangeConnector for BybitConnector {
         // Fallback to history for IOC
         if order.is_none() {
             let ts2 = now_ms();
-            let sig2 = bybit_sign(&keys.bybit_secret, ts2, &qs);
+            let ts2_str = ts2.to_string();
+            let sig2 = bybit_sign(&keys.bybit_secret, &ts2_str, &keys.bybit_key, "5000", &qs);
             let url2 = format!("https://api.bybit.com/v5/order/history?{}", qs);
             let req2 = http
                 .get(&url2)
