@@ -1441,8 +1441,12 @@ pub async fn run_cycle(
             settings.leverage as f64,
             &e_ctx,
         );
-        // opened_this_cycle is already set to true earlier
 
+        // 🛡️ Apply cooldown to the pair so we don't spam duplicate entries
+        // while the orderbook absorbs our impact
+        e_ctx.pair_cooldown.insert(pair.clone(), now + ts.pair_cooldown_ms);
+
+        // opened_this_cycle is already set to true earlier
         let dir = sig.direction.clone();
         let actual_entry_spread = if fill_a > 0.0 && fill_b > 0.0 {
             if is_a_higher {

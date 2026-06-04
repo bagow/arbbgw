@@ -518,6 +518,9 @@ pub async fn run_hft_cycle(
         crate::engine::real::deduct_cached_balance(&exa, final_vol_usd, settings.leverage as f64, &e_ctx);
         crate::engine::real::deduct_cached_balance(&exb, final_vol_usd, settings.leverage as f64, &e_ctx);
 
+        // 🛡️ Apply cooldown to the pair so we don't spam duplicate entries
+        e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + ts.pair_cooldown_ms);
+
         let actual_entry_spread = if fill_a > 0.0 && fill_b > 0.0 {
             if is_a_higher { (fill_a - fill_b) / fill_b.max(1e-12) * 100.0 }
             else { (fill_b - fill_a) / fill_a.max(1e-12) * 100.0 }

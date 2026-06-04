@@ -259,6 +259,13 @@ pub fn start_position_sync(
 
             // 4. Check each open trade against exchange positions
             for trade in &open_trades {
+                // Ignore newly opened trades because REST APIs on exchanges (like KuCoin/Binance) 
+                // can aggressively cache positions, leading to false "missing position" detects.
+                let age_ms = now_ms() - trade.entry_time;
+                if age_ms < 45_000 {
+                    continue;
+                }
+
                 let has_pos_a = all_positions
                     .get(&trade.exchange_a)
                     .map(|ps| {
