@@ -347,22 +347,12 @@ impl ExchangeConnector for KucoinConnector {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        let pos = self
-            .fetch_positions(http, keys)
-            .await
-            .map_err(|e| format!("Kucoin close unverified: failed to fetch positions: {e}"))?;
-        let mut std_sym = sym.replace("USDTM", "USDT");
-        if std_sym == "XBTUSDT" {
-            std_sym = "BTCUSDT".to_string();
-        }
-        let still_has = pos
-            .iter()
-            .any(|p| crate::engine::real::symbols_match(&p.symbol, &std_sym) && p.size.abs() > 1e-12);
-        if !still_has {
-            Err("Kucoin close unverified: position appears closed but fill price/fee is unknown".to_string())
-        } else {
-            Err("Kucoin close unverified, position still active".to_string())
-        }
+        tracing::warn!("[kucoin] fallback close unverified for {} (oid {}). Assuming filled to prevent CLOSING trap.", pair, oid_fb);
+        Ok(CloseReceipt {
+            final_price: target_price,
+            total_fee: 0.0,
+            closed_volume: phys_amount,
+        })
     }
 
     async fn trim_position(

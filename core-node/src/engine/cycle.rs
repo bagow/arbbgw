@@ -303,21 +303,18 @@ pub async fn run_cycle(
                     let still_zero = reason_str == "ZERO_SPREAD" && vwap_exit_spread <= 0.0 && vwap_net_pnl >= 0.0;
 
                     if !still_tp && !still_zero {
-                        // Throttled MIRAGE log: max 1 per 10 seconds per trade
-                        e_ctx.mirage_cooldown.insert(trade.id, now_cd);
-                        tracing::warn!("[real] 🛑 MIRAGE DETECTED ({}): L1 spread={:.2}%, VWAP spread={:.2}%, L1 PnL={:.2}%, VWAP PnL={:.2}%. Cooldown 10s. Age={}s.", 
-                            reason_str, exit_spread, vwap_exit_spread, exec_net_pct, vwap_net_pct, trade_age_ms / 1000);
-                        continue;
+                        tracing::warn!("[real] ⚠️ VWAP MIRAGE ({}): L1 spread={:.2}%, VWAP spread={:.2}%. Closing anyway to prevent getting stuck.", 
+                            reason_str, exit_spread, vwap_exit_spread);
+                        exit_price_a = px_a;
+                        exit_price_b = px_b;
                     } else {
                         tracing::info!("[real] ✅ VWAP Confirmed: VWAP spread={:.2}%, VWAP PnL={:.2}%", vwap_exit_spread, vwap_net_pct);
                         exit_price_a = px_a;
                         exit_price_b = px_b;
                     }
                 } else {
-                    // Throttled log for depth issues too
-                    e_ctx.mirage_cooldown.insert(trade.id, now_cd);
-                    tracing::warn!("[real] 🛑 MIRAGE DETECTED ({}): Insufficient L2 depth for {:.4} phys coins on {}/{}. Cooldown 10s.", reason_str, trade_coins, exa, exb);
-                    continue;
+                    tracing::warn!("[real] ⚠️ MIRAGE ({}): Insufficient L2 depth for {:.4} phys coins on {}/{}. Using L1 fallback prices to force close.", reason_str, trade_coins, exa, exb);
+                    // exit_price_a and b remain at L1 prices
                 }
             }
 
@@ -603,17 +600,12 @@ pub async fn run_cycle(
                 closing_guard.remove(&trade_id_for_guard);
             });
         } else {
-            // Fetch real funding rates from exchange APIs (cached 5 min)
-            let (fr_a, next_a) = crate::engine::exchanges::get_connector(&trade.exchange_a)
-                .unwrap()
-                .get_funding_rate(&http, &trade.pair)
-                .await
-                .unwrap_or((0.0, 0));
-            let (fr_b, next_b) = crate::engine::exchanges::get_connector(&trade.exchange_b)
-                .unwrap()
-                .get_funding_rate(&http, &trade.pair)
-                .await
-                .unwrap_or((0.0, 0));
+            // Fetch real funding rates from local cache to avoid blocking event loop
+            let key_a = format!("{}:{}", trade.exchange_a, trade.pair);
+            let (fr_a, next_a) = e_ctx.funding_rates.get(&key_a).map(|f| (f.rate, f.next_ts)).unwrap_or((0.0, 0_i64));
+            
+            let key_b = format!("{}:{}", trade.exchange_b, trade.pair);
+            let (fr_b, next_b) = e_ctx.funding_rates.get(&key_b).map(|f| (f.rate, f.next_ts)).unwrap_or((0.0, 0_i64));
             let fund_next = next_a.min(next_b); // nearest funding event
 
             // Estimate accumulated funding using live exchange rates instead of the static profile setting.
