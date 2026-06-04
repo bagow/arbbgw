@@ -222,6 +222,11 @@ pub fn start_position_sync(
             }).await.unwrap_or_default();
 
             if open_trades.is_empty() {
+                // Clear ALL cached positions — no open trades means no positions to track.
+                // Without this, phantom positions stay in the UI forever after trades close.
+                for mut st in e_ctx.exchanges.iter_mut() {
+                    st.positions.clear();
+                }
                 continue;
             }
 

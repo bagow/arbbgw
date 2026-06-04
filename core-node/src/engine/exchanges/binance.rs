@@ -96,8 +96,55 @@ async fn execute_binance_order(
             Ok(v_ws.get("result").cloned().unwrap_or(v_ws))
         },
         Err(e) => {
-            tracing::error!("[binance_ws] WS order failed ({}). No REST fallback available.", e);
-            Err(format!("Binance WS connection error: {}", e))
+            tracing::warn!("[binance_ws] WS order failed ({}). Trying REST fallback...", e);
+
+            // ── REST FALLBACK ──
+            // Build query string for REST API (no apiKey in params for REST, it goes in header-less HMAC)
+            let rest_params = params.clone();
+            let mut sorted_keys: Vec<&String> = rest_params.keys().collect();
+            sorted_keys.sort();
+            let qs: String = sorted_keys.iter()
+                .map(|k| {
+                    let v = &rest_params[k.as_str()];
+                    let vs = match v {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        Value::Bool(b) => b.to_string(),
+                        _ => v.to_string(),
+                    };
+                    format!("{}={}", k, vs)
+                })
+                .collect::<Vec<_>>()
+                .join("&");
+            let sig = binance_sign(&keys.binance_secret, &qs);
+            let full_qs = format!("{}&signature={}", qs, sig);
+
+            let url = format!("https://fapi.binance.com/fapi/v1/order?{}", full_qs);
+            let resp = _http.post(&url)
+                .header("X-MBX-APIKEY", &keys.binance_key)
+                .timeout(Duration::from_millis(_api_timeout_ms.max(5000)))
+                .send()
+                .await
+                .map_err(|e| format!("Binance REST fallback HTTP error: {}", e))?;
+
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let _ = check_rate_limits(status, &headers).await;
+
+            let body: Value = resp.json().await
+                .map_err(|e| format!("Binance REST fallback JSON error: {}", e))?;
+
+            if let Some(code) = body.get("code") {
+                let code_i = code.as_i64().unwrap_or(0);
+                if code_i != 0 && code_i != 200 {
+                    let msg = body["msg"].as_str().unwrap_or("?");
+                    tracing::error!("[binance] REST fallback order error: code={} msg={}", code_i, msg);
+                    return Err(format!("Binance REST API Error: {} (code={})", msg, code_i));
+                }
+            }
+
+            tracing::info!("[binance] ✅ REST fallback order succeeded: {}", body["orderId"]);
+            Ok(body)
         }
     }
 }
