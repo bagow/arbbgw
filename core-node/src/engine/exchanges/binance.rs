@@ -578,11 +578,29 @@ impl ExchangeConnector for BinanceConnector {
                 "signature": sig
             }
         });
-        let resp = send_ws_request(ws_req).await?;
-        if let Some(err) = resp.get("error") {
-            return Err(format!("Binance WS order.status error: {}", err));
-        }
-        let v = &resp["result"];
+        let v_val = match send_ws_request(ws_req).await {
+            Ok(resp) => {
+                if let Some(err) = resp.get("error") {
+                    return Err(format!("Binance WS order.status error: {}", err));
+                }
+                resp["result"].clone()
+            },
+            Err(e) => {
+                tracing::warn!("[binance] WS fetch_order failed ({}). Trying REST fallback...", e);
+                let rest_qs = format!("orderId={}&symbol={}&timestamp={}", oid, pair, ts);
+                let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
+                let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
+                let url = format!("https://fapi.binance.com/fapi/v1/order?{}", full_qs);
+                let resp = _http.get(&url)
+                    .header("X-MBX-APIKEY", &keys.binance_key)
+                    .timeout(std::time::Duration::from_millis(5000))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Binance REST fetch_order HTTP error: {}", e))?;
+                resp.json::<Value>().await.map_err(|e| format!("Binance REST fetch_order JSON error: {}", e))?
+            }
+        };
+        let v = &v_val;
 
         let exec_qty: f64 = v["executedQty"]
             .as_str()
@@ -670,26 +688,49 @@ impl ExchangeConnector for BinanceConnector {
                 "signature": sig
             }
         });
-        let resp = send_ws_request(ws_req).await?;
-        if let Some(err) = resp.get("error") {
-            return Err(format!("Binance WS balance error: {}", err));
-        }
+        let result_arr = match send_ws_request(ws_req).await {
+            Ok(resp) => {
+                if let Some(err) = resp.get("error") {
+                    return Err(format!("Binance WS balance error: {}", err));
+                }
+                resp["result"].as_array().cloned().unwrap_or_default()
+            },
+            Err(e) => {
+                tracing::warn!("[binance] WS balance fetch failed ({}). Trying REST fallback...", e);
+                let rest_qs = format!("timestamp={}", ts);
+                let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
+                let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
+                let url = format!("https://fapi.binance.com/fapi/v2/balance?{}", full_qs);
+                let resp = _http.get(&url)
+                    .header("X-MBX-APIKEY", &keys.binance_key)
+                    .timeout(std::time::Duration::from_millis(5000))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Binance REST balance HTTP error: {}", e))?;
+                
+                let body: Value = resp.json().await.map_err(|e| format!("Binance REST balance JSON error: {}", e))?;
+                if let Some(code) = body.get("code") {
+                    return Err(format!("Binance REST balance API error: {}", body));
+                }
+                body.as_array().cloned().unwrap_or_default()
+            }
+        };
 
         let mut total_balance = 0.0f64;
         let mut available_balance = 0.0f64;
 
-        if let Some(arr) = resp["result"].as_array() {
-            for item in arr {
-                let asset = item["asset"].as_str().unwrap_or("");
-                if asset == "USDT" {
-                    total_balance = item["balance"].as_str()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .unwrap_or(0.0);
-                    available_balance = item["availableBalance"].as_str()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .unwrap_or(0.0);
-                    break;
-                }
+        for item in result_arr {
+            let asset = item["asset"].as_str().unwrap_or("");
+            if asset == "USDT" {
+                total_balance = item["balance"].as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .or_else(|| item["balance"].as_f64())
+                    .unwrap_or(0.0);
+                available_balance = item["availableBalance"].as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .or_else(|| item["availableBalance"].as_f64())
+                    .unwrap_or(0.0);
+                break;
             }
         }
 
@@ -712,13 +753,34 @@ impl ExchangeConnector for BinanceConnector {
                 "signature": sig
             }
         });
-        let resp = send_ws_request(ws_req).await?;
-        if let Some(err) = resp.get("error") {
-            return Err(format!("Binance WS fee error: {}", err));
+        match send_ws_request(ws_req).await {
+            Ok(resp) => {
+                if let Some(err) = resp.get("error") {
+                    return Err(format!("Binance WS fee error: {}", err));
+                }
+                resp["result"]["takerCommissionRate"].as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .ok_or_else(|| "Failed to parse Binance fee from WS".to_string())
+            },
+            Err(e) => {
+                tracing::warn!("[binance] WS fee fetch failed ({}). Trying REST fallback...", e);
+                let rest_qs = format!("symbol=BTCUSDT&timestamp={}", ts);
+                let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
+                let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
+                let url = format!("https://fapi.binance.com/fapi/v1/commissionRate?{}", full_qs);
+                let resp = _http.get(&url)
+                    .header("X-MBX-APIKEY", &keys.binance_key)
+                    .timeout(std::time::Duration::from_millis(5000))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Binance REST fee HTTP error: {}", e))?;
+                
+                let body: Value = resp.json().await.map_err(|e| format!("Binance REST fee JSON error: {}", e))?;
+                body["takerCommissionRate"].as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .ok_or_else(|| format!("Failed to parse Binance fee from REST: {}", body))
+            }
         }
-        resp["result"]["takerCommissionRate"].as_str()
-            .and_then(|s| s.parse::<f64>().ok())
-            .ok_or_else(|| "Failed to parse Binance fee from WS".to_string())
     }
 
     async fn ensure_leverage(
@@ -745,8 +807,24 @@ impl ExchangeConnector for BinanceConnector {
                 "signature": sig
             }
         });
-        let _ = send_ws_request(ws_req).await;
-        Ok(())
+        match send_ws_request(ws_req).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!("[binance] WS setLeverage failed ({}). Trying REST fallback...", e);
+                let rest_qs = format!("leverage={}&symbol={}&timestamp={}", lev, pair, ts);
+                let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
+                let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
+                let url = format!("https://fapi.binance.com/fapi/v1/leverage?{}", full_qs);
+                let resp = _http.post(&url)
+                    .header("X-MBX-APIKEY", &keys.binance_key)
+                    .timeout(std::time::Duration::from_millis(5000))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Binance REST leverage HTTP error: {}", e))?;
+                let _body: Value = resp.json().await.unwrap_or_default();
+                Ok(())
+            }
+        }
     }
 
     async fn get_funding_rate(&self, _http: &Client, pair: &str) -> Result<(f64, i64), String> {
@@ -798,36 +876,61 @@ impl ExchangeConnector for BinanceConnector {
                 "signature": sig
             }
         });
-        let resp = send_ws_request(ws_req).await?;
-        if let Some(err) = resp.get("error") {
-            return Err(format!("Binance WS position error: {}", err));
-        }
+        let result_arr = match send_ws_request(ws_req).await {
+            Ok(resp) => {
+                if let Some(err) = resp.get("error") {
+                    return Err(format!("Binance WS position error: {}", err));
+                }
+                resp["result"].as_array().cloned().unwrap_or_default()
+            },
+            Err(e) => {
+                tracing::warn!("[binance] WS positions fetch failed ({}). Trying REST fallback...", e);
+                let rest_qs = format!("timestamp={}", ts);
+                let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
+                let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
+                let url = format!("https://fapi.binance.com/fapi/v2/positionRisk?{}", full_qs);
+                let resp = _http.get(&url)
+                    .header("X-MBX-APIKEY", &keys.binance_key)
+                    .timeout(std::time::Duration::from_millis(5000))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Binance REST positions HTTP error: {}", e))?;
+                
+                let body: Value = resp.json().await.map_err(|e| format!("Binance REST positions JSON error: {}", e))?;
+                if let Some(code) = body.get("code") {
+                    return Err(format!("Binance REST positions API error: {}", body));
+                }
+                body.as_array().cloned().unwrap_or_default()
+            }
+        };
+
         let mut positions = Vec::new();
-        if let Some(arr) = resp["result"].as_array() {
-            for p in arr {
-                let amt: f64 = p["positionAmt"]
+        for p in result_arr {
+            let amt: f64 = p["positionAmt"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| p["positionAmt"].as_f64())
+                .unwrap_or(0.0);
+            if amt.abs() < 1e-12 {
+                continue;
+            }
+            positions.push(PositionInfo {
+                symbol: p["symbol"].as_str().unwrap_or("").to_string(),
+                size: amt,
+                entry_price: p["entryPrice"]
                     .as_str()
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                if amt.abs() < 1e-12 {
-                    continue;
-                }
-                positions.push(PositionInfo {
-                    symbol: p["symbol"].as_str().unwrap_or("").to_string(),
-                    size: amt,
-                    entry_price: p["entryPrice"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.0),
-                    unrealized_pnl: p["unRealizedProfit"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.0),
-                    realized_pnl: 0.0,
-                    accumulated_fee: 0.0,
-                    accumulated_funding: 0.0,
-                });
-            }
+                    .or_else(|| p["entryPrice"].as_f64())
+                    .unwrap_or(0.0),
+                unrealized_pnl: p["unRealizedProfit"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| p["unRealizedProfit"].as_f64())
+                    .unwrap_or(0.0),
+                realized_pnl: 0.0,
+                accumulated_fee: 0.0,
+                accumulated_funding: 0.0,
+            });
         }
         Ok(positions)
     }
