@@ -116,10 +116,15 @@ async fn bybit_private_ws_loop(api_key: String, api_secret: String) {
     loop {
         let url = "wss://stream.bybit.com/v5/private";
 
-        let (ws_stream, _) = match connect_async(url).await {
-            Ok(res) => res,
-            Err(e) => {
+        let (ws_stream, _) = match tokio::time::timeout(tokio::time::Duration::from_secs(10), connect_async(url)).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(e)) => {
                 tracing::error!("[bybit_ws_private] connection failed: {}. Retrying in 2s...", e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                continue;
+            },
+            Err(_) => {
+                tracing::error!("[bybit_ws_private] connect_async TIMEOUT after 10s. Retrying in 2s...");
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 continue;
             }
@@ -238,10 +243,15 @@ async fn bybit_ws_loop(
     loop {
         let url = "wss://stream.bybit.com/v5/trade";
 
-        let (ws_stream, _) = match connect_async(url).await {
-            Ok(res) => res,
-            Err(e) => {
+        let (ws_stream, _) = match tokio::time::timeout(tokio::time::Duration::from_secs(10), connect_async(url)).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(e)) => {
                 tracing::error!("[bybit_ws] connection failed: {}. Retrying in 2s...", e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                continue;
+            },
+            Err(_) => {
+                tracing::error!("[bybit_ws] connect_async TIMEOUT after 10s. Retrying in 2s...");
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 continue;
             }

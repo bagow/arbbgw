@@ -23,12 +23,12 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>) {
     loop {
         let url = "wss://ws-fapi.binance.com/ws-fapi/v1";
         
-        let (ws_stream, _) = match connect_async(url).await {
-            Ok(res) => {
+        let (ws_stream, _) = match tokio::time::timeout(tokio::time::Duration::from_secs(10), connect_async(url)).await {
+            Ok(Ok(res)) => {
                 backoff_secs = 2; // Reset on success
                 res
             },
-            Err(e) => {
+            Ok(Err(e)) => {
                 let err_str = e.to_string();
                 // 418 = IP banned by Binance. Back off aggressively.
                 if err_str.contains("418") {
@@ -40,6 +40,12 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>) {
                     tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(60);
                 }
+                continue;
+            },
+            Err(_) => {
+                tracing::error!("[binance_ws] connect_async TIMEOUT after 10s. Retrying in {}s...", backoff_secs);
+                tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(60);
                 continue;
             }
         };

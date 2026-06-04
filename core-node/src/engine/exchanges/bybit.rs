@@ -605,21 +605,32 @@ impl ExchangeConnector for BybitConnector {
 
     async fn fetch_positions(
         &self,
-        _http: &Client,
+        http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<Vec<PositionInfo>, String> {
-        use super::ws_bybit::send_bybit_ws_request;
-        let _ = super::ws_bybit::get_or_init_bybit_ws(keys.bybit_key.clone(), keys.bybit_secret.clone());
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "reqId": req_id,
-            "header": {"X-BAPI-TIMESTAMP": now_ms().to_string(), "X-BAPI-RECV-WINDOW": "5000"},
-            "op": "position.list",
-            "args": [{"category": "linear", "settleCoin": "USDT"}]
-        });
-        let v = send_bybit_ws_request(ws_req).await?;
+        let ts = now_ms().to_string();
+        let recv = "10000";
+        let qs = "category=linear&settleCoin=USDT";
+        let sig = bybit_sign(&keys.bybit_secret, &ts, &keys.bybit_key, recv, qs);
+
+        let url = format!("https://api.bybit.com/v5/position/list?{}", qs);
+        let resp = http.get(&url)
+            .header("X-BAPI-API-KEY", &keys.bybit_key)
+            .header("X-BAPI-TIMESTAMP", &ts)
+            .header("X-BAPI-RECV-WINDOW", recv)
+            .header("X-BAPI-SIGN", &sig)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("Bybit HTTP error: {}", e))?;
+
+        let v: Value = resp.json().await.map_err(|e| format!("Bybit JSON error: {}", e))?;
+        if v["retCode"].as_i64() != Some(0) {
+            return Err(format!("Bybit API error: {}", v["retMsg"].as_str().unwrap_or("?")));
+        }
+
         let mut positions = Vec::new();
-        if let Some(arr) = v["data"]["list"].as_array() {
+        if let Some(arr) = v["result"]["list"].as_array() {
             for p in arr {
                 let size: f64 = p["size"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                 if size.abs() < 1e-12 { continue; }
