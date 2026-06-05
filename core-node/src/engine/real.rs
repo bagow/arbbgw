@@ -284,6 +284,14 @@ pub fn start_position_sync(
                     })
                     .unwrap_or(true); // conservative
 
+                // FIX: Do not trigger EXTERNAL_CLOSE if the trade is already actively CLOSING.
+                // If the trade is in CLOSING status, it means the bot itself successfully closed one leg
+                // and is retrying the other. External close logic should only apply to OPEN trades
+                // that suddenly disappear without the bot's intervention.
+                if trade.status == "CLOSING" {
+                    continue;
+                }
+
                 if has_pos_a && has_pos_b {
                     continue; // Both positions exist, all normal
                 }
