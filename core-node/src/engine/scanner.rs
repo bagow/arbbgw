@@ -522,6 +522,11 @@ pub fn generate_signals(
                 mult_a,
                 mult_b,
             });
+            tracing::info!(
+                "[scanner] SIGNAL {}: {} vs {} spread={:.4}% BE={:.4}% (fee_a={:.6} fee_b={:.6} slip={:.4}%)",
+                row.pair, row.exchange_a, row.exchange_b, row.spread, break_even_pct,
+                fee_a, fee_b, profile.slippage_percent
+            );
             emitted_pairs.insert(row.pair.clone());
         }
     }

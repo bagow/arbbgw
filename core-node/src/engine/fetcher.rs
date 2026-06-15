@@ -252,6 +252,18 @@ pub fn start_balance_fetcher(
                         _ => {}
                     }
                 }
+                // Diagnostic: log current fee_rates and balances
+                {
+                    let mut fee_diag = String::from("[fetcher] fee_rates:");
+                    for item in e_ctx.fee_rates.iter() {
+                        fee_diag.push_str(&format!(" {}={:.6}", item.key(), item.value()));
+                    }
+                    let mut bal_diag = String::from(" | balances:");
+                    for item in e_ctx.balances.iter() {
+                        bal_diag.push_str(&format!(" {}=${:.2}", item.key(), item.value()));
+                    }
+                    info!("{}{}", fee_diag, bal_diag);
+                }
                 tokio::time::sleep(Duration::from_secs(normal_interval_s)).await;
             }
         }
