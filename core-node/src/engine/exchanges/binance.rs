@@ -810,18 +810,17 @@ impl ExchangeConnector for BinanceConnector {
         match send_ws_request(ws_req).await {
             Ok(_) => Ok(()),
             Err(e) => {
-                tracing::warn!("[binance] WS setLeverage failed ({}). Trying REST fallback...", e);
+                // Use trace! not warn! — when Binance WS is dead this fires 1000s of times
+                tracing::trace!("[binance] WS setLeverage failed ({}). Trying REST...", e);
                 let rest_qs = format!("leverage={}&symbol={}&timestamp={}", lev, pair, ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
                 let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
                 let url = format!("https://fapi.binance.com/fapi/v1/leverage?{}", full_qs);
-                let resp = _http.post(&url)
+                let _ = _http.post(&url)
                     .header("X-MBX-APIKEY", &keys.binance_key)
                     .timeout(std::time::Duration::from_millis(5000))
                     .send()
-                    .await
-                    .map_err(|e| format!("Binance REST leverage HTTP error: {}", e))?;
-                let _body: Value = resp.json().await.unwrap_or_default();
+                    .await;
                 Ok(())
             }
         }
