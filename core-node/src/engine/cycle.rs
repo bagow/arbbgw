@@ -1081,13 +1081,23 @@ pub async fn run_cycle(
         if fill_a > 0.0 { actual_vol_phys_a = Some(qty_a); }
         if fill_b > 0.0 { actual_vol_phys_b = Some(qty_b); }
 
+        // IOC FAST PATH: IOC orders fill instantly or expire.
+        // If place_order returned no fill, limit retries to 2 quick checks (not 10+8 slow).
+        // This avoids 40+ seconds of pointless REST polling.
+        let ioc_no_fill_a = use_ioc && fill_a <= 0.0;
+        let ioc_no_fill_b = use_ioc && fill_b <= 0.0;
+        let max_retries_a = if ioc_no_fill_a { 2_i64 } else { ts.fill_verify_retries };
+        let max_retries_b = if ioc_no_fill_b { 2_i64 } else { ts.fill_verify_retries };
+        let skip_slow_a = ioc_no_fill_a; // no extended wait for IOC
+        let skip_slow_b = ioc_no_fill_b;
+
         // 3. Parallel verification loops (if needed)
         let verify_a_fut = async {
             let mut phys = actual_vol_phys_a;
             let mut got = dry_run || fill_a > 0.0;
             if got && phys.is_some() { return (got, phys, fill_a, fee_a_val); }
     
-            for attempt in 0..ts.fill_verify_retries {
+            for attempt in 0..max_retries_a {
                 if got && phys.is_some() { break; }
                 if attempt > 0 { tokio::time::sleep(std::time::Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
         
@@ -1100,7 +1110,7 @@ pub async fn run_cycle(
                 }
             }
     
-            if !got && oid_a.is_some() && !dry_run {
+            if !got && oid_a.is_some() && !dry_run && !skip_slow_a {
                 tracing::warn!("[real] ⏳ {}: Leg A orderId={} accepted but fill not yet confirmed. Extended wait...", pair, oid_a.as_deref().unwrap_or("?"));
                 for slow_attempt in 0..8 {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1136,7 +1146,7 @@ pub async fn run_cycle(
             let mut got = dry_run || fill_b > 0.0;
             if got && phys.is_some() { return (got, phys, fill_b, fee_b_val); }
     
-            for attempt in 0..ts.fill_verify_retries {
+            for attempt in 0..max_retries_b {
                 if got && phys.is_some() { break; }
                 if attempt > 0 { tokio::time::sleep(std::time::Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
         
@@ -1149,7 +1159,7 @@ pub async fn run_cycle(
                 }
             }
     
-            if !got && oid_b.is_some() && !dry_run {
+            if !got && oid_b.is_some() && !dry_run && !skip_slow_b {
                 tracing::warn!("[real] ⏳ {}: Leg B orderId={} accepted but fill not yet confirmed. Extended wait...", pair, oid_b.as_deref().unwrap_or("?"));
                 for slow_attempt in 0..8 {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
