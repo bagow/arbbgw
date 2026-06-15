@@ -994,37 +994,34 @@ pub async fn run_cycle(
             async move { snap_repo.insert_snapshot(sp_pair, sp_exa, sp_exb, snapshot, ts_ms).await; }
         });
 
-        // ── SEQUENTIAL ORDER EXECUTION ─────────────────────────────────────────────
-        // Previously used tokio::join! for parallel, but on Oracle Cloud VPS with
-        // high latency and IP bans, 75% of trades ended as ASYMMETRIC_CLOSE.
-        // Sequential: execute Leg A first → verify → only then Leg B.
+        // ── PARALLEL ORDER EXECUTION ─────────────────────────────────────────────
+        // With tight IOC slippage (0.05%), parallel is safe:
+        // - Both legs see the same price → maximizes fill chance
+        // - Sequential was failing: Leg A fills → 1-2s delay → spread gone → Leg B never fills
+        //   → 100% asymmetric positions → all losses
+        // - With parallel + tight IOC: worst case one leg fills → trim at 0.05% cost (tiny)
         opened_this_cycle = true;
 
         info!(
-            "[real] ⚡ Executing Leg A ({}) then Leg B ({}) SEQUENTIALLY for {}...",
+            "[real] ⚡ Выполнение ПАРАЛЛЕЛЬНО: Leg A ({}) + Leg B ({}) для {}...",
             exa, exb, pair
         );
 
         let t0_exec = std::time::Instant::now();
 
-        // 1. Execute Leg A first
-        let res_a = conn_ensure_a.place_order(
-            &http, &keys, &pair, !is_a_higher, qty_a, dry_run,
-            limit_price_a, limit_price_a > 0.0,
-            settings.leverage as f64, mult_a, ioc_slippage_pct, tick_a, ts.api_timeout_ms
-        ).await;
-
-        // If Leg A failed — skip Leg B entirely (no orphaned position)
-        let res_b = if res_a.is_ok() {
+        // Execute both legs simultaneously via tokio::join!
+        let (res_a, res_b) = tokio::join!(
+            conn_ensure_a.place_order(
+                &http, &keys, &pair, !is_a_higher, qty_a, dry_run,
+                limit_price_a, limit_price_a > 0.0,
+                settings.leverage as f64, mult_a, ioc_slippage_pct, tick_a, ts.api_timeout_ms
+            ),
             conn_ensure_b.place_order(
                 &http, &keys, &pair, is_a_higher, qty_b, dry_run,
                 limit_price_b, limit_price_b > 0.0,
                 settings.leverage as f64, mult_b, ioc_slippage_pct, tick_b, ts.api_timeout_ms
-            ).await
-        } else {
-            tracing::warn!("[real] ⛔ Leg A failed for {} — skipping Leg B to avoid orphaned position", pair);
-            Err("Skipped: Leg A failed".to_string())
-        };
+            )
+        );
 
         let total_ms = t0_exec.elapsed().as_millis();
 
