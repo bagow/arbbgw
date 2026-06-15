@@ -333,7 +333,11 @@ pub fn generate_signals(
                 continue;
             }
 
-            let slippage_frac = profile.slippage_percent / 100.0;
+            // Slippage: hardcoded by order type (not user-configurable — prevents misconfiguration)
+            // IOC orders have built-in price tolerance → minimal slippage
+            // Market orders have slightly more slippage
+            let slippage_pct = if ts.entry_order_type == "ioc" { 0.05 } else { 0.1 };
+            let slippage_frac = slippage_pct / 100.0;
             // Fees apply on all 4 legs (entry + exit on both exchanges).
             // Slippage only applies to 2 ENTRY legs — exit uses limit orders
             // at convergence prices, so exit slippage ≈ 0.
@@ -525,7 +529,7 @@ pub fn generate_signals(
             tracing::info!(
                 "[scanner] SIGNAL {}: {} vs {} spread={:.4}% BE={:.4}% (fee_a={:.6} fee_b={:.6} slip={:.4}%)",
                 row.pair, row.exchange_a, row.exchange_b, row.spread, break_even_pct,
-                fee_a, fee_b, profile.slippage_percent
+                fee_a, fee_b, slippage_pct
             );
             emitted_pairs.insert(row.pair.clone());
         }

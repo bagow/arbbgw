@@ -751,67 +751,36 @@ function renderSettingsForm(profile) {
         <section id="stab-profile" class="trading-settings-section" style="padding:0;background:transparent;border:none;">
             <form id="settings-form-${p.id}" class="settings-grid" onsubmit="return false;">
                 <div class="form-group">
+                    <label>Trade Volume (USD)</label>
+                    <input type="number" id="sf-vol-${p.id}" step="0.01" value="${p.trade_volume??10}" />
+                </div>
+                <div class="form-group">
+                    <label>Take Profit (%)</label>
+                    <input type="number" id="sf-tp-${p.id}" step="0.01" value="${p.take_profit_percent??0.2}" />
+                </div>
+                <div class="form-group">
                     <label>Min Entry Spread (%)</label>
-                    <input type="number" id="sf-min-${p.id}" step="0.0001" value="${p.min_entry_spread??1}" />
+                    <input type="number" id="sf-min-${p.id}" step="0.01" value="${p.min_entry_spread??0.5}" />
                 </div>
                 <div class="form-group">
                     <label>Max Entry Spread (%)</label>
-                    <input type="number" id="sf-max-${p.id}" step="0.0001" value="${p.max_entry_spread??10}" />
-                </div>
-                <div class="form-group">
-                    <label>Strategy Type</label>
-                    <select id="sf-strategy-${p.id}" style="background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:.95rem;">
-                        <option value="ema" ${(p.strategy_type||'ema')==='ema'?'selected':''}>EMA Reversion</option>
-                        <option value="hft" ${(p.strategy_type)==='hft'?'selected':''}>HFT / Latency Arb</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>HFT Timeout (ms)</label>
-                    <input type="number" id="sf-hft-timeout-${p.id}" step="1" value="${p.hft_timeout_ms??10000}" title="Time limit to hold an HFT trade before market closing" />
-                </div>
-                <div class="form-group">
-                    <label>Trade Volume (USD)</label>
-                    <input type="number" id="sf-vol-${p.id}" step="0.0001" value="${p.trade_volume??1000}" />
+                    <input type="number" id="sf-max-${p.id}" step="0.1" value="${p.max_entry_spread??50}" />
                 </div>
                 <div class="form-group">
                     <label>Max Active Trades</label>
                     <input type="number" id="sf-max-trades-${p.id}" step="1" value="${p.max_active_trades??5}" />
                 </div>
                 <div class="form-group">
-                    <label>Take Profit (%)</label>
-                    <input type="number" id="sf-tp-${p.id}" step="0.0001" value="${p.take_profit_percent??0.1}" />
+                    <label>Leverage (x)</label>
+                    <input type="number" id="sf-leverage-${p.id}" step="1" min="1" max="125" value="${p.leverage??10}" />
                 </div>
-                <div class="form-group">
-                    <label>Trailing Stop (%)</label>
-                    <input type="number" id="sf-trail-${p.id}" step="0.0001" value="${p.trailing_stop_percent??0.5}" />
-                </div>
-                <div class="form-group">
-                    <label>Slippage / IOC Tolerance (%)</label>
-                    <input type="number" id="sf-slip-${p.id}" step="0.01" value="${p.slippage_percent??0.3}" />
-                </div>
-                <div class="form-group">
-                    <label>L1 Orderbook Depth (%)</label>
-                    <input type="number" id="sf-depth-${p.id}" step="1" title="Minimum L1 volume required relative to Trade Volume" value="${p.min_depth_percent??100}" />
-                </div>
-
                 <div class="form-group">
                     <label>Min Volume (M$)</label>
                     <input type="number" id="sf-minvol-${p.id}" step="0.1" value="${p.min_volume_millions??10}" />
                 </div>
                 <div class="form-group">
-                    <label>Leverage (x)</label>
-                    <input type="number" id="sf-leverage-${p.id}" step="1" min="1" max="125" value="${p.leverage??10}" />
-                </div>
-                <div class="form-group">
-                    <label>Margin Mode</label>
-                    <select id="sf-margin-${p.id}" style="background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:.95rem;">
-                        <option value="cross" ${(p.margin_mode??'cross')==='cross'?'selected':''}>Cross</option>
-                        <option value="isolated" ${p.margin_mode==='isolated'?'selected':''}>Isolated</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Collector Update (s)</label>
-                    <input type="number" id="sf-interval-${p.id}" step="1" min="1" max="60" value="${p.collector_interval_secs??5}" />
+                    <label>L1 Depth (% of vol)</label>
+                    <input type="number" id="sf-depth-${p.id}" step="1" title="Minimum L1 volume required as % of Trade Volume" value="${p.min_depth_percent??100}" />
                 </div>
                 <div class="form-actions" style="grid-column:1/-1;display:flex;gap:16px;margin-top:24px;border-top:1px solid var(--border-dim);padding-top:24px;align-items:center;">
                     <button type="button" id="sf-power-${p.id}"
@@ -897,9 +866,16 @@ function renderTechSettingsTable(wrap, data) {
         intervals: '🔄 Refresh Intervals',
         general: '⚙️ General',
     };
+    // Keys that exist in DB but have zero effect in engine code — hide from UI
+    const HIDDEN_KEYS = new Set([
+        'safety_margin', 'deviation_safety', 'max_price_ratio',
+        'max_funding_diff', 'min_ioc_tolerance_pct', 'funding_cache_secs',
+        'depth_multiplier',
+    ]);
     // Group by category
     const groups = {};
     for (const item of data) {
+        if (HIDDEN_KEYS.has(item.key)) continue;
         const cat = item.category || 'general';
         if (!groups[cat]) groups[cat] = [];
         groups[cat].push(item);
@@ -1596,21 +1572,14 @@ window.saveSettings = async function (profileId) {
     const g = id => document.getElementById(id)?.value;
     // NOTE: is_active is intentionally excluded here — use Start/Stop Bot for that.
     const settings = {
+        trade_volume:          parseFloat(g(`sf-vol-${profileId}`)),
+        take_profit_percent:   parseFloat(g(`sf-tp-${profileId}`)),
         min_entry_spread:      parseFloat(g(`sf-min-${profileId}`)),
         max_entry_spread:      parseFloat(g(`sf-max-${profileId}`)),
-        trade_volume:          parseFloat(g(`sf-vol-${profileId}`)),
         max_active_trades:     parseInt(g(`sf-max-trades-${profileId}`)),
-        take_profit_percent:   parseFloat(g(`sf-tp-${profileId}`)),
-        trailing_stop_percent: parseFloat(g(`sf-trail-${profileId}`)),
-        slippage_percent:      parseFloat(g(`sf-slip-${profileId}`)),
-        min_depth_percent:     parseFloat(g(`sf-depth-${profileId}`)),
-
-        min_volume_millions:   parseFloat(g(`sf-minvol-${profileId}`)),
-        collector_interval_secs: parseInt(g(`sf-interval-${profileId}`)),
         leverage:              parseInt(g(`sf-leverage-${profileId}`)) || 10,
-        margin_mode:           document.getElementById(`sf-margin-${profileId}`)?.value || 'cross',
-        strategy_type:         document.getElementById(`sf-strategy-${profileId}`)?.value || 'ema',
-        hft_timeout_ms:        parseInt(g(`sf-hft-timeout-${profileId}`)) || 10000,
+        min_volume_millions:   parseFloat(g(`sf-minvol-${profileId}`)),
+        min_depth_percent:     parseFloat(g(`sf-depth-${profileId}`)),
     };
     const btn = document.getElementById(`sf-save-${profileId}`);
     try {
