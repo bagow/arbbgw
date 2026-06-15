@@ -808,6 +808,9 @@ pub async fn run_cycle(
         let t0 = std::time::Instant::now();
         let use_ioc = ts.entry_order_type == "ioc";
         let order_type_label = if use_ioc { "IOC" } else { "MKT" };
+        // Hardcoded IOC slippage — DB value (2.0%!) was destroying all profit.
+        // 0.05% = tight enough to preserve spread, wide enough for tick rounding.
+        let ioc_slippage_pct = 0.05;
         // NOTE: FIRE log moved to after L2/depth checks to avoid false-positive log entries
 
         // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
@@ -1008,7 +1011,7 @@ pub async fn run_cycle(
         let res_a = conn_ensure_a.place_order(
             &http, &keys, &pair, !is_a_higher, qty_a, dry_run,
             limit_price_a, limit_price_a > 0.0,
-            settings.leverage as f64, mult_a, settings.slippage_percent, tick_a, ts.api_timeout_ms
+            settings.leverage as f64, mult_a, ioc_slippage_pct, tick_a, ts.api_timeout_ms
         ).await;
 
         // If Leg A failed — skip Leg B entirely (no orphaned position)
@@ -1016,7 +1019,7 @@ pub async fn run_cycle(
             conn_ensure_b.place_order(
                 &http, &keys, &pair, is_a_higher, qty_b, dry_run,
                 limit_price_b, limit_price_b > 0.0,
-                settings.leverage as f64, mult_b, settings.slippage_percent, tick_b, ts.api_timeout_ms
+                settings.leverage as f64, mult_b, ioc_slippage_pct, tick_b, ts.api_timeout_ms
             ).await
         } else {
             tracing::warn!("[real] ⛔ Leg A failed for {} — skipping Leg B to avoid orphaned position", pair);
