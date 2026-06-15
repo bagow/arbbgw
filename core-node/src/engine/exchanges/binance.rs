@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::Value; // We will replace these with strict DTOs
+use serde_json::Value;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
@@ -9,34 +10,117 @@ use crate::engine::real::{binance_sign, now_ms, ExchangeKeys};
 
 pub struct BinanceConnector;
 
+// ── IP BAN TRACKING ──────────────────────────────────────────────────────────
+// Module-level atomic: stores the Unix timestamp (ms) until which this IP is banned.
+// 0 = not banned. All Binance API calls check this before sending requests.
+static BINANCE_BANNED_UNTIL_MS: AtomicI64 = AtomicI64::new(0);
+
+/// Check if we're currently IP-banned. Returns Err if banned, Ok if clear.
+fn check_ip_ban() -> Result<(), String> {
+    let banned_until = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
+    if banned_until > 0 {
+        let now = now_ms() as i64;
+        if now < banned_until {
+            let remaining_s = (banned_until - now) / 1000;
+            // Only log once per ~60s to avoid spam
+            static LAST_BAN_LOG: AtomicI64 = AtomicI64::new(0);
+            let last = LAST_BAN_LOG.load(Ordering::Relaxed);
+            if now - last > 60_000 {
+                LAST_BAN_LOG.store(now, Ordering::Relaxed);
+                tracing::warn!(
+                    "[binance] 🚫 IP banned for {}s more (until {}). All requests skipped.",
+                    remaining_s, banned_until
+                );
+            }
+            return Err(format!("Binance IP banned for {}s more", remaining_s));
+        } else {
+            // Ban expired — clear it
+            BINANCE_BANNED_UNTIL_MS.store(0, Ordering::Relaxed);
+            tracing::info!("[binance] ✅ IP ban expired. Resuming normal operations.");
+        }
+    }
+    Ok(())
+}
+
+/// Scan any Binance JSON response for ban indicators and update the atomic.
+fn detect_ban_from_response(body: &Value) {
+    let code = body["code"].as_i64().unwrap_or(0);
+    let msg = body["msg"].as_str().unwrap_or("");
+
+    // -1003 = "Too many requests" / "IP banned until XXXX"
+    // -1015 = "Too many orders"
+    if code == -1003 || code == -1015 {
+        // Try to parse "banned until TIMESTAMP" from the message
+        if let Some(pos) = msg.find("banned until ") {
+            let after = &msg[pos + 13..];
+            // Extract digits
+            let ts_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(ban_ts) = ts_str.parse::<i64>() {
+                let old = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
+                if ban_ts > old {
+                    BINANCE_BANNED_UNTIL_MS.store(ban_ts, Ordering::Relaxed);
+                    let now = now_ms() as i64;
+                    let dur_s = (ban_ts - now) / 1000;
+                    tracing::error!(
+                        "[binance] 🔴 IP BAN DETECTED! Banned for {}s (until {}). Auto-backing off.",
+                        dur_s, ban_ts
+                    );
+                }
+            }
+        } else {
+            // No explicit timestamp — apply a 2-minute cooldown
+            let cooldown = now_ms() as i64 + 120_000;
+            let old = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
+            if cooldown > old {
+                BINANCE_BANNED_UNTIL_MS.store(cooldown, Ordering::Relaxed);
+                tracing::error!(
+                    "[binance] 🔴 RATE LIMIT -1003 without ban timestamp. Auto-cooldown 120s."
+                );
+            }
+        }
+    }
+}
+
 async fn check_rate_limits(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
+    body: Option<&Value>,
 ) -> Result<(), String> {
+    // Check response body for ban codes
+    if let Some(b) = body {
+        detect_ban_from_response(b);
+    }
+
     if status.as_u16() == 429 {
+        // Set a 2-minute cooldown for 429 without explicit ban timestamp
+        let cooldown = now_ms() as i64 + 120_000;
+        BINANCE_BANNED_UNTIL_MS.fetch_max(cooldown, Ordering::Relaxed);
         if let Some(retry_after) = headers.get("Retry-After") {
             if let Ok(sec) = retry_after.to_str().unwrap_or("").parse::<u64>() {
                 tracing::error!(
-                    "[binance] 🔴 RATE LIMIT HIT (429)! Backing off for {} seconds.",
+                    "[binance] 🔴 RATE LIMIT HIT (429)! Auto-backoff for {} seconds.",
                     sec
                 );
-                tokio::time::sleep(tokio::time::Duration::from_secs(sec)).await;
+                let ban_ts = now_ms() as i64 + (sec as i64 * 1000);
+                BINANCE_BANNED_UNTIL_MS.fetch_max(ban_ts, Ordering::Relaxed);
             }
         } else {
-            tracing::error!("[binance] 🔴 RATE LIMIT HIT (429)! Backing off for 10 seconds.");
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            tracing::error!("[binance] 🔴 RATE LIMIT HIT (429)! Auto-backoff 120s.");
         }
         return Err("Binance HTTP 429 Too Many Requests (Rate limit hit)".into());
     }
     if status.as_u16() == 418 {
-        tracing::error!("[binance] 💀 IP COMPLETELY BANNED (HTTP 418).");
+        // 418 = hard IP ban, set 10 minute cooldown
+        let ban_ts = now_ms() as i64 + 600_000;
+        BINANCE_BANNED_UNTIL_MS.fetch_max(ban_ts, Ordering::Relaxed);
+        tracing::error!("[binance] 💀 IP COMPLETELY BANNED (HTTP 418). Auto-backoff 10 min.");
         return Err("Binance HTTP 418 IP Banned".into());
     }
 
     if let Some(w) = headers.get("X-MBX-USED-WEIGHT-1M") {
         if let Ok(weight) = w.to_str().unwrap_or("").parse::<u32>() {
             if weight > 4000 {
-                tracing::warn!("[binance] ⚠️ HIGH RATE LIMIT WEIGHT USED: {}/6000", weight);
+                tracing::warn!("[binance] ⚠️ HIGH RATE LIMIT WEIGHT: {}/6000", weight);
             }
         }
     }
@@ -49,6 +133,7 @@ async fn execute_binance_order(
     params: &serde_json::Map<String, Value>,
     _api_timeout_ms: u64,
 ) -> Result<Value, String> {
+    check_ip_ban()?;
     use crate::engine::exchanges::ws_trader::send_ws_request;
     
     // 1. Build signature for WS (must include apiKey)
@@ -90,6 +175,7 @@ async fn execute_binance_order(
                 }
             }
             if let Some(err) = v_ws.get("error") {
+                detect_ban_from_response(err);
                 tracing::error!("[binance_ws] order error: {}", err);
                 return Err(format!("Binance WS API Error: {}", err["msg"].as_str().unwrap_or("?")));
             }
@@ -129,10 +215,9 @@ async fn execute_binance_order(
 
             let status = resp.status();
             let headers = resp.headers().clone();
-            let _ = check_rate_limits(status, &headers).await;
-
             let body: Value = resp.json().await
                 .map_err(|e| format!("Binance REST fallback JSON error: {}", e))?;
+            let _ = check_rate_limits(status, &headers, Some(&body)).await;
 
             if let Some(code) = body.get("code") {
                 let code_i = code.as_i64().unwrap_or(0);
@@ -674,6 +759,7 @@ impl ExchangeConnector for BinanceConnector {
         _http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String> {
+        check_ip_ban()?;
         use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
         let qs = format!("apiKey={}&timestamp={}", keys.binance_key, ts);
@@ -691,6 +777,7 @@ impl ExchangeConnector for BinanceConnector {
         let result_arr = match send_ws_request(ws_req).await {
             Ok(resp) => {
                 if let Some(err) = resp.get("error") {
+                    detect_ban_from_response(err);
                     return Err(format!("Binance WS balance error: {}", err));
                 }
                 resp["result"].as_array().cloned().unwrap_or_default()
@@ -709,7 +796,8 @@ impl ExchangeConnector for BinanceConnector {
                     .map_err(|e| format!("Binance REST balance HTTP error: {}", e))?;
                 
                 let body: Value = resp.json().await.map_err(|e| format!("Binance REST balance JSON error: {}", e))?;
-                if let Some(code) = body.get("code") {
+                detect_ban_from_response(&body);
+                if let Some(_code) = body.get("code") {
                     return Err(format!("Binance REST balance API error: {}", body));
                 }
                 body.as_array().cloned().unwrap_or_default()
@@ -738,6 +826,7 @@ impl ExchangeConnector for BinanceConnector {
     }
 
     async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+        check_ip_ban()?;
         use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
         let qs = format!("apiKey={}&symbol=BTCUSDT&timestamp={}", keys.binance_key, ts);
@@ -756,6 +845,7 @@ impl ExchangeConnector for BinanceConnector {
         match send_ws_request(ws_req).await {
             Ok(resp) => {
                 if let Some(err) = resp.get("error") {
+                    detect_ban_from_response(err);
                     return Err(format!("Binance WS fee error: {}", err));
                 }
                 resp["result"]["takerCommissionRate"].as_str()
@@ -776,6 +866,7 @@ impl ExchangeConnector for BinanceConnector {
                     .map_err(|e| format!("Binance REST fee HTTP error: {}", e))?;
                 
                 let body: Value = resp.json().await.map_err(|e| format!("Binance REST fee JSON error: {}", e))?;
+                detect_ban_from_response(&body);
                 body["takerCommissionRate"].as_str()
                     .and_then(|s| s.parse::<f64>().ok())
                     .ok_or_else(|| format!("Failed to parse Binance fee from REST: {}", body))
@@ -790,6 +881,8 @@ impl ExchangeConnector for BinanceConnector {
         pair: &str,
         leverage: f64,
     ) -> Result<(), String> {
+        // Early return if banned — prevents 1000s of REST requests when WS is dead
+        if check_ip_ban().is_err() { return Ok(()); }
         use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
         let lev = leverage as i64;
@@ -861,6 +954,7 @@ impl ExchangeConnector for BinanceConnector {
         _http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<Vec<PositionInfo>, String> {
+        check_ip_ban()?;
         use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
         let qs = format!("apiKey={}&timestamp={}", keys.binance_key, ts);
@@ -878,6 +972,7 @@ impl ExchangeConnector for BinanceConnector {
         let result_arr = match send_ws_request(ws_req).await {
             Ok(resp) => {
                 if let Some(err) = resp.get("error") {
+                    detect_ban_from_response(err);
                     return Err(format!("Binance WS position error: {}", err));
                 }
                 resp["result"].as_array().cloned().unwrap_or_default()
@@ -896,7 +991,8 @@ impl ExchangeConnector for BinanceConnector {
                     .map_err(|e| format!("Binance REST positions HTTP error: {}", e))?;
                 
                 let body: Value = resp.json().await.map_err(|e| format!("Binance REST positions JSON error: {}", e))?;
-                if let Some(code) = body.get("code") {
+                detect_ban_from_response(&body);
+                if let Some(_code) = body.get("code") {
                     return Err(format!("Binance REST positions API error: {}", body));
                 }
                 body.as_array().cloned().unwrap_or_default()
