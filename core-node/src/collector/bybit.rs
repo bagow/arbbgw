@@ -215,8 +215,12 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
-    // Subscribe to L2 (orderbook.50) for ALL symbols
-    for chunk in symbols.chunks(10) {
+    // Subscribe to L2 (orderbook.50) for TOP symbols only.
+    // Bybit WS has ~200-300 subscription limit per connection.
+    // Subscribing to ALL 500+ symbols (1000+ topics) causes connection resets.
+    let l2_limit = 150.min(symbols.len());
+    let l2_symbols = &symbols[..l2_limit]; // Already sorted by volume desc
+    for chunk in l2_symbols.chunks(10) {
         let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.50.{}", s)).collect();
         ws.send(Message::Text(json!({
             "op": "subscribe",
@@ -224,7 +228,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         }).to_string().into())).await?;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    info!("[bybit] Subscribed L1 tickers & L2 depth for {} symbols", symbols.len());
+    info!("[bybit] Subscribed L1 for {} symbols, L2 depth for top {} by volume", symbols.len(), l2_limit);
 
     // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
     let conn_start = std::time::Instant::now();
