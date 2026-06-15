@@ -331,6 +331,22 @@ pub fn compute_spreads(
 
     // ── PERIODIC DIAGNOSTICS ──
     if log_diag {
+        // Per-exchange freshness: count non-stale tickers with valid bid/ask
+        let mut ex_fresh: Vec<(&str, usize, usize)> = Vec::new();
+        for (name, map) in &snapshot {
+            let total = map.len();
+            let fresh = map.values().filter(|d| {
+                d.bid > 0.0 && d.ask > 0.0
+                    && (d.last_updated == 0 || now_secs.saturating_sub(d.last_updated) <= ts.stale_secs)
+            }).count();
+            ex_fresh.push((name.as_str(), fresh, total));
+        }
+        ex_fresh.sort_by(|a, b| b.1.cmp(&a.1));
+        let ex_summary: String = ex_fresh.iter()
+            .map(|(n, f, t)| format!("{}:{}/{}", n, f, t))
+            .collect::<Vec<_>>()
+            .join(" ");
+
         tracing::info!(
             "[spreads] DIAG: exchanges={} total_pairs={} → blacklist={} stale={} invalid_price={} intra_spread={} volume={} spread_range={} → PASSED={} | min_vol={:.1}M spread_thr={:.2} stale={}s",
             snapshot.len(),
@@ -346,6 +362,7 @@ pub fn compute_spreads(
             ts.spread_threshold,
             ts.stale_secs,
         );
+        tracing::info!("[spreads] FRESH: {}", ex_summary);
     }
 
     // Partial sort: we only need top spreads, but full sort is fine for ~1-5k rows
