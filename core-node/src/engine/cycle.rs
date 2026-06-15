@@ -1019,8 +1019,8 @@ pub async fn run_cycle(
                 settings.leverage as f64, mult_b, settings.slippage_percent, tick_b, ts.api_timeout_ms
             ).await
         } else {
-            warn!("[real] ⛔ Leg A failed for {} — skipping Leg B to avoid orphaned position", pair);
-            Err(anyhow::anyhow!("Skipped: Leg A failed"))
+            tracing::warn!("[real] ⛔ Leg A failed for {} — skipping Leg B to avoid orphaned position", pair);
+            Err("Skipped: Leg A failed".to_string())
         };
 
         let total_ms = t0_exec.elapsed().as_millis();
