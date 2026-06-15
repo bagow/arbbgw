@@ -991,30 +991,38 @@ pub async fn run_cycle(
             async move { snap_repo.insert_snapshot(sp_pair, sp_exa, sp_exb, snapshot, ts_ms).await; }
         });
 
-        // ── PARALLEL ORDER EXECUTION ───────────────────────────────────────────────
+        // ── SEQUENTIAL ORDER EXECUTION ─────────────────────────────────────────────
+        // Previously used tokio::join! for parallel, but on Oracle Cloud VPS with
+        // high latency and IP bans, 75% of trades ended as ASYMMETRIC_CLOSE.
+        // Sequential: execute Leg A first → verify → only then Leg B.
         opened_this_cycle = true;
 
         info!(
-            "[real] ⚡ Executing Leg A ({}) and Leg B ({}) IN PARALLEL for {}...",
+            "[real] ⚡ Executing Leg A ({}) then Leg B ({}) SEQUENTIALLY for {}...",
             exa, exb, pair
         );
 
         let t0_exec = std::time::Instant::now();
 
-        // 1. Fire both legs concurrently
-        let res_a_fut = conn_ensure_a.place_order(
+        // 1. Execute Leg A first
+        let res_a = conn_ensure_a.place_order(
             &http, &keys, &pair, !is_a_higher, qty_a, dry_run,
             limit_price_a, limit_price_a > 0.0,
             settings.leverage as f64, mult_a, settings.slippage_percent, tick_a, ts.api_timeout_ms
-        );
+        ).await;
 
-        let res_b_fut = conn_ensure_b.place_order(
-            &http, &keys, &pair, is_a_higher, qty_b, dry_run,
-            limit_price_b, limit_price_b > 0.0,
-            settings.leverage as f64, mult_b, settings.slippage_percent, tick_b, ts.api_timeout_ms
-        );
+        // If Leg A failed — skip Leg B entirely (no orphaned position)
+        let res_b = if res_a.is_ok() {
+            conn_ensure_b.place_order(
+                &http, &keys, &pair, is_a_higher, qty_b, dry_run,
+                limit_price_b, limit_price_b > 0.0,
+                settings.leverage as f64, mult_b, settings.slippage_percent, tick_b, ts.api_timeout_ms
+            ).await
+        } else {
+            warn!("[real] ⛔ Leg A failed for {} — skipping Leg B to avoid orphaned position", pair);
+            Err(anyhow::anyhow!("Skipped: Leg A failed"))
+        };
 
-        let (res_a, res_b) = tokio::join!(res_a_fut, res_b_fut);
         let total_ms = t0_exec.elapsed().as_millis();
 
         // Latency checks
