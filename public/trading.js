@@ -1471,6 +1471,138 @@ window.renderLogsHTML = function(text) {
     if (!el) return;
     const isScrolled = el.scrollTop > 10;
         
+    const translateLog = (line) => {
+        // ── ENTRY FLOW ──
+        let m;
+        if ((m = line.match(/FIRE (\S+) \[(\w+)\] A=(\S+) c=(\d+) lim=([\d.]+) \| B=(\S+) c=(\d+) lim=([\d.]+) spread=([\d.]+)% be=([\d.]+)%/))) {
+            return `🚀 ОТКРЫТИЕ ${m[1]}: ${m[3]}↔${m[6]} | кол-во: ${m[4]}×${m[7]} шт | спред ${m[9]}% > безубыток ${m[10]}% | тип: ${m[2]}`;
+        }
+        if ((m = line.match(/VWAP entry OK (\S+): VWAP spread=([\d.]+)% > BE=([\d.]+)%/))) {
+            return `✅ ${m[1]}: проверка ордербука пройдена — реальный спред ${m[2]}% > безубыток ${m[3]}%`;
+        }
+        if ((m = line.match(/Executing Leg A \((\S+)\) then Leg B \((\S+)\) SEQUENTIALLY for (\S+)/))) {
+            return `⚡ ${m[3]}: отправка ордеров последовательно — сначала ${m[1]}, потом ${m[2]}`;
+        }
+        if ((m = line.match(/RESULT (\S+) A=(\S+) B=(\S+) phys_a=([\d.]+) phys_b=([\d.]+) fill_a=([\d.]+) fill_b=([\d.]+) latency=(\d+)ms/))) {
+            const aOk = m[2] === 'true', bOk = m[3] === 'true';
+            if (aOk && bOk) return `✅ ${m[1]}: ОБЕ НОГИ ИСПОЛНЕНЫ — A: ${m[6]} по ${m[4]} | B: ${m[7]} по ${m[5]} | ${m[8]}мс`;
+            if (!aOk && !bOk) return `⛔ ${m[1]}: ОБЕ НОГИ НЕ ИСПОЛНЕНЫ — ордера не прошли (${m[8]}мс)`;
+            return `⚠️ ${m[1]}: ЧАСТИЧНОЕ ИСПОЛНЕНИЕ — A=${m[2]} B=${m[3]} (${m[8]}мс)`;
+        }
+        if ((m = line.match(/Both IOC unfilled (\S+) — no exposure \((\d+)ms\)/))) {
+            return `⏹ ${m[1]}: оба IOC ордера не исполнились — позиции нет, риска нет (${m[2]}мс)`;
+        }
+        if (line.includes('Inserting confirmed trade')) {
+            return `✅ СДЕЛКА ОТКРЫТА И ЗАПИСАНА В БАЗУ`;
+        }
+
+        // ── SKIP / REJECT ──
+        if ((m = line.match(/SKIP (\S+) — no fresh L2 WS data for (\S+) \(age: (-?\d+)ms\) \/ (\S+) \(age: (-?\d+)ms\)/))) {
+            const ageA = parseInt(m[3]), ageB = parseInt(m[5]);
+            const probA = ageA > 5000 ? `${m[2]} устарел ${(ageA/1000).toFixed(1)}с` : `${m[2]} ок`;
+            const probB = ageB > 5000 ? `${m[4]} устарел ${(ageB/1000).toFixed(1)}с` : `${m[4]} ок`;
+            return `⏭ ${m[1]}: нет свежего ордербука — ${probA}, ${probB}`;
+        }
+        if ((m = line.match(/SKIP (\S+) L1 depth too shallow: A=([\d.]+)\$ B=([\d.]+)\$ < ([\d.]+)\$/))) {
+            return `⏭ ${m[1]}: стакан слишком тонкий — A=$${m[2]} B=$${m[3]}, нужно минимум $${m[4]}`;
+        }
+        if ((m = line.match(/SKIP (\S+): insufficient margin (\S+) \(avail=\$([\d.]+), required=\$([\d.]+).*lev=(\d+)x\)/))) {
+            return `⏭ ${m[1]}: не хватает маржи на ${m[2]} — доступно $${m[3]}, нужно $${m[4]} (плечо ${m[5]}x)`;
+        }
+
+        // ── ABORT ──
+        if ((m = line.match(/ABORT (\S+): VWAP spread ([\d.-]+)% < break-even ([\d.]+)% \(L1 spread=([\d.]+)%\)/))) {
+            return `🛑 ${m[1]}: ОТМЕНА — реальный спред в стакане ${m[2]}% ниже безубытка ${m[3]}% (L1 показывал ${m[4]}%). Сделка была бы убыточной.`;
+        }
+        if ((m = line.match(/ABORT (\S+): Insufficient L2 depth! req A=[\d.]+ \(has ([\d.]+)\), req B=[\d.]+ \(has ([\d.]+)\)/))) {
+            return `🛑 ${m[1]}: ОТМЕНА — в стакане не хватает ликвидности (A=${m[2]} B=${m[3]} монет)`;
+        }
+
+        // ── LEG ERRORS ──
+        if ((m = line.match(/LEG_A reject (\S+)\/(\S+): (.*)/))) {
+            return `❌ ${m[2]}: ошибка ноги A на ${m[1]} — ${m[3]}`;
+        }
+        if ((m = line.match(/LEG_B reject (\S+)\/(\S+): (.*)/))) {
+            return `❌ ${m[2]}: ошибка ноги B на ${m[1]} — ${m[3]}`;
+        }
+        if ((m = line.match(/Leg A failed for (\S+)/))) {
+            return `⛔ ${m[1]}: нога A провалилась — нога B отменена чтобы не было однобокой позиции`;
+        }
+
+        // ── CLOSE FLOW ──
+        if ((m = line.match(/Closing (\d+) (\S+) reason=(\S+) pct=([\d.-]+)% exit_sp=([\d.-]+)/))) {
+            const reasons = {TP:'тейк-профит',STOP:'трейлинг-стоп',MANUAL:'ручное закрытие',ZERO_SPREAD:'спред схлопнулся',RETRY_CLOSE:'повтор закрытия'};
+            return `📤 ЗАКРЫТИЕ #${m[1]} ${m[2]}: причина — ${reasons[m[3]]||m[3]} | PnL ${m[4]}%`;
+        }
+        if ((m = line.match(/EXCHANGE_VERIFIED.*PnL id=(\d+) pna=([\d.-]+) pnb=([\d.-]+) gross=([\d.-]+)/))) {
+            const gross = parseFloat(m[4]);
+            const icon = gross >= 0 ? '💰' : '💸';
+            return `${icon} СДЕЛКА #${m[1]} ЗАКРЫТА: PnL ноги A=$${m[2]} B=$${m[3]} | итого=$${m[4]}`;
+        }
+        if (line.includes('CLOSE FAILED OR UNVERIFIED')) {
+            return `❌ ОШИБКА ЗАКРЫТИЯ — ордер не подтверждён биржей, повтор через 5с`;
+        }
+        if (line.includes('POSITION STILL EXISTS after close')) {
+            return `⚠️ ПОЗИЦИЯ ВСЁ ЕЩЁ ОТКРЫТА после попытки закрытия — повторная попытка`;
+        }
+
+        // ── MIRAGE ──
+        if ((m = line.match(/VWAP MIRAGE \((\w+)\): L1 spread=([\d.-]+)%, VWAP spread=([\d.-]+)%/))) {
+            return `👻 МИРАЖ (${m[1]}): L1 показывал ${m[2]}%, реальный VWAP ${m[3]}% — закрываем по факту`;
+        }
+        if ((m = line.match(/FORCE CLOSE (\S+) after (\d+)s/))) {
+            return `⏰ ${m[1]}: ПРИНУДИТЕЛЬНОЕ ЗАКРЫТИЕ через ${m[2]}с зависания — лучше зафиксировать`;
+        }
+
+        // ── RISK ──
+        if ((m = line.match(/MARKET REGIME ALERT: (\S+) velocity ([\d.]+)% in (\d+)ms/))) {
+            return `🌪 ${m[1]}: резкое движение цены ${m[2]}% за ${m[3]}мс — пауза 15с от волатильности`;
+        }
+        if (line.includes('KILL-SWITCH IS ACTIVE')) {
+            return `🚨 АВАРИЙНАЯ ОСТАНОВКА: движок заблокирован после 5 провалов подряд. Нужен перезапуск.`;
+        }
+        if (line.includes('KILL-SWITCH TRIGGERED')) {
+            return `💀 АВАРИЙНАЯ ОСТАНОВКА АКТИВИРОВАНА — 5 IOC ордеров подряд не исполнились`;
+        }
+        if ((m = line.match(/ASYMMETRIC FILL (\S+): A \((\S+)\) filled ([\d.]+), B \((\S+)\) filled ([\d.]+)/))) {
+            return `⚠️ ${m[1]}: НЕРАВНОМЕРНОЕ ИСПОЛНЕНИЕ — ${m[2]}=${m[3]} vs ${m[4]}=${m[5]}, подрезаем лишнее`;
+        }
+        if ((m = line.match(/LATENCY ALERT: (\S+) RTT >800ms/))) {
+            return `🐢 ${m[1]}: задержка API >800мс — биржа на паузе 1 мин`;
+        }
+
+        // ── VERIFY ──
+        if ((m = line.match(/Leg ([AB]) fill confirmed on slow attempt (\d+)/))) {
+            return `✅ Нога ${m[1]}: исполнение подтверждено с попытки #${m[2]}`;
+        }
+        if ((m = line.match(/Leg ([AB]) fill unverified/))) {
+            return `🔍 Нога ${m[1]}: исполнение не подтверждено — проверяем позицию на бирже`;
+        }
+        if ((m = line.match(/Leg ([AB]) orderId=\S+ accepted but fill not yet confirmed/))) {
+            return `⏳ Нога ${m[1]}: ордер принят биржей, ждём подтверждения исполнения...`;
+        }
+
+        // ── SCANNER ──
+        if ((m = line.match(/\[scanner\] SIGNAL (\S+): (\S+) vs (\S+) spread=([\d.]+)% BE=([\d.]+)%/))) {
+            return `📡 СИГНАЛ ${m[1]}: ${m[2]}↔${m[3]} спред=${m[4]}% безубыток=${m[5]}%`;
+        }
+        if ((m = line.match(/\[scanner\] REJECT (\S+).*?->\s*(.*)/))) {
+            return `🛡 ФИЛЬТР ${m[1]}: ${m[2]}`;
+        }
+
+        // ── SETTINGS (only shown on change now) ──
+        if (line.includes('[settings]')) {
+            return line; // already formatted in backend with ОБНОВЛЕНО
+        }
+
+        // ── MANUAL CLOSE ──
+        if ((m = line.match(/MANUAL_CLOSE detected for trade (\d+) (\S+) on (\S+)\/(\S+)/))) {
+            return `🖐 РУЧНОЕ ЗАКРЫТИЕ сделки #${m[1]} ${m[2]} (${m[3]}/${m[4]})`;
+        }
+
+        return null; // no translation — show original
+    };
+
     const formatLogLine = (line) => {
         if (!line.trim()) return '';
         let cleanLine = line;
@@ -1484,8 +1616,6 @@ window.renderLogsHTML = function(text) {
         }
 
         // Context filtering
-        const currentProfile = profiles.find(p => p.id === activeTabId);
-
         if (cleanLine.includes('[settings]')) {
             if (!cleanLine.includes(`id=${activeTabId}`)) return '';
         }
@@ -1496,38 +1626,46 @@ window.renderLogsHTML = function(text) {
         if (window.logViewMode === 'trade' && isTechLog) return '';
         if (window.logViewMode === 'tech' && isTradeLog) return '';
 
-        let html = escHtml(cleanLine);
+        // Extract time prefix for translated lines
+        const timePfx = cleanLine.match(/^\[[\d:]+\]/)?.[0] || '';
+
+        // Try translating to Russian
+        const translated = translateLog(cleanLine);
+        let displayLine = translated || cleanLine;
+        if (translated && timePfx && !translated.startsWith('[')) {
+            displayLine = `${timePfx} ${translated}`;
+        }
+
+        let html = escHtml(displayLine);
         let style = 'color: var(--text);';
 
-        if (html.includes('[ERROR]')) {
-                html = '❌ ' + html;
-                style = 'color: #ff4b4b; font-weight: bold;';
-            } else if (html.includes('[SKIP]')) {
-                html = '⏭️ ' + html;
-                style = 'color: var(--text-sub);';
-            } else if (html.includes('Placing orders:')) {
-                html = '🚀 ' + html;
-                style = 'color: #00f2fe;';
-            } else if (html.includes('Inserting trade:')) {
-                html = '✅ <strong>' + html + '</strong>';
-                style = 'color: var(--green);';
-            } else if (html.includes('PnL final')) {
-                html = '💰 <strong>' + html + '</strong>';
-                style = 'color: #ffcc00;';
-            } else if (html.includes('[settings]')) {
-                html = '⚙️ ' + html;
-                style = 'color: #a8b2d1;';
-            } else if (html.includes('Emergency close') || html.includes('FAILED_ASYMMETRIC')) {
-                html = '🛡️ ' + html;
-                style = 'color: #ff4b4b; background: rgba(255,0,0,0.1); padding: 2px 4px; border-radius: 4px;';
-            } else if (html.includes('[scanner]') && html.includes('REJECT')) {
-                html = '🛡️ ' + html;
-                style = 'color: #e8a87c;';
-            }
+        if (html.includes('❌') || html.includes('💀') || html.includes('🚨')) {
+            style = 'color: #ff4b4b; font-weight: bold;';
+        } else if (html.includes('⏭') || html.includes('⏹')) {
+            style = 'color: var(--text-sub);';
+        } else if (html.includes('🚀') || html.includes('⚡')) {
+            style = 'color: #00f2fe;';
+        } else if (html.includes('✅')) {
+            style = 'color: var(--green); font-weight: 600;';
+        } else if (html.includes('💰') || html.includes('💸')) {
+            style = 'color: #ffcc00; font-weight: bold;';
+        } else if (html.includes('⚙')) {
+            style = 'color: #a8b2d1;';
+        } else if (html.includes('🛑') || html.includes('⛔')) {
+            style = 'color: #ff8c42;';
+        } else if (html.includes('⚠')) {
+            style = 'color: #ff4b4b; background: rgba(255,0,0,0.08); padding: 2px 4px; border-radius: 4px;';
+        } else if (html.includes('🛡')) {
+            style = 'color: #e8a87c;';
+        } else if (html.includes('📡')) {
+            style = 'color: #64dfdf;';
+        } else if (html.includes('🌪') || html.includes('👻')) {
+            style = 'color: #c89bff;';
+        }
 
-            // Bold the pair names (e.g. BTCUSDT)
-            html = html.replace(/\b([A-Z0-9]{2,}USDT)\b/g, '<span style="color:#fff;font-weight:700;">$1</span>');
-            return `<div style="padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.02); ${style}">${html}</div>`;
+        // Bold pair names
+        html = html.replace(/\b([A-Z0-9]{2,}USDT)\b/g, '<span style="color:#fff;font-weight:700;">$1</span>');
+        return `<div style="padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.02); ${style}">${html}</div>`;
         };
 
         const formattedHTML = text.split('\n').filter(l => l.trim()).map(formatLogLine).join('');

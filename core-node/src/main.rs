@@ -330,18 +330,38 @@ async fn main() -> Result<()> {
                     .fold(f64::MAX, f64::min);
                 let min_vol = if min_vol == f64::MAX { 1.0 } else { min_vol };
 
-                // Log settings being used (every ~5s = ~500 ticks at 10ms)
-                static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if tick % 500 == 0 {
+                // Log settings only when they actually change
+                static LAST_SETTINGS_HASH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let settings_hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    for p in real_profiles.iter() {
+                        p.id.hash(&mut h);
+                        p.is_active.hash(&mut h);
+                        p.trade_volume.to_bits().hash(&mut h);
+                        p.take_profit_percent.to_bits().hash(&mut h);
+                        p.min_entry_spread.to_bits().hash(&mut h);
+                        p.max_entry_spread.to_bits().hash(&mut h);
+                        p.max_active_trades.hash(&mut h);
+                        p.leverage.hash(&mut h);
+                    }
+                    ts.spread_threshold.to_bits().hash(&mut h);
+                    ts.stale_secs.hash(&mut h);
+                    h.finish()
+                };
+                let prev = LAST_SETTINGS_HASH.load(std::sync::atomic::Ordering::Relaxed);
+                if prev != settings_hash {
+                    LAST_SETTINGS_HASH.store(settings_hash, std::sync::atomic::Ordering::Relaxed);
                     for p in real_profiles.iter() {
                         info!(
-                            "[settings] real  id={} active={} vol={} tp={}% min_spread={} | tech: spread_thr={:.2} stale={}s min_vol={:.1}M",
+                            "[settings] ⚙️ ОБНОВЛЕНО: id={} active={} vol={} tp={}% min_spread={} max_spread={} lev={}x | tech: spread_thr={:.2} stale={}s min_vol={:.1}M",
                             p.id,
                             p.is_active,
                             p.trade_volume,
                             p.take_profit_percent,
                             p.min_entry_spread,
+                            p.max_entry_spread,
+                            p.leverage,
                             ts.spread_threshold,
                             ts.stale_secs,
                             min_vol
