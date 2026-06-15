@@ -125,6 +125,18 @@ pub fn compute_spreads(
 
                 // Removed max_funding_diff check per user request
 
+                // ── PRICE SANITY CHECK ──
+                // Reject pairs where prices differ > 50% between exchanges.
+                // This catches different tokens with identical tickers
+                // (e.g. COAIUSDT: $0.32 on Bybit vs $0.03 on KuCoin = different tokens).
+                let mid_a = (data_a.bid + data_a.ask) / 2.0;
+                let mid_b = (data_b.bid + data_b.ask) / 2.0;
+                let price_ratio = mid_a / mid_b.max(1e-15);
+                if price_ratio > 1.5 || price_ratio < 0.667 {
+                    cnt_spread_range += 1;
+                    continue;
+                }
+
                 // ── DIRECTIONAL ARBITRAGE SPREAD ──
                 let a_over_b = (data_a.bid - data_b.ask) / data_b.ask * 100.0;
                 let b_over_a = (data_b.bid - data_a.ask) / data_a.ask * 100.0;
