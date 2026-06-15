@@ -168,8 +168,9 @@ pub async fn run_cycle(
         // Use the accumulated real funding cost from DB (column updated every live-update cycle
         // using real rates fetched from exchange API — NOT from the settings constant).
         let fund_cost = trade.funding_cost;
+        // Slippage is NOT subtracted — gross_pnl already uses actual fill prices.
         let _live_net_pnl =
-            live_gross_pnl - trade.commission_cost - trade.slippage_cost - fund_cost;
+            live_gross_pnl - trade.commission_cost - fund_cost;
 
         // PnL for CLOSE TRIGGERS (using bid/ask — pessimistic, for safe execution)
         let exec_pnl_a = if is_a_higher {
@@ -630,8 +631,9 @@ pub async fn run_cycle(
 
             // Recompute net PnL with the freshly-fetched real funding cost so curr_gross_pnl
             // in the DB reflects the true net position (gross - commission - real_funding).
+            // Slippage is NOT subtracted — gross_pnl already uses actual fill prices.
             let real_live_net_pnl =
-                live_gross_pnl - trade.commission_cost - trade.slippage_cost - acc_fund_cost;
+                live_gross_pnl - trade.commission_cost - acc_fund_cost;
 
             live_updates.push((
                 trade.id,

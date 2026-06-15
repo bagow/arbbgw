@@ -17,6 +17,60 @@ pub async fn run(
     l2_books: L2OrderbookMap,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
+    // Spawn L2 depth stream ONCE at top level — NOT inside handler().
+    // Previously it was spawned inside handler(), causing N copies after N reconnects.
+    let l2_books_for_depth = l2_books.clone();
+    let prices_for_depth = prices.clone();
+    tokio::spawn(async move {
+        // Wait 20s for bookTicker to populate price_map with all symbols
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        run_l2_depth_stream(l2_books_for_depth, prices_for_depth).await;
+    });
+
+    // Spawn volume refresher ONCE at top level (same leak fix).
+    {
+        let pm = prices.clone();
+        let http_vol = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1800)).await;
+                let mut target_url = "https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
+                let mut resp = http_vol.get(&target_url).timeout(Duration::from_secs(15)).send().await;
+
+                if let Ok(ref r) = resp {
+                    let status = r.status().as_u16();
+                    if status == 403 || status == 418 || status == 429 {
+                        target_url = "https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
+                        resp = http_vol.get(&target_url).timeout(Duration::from_secs(15)).send().await;
+                    }
+                }
+
+                if let Ok(r) = resp {
+                    if let Ok(arr) = r.json::<Vec<Value>>().await {
+                        let mut count = 0u32;
+                        for t in &arr {
+                            let sym = t["symbol"].as_str().unwrap_or("");
+                            if !sym.ends_with("USDT") { continue; }
+                            let vol: f64 = t["quoteVolume"]
+                                .as_str()
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0.0);
+                            if vol > 0.0 {
+                                if let Some(mut ex_map) = pm.get_mut("binance") {
+                                    if let Some(entry) = ex_map.get_mut(sym) {
+                                        entry.vol = vol;
+                                        count += 1;
+                                    }
+                                }
+                            }
+                        }
+                        info!("[binance] Volume refreshed for {} symbols", count);
+                    }
+                }
+            }
+        });
+    }
+
     let mut backoff = Duration::from_secs(1);
     loop {
         let is_disabled = {
@@ -68,7 +122,7 @@ pub async fn run(
     }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
+async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2OrderbookMap) -> Result<()> {
     // Seed 24h volume from REST miniTicker snapshot
     let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
     let mut target_url = "https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
@@ -112,6 +166,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     }
 
     // WS: !bookTicker — instant bid/ask for every USDT future
+    // NOTE: L2 depth stream and volume refresher are spawned ONCE in run(),
+    // NOT here — spawning here caused N copies after N reconnects (task leak).
     let (mut ws, _) = connect_async_tls_with_config(
         "wss://fstream.binance.com/ws/!bookTicker",
         None,
@@ -121,62 +177,6 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     .await
     .context("Binance WS connect failed")?;
     info!("[binance] Connected (bookTicker)");
-
-    // Spawn L2 depth collector — passes price_map so it can rebuild
-    // the symbol list dynamically on each reconnect (bookTicker fills it)
-    let l2_books_clone = l2_books.clone();
-    let price_map_clone = price_map.clone();
-    tokio::spawn(async move {
-        // Wait 15s for bookTicker to populate price_map with all symbols
-        // before building the top-200 sorted list for the L2 stream.
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        run_l2_depth_stream(l2_books_clone, price_map_clone).await;
-    });
-
-    // Spawn background volume refresher — re-seeds 24h volumes every 30 min
-    // so Binance doesn't disappear from the spread scanner after long uptime.
-    {
-        let pm = price_map.clone();
-        let http2 = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(1800)).await;
-                let mut target_url = "https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
-                let mut resp = http2.get(&target_url).timeout(Duration::from_secs(15)).send().await;
-                
-                if let Ok(ref r) = resp {
-                    let status = r.status().as_u16();
-                    if status == 403 || status == 418 || status == 429 {
-                        target_url = "https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
-                        resp = http2.get(&target_url).timeout(Duration::from_secs(15)).send().await;
-                    }
-                }
-
-                if let Ok(r) = resp {
-                    if let Ok(arr) = r.json::<Vec<Value>>().await {
-                        let mut count = 0u32;
-                        for t in &arr {
-                            let sym = t["symbol"].as_str().unwrap_or("");
-                            if !sym.ends_with("USDT") { continue; }
-                            let vol: f64 = t["quoteVolume"]
-                                .as_str()
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(0.0);
-                            if vol > 0.0 {
-                                if let Some(mut ex_map) = pm.get_mut("binance") {
-                                    if let Some(entry) = ex_map.get_mut(sym) {
-                                        entry.vol = vol;
-                                        count += 1;
-                                    }
-                                }
-                            }
-                        }
-                        info!("[binance] Volume refreshed for {} symbols", count);
-                    }
-                }
-            }
-        });
-    }
 
     #[derive(Deserialize)]
     struct BinanceTicker<'a> {

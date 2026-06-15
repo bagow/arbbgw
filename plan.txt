@@ -1,3 +1,0 @@
-1. Modify traits.rs to update ExchangeConnector.
-2. Update gate.rs, kucoin.rs, binance.rs, bybit.rs to support use_ioc, price, and multiplier.
-3. Update cycle.rs to use limit_close_a, pass mults, remove sanity checks.

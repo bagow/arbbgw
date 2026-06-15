@@ -264,8 +264,9 @@ pub fn start_position_sync(
             for trade in &open_trades {
                 // Ignore newly opened trades because REST APIs on exchanges (like KuCoin/Binance) 
                 // can aggressively cache positions, leading to false "missing position" detects.
+                // 120s grace period accounts for worst-case REST API cache staleness.
                 let age_ms = now_ms() - trade.entry_time;
-                if age_ms < 45_000 {
+                if age_ms < 120_000 {
                     continue;
                 }
 
@@ -310,10 +311,10 @@ pub fn start_position_sync(
                              gross_pnl=COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0), \
                              pnl=COALESCE(curr_gross_pnl, \
                                  (COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
-                                  -COALESCE(commission_cost,0.0)-COALESCE(funding_cost,0.0)-COALESCE(slippage_cost,0.0))), \
+                                  -COALESCE(commission_cost,0.0)-COALESCE(funding_cost,0.0))), \
                              curr_gross_pnl=COALESCE(curr_gross_pnl, \
                                  (COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
-                                  -COALESCE(commission_cost,0.0)-COALESCE(funding_cost,0.0)-COALESCE(slippage_cost,0.0))) \
+                                  -COALESCE(commission_cost,0.0)-COALESCE(funding_cost,0.0))) \
                              WHERE id=?",
                             rusqlite::params![now, id]
                         )?;
@@ -398,9 +399,9 @@ pub fn start_position_sync(
                                      commission_cost=?, \
                                      gross_pnl=COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0), \
                                      pnl=(COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
-                                         -?-COALESCE(funding_cost,0.0)-COALESCE(slippage_cost,0.0)), \
+                                         -?-COALESCE(funding_cost,0.0)), \
                                      curr_gross_pnl=(COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
-                                         -?-COALESCE(funding_cost,0.0)-COALESCE(slippage_cost,0.0)) \
+                                         -?-COALESCE(funding_cost,0.0)) \
                                      WHERE id=?",
                                     rusqlite::params![now, total_fee, total_fee, total_fee, id]
                                 )?;

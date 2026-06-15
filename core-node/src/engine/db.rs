@@ -309,9 +309,10 @@ impl TradeRepository {
 
             let total_comm = entry_comm + exit_fee;
             let total_slip = entry_slip + exit_slip;
-            // Canonical net PnL model:
-            // net = gross - commission - funding - slippage
-            let net_pnl = gross_pnl - total_comm - fund_cost - total_slip;
+            // Net PnL: gross already uses actual fill prices (slippage is baked in).
+            // Subtracting slippage again would double-count it.
+            // Slippage stays in DB for diagnostics only.
+            let net_pnl = gross_pnl - total_comm - fund_cost;
 
             conn.execute(
                 "UPDATE trades SET \

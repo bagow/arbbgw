@@ -289,7 +289,6 @@ pub async fn handle_get_unified(
                             COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0)
                             - COALESCE(commission_cost,0.0)
                             - COALESCE(funding_cost,0.0)
-                            - COALESCE(slippage_cost,0.0)
                         ) as net_live
                  FROM trades
                  WHERE status IN ('OPEN','CLOSING')",
