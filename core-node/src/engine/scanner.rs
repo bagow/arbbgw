@@ -460,15 +460,16 @@ pub fn generate_signals(
                 continue;
             }
 
-            if (row.exchange_a == "binance" && actual_vol_a < ts.binance_min_notional)
-                || (row.exchange_b == "binance" && phys_qty * entry_b < ts.binance_min_notional)
-            {
+            // Universal minimum notional check — all major CEXes reject orders below ~$5
+            let min_notional = ts.binance_min_notional; // reuse setting as universal floor
+            if actual_vol_a < min_notional || actual_vol_b < min_notional {
                 if let Some(p) = &diag_prefix {
                     tracing::info!(
-                        "{} -> below binance_min_notional (${:.2} < ${:.2})",
+                        "{} -> below min_notional (A=${:.2} B=${:.2} < ${:.2})",
                         p,
                         actual_vol_a,
-                        ts.binance_min_notional
+                        actual_vol_b,
+                        min_notional
                     );
                 }
                 continue;
