@@ -34,6 +34,7 @@ pub struct VerifyConfig {
 /// Result of fill verification.
 pub struct VerifyResult {
     /// True if fill was confirmed
+    #[allow(dead_code)]
     pub got_fill: bool,
     /// Physical volume filled (None if unconfirmed)
     pub phys_volume: Option<f64>,

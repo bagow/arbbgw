@@ -43,6 +43,7 @@ const PROFILE_SELECT: &str = "
 ";
 
 /// Load settings for a given mode ('real') from the profiles DB.
+#[allow(dead_code)]
 pub async fn load_settings(db: &Connection, mode: &str) -> TradingSettings {
     let mode = mode.to_string();
     db.call(move |conn| {

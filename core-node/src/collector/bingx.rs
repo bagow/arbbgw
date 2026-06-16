@@ -241,7 +241,6 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                     }
                 }
                 None | Some(Err(_)) => break,
-                _ => {}
             },
             _ = ping.tick() => {
                 let _ = ws.send(Message::Ping(vec![])).await;

@@ -267,7 +267,7 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
         "SANDUSDT","MANAUSDT","AXSUSDT","CRVUSDT","SNXUSDT","ATOMUSDT","XLMUSDT",
     ];
 
-    let backoff = Duration::from_secs(1);
+    let _backoff = Duration::from_secs(1);
     loop {
         // Rebuild symbol list on every reconnect attempt
         let mut vol_syms: Vec<(f64, String)> = {

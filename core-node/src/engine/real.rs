@@ -8,6 +8,7 @@ use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use std::sync::Arc;
+use tokio_rusqlite::Connection;
 
 use sha2::Sha256;
 
@@ -91,18 +92,20 @@ impl ExchangeKeys {
 pub use crate::engine::utils::now_ms;
 pub use crate::engine::utils::now_secs;
 pub use crate::engine::utils::symbols_match;
-pub use crate::engine::utils::get_exchange_fee;
+
 
 fn hmac_sha256_hex(secret: &[u8], data: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC any key");
     mac.update(data.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
+#[allow(dead_code)]
 fn hmac_sha256_b64(secret: &[u8], data: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC any key");
     mac.update(data.as_bytes());
     base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
 }
+#[allow(dead_code)]
 pub fn kucoin_sign(
     secret: &str,
     passphrase: &str,
@@ -153,6 +156,7 @@ pub fn bybit_sign(secret: &str, ts: &str, api_key: &str, recv_window: &str, body
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Trade {
     pub id: i64,
     pub pair: String,

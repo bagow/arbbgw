@@ -73,12 +73,14 @@ async fn try_gate_ws_order(
 
 #[derive(Deserialize, Debug)]
 #[allow(non_snake_case)]
+#[allow(dead_code)]
 struct GateBalanceResponse {
     available: String,
     total: String,
 }
 
 #[derive(Deserialize, Debug)]
+#[allow(dead_code)]
 struct GateFeeResponse {
     taker_fee: String,
 }
@@ -91,7 +93,7 @@ impl ExchangeConnector for GateConnector {
 
     async fn place_order(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
         pair: &str,
         is_buy: bool,
@@ -103,7 +105,7 @@ impl ExchangeConnector for GateConnector {
         multiplier: f64,
         slippage_percent: f64,
         tick_size: f64,
-        api_timeout_ms: u64,
+        _api_timeout_ms: u64,
     ) -> Result<(Option<String>, f64, f64), String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if is_buy {
@@ -117,7 +119,7 @@ impl ExchangeConnector for GateConnector {
                 phys_amount, multiplier
             ));
         }
-        let path = "/api/v4/futures/usdt/orders";
+        let _path = "/api/v4/futures/usdt/orders";
 
         let price = if is_buy {
             target_price * (1.0 + slippage_percent / 100.0)
@@ -160,7 +162,7 @@ impl ExchangeConnector for GateConnector {
             "close": false,
             "text": "t-corenode"
         });
-        let body_str = body.to_string();
+        let _body_str = body.to_string();
 
         if dry_run {
             return Ok((Some(format!("dry_{}", Uuid::new_v4())), target_price, 0.0));

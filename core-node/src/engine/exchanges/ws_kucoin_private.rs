@@ -114,7 +114,7 @@ async fn kucoin_private_ws_loop(api_key: String, api_secret: String, passphrase:
             }
         });
 
-        let mut read_failed = false;
+        let mut _read_failed = false;
 
         loop {
             tokio::select! {
@@ -167,7 +167,7 @@ async fn kucoin_private_ws_loop(api_key: String, api_secret: String, passphrase:
                         Ok(Message::Ping(_)) => {} // tungstenite handles pong
                         Err(e) => {
                             tracing::error!("[kucoin_ws_private] Read error: {}", e);
-                            read_failed = true;
+                            _read_failed = true;
                             break;
                         }
                         _ => {}
@@ -180,19 +180,19 @@ async fn kucoin_private_ws_loop(api_key: String, api_secret: String, passphrase:
                     });
                     if let Err(e) = write.send(Message::Text(ping_msg.to_string())).await {
                         tracing::error!("[kucoin_ws_private] Ping failed: {}", e);
-                        read_failed = true;
+                        _read_failed = true;
                         break;
                     }
                 }
                 else => {
-                    read_failed = true;
+                    _read_failed = true;
                     break;
                 }
             }
         }
 
         ping_handle.abort();
-        if read_failed {
+        if _read_failed {
             tracing::warn!("[kucoin_ws_private] Connection dropped. Reconnecting in 2s...");
             tokio::time::sleep(Duration::from_secs(2)).await;
         }

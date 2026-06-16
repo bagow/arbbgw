@@ -5,7 +5,7 @@ use tokio_rusqlite::Connection;
 use tracing::{error, info};
 use shared::{TechnicalSettings, TradingSettings};
 use crate::engine::pnl::*;
-use crate::engine::risk_manager::*;
+
 use crate::engine::real::*;
 use crate::state::EngineContext;
 
@@ -20,7 +20,7 @@ pub async fn process_closes(
     ts: &TechnicalSettings,
     e_ctx: &Arc<EngineContext>,
 ) -> Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)> {
-    let dry_run = false;
+    let _dry_run = false;
     let repo = TradeRepository::new(db.clone());
     // Tuple: (trade_id, price_a, price_b, spread, net_pnl, funding_rate_a, funding_rate_b, funding_next_ts, accumulated_funding_cost)
     let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)> = Vec::new();

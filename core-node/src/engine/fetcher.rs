@@ -4,7 +4,7 @@ use tokio::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::engine::exchanges::get_connector;
-use crate::engine::exchanges::traits::ExchangeConnector;
+
 use crate::engine::real::ExchangeKeys;
 
 /// Spawn background task that refreshes balances and fee rates.

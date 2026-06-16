@@ -141,7 +141,7 @@ async fn bitget_private_ws_loop(api_key: String, api_secret: String, passphrase:
             }
         });
 
-        let mut read_failed = false;
+        let mut _read_failed = false;
 
         loop {
             tokio::select! {
@@ -191,7 +191,7 @@ async fn bitget_private_ws_loop(api_key: String, api_secret: String, passphrase:
                         Ok(Message::Ping(_)) => {} // auto-handled
                         Err(e) => {
                             tracing::error!("[bitget_ws_private] Read error: {}", e);
-                            read_failed = true;
+                            _read_failed = true;
                             break;
                         }
                         _ => {}
@@ -200,19 +200,19 @@ async fn bitget_private_ws_loop(api_key: String, api_secret: String, passphrase:
                 Some(()) = ping_rx.recv() => {
                     if let Err(e) = write.send(Message::Text("ping".to_string())).await {
                         tracing::error!("[bitget_ws_private] Ping failed: {}", e);
-                        read_failed = true;
+                        _read_failed = true;
                         break;
                     }
                 }
                 else => {
-                    read_failed = true;
+                    _read_failed = true;
                     break;
                 }
             }
         }
 
         ping_handle.abort();
-        if read_failed {
+        if _read_failed {
             tracing::warn!("[bitget_ws_private] Connection dropped. Reconnecting in 2s...");
             tokio::time::sleep(Duration::from_secs(2)).await;
         }

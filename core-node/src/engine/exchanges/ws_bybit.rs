@@ -36,6 +36,7 @@ pub fn get_cached_fill(order_id: &str) -> Option<(f64, f64, f64)> {
 }
 
 /// Remove cached fill (cleanup after use)
+#[allow(dead_code)]
 pub fn remove_cached_fill(order_id: &str) {
     get_exec_cache().remove(order_id);
 }

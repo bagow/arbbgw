@@ -55,7 +55,7 @@ async fn get_listen_key(api_key: &str, api_secret: &str) -> Result<String, Strin
     let client = reqwest::Client::new();
     let ts = now_ms().to_string();
     // BingX listenKey endpoint
-    let params = "";
+    let _params = "";
     let sign_str = format!("timestamp={}", ts);
     let sig = bingx_ws_sign(api_secret, &sign_str);
     
@@ -123,7 +123,7 @@ async fn bingx_private_ws_loop(api_key: String, api_secret: String) {
             }
         });
 
-        let mut read_failed = false;
+        let mut _read_failed = false;
 
         loop {
             tokio::select! {
@@ -170,7 +170,7 @@ async fn bingx_private_ws_loop(api_key: String, api_secret: String) {
                         Ok(Message::Ping(_)) => {} // auto-handled
                         Err(e) => {
                             tracing::error!("[bingx_ws_private] Read error: {}", e);
-                            read_failed = true;
+                            _read_failed = true;
                             break;
                         }
                         _ => {}
@@ -189,19 +189,19 @@ async fn bingx_private_ws_loop(api_key: String, api_secret: String) {
                     // Ping WS
                     if let Err(e) = write.send(Message::Ping(vec![])).await {
                         tracing::error!("[bingx_ws_private] Ping failed: {}", e);
-                        read_failed = true;
+                        _read_failed = true;
                         break;
                     }
                 }
                 else => {
-                    read_failed = true;
+                    _read_failed = true;
                     break;
                 }
             }
         }
 
         ping_handle.abort();
-        if read_failed {
+        if _read_failed {
             tracing::warn!("[bingx_ws_private] Connection dropped. Reconnecting in 2s...");
             tokio::time::sleep(Duration::from_secs(2)).await;
         }

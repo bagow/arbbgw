@@ -105,7 +105,6 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                     let vol: f64 = t["v"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0); // quote volume
                     let close: f64 = t["c"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                     if vol > 0.0 || close > 0.0 {
-                        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                         if let Some(mut ex_map) = price_map.get_mut("xt") {
                             if let Some(entry) = ex_map.get_mut(&std_sym) {
                                 entry.vol = vol;

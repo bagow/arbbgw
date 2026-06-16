@@ -18,7 +18,7 @@ impl ExchangeConnector for KucoinConnector {
 
     async fn place_order(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
         pair: &str,
         is_buy: bool,
@@ -33,7 +33,7 @@ impl ExchangeConnector for KucoinConnector {
         api_timeout_ms: u64,
     ) -> Result<(Option<String>, f64, f64), String> {
         let sym = format!("{}M", pair);
-        let ts = now_ms().to_string();
+        let _ts = now_ms().to_string();
         let path = "/api/v1/orders";
         let side = if is_buy { "buy" } else { "sell" };
 
@@ -166,7 +166,7 @@ impl ExchangeConnector for KucoinConnector {
         dry_run: bool,
         leverage: f64,
         target_price: f64,
-        use_ioc: bool,
+        _use_ioc: bool,
         slippage_percent: f64,
         multiplier: f64,
         tick_size: f64,
@@ -414,7 +414,7 @@ impl ExchangeConnector for KucoinConnector {
 
     async fn fetch_order(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
         _pair: &str,
         order_id: &str,
@@ -516,7 +516,7 @@ impl ExchangeConnector for KucoinConnector {
             0.0
         };
 
-        let mut fee = final_fee;
+        let fee = final_fee;
         if price > 0.0 && !resolved_via_ws && fee <= 1e-9 {
             let path_fills = format!("/api/v1/fills?orderId={}", order_id);
             if let Ok(v2) = super::ws_kucoin::send_kucoin_request(
@@ -536,7 +536,7 @@ impl ExchangeConnector for KucoinConnector {
         Ok((price, final_fee, final_size * mult))
     }
 
-    async fn fetch_balances(&self, _http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
+    async fn fetch_balances(&self, __http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
         let path = "/api/v1/account-overview?currency=USDT";
         let v = super::ws_kucoin::send_kucoin_request(
             &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
@@ -559,7 +559,7 @@ impl ExchangeConnector for KucoinConnector {
 
     async fn ensure_leverage(
         &self,
-        _http: &Client,
+        __http: &Client,
         _keys: &ExchangeKeys,
         _pair: &str,
         _leverage: f64,

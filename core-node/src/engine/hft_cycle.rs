@@ -18,8 +18,10 @@ use crate::engine::risk_manager::{has_sufficient_margin, mark_balance_low};
 use shared::{SpreadRow, TechnicalSettings, TradingSettings};
 use std::sync::atomic::AtomicI64;
 
+#[allow(dead_code)]
 static LAST_HFT_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
 
+#[allow(unused_assignments)]
 pub async fn run_hft_cycle(
     signals: Vec<shared::TradeSignal>,
     _spreads: Vec<SpreadRow>,

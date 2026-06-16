@@ -230,6 +230,7 @@ async fn execute_binance_order(
 
 #[derive(Deserialize, Debug)]
 #[allow(non_snake_case)]
+#[allow(dead_code)]
 struct BinanceBalanceAccountResponse {
     availableBalance: String,
     totalWalletBalance: String,
@@ -238,6 +239,7 @@ struct BinanceBalanceAccountResponse {
 
 #[derive(Deserialize, Debug)]
 #[allow(non_snake_case)]
+#[allow(dead_code)]
 struct BinanceFeeResponse {
     takerCommissionRate: String,
 }
@@ -415,8 +417,8 @@ impl ExchangeConnector for BinanceConnector {
         slippage_percent: f64,
         multiplier: f64,
         tick_size: f64,
-        retries: u32,
-        delay_ms: u64,
+        _retries: u32,
+        _delay_ms: u64,
         api_timeout_ms: u64,
     ) -> Result<CloseReceipt, String> {
         let side = if is_buy { "BUY" } else { "SELL" };
@@ -530,7 +532,7 @@ impl ExchangeConnector for BinanceConnector {
             pair,
             phys_amount
         );
-        let mut fb_price_str = String::new();
+        let mut _fb_price_str = String::new();
         if target_price > 0.0 {
             let p = if is_buy {
                 target_price * 1.02
@@ -545,7 +547,7 @@ impl ExchangeConnector for BinanceConnector {
             let mut s = format!("{:.8}", rp).trim_end_matches('0').to_string();
             if s.ends_with('.') { s.pop(); }
             if !s.is_empty() && s != "0" {
-                fb_price_str = s;
+                _fb_price_str = s;
             }
         }
 

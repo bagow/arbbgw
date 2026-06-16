@@ -55,6 +55,7 @@ pub fn symbols_match(a: &str, b: &str) -> bool {
 
 /// Round price to the nearest valid tick size for the given exchange:pair.
 /// If tick size is unknown, rounds based on price magnitude (safe fallback).
+#[allow(dead_code)]
 pub fn round_to_tick(
     price: f64,
     exchange: &str,

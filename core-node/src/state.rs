@@ -39,6 +39,7 @@ pub type UpdateSignal = Arc<Notify>;
 pub struct FundingInfo {
     pub rate: f64,       // current funding rate (e.g. 0.0001 = 0.01%)
     pub next_ts: i64,    // unix timestamp (ms) of next funding apply
+    #[allow(dead_code)]
     pub fetched_at: i64, // when this was cached
 }
 
@@ -49,6 +50,7 @@ pub struct EngineContext {
     pub tick_sizes: Arc<DashMap<String, f64>>,
     pub balances: Arc<DashMap<String, f64>>,
     pub fee_rates: Arc<DashMap<String, f64>>,
+    #[allow(dead_code)]
     pub leverage_set: Arc<DashMap<String, bool>>,
     pub exchange_cooldown: Arc<DashMap<String, i64>>,
     pub pair_cooldown: Arc<DashMap<String, i64>>,

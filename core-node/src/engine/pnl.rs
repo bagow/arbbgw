@@ -64,6 +64,7 @@ pub fn calculate_exit_spread(
 }
 
 /// Helper to get L1 prices or fallback to entry prices if missing/empty
+#[allow(dead_code)]
 pub fn get_fallback_prices(
     is_a_higher: bool,
     entry_price_a: f64,

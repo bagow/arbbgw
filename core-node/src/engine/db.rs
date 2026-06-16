@@ -35,6 +35,7 @@ impl TradeRepository {
         crate::engine::real::load_open_trades(&self.db, profile_id).await
     }
 
+    #[allow(dead_code)]
     pub async fn mark_trade_closed(
         &self,
         id: i64,
@@ -59,6 +60,7 @@ impl TradeRepository {
         }).await;
     }
 
+    #[allow(dead_code)]
     pub async fn update_trade_real_exit(
         &self,
         id: i64,
@@ -183,6 +185,7 @@ impl TradeRepository {
             .await;
     }
 
+    #[allow(dead_code)]
     pub async fn correct_entry_prices(
         &self,
         oid_a2: String,
@@ -219,6 +222,7 @@ impl TradeRepository {
 
     /// Revert a trade back to OPEN state when a close order fails to fill.
     /// Clears close_reason so the engine can re-trigger on the next cycle.
+    #[allow(dead_code)]
     pub async fn revert_to_open(&self, id: i64) {
         let _ = self
             .db

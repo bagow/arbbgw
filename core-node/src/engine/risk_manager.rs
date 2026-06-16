@@ -97,6 +97,7 @@ pub fn deduct_cached_balance(
     }
 }
 
+#[allow(dead_code)]
 pub fn is_margin_error(err: &str) -> bool {
     let s = err.to_lowercase();
     s.contains("insufficient")

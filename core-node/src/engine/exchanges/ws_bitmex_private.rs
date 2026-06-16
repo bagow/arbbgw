@@ -83,7 +83,7 @@ async fn bitmex_private_ws_loop(api_key: String, api_secret: String) {
             continue;
         }
 
-        let mut read_failed = false;
+        let mut _read_failed = false;
 
         loop {
             tokio::select! {
@@ -133,20 +133,20 @@ async fn bitmex_private_ws_loop(api_key: String, api_secret: String) {
                         Ok(Message::Ping(_)) => {} // auto-handled
                         Err(e) => {
                             tracing::error!("[bitmex_ws_private] Read error: {}", e);
-                            read_failed = true;
+                            _read_failed = true;
                             break;
                         }
                         _ => {}
                     }
                 }
                 else => {
-                    read_failed = true;
+                    _read_failed = true;
                     break;
                 }
             }
         }
 
-        if read_failed {
+        if _read_failed {
             tracing::warn!("[bitmex_ws_private] Connection dropped. Reconnecting in 2s...");
             tokio::time::sleep(Duration::from_secs(2)).await;
         }

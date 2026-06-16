@@ -53,7 +53,7 @@ impl ExchangeConnector for BybitConnector {
 
     async fn place_order(
         &self,
-        http: &Client,
+        _http: &Client,
         keys: &ExchangeKeys,
         pair: &str,
         is_buy: bool,
@@ -65,7 +65,7 @@ impl ExchangeConnector for BybitConnector {
         multiplier: f64,
         slippage_percent: f64,
         tick_size: f64,
-        api_timeout_ms: u64,
+        _api_timeout_ms: u64,
     ) -> Result<(Option<String>, f64, f64), String> {
         let side_str = if is_buy { "Buy" } else { "Sell" };
 
@@ -157,12 +157,12 @@ impl ExchangeConnector for BybitConnector {
                 // while giving the stream enough time.
                 let mut inline_price = 0.0;
                 let mut inline_fee = 0.0;
-                let mut inline_qty = 0.0;
+                    let mut _inline_qty = 0.0;
                 for _wait in 0..10 {
                     if let Some((p, f, q)) = super::ws_bybit::get_cached_fill(&oid) {
                         inline_price = p;
                         inline_fee = f;
-                        inline_qty = q;
+                        _inline_qty = q;
                         tracing::info!(
                             "[bybit_ws] ⚡ Inline fill {} price={:.6} fee={:.6} qty={:.6}",
                             pair, p, f, q
@@ -197,7 +197,7 @@ impl ExchangeConnector for BybitConnector {
         tick_size: f64,
         retries: u32,
         delay_ms: u64,
-        api_timeout_ms: u64,
+        _api_timeout_ms: u64,
     ) -> Result<CloseReceipt, String> {
         let side_str = if is_buy { "Buy" } else { "Sell" };
 
