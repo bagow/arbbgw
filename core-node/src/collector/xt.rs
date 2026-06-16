@@ -129,13 +129,13 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     ).await.context("XT WS connect failed")?;
     info!("[xt] Connected, subscribing {} symbols...", xt_symbols.len());
 
-    // Subscribe to ticker (for volume) AND depth (for bid/ask) — XT format: topic@symbol
-    // ticker only gives OHLC, no bid/ask. depth gives bids/asks levels.
+    // Subscribe to ticker (for volume) AND depth_update (for bid/ask) — XT format: topic@symbol
+    // ticker only gives OHLC, no bid/ask. depth_update gives incremental bids/asks.
     for chunk in xt_symbols.chunks(20) {
         let mut args: Vec<String> = Vec::new();
         for s in chunk {
             args.push(format!("ticker@{}", s));
-            args.push(format!("depth@{}", s));
+            args.push(format!("depth_update@{}", s));
         }
         ws.send(Message::Text(json!({
             "method": "SUBSCRIBE",

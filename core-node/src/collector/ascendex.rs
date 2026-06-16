@@ -137,9 +137,15 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     ).await.context("AscendEX WS connect failed")?;
     info!("[ascendex] Connected, subscribing {} symbols...", ws_symbols.len());
 
-    // Subscribe to bbo channel — ch must be a string, not array
+    // Subscribe to bbo channel — format: bbo:BTC/USDT (not futures/bbo:BTC-PERP)
+    // Convert BTC-PERP → BTC/USDT for channel subscription
+    let mut bbo_to_std: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for sym in &ws_symbols {
-        let ch = format!("futures/bbo:{}", sym);
+        // BTC-PERP → BTC/USDT
+        let base = sym.strip_suffix("-PERP").unwrap_or(sym);
+        let bbo_sym = format!("{}/USDT", base);
+        bbo_to_std.insert(bbo_sym.clone(), sym_map.get(sym.as_str()).cloned().unwrap_or_default());
+        let ch = format!("bbo:{}", bbo_sym);
         ws.send(Message::Text(json!({"op":"sub","ch": ch}).to_string().into())).await?;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -160,13 +166,17 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let m = v["m"].as_str().unwrap_or("");
-                        if m == "futures/bbo" {
+                        if m == "bbo" || m == "futures/bbo" {
                             if let Some(data) = v["data"].as_object() {
-                                let sym_raw = data["s"].as_str().unwrap_or(""); // "BTC-PERP"
-                                let std_sym = match sym_map.get(sym_raw) {
-                                    Some(s) => s.clone(),
-                                    None => continue, // unknown symbol
-                                };
+                                let sym_raw = v["symbol"].as_str()
+                                    .or_else(|| data.get("s").and_then(|v| v.as_str()))
+                                    .unwrap_or("");
+                                // Try bbo_to_std mapping (BTC/USDT→BTCUSDT) or sym_map (BTC-PERP→BTCUSDT)
+                                let std_sym = bbo_to_std.get(sym_raw)
+                                    .or_else(|| sym_map.get(sym_raw))
+                                    .cloned()
+                                    .unwrap_or_default();
+                                if std_sym.is_empty() { continue; }
                                 let bid: f64 = data["b"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                 let ask: f64 = data["a"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                 let bid_sz: f64 = data["bq"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
