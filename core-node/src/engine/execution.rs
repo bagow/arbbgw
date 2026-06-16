@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 use reqwest::Client;
-use tracing::{error, info};
 
 use crate::engine::exchanges::traits::ExchangeConnector;
 use crate::engine::real::ExchangeKeys;

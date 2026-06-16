@@ -7,7 +7,6 @@ use shared::{TechnicalSettings, TradingSettings};
 use crate::engine::pnl::*;
 use crate::engine::risk_manager::*;
 use crate::engine::real::*;
-use crate::engine::utils::is_position_missing_or_liquidated_error;
 use crate::state::EngineContext;
 
 
