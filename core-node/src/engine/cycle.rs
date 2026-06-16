@@ -1245,16 +1245,10 @@ pub async fn run_cycle(
                 "[real] Both IOC unfilled {} — no exposure ({}ms)",
                 pair, total_ms
             );
-            let fails = e_ctx
-                .consecutive_failures
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                + 1;
-            if fails >= 5 {
-                e_ctx
-                    .is_killed
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                error!("[real] 💀 KILL-SWITCH TRIGGERED: 5 consecutive IOC failures. Suspending new entries.");
-            }
+            // Both unfilled = safe outcome (no position, no risk).
+            // With tight 0.05% IOC this is common — NOT a failure.
+            // Cooldown this pair briefly to avoid re-trying the same thin spread.
+            e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 10_000);
             continue;
         }
 
