@@ -196,6 +196,19 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                 }).unwrap_or_default();
                                 if !bids.is_empty() || !asks.is_empty() {
                                     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                                    // BUG-3 FIX: Update L1 depth (bid_size/ask_size) from L2 data
+                                    // so scanner depth filter sees real BingX liquidity.
+                                    // Other collectors do this inline; BingX was missing it entirely.
+                                    if let Some(mut ex_map) = price_map.get_mut("bingx") {
+                                        if let Some(entry) = ex_map.get_mut(&sym_raw) {
+                                            if let Some(&(bp, bq)) = bids.first() {
+                                                entry.bid_size = bq * bp; // USD depth at best bid
+                                            }
+                                            if let Some(&(ap, aq)) = asks.first() {
+                                                entry.ask_size = aq * ap; // USD depth at best ask
+                                            }
+                                        }
+                                    }
                                     l2_books.insert(format!("bingx:{}", sym_raw), crate::state::L2Snapshot { bids, asks, updated_ms: now_ms });
                                 }
                             }

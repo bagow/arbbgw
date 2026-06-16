@@ -328,12 +328,17 @@ pub fn start_position_sync(
                     })
                     .unwrap_or(true); // conservative
 
-                // FIX: Do not trigger EXTERNAL_CLOSE if the trade is already actively CLOSING.
-                // If the trade is in CLOSING status, it means the bot itself successfully closed one leg
-                // and is retrying the other. External close logic should only apply to OPEN trades
-                // that suddenly disappear without the bot's intervention.
-                if trade.status == "CLOSING" {
+                // BUG-S3 FIX: Only skip fresh CLOSING trades (< 5 min). Stale CLOSING trades
+                // may be stuck (e.g., after panic in close spawn, or external liquidation).
+                // For stale ones, fall through to position check so we can detect and recover.
+                if trade.status == "CLOSING" && age_ms < 300_000 {
                     continue;
+                }
+                if trade.status == "CLOSING" {
+                    tracing::warn!(
+                        "[pos_sync] Trade id={} {} stuck in CLOSING for {}s, checking positions...",
+                        trade.id, trade.pair, age_ms / 1000
+                    );
                 }
 
                 if has_pos_a && has_pos_b {

@@ -147,21 +147,24 @@ pub async fn run_cycle(
             }
         }
 
-        let _contracts_a = trade.contracts_a as f64;
-        let _contracts_b = trade.contracts_b as f64;
-
-        let trade_coins = trade.volume / trade.entry_price_a.max(1e-12);
+        // BUG-2 FIX: Use actual physical coins per leg (contracts × multiplier)
+        // instead of approximating via volume/price_a which diverges when
+        // signal price ≠ fill price or after asymmetric trimming.
+        let mult_a_live = e_ctx.multipliers.get(&format!("{}:{}", trade.exchange_a, trade.pair)).map(|v| *v).unwrap_or(1.0);
+        let mult_b_live = e_ctx.multipliers.get(&format!("{}:{}", trade.exchange_b, trade.pair)).map(|v| *v).unwrap_or(1.0);
+        let coins_a = trade.contracts_a * mult_a_live;
+        let coins_b = trade.contracts_b * mult_b_live;
 
         // PnL for DISPLAY (using mark/mid prices — matches exchange PnL)
         let live_pnl_a = if is_a_higher {
-            (trade.entry_price_a - c_price_a) * trade_coins
+            (trade.entry_price_a - c_price_a) * coins_a
         } else {
-            (c_price_a - trade.entry_price_a) * trade_coins
+            (c_price_a - trade.entry_price_a) * coins_a
         };
         let live_pnl_b = if is_a_higher {
-            (c_price_b - trade.entry_price_b) * trade_coins
+            (c_price_b - trade.entry_price_b) * coins_b
         } else {
-            (trade.entry_price_b - c_price_b) * trade_coins
+            (trade.entry_price_b - c_price_b) * coins_b
         };
         let live_gross_pnl = live_pnl_a + live_pnl_b;
 
@@ -174,14 +177,14 @@ pub async fn run_cycle(
 
         // PnL for CLOSE TRIGGERS (using bid/ask — pessimistic, for safe execution)
         let exec_pnl_a = if is_a_higher {
-            (trade.entry_price_a - exit_price_a) * trade_coins
+            (trade.entry_price_a - exit_price_a) * coins_a
         } else {
-            (exit_price_a - trade.entry_price_a) * trade_coins
+            (exit_price_a - trade.entry_price_a) * coins_a
         };
         let exec_pnl_b = if is_a_higher {
-            (exit_price_b - trade.entry_price_b) * trade_coins
+            (exit_price_b - trade.entry_price_b) * coins_b
         } else {
-            (trade.entry_price_b - exit_price_b) * trade_coins
+            (trade.entry_price_b - exit_price_b) * coins_b
         };
         let exec_gross_pnl = exec_pnl_a + exec_pnl_b;
         let exec_net_pnl = exec_gross_pnl - trade.commission_cost - trade.slippage_cost - fund_cost;
@@ -274,20 +277,20 @@ pub async fn run_cycle(
 
                 // Exit A requires us to do the OPPOSITE of entry. 
                 // If Entry A was Short (is_a_higher = true), we must BUY.
-                let vwap_a = analyze_vwap(ob_a_res, is_a_higher, trade_coins, mult_a);
+                let vwap_a = analyze_vwap(ob_a_res, is_a_higher, coins_a, mult_a);
                 // If Entry B was Long (is_a_higher = true), we must SELL (is_buy = false).
-                let vwap_b = analyze_vwap(ob_b_res, !is_a_higher, trade_coins, mult_b);
+                let vwap_b = analyze_vwap(ob_b_res, !is_a_higher, coins_b, mult_b);
 
                 if let (Some(px_a), Some(px_b)) = (vwap_a, vwap_b) {
                     let vwap_exec_pnl_a = if is_a_higher {
-                        (trade.entry_price_a - px_a) * trade_coins
+                        (trade.entry_price_a - px_a) * coins_a
                     } else {
-                        (px_a - trade.entry_price_a) * trade_coins
+                        (px_a - trade.entry_price_a) * coins_a
                     };
                     let vwap_exec_pnl_b = if is_a_higher {
-                        (px_b - trade.entry_price_b) * trade_coins
+                        (px_b - trade.entry_price_b) * coins_b
                     } else {
-                        (trade.entry_price_b - px_b) * trade_coins
+                        (trade.entry_price_b - px_b) * coins_b
                     };
                     let vwap_gross_pnl = vwap_exec_pnl_a + vwap_exec_pnl_b;
                     let vwap_net_pnl =
@@ -314,7 +317,7 @@ pub async fn run_cycle(
                         exit_price_b = px_b;
                     }
                 } else {
-                    tracing::warn!("[real] ⚠️ MIRAGE ({}): Insufficient L2 depth for {:.4} phys coins on {}/{}. Using L1 fallback prices to force close.", reason_str, trade_coins, exa, exb);
+                    tracing::warn!("[real] ⚠️ MIRAGE ({}): Insufficient L2 depth for {:.4}/{:.4} phys coins on {}/{}. Using L1 fallback prices to force close.", reason_str, coins_a, coins_b, exa, exb);
                     // exit_price_a and b remain at L1 prices
                 }
             }
@@ -343,7 +346,8 @@ pub async fn run_cycle(
             let _vol = trade.volume;
             let entry_a = trade.entry_price_a;
             let entry_b = trade.entry_price_b;
-            let tc = trade_coins;
+            let ca_coins = coins_a;
+            let cb_coins = coins_b;
             let h = http.clone();
             let k = Arc::clone(&keys);
             let db_c = db.clone();
@@ -503,32 +507,33 @@ pub async fn run_cycle(
                 };
 
                 // ✅ Fill confirmed — compute real PnL and mark CLOSED
+                // BUG-2 FIX: Use per-leg coin amounts (contracts × multiplier)
                 let real_pna = if is_a_higher {
-                    (entry_a - real_exit_a) * tc
+                    (entry_a - real_exit_a) * ca_coins
                 } else {
-                    (real_exit_a - entry_a) * tc
+                    (real_exit_a - entry_a) * ca_coins
                 };
                 let real_pnb = if is_a_higher {
-                    (real_exit_b - entry_b) * tc
+                    (real_exit_b - entry_b) * cb_coins
                 } else {
-                    (entry_b - real_exit_b) * tc
+                    (entry_b - real_exit_b) * cb_coins
                 };
                 let real_gp = real_pna + real_pnb;
 
                 let slip_cost_exit_a = if real_exit_a > 0.0 {
                     if is_a_higher {
-                        ((real_exit_a - exit_price_a) * tc).max(0.0)
+                        ((real_exit_a - exit_price_a) * ca_coins).max(0.0)
                     } else {
-                        ((exit_price_a - real_exit_a) * tc).max(0.0)
+                        ((exit_price_a - real_exit_a) * ca_coins).max(0.0)
                     }
                 } else {
                     0.0
                 };
                 let slip_cost_exit_b = if real_exit_b > 0.0 {
                     if !is_a_higher {
-                        ((real_exit_b - exit_price_b) * tc).max(0.0)
+                        ((real_exit_b - exit_price_b) * cb_coins).max(0.0)
                     } else {
-                        ((exit_price_b - real_exit_b) * tc).max(0.0)
+                        ((exit_price_b - real_exit_b) * cb_coins).max(0.0)
                     }
                 } else {
                     0.0
@@ -609,28 +614,20 @@ pub async fn run_cycle(
             let (fr_b, next_b) = e_ctx.funding_rates.get(&key_b).map(|f| (f.rate, f.next_ts)).unwrap_or((0.0, 0_i64));
             let fund_next = next_a.min(next_b); // nearest funding event
 
-            // Estimate accumulated funding using live exchange rates instead of the static profile setting.
-            // Positive funding means longs pay shorts; shorts receive (negative cost).
-            let hours_open = (now_ms() - trade.entry_time) as f64 / 3_600_000.0_f64;
-            let periods_8h = (hours_open / 8.0).max(0.0);
-            let notional_a = trade.entry_price_a * trade_coins;
-            let notional_b = trade.entry_price_b * trade_coins;
+            // BUG-4 FIX: Incremental funding accumulation instead of linear extrapolation.
+            // Each flush cycle adds (rate × dt) to the running total in DB, properly tracking
+            // rate changes over time. Old code extrapolated current rate across entire position
+            // lifetime — wildly overestimating when rates spike temporarily.
+            let dt_8h = ts.live_update_throttle_ms as f64 / (8.0 * 3_600_000.0);
+            let notional_a = trade.entry_price_a * coins_a;
+            let notional_b = trade.entry_price_b * coins_b;
             let long_a = !is_a_higher;
             let long_b = is_a_higher;
-            let leg_a_fund = if long_a {
-                notional_a * fr_a * periods_8h
-            } else {
-                -notional_a * fr_a * periods_8h
-            };
-            let leg_b_fund = if long_b {
-                notional_b * fr_b * periods_8h
-            } else {
-                -notional_b * fr_b * periods_8h
-            };
-            let acc_fund_cost = leg_a_fund + leg_b_fund;
+            let fund_incr_a = if long_a { notional_a * fr_a * dt_8h } else { -notional_a * fr_a * dt_8h };
+            let fund_incr_b = if long_b { notional_b * fr_b * dt_8h } else { -notional_b * fr_b * dt_8h };
+            let acc_fund_cost = trade.funding_cost + fund_incr_a + fund_incr_b;
 
-            // Recompute net PnL with the freshly-fetched real funding cost so curr_gross_pnl
-            // in the DB reflects the true net position (gross - commission - real_funding).
+            // Net PnL with incrementally accumulated funding cost.
             // Slippage is NOT subtracted — gross_pnl already uses actual fill prices.
             let real_live_net_pnl =
                 live_gross_pnl - trade.commission_cost - acc_fund_cost;
@@ -1457,7 +1454,8 @@ pub async fn run_cycle(
         e_ctx
             .consecutive_trims
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        let final_vol_usd = matched_phys * entry_a;
+        // BUG-S4 FIX: Use actual fill price, not signal price, for volume record
+        let final_vol_usd = matched_phys * fill_a;
         crate::engine::real::deduct_cached_balance(
             &exa,
             final_vol_usd,
@@ -1487,7 +1485,9 @@ pub async fn run_cycle(
             sig.spread
         };
 
-        let entry_comm = fee_a_val + fee_b_val + trimming_fee; // Add trimming fees to the opening fees
+        // BUG-6 FIX: Include trimming_loss in commission so net PnL (gross - comm - fund)
+        // correctly accounts for the cost of dumping excess asymmetric fill volume.
+        let entry_comm = fee_a_val + fee_b_val + trimming_fee + trimming_loss;
         let slip_a = if fill_a > 0.0 {
             if is_a_higher {
                 ((entry_a - fill_a) * matched_phys).max(0.0)
@@ -1507,8 +1507,8 @@ pub async fn run_cycle(
             0.0
         };
 
-        // Trimming loss is baked into the entry slippage curve (as it was an immediate loss to enter the market symmetrically)
-        let entry_slip = slip_a + slip_b + trimming_loss;
+        // Trimming loss is now in commission_cost (BUG-6 FIX). Slippage tracks pure price deviation only.
+        let entry_slip = slip_a + slip_b;
 
         let contracts_a_db = matched_phys / mult_a;
         let contracts_b_db = matched_phys / mult_b;
