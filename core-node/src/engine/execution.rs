@@ -274,6 +274,28 @@ pub async fn execute_close(
         }
     }
 
+    // 🛡️ EXIT PRICE SANITY CHECK: Protect against connector bugs returning wrong price units.
+    if real_exit_a > 0.0 && exit_price_a > 0.0 && !leg_a_external {
+        let ratio = real_exit_a / exit_price_a;
+        if ratio > 2.0 || ratio < 0.5 {
+            tracing::error!(
+                "[close] 🚨 EXIT PRICE SANITY FAIL {}/A: real_exit={:.8} expected={:.8} ratio={:.2}. Using expected!",
+                pair, real_exit_a, exit_price_a, ratio
+            );
+            real_exit_a = exit_price_a;
+        }
+    }
+    if real_exit_b > 0.0 && exit_price_b > 0.0 && !leg_b_external {
+        let ratio = real_exit_b / exit_price_b;
+        if ratio > 2.0 || ratio < 0.5 {
+            tracing::error!(
+                "[close] 🚨 EXIT PRICE SANITY FAIL {}/B: real_exit={:.8} expected={:.8} ratio={:.2}. Using expected!",
+                pair, real_exit_b, exit_price_b, ratio
+            );
+            real_exit_b = exit_price_b;
+        }
+    }
+
     // Compute real PnL from actual fill prices
     let pnl_result = crate::engine::pnl::calculate_gross_pnl(
         is_a_higher, entry_a, entry_b,

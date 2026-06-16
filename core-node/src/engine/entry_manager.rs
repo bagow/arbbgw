@@ -852,6 +852,25 @@ pub async fn process_entries(
         let contracts_a_db = matched_phys / mult_a;
         let contracts_b_db = matched_phys / mult_b;
 
+        // 🛡️ PRICE SANITY CHECK: Protect against connector bugs that return wrong price units.
+        // Compare fill price against scanner L1 price (entry_a/entry_b). If off by >50%, use L1 fallback.
+        if fill_a > 0.0 && entry_a > 0.0 {
+            let ratio_a = fill_a / entry_a;
+            if ratio_a > 2.0 || ratio_a < 0.5 {
+                error!("[real] 🚨 PRICE SANITY FAIL {}/{}: fill_a={:.8} entry_a={:.8} ratio={:.2}. Using L1 price as fallback!",
+                    pair, exa, fill_a, entry_a, ratio_a);
+                fill_a = entry_a;
+            }
+        }
+        if fill_b > 0.0 && entry_b > 0.0 {
+            let ratio_b = fill_b / entry_b;
+            if ratio_b > 2.0 || ratio_b < 0.5 {
+                error!("[real] 🚨 PRICE SANITY FAIL {}/{}: fill_b={:.8} entry_b={:.8} ratio={:.2}. Using L1 price as fallback!",
+                    pair, exb, fill_b, entry_b, ratio_b);
+                fill_b = entry_b;
+            }
+        }
+
         info!("[real] [EXCHANGE_VERIFIED] ✅ OPEN {} phys={:.6} (Trimming: -${:.4}) A_price={:.6} B_price={:.6} fees={:.4} slip={:.4} actual_sp={:.4}%",
             pair, matched_phys, trimming_loss, fill_a, fill_b, entry_comm, entry_slip, actual_entry_spread);
 

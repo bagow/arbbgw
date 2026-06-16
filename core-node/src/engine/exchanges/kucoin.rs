@@ -143,9 +143,21 @@ impl ExchangeConnector for KucoinConnector {
                         } else { 0.0 };
                         inline_fee = state.fee.abs();
                         tracing::info!(
-                            "[kucoin] ⚡ Inline fill {} price={:.6} fee={:.6} size={:.1}",
-                            pair, inline_price, inline_fee, state.filled_size
+                            "[kucoin] ⚡ Inline fill {} price={:.6} fee={:.6} size={:.1} raw_deal_value={:.8} raw_filled_size={:.4} mult={}",
+                            pair, inline_price, inline_fee, state.filled_size,
+                            state.deal_value, state.filled_size, multiplier
                         );
+                        // Sanity check: if inline_price is way off from target_price, something is wrong
+                        if target_price > 0.0 && inline_price > 0.0 {
+                            let ratio = inline_price / target_price;
+                            if ratio > 2.0 || ratio < 0.5 {
+                                tracing::error!(
+                                    "[kucoin] 🚨 PRICE SANITY FAIL {}: inline={:.8} target={:.8} ratio={:.2} deal_val={:.8} filled_sz={:.4}. Using target_price!",
+                                    pair, inline_price, target_price, ratio, state.deal_value, state.filled_size
+                                );
+                                inline_price = target_price;
+                            }
+                        }
                         break;
                     }
                 }
@@ -505,12 +517,14 @@ impl ExchangeConnector for KucoinConnector {
             final_size = size;
             final_val = val;
             final_fee = fee;
+
+            tracing::info!(
+                "[kucoin] 📊 fetch_order {} REST raw: dealSize={:.6} dealValue={:.8} fee={:.6} status={}",
+                order_id, size, val, fee, status
+            );
             break;
         }
 
-        // Price = dealValue / dealSize = contract price (matches WS bestBidPrice).
-        // Do NOT divide by multiplier — that gives per-unit price which
-        // differs from WS prices and causes phantom 900%+ spreads.
         let mult = if multiplier > 0.0 { multiplier } else { 1.0 };
 
         let price = if final_size > 0.0 {
@@ -518,6 +532,11 @@ impl ExchangeConnector for KucoinConnector {
         } else {
             0.0
         };
+
+        tracing::info!(
+            "[kucoin] 📊 fetch_order {} COMPUTED: price={:.8} = dealVal({:.8}) / dealSz({:.4}), mult={}, resolved_via_ws={}",
+            order_id, price, final_val, final_size, mult, resolved_via_ws
+        );
 
         let fee = final_fee;
         if price > 0.0 && !resolved_via_ws && fee <= 1e-9 {
@@ -528,10 +547,21 @@ impl ExchangeConnector for KucoinConnector {
             ).await {
                 if let Some(items) = v2["data"]["data"].as_array().or_else(|| v2["data"]["items"].as_array()) {
                     let mut sum_fee = 0.0;
+                    let mut fills_sum_value = 0.0;
+                    let mut fills_sum_size = 0.0;
                     for item in items {
                         sum_fee += item["fee"].as_f64().or_else(|| item["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+                        let fp = item["price"].as_f64().or_else(|| item["price"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+                        let fs = item["size"].as_f64().or_else(|| item["size"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+                        fills_sum_value += fp * fs;
+                        fills_sum_size += fs;
                     }
                     if sum_fee > 1e-9 { final_fee = sum_fee; }
+                    tracing::info!(
+                        "[kucoin] 📊 fetch_order {} FILLS: fills_sum_value={:.8} fills_sum_size={:.4} fills_price={:.8}",
+                        order_id, fills_sum_value, fills_sum_size,
+                        if fills_sum_size > 0.0 { fills_sum_value / fills_sum_size } else { 0.0 }
+                    );
                 }
             }
         }

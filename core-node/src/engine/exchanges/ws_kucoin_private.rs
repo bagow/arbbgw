@@ -146,6 +146,12 @@ async fn kucoin_private_ws_loop(api_key: String, api_secret: String, passphrase:
                                             if let Some(match_price) = data["matchPrice"].as_f64().or_else(|| data["matchPrice"].as_str().and_then(|s| s.parse().ok())) {
                                                 if let Some(match_size) = data["matchSize"].as_f64().or_else(|| data["matchSize"].as_str().and_then(|s| s.parse().ok())) {
                                                     state.deal_value += match_price * match_size;
+                                                    tracing::info!(
+                                                        "[kucoin_ws_private] 📊 Fill oid={} status={} matchPrice={:.8} matchSize={:.4} cum_deal_value={:.8} cum_filled_size={:.4} cum_price={:.8}",
+                                                        order_id, status, match_price, match_size,
+                                                        state.deal_value, state.filled_size,
+                                                        if state.filled_size > 0.0 { state.deal_value / state.filled_size } else { 0.0 }
+                                                    );
                                                 }
                                             }
                                             if let Some(fee) = data["fee"].as_f64().or_else(|| data["fee"].as_str().and_then(|s| s.parse().ok())) {
