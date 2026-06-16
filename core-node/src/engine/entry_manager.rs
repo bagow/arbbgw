@@ -11,6 +11,24 @@ use crate::engine::real::*;
 use crate::engine::risk_manager::*;
 use crate::engine::cycle::cooldown_active;
 
+/// Static liquidity ranking for exchanges.
+/// Lower = more liquid. Used to determine entry order (less liquid first).
+fn liquidity_rank(exchange: &str) -> u8 {
+    match exchange {
+        "binance" => 1,
+        "bybit" => 2,
+        "gate" => 3,
+        "bitget" => 4,
+        "bingx" => 5,
+        "kucoin" => 6,
+        "bitmex" => 7,
+        "ascendex" => 8,
+        "toobit" => 9,
+        "xt" => 10,
+        _ => 50,
+    }
+}
+
 pub async fn process_entries(
     signals: Vec<TradeSignal>,
     prices: &crate::state::PriceMap,
@@ -362,39 +380,137 @@ pub async fn process_entries(
             async move { snap_repo.insert_snapshot(sp_pair, sp_exa, sp_exb, snapshot, ts_ms).await; }
         });
 
-        // ── PARALLEL ORDER EXECUTION ─────────────────────────────────────────────
-        // With tight IOC slippage (0.05%), parallel is safe:
-        // - Both legs see the same price → maximizes fill chance
-        // - Sequential was failing: Leg A fills → 1-2s delay → spread gone → Leg B never fills
-        //   → 100% asymmetric positions → all losses
-        // - With parallel + tight IOC: worst case one leg fills → trim at 0.05% cost (tiny)
+        // ── SEQUENTIAL ORDER EXECUTION (less liquid leg first) ─────────────────
+        // Strategy: open the LESS LIQUID exchange first. If it doesn't fill,
+        // skip the trade entirely — zero exposure, zero loss.
+        // Only if the less liquid leg fills, we open the more liquid leg.
+        // This eliminates asymmetric fills that cause 100% of current losses.
         opened_this_cycle = true;
 
+        let rank_a = liquidity_rank(&exa);
+        let rank_b = liquidity_rank(&exb);
+        let a_is_less_liquid = rank_a >= rank_b;
+
+        let (first_label, second_label) = if a_is_less_liquid {
+            (exa.as_str(), exb.as_str())
+        } else {
+            (exb.as_str(), exa.as_str())
+        };
+
         info!(
-            "[real] ⚡ Выполнение ПАРАЛЛЕЛЬНО: Leg A ({}) + Leg B ({}) для {}...",
-            exa, exb, pair
+            "[real] 🔄 Последовательное исполнение: сначала {} (менее ликв.), затем {} для {}...",
+            first_label, second_label, pair
         );
 
         let t0_exec = std::time::Instant::now();
 
-        // Execute both legs simultaneously via tokio::join!
-        let (res_a, res_b) = tokio::join!(
-            conn_ensure_a.place_order(
-                &http, &keys, &pair, !is_a_higher, qty_a, dry_run,
-                limit_price_a, limit_price_a > 0.0,
-                settings.leverage as f64, mult_a, ioc_slippage_pct, tick_a, ts.api_timeout_ms
-            ),
-            conn_ensure_b.place_order(
-                &http, &keys, &pair, is_a_higher, qty_b, dry_run,
-                limit_price_b, limit_price_b > 0.0,
-                settings.leverage as f64, mult_b, ioc_slippage_pct, tick_b, ts.api_timeout_ms
-            )
+        // ── PHASE 1: Less liquid leg ─────────────────────────────────────────
+        let (first_conn, first_is_buy, first_qty, first_limit, first_mult, first_tick) = if a_is_less_liquid {
+            (&conn_ensure_a, !is_a_higher, qty_a, limit_price_a, mult_a, tick_a)
+        } else {
+            (&conn_ensure_b, is_a_higher, qty_b, limit_price_b, mult_b, tick_b)
+        };
+
+        let res_first = first_conn.place_order(
+            &http, &keys, &pair, first_is_buy, first_qty, dry_run,
+            first_limit, first_limit > 0.0,
+            settings.leverage as f64, first_mult, ioc_slippage_pct, first_tick, ts.api_timeout_ms
+        ).await;
+
+        let (oid_first, fill_first, fee_first) = match res_first {
+            Ok(t) => (t.0, t.1, t.2),
+            Err(e) => {
+                error!("[real] LEG_FIRST reject {}/{}: {}", first_label, pair, e);
+                let esl = e.to_string().to_lowercase();
+                if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
+                    mark_balance_low(first_label, &e_ctx);
+                }
+                (None, 0.0, 0.0)
+            }
+        };
+
+        // Verify first leg fill
+        let first_phys_init = if fill_first > 0.0 { Some(first_qty) } else { None };
+        let first_max_retries = if use_ioc && fill_first <= 0.0 { 5_i64 } else { ts.fill_verify_retries };
+
+        let ver_first = crate::engine::execution::verify_fill(
+            first_conn, &http, &keys, &pair, &oid_first,
+            fill_first, fee_first, first_phys_init, first_qty, dry_run,
+            crate::engine::execution::VerifyConfig {
+                fast_retries: first_max_retries,
+                fast_delay_ms: ts.fill_verify_delay_ms as u64,
+                slow_retries: 8,
+                slow_delay_ms: 500,
+                position_fallback: true,
+                mult: first_mult,
+            },
+            "real",
+        ).await;
+
+        let first_phys = ver_first.phys_volume.unwrap_or(0.0);
+
+        // If less liquid leg didn't fill → skip entirely, no exposure
+        if first_phys <= 1e-12 {
+            info!(
+                "[real] ⏭️ {} IOC не заполнен для {} — нет экспозиции, пропускаем ({}ms)",
+                first_label, pair, t0_exec.elapsed().as_millis()
+            );
+            e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 10_000);
+            continue;
+        }
+
+        info!(
+            "[real] ✅ Первая нога {} заполнена: price={:.6} qty={:.6}. Открываем {}...",
+            first_label, ver_first.fill_price, first_phys, second_label
         );
 
-        let total_ms = t0_exec.elapsed().as_millis();
+        // ── PHASE 2: More liquid leg (should fill easily) ────────────────────
+        let (second_conn, second_is_buy, second_qty, second_limit, second_mult, second_tick) = if a_is_less_liquid {
+            (&conn_ensure_b, is_a_higher, qty_b, limit_price_b, mult_b, tick_b)
+        } else {
+            (&conn_ensure_a, !is_a_higher, qty_a, limit_price_a, mult_a, tick_a)
+        };
+
+        let res_second = second_conn.place_order(
+            &http, &keys, &pair, second_is_buy, second_qty, dry_run,
+            second_limit, second_limit > 0.0,
+            settings.leverage as f64, second_mult, ioc_slippage_pct, second_tick, ts.api_timeout_ms
+        ).await;
+
+        let (oid_second, fill_second, fee_second) = match res_second {
+            Ok(t) => (t.0, t.1, t.2),
+            Err(e) => {
+                error!("[real] LEG_SECOND reject {}/{}: {}", second_label, pair, e);
+                let esl = e.to_string().to_lowercase();
+                if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
+                    mark_balance_low(second_label, &e_ctx);
+                }
+                (None, 0.0, 0.0)
+            }
+        };
+
+        // Verify second leg fill
+        let second_phys_init = if fill_second > 0.0 { Some(second_qty) } else { None };
+        let second_max_retries = if use_ioc && fill_second <= 0.0 { 5_i64 } else { ts.fill_verify_retries };
+
+        let ver_second = crate::engine::execution::verify_fill(
+            second_conn, &http, &keys, &pair, &oid_second,
+            fill_second, fee_second, second_phys_init, second_qty, dry_run,
+            crate::engine::execution::VerifyConfig {
+                fast_retries: second_max_retries,
+                fast_delay_ms: ts.fill_verify_delay_ms as u64,
+                slow_retries: 8,
+                slow_delay_ms: 500,
+                position_fallback: true,
+                mult: second_mult,
+            },
+            "real",
+        ).await;
+
+        let total_exec_ms = t0_exec.elapsed().as_millis();
 
         // Latency checks
-        if total_ms > 800 {
+        if total_exec_ms > 800 {
             let mut strikes_a = e_ctx.high_latency_strikes.entry(exa.clone()).or_insert(0);
             *strikes_a += 1;
             if *strikes_a >= 3 {
@@ -402,7 +518,7 @@ pub async fn process_entries(
                 error!("[real] 🐢 LATENCY ALERT: {} RTT >800ms. Cooldown 1m.", exa);
                 *strikes_a = 0;
             }
-    
+
             let mut strikes_b = e_ctx.high_latency_strikes.entry(exb.clone()).or_insert(0);
             *strikes_b += 1;
             if *strikes_b >= 3 {
@@ -415,80 +531,30 @@ pub async fn process_entries(
             e_ctx.high_latency_strikes.insert(exb.clone(), 0);
         }
 
-        // 2. Parse inline results
-        let (oid_a, mut fill_a, mut fee_a_val) = match res_a {
-            Ok(t) => (t.0, t.1, t.2),
-            Err(e) => {
-                error!("[real] LEG_A reject {}/{}: {}", exa, pair, e);
-                let esl = e.to_string().to_lowercase();
-                if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
-                    mark_balance_low(&exa, &e_ctx);
-                }
-                (None, 0.0, 0.0)
-            }
-        };
+        // Map first/second results back to A/B
+        let (oid_a, oid_b);
+        let (mut fill_a, fee_a_val, actual_vol_phys_a);
+        let (mut fill_b, fee_b_val, actual_vol_phys_b);
+        if a_is_less_liquid {
+            oid_a = oid_first;
+            fill_a = ver_first.fill_price;
+            fee_a_val = ver_first.fee;
+            actual_vol_phys_a = ver_first.phys_volume;
+            oid_b = oid_second;
+            fill_b = ver_second.fill_price;
+            fee_b_val = ver_second.fee;
+            actual_vol_phys_b = ver_second.phys_volume;
+        } else {
+            oid_a = oid_second;
+            fill_a = ver_second.fill_price;
+            fee_a_val = ver_second.fee;
+            actual_vol_phys_a = ver_second.phys_volume;
+            oid_b = oid_first;
+            fill_b = ver_first.fill_price;
+            fee_b_val = ver_first.fee;
+            actual_vol_phys_b = ver_first.phys_volume;
+        }
 
-        let (oid_b, mut fill_b, mut fee_b_val) = match res_b {
-            Ok(t) => (t.0, t.1, t.2),
-            Err(e) => {
-                error!("[real] LEG_B reject {}/{}: {}", exb, pair, e);
-                let esl = e.to_string().to_lowercase();
-                if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
-                    mark_balance_low(&exb, &e_ctx);
-                }
-                (None, 0.0, 0.0)
-            }
-        };
-
-        let mut actual_vol_phys_a: Option<f64> = None;
-        let mut actual_vol_phys_b: Option<f64> = None;
-
-        if fill_a > 0.0 { actual_vol_phys_a = Some(qty_a); }
-        if fill_b > 0.0 { actual_vol_phys_b = Some(qty_b); }
-
-        // IOC verify: Even if inline fill returned 0 (e.g., WS lag), give enough
-        // retries for execution report to arrive. Don't skip slow path — a filled
-        // IOC order that we miss leads to orphaned positions and asymmetric losses.
-        let ioc_no_fill_a = use_ioc && fill_a <= 0.0;
-        let ioc_no_fill_b = use_ioc && fill_b <= 0.0;
-        let max_retries_a = if ioc_no_fill_a { 5_i64 } else { ts.fill_verify_retries };
-        let max_retries_b = if ioc_no_fill_b { 5_i64 } else { ts.fill_verify_retries };
-
-        // 3. Parallel verification via shared execution helper
-        let (ver_a, ver_b) = tokio::join!(
-            crate::engine::execution::verify_fill(
-                &conn_ensure_a, &http, &keys, &pair, &oid_a,
-                fill_a, fee_a_val, actual_vol_phys_a, qty_a, dry_run,
-                crate::engine::execution::VerifyConfig {
-                    fast_retries: max_retries_a,
-                    fast_delay_ms: ts.fill_verify_delay_ms as u64,
-                    slow_retries: 8,
-                    slow_delay_ms: 500,
-                    position_fallback: true,
-                    mult: mult_a,
-                },
-                "real",
-            ),
-            crate::engine::execution::verify_fill(
-                &conn_ensure_b, &http, &keys, &pair, &oid_b,
-                fill_b, fee_b_val, actual_vol_phys_b, qty_b, dry_run,
-                crate::engine::execution::VerifyConfig {
-                    fast_retries: max_retries_b,
-                    fast_delay_ms: ts.fill_verify_delay_ms as u64,
-                    slow_retries: 8,
-                    slow_delay_ms: 500,
-                    position_fallback: true,
-                    mult: mult_b,
-                },
-                "real",
-            )
-        );
-        actual_vol_phys_a = ver_a.phys_volume;
-        fill_a = ver_a.fill_price;
-        fee_a_val = ver_a.fee;
-        actual_vol_phys_b = ver_b.phys_volume;
-        fill_b = ver_b.fill_price;
-        fee_b_val = ver_b.fee;
 
         // 4. Handle asymmetry (Trimming)
         let phys_a = actual_vol_phys_a.unwrap_or(0.0);
