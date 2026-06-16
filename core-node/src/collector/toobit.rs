@@ -151,15 +151,17 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     // Subscribe in chunks of 30
     for chunk in symbols.chunks(30) {
         let subs: Vec<Value> = chunk.iter().map(|s| {
-            json!({"symbol": s, "topic": "depth", "event": "sub"})
+            json!({"symbol": s, "topic": "depth", "event": "sub", "params": {"binary": false}})
         }).collect();
         for sub in subs {
             ws.send(Message::Text(sub.to_string().into())).await?;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await; // 5 msg/sec limit
         }
     }
 
     let mut ping = tokio::time::interval(Duration::from_secs(25));
+    let mut msg_count: u64 = 0;
+    let mut tick_count: u64 = 0;
 
     loop {
         tokio::select! {
@@ -168,6 +170,10 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                     if text.contains("\"ping\"") {
                         let _ = ws.send(Message::Text(text.replace("ping", "pong"))).await;
                         continue;
+                    }
+                    msg_count += 1;
+                    if msg_count <= 3 {
+                        info!("[toobit] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(400)]);
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         if v["topic"].as_str() == Some("depth") {
@@ -221,6 +227,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                 }
                             );
                             signal.notify_one();
+                            tick_count += 1;
                         }
                     }
                 }
@@ -229,7 +236,9 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                 _ => {}
             },
             _ = ping.tick() => {
-                ws.send(Message::Text("Ping".into())).await?;
+                let ts_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                ws.send(Message::Text(json!({"ping": ts_ms}).to_string().into())).await?;
+                info!("[toobit] DIAG: msgs={} ticks={}", msg_count, tick_count);
             }
         }
     }

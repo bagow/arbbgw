@@ -147,11 +147,17 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     price_map.entry("ascendex".to_string()).or_default();
 
     let mut ping = tokio::time::interval(Duration::from_secs(25));
+    let mut msg_count: u64 = 0;
+    let mut tick_count: u64 = 0;
 
     loop {
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
+                    msg_count += 1;
+                    if msg_count <= 5 {
+                        info!("[ascendex] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(400)]);
+                    }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let m = v["m"].as_str().unwrap_or("");
                         if m == "futures/bbo" {
@@ -190,6 +196,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                     }
                                 );
                                 signal.notify_one();
+                                tick_count += 1;
                             }
                         }
                     }
@@ -200,6 +207,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             },
             _ = ping.tick() => {
                 ws.send(Message::Text(json!({"op":"ping"}).to_string().into())).await?;
+                info!("[ascendex] DIAG: msgs={} ticks={}", msg_count, tick_count);
                 let now_ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default().as_secs();

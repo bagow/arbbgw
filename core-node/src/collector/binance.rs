@@ -17,59 +17,8 @@ pub async fn run(
     l2_books: L2OrderbookMap,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
-    // Spawn L2 depth stream ONCE at top level — NOT inside handler().
-    // Previously it was spawned inside handler(), causing N copies after N reconnects.
-    let l2_books_for_depth = l2_books.clone();
-    let prices_for_depth = prices.clone();
-    tokio::spawn(async move {
-        // Wait 20s for bookTicker to populate price_map with all symbols
-        tokio::time::sleep(Duration::from_secs(20)).await;
-        run_l2_depth_stream(l2_books_for_depth, prices_for_depth).await;
-    });
-
-    // Spawn volume refresher ONCE at top level (same leak fix).
-    {
-        let pm = prices.clone();
-        let http_vol = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(1800)).await;
-                let mut target_url = "https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
-                let mut resp = http_vol.get(&target_url).timeout(Duration::from_secs(15)).send().await;
-
-                if let Ok(ref r) = resp {
-                    let status = r.status().as_u16();
-                    if status == 403 || status == 418 || status == 429 {
-                        target_url = "https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
-                        resp = http_vol.get(&target_url).timeout(Duration::from_secs(15)).send().await;
-                    }
-                }
-
-                if let Ok(r) = resp {
-                    if let Ok(arr) = r.json::<Vec<Value>>().await {
-                        let mut count = 0u32;
-                        for t in &arr {
-                            let sym = t["symbol"].as_str().unwrap_or("");
-                            if !sym.ends_with("USDT") { continue; }
-                            let vol: f64 = t["quoteVolume"]
-                                .as_str()
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(0.0);
-                            if vol > 0.0 {
-                                if let Some(mut ex_map) = pm.get_mut("binance") {
-                                    if let Some(entry) = ex_map.get_mut(sym) {
-                                        entry.vol = vol;
-                                        count += 1;
-                                    }
-                                }
-                            }
-                        }
-                        info!("[binance] Volume refreshed for {} symbols", count);
-                    }
-                }
-            }
-        });
-    }
+    // Track whether L2 depth stream is already spawned to avoid duplicates
+    let l2_spawned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let mut backoff = Duration::from_secs(1);
     loop {
@@ -83,12 +32,46 @@ pub async fn run(
             if backoff == Duration::from_secs(1) {
                 info!("[binance] Disabled globally in profiles. Sleeping...");
             }
-            backoff = Duration::from_secs(5);
+            backoff = Duration::from_secs(30);
             tokio::time::sleep(backoff).await;
             continue;
         }
 
-        info!("[binance] Connecting...");
+        // Pre-flight ban check: test REST before opening WS connections
+        let http_check = Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .build().unwrap();
+        match http_check.get("https://fapi.binance.com/fapi/v1/ping")
+            .timeout(Duration::from_secs(10))
+            .send().await
+        {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                if status == 418 || status == 429 || status == 403 {
+                    error!("[binance] IP still banned/rate-limited (HTTP {}). Backing off 5 min.", status);
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                    continue;
+                }
+            }
+            Err(e) => {
+                error!("[binance] Ping failed: {}. Backing off 60s.", e);
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            }
+        }
+
+        info!("[binance] Connecting (ban check passed)...");
+
+        // Spawn L2 depth stream ONCE (not on every reconnect)
+        if !l2_spawned.load(std::sync::atomic::Ordering::Relaxed) {
+            l2_spawned.store(true, std::sync::atomic::Ordering::Relaxed);
+            let l2_books_for_depth = l2_books.clone();
+            let prices_for_depth = prices.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                run_l2_depth_stream(l2_books_for_depth, prices_for_depth).await;
+            });
+        }
 
         let disable_watcher = async {
             loop {
@@ -108,11 +91,11 @@ pub async fn run(
         tokio::select! {
             res = handler(&prices, &signal, &l2_books) => {
                 match res {
-                    Ok(_)  => { warn!("[binance] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
+                    Ok(_)  => { warn!("[binance] WS closed, reconnecting..."); backoff = Duration::from_secs(5); }
                     Err(e) => error!("[binance] Error: {}. Reconnecting in {:?}", e, backoff),
                 }
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(60));
+                backoff = (backoff * 2).min(Duration::from_secs(120));
             }
             _ = disable_watcher => {
                 info!("[binance] Exchange was disabled dynamically. Dropping connection.");

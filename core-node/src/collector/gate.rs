@@ -61,7 +61,7 @@ pub async fn run(
                     Err(e) => error!("[gate] Error: {}. Reconnecting in {:?}", e, backoff),
                 }
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(10));
+                backoff = (backoff * 2).min(Duration::from_secs(60));
             }
             _ = disable_watcher => {
                 info!("[gate] Exchange was disabled dynamically. Dropping connections.");
