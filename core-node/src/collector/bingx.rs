@@ -191,6 +191,11 @@ async fn shard_handler(
     info!("[bingx] Shard {} subscribed L1+L2 for {} symbols", shard_idx, symbols.len());
 
     let mut ping = tokio::time::interval(Duration::from_secs(15));
+    let mut msg_count: u64 = 0;
+    let mut tick_count: u64 = 0;
+    let mut diag_timer = tokio::time::interval(Duration::from_secs(30));
+    diag_timer.tick().await; // skip immediate
+    let mut first_msg_logged = false;
 
     // Reconnect after 30 min to refresh subscriptions
     let conn_start = std::time::Instant::now();
@@ -222,6 +227,11 @@ async fn shard_handler(
                         continue;
                     }
                     if text.is_empty() || text == "Pong" { continue; }
+                    msg_count += 1;
+                    if !first_msg_logged && shard_idx == 0 {
+                        first_msg_logged = true;
+                        info!("[bingx] Shard 0 FIRST MSG (len={}): {}", text.len(), &text[..text.len().min(300)]);
+                    }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let data_type = v["dataType"].as_str().unwrap_or("");
                         if data_type.starts_with("MARKET.DEPTH.step0.") {
@@ -280,6 +290,7 @@ async fn shard_handler(
                                     }
                                 }
                                 signal.notify_one();
+                                tick_count += 1;
                             }
                         }
                     }
@@ -301,6 +312,11 @@ async fn shard_handler(
                             }
                         }
                     }
+                }
+            },
+            _ = diag_timer.tick() => {
+                if shard_idx == 0 {
+                    info!("[bingx] Shard 0 DIAG: msgs={} ticks={}", msg_count, tick_count);
                 }
             }
         }

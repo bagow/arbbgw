@@ -226,6 +226,9 @@ async fn handler(
     price_map.entry("bitget".to_string()).or_default();
 
     let mut ping = tokio::time::interval(Duration::from_secs(25));
+    let mut msg_count: u64 = 0;
+    let mut tick_count: u64 = 0;
+    let mut first_msg_logged = false;
 
     loop {
         tokio::select! {
@@ -233,7 +236,11 @@ async fn handler(
                 Some(Ok(Message::Text(text))) => {
                     // Bitget sends "pong" as plain text
                     if text.as_str() == "pong" { continue; }
-
+                    msg_count += 1;
+                    if !first_msg_logged {
+                        first_msg_logged = true;
+                        info!("[bitget] FIRST MSG (len={}): {}", text.len(), &text[..text.len().min(300)]);
+                    }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let action = v["action"].as_str().unwrap_or("");
                         let channel = v["arg"]["channel"].as_str().unwrap_or("");
@@ -275,6 +282,7 @@ async fn handler(
                                         }
                                     }
                                     signal.notify_one();
+                                    tick_count += 1;
                                 }
                             }
                         } else if channel == "books5" && (action == "snapshot" || action == "update" || action.is_empty()) {
@@ -305,6 +313,7 @@ async fn handler(
             },
             _ = ping.tick() => {
                 ws.send(Message::Text("ping".into())).await?;
+                info!("[bitget] DIAG: msgs={} ticks={}", msg_count, tick_count);
                 let now_ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default().as_secs();

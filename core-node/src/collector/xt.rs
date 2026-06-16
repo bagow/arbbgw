@@ -143,11 +143,19 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     price_map.entry("xt".to_string()).or_default();
 
     let mut ping = tokio::time::interval(Duration::from_secs(15));
+    let mut msg_count: u64 = 0;
+    let mut tick_count: u64 = 0;
+    let mut first_msg_logged = false;
 
     loop {
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
+                    msg_count += 1;
+                    if !first_msg_logged {
+                        first_msg_logged = true;
+                        info!("[xt] FIRST MSG (len={}): {}", text.len(), &text[..text.len().min(300)]);
+                    }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         // XT bookTicker event: {"event":"bookTicker","data":{...},"symbol":"btc_usdt"}
                         if v["event"].as_str() == Some("bookTicker") {
@@ -183,6 +191,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                 }
                             );
                             signal.notify_one();
+                            tick_count += 1;
                         }
                     }
                 }
@@ -193,6 +202,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             _ = ping.tick() => {
                 ws.send(Message::Text(json!({"method":"ping","id":2}).to_string().into())).await?;
                 let _ = ws.send(Message::Text("ping".into())).await; // Fallback text ping
+                info!("[xt] DIAG: msgs={} ticks={}", msg_count, tick_count);
             }
         }
     }
