@@ -891,5 +891,3 @@ pub async fn process_entries(
         .await;
     }
 }
-
-}

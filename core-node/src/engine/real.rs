@@ -163,8 +163,4 @@ pub fn get_exchange_fee(
         .map(|v| *v)
         .unwrap_or(default_fee)
 }
-
-
-/// Background task: detect positions closed externally on exchanges.
-/// Every 10 seconds, checks all open trades against actual exchange positions.
-/// If a position is gone from the exchange but still OPEN in DB, handle it.
+}
