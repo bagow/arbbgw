@@ -815,9 +815,13 @@ pub async fn run_cycle(
         let t0 = std::time::Instant::now();
         let use_ioc = ts.entry_order_type == "ioc";
         let order_type_label = if use_ioc { "IOC" } else { "MKT" };
-        // Hardcoded IOC slippage — DB value (2.0%!) was destroying all profit.
-        // 0.05% = tight enough to preserve spread, wide enough for tick rounding.
-        let ioc_slippage_pct = 0.05;
+        // Dynamic IOC slippage: (signal_spread - break_even) / 2
+        // This guarantees profitability: even if BOTH legs get worst-case fill,
+        // total slippage = 2 * per_leg ≤ (spread - BE) → net PnL ≥ 0
+        // Clamped: min 0.05% (tick rounding), max 0.5% (safety cap)
+        let ioc_slippage_pct = ((sig.spread - break_even_pct) / 2.0)
+            .max(0.05)
+            .min(0.5);
         // NOTE: FIRE log moved to after L2/depth checks to avoid false-positive log entries
 
         // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
@@ -985,9 +989,9 @@ pub async fn run_cycle(
 
         // ── ALL CHECKS PASSED — log FIRE and execute ─────────────────────────
         info!(
-            "[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}%",
+            "[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}% slip={:.3}%",
             pair, order_type_label, exa, contracts_a, limit_price_a,
-            exb, contracts_b, limit_price_b, sig.spread, break_even_pct
+            exb, contracts_b, limit_price_b, sig.spread, break_even_pct, ioc_slippage_pct
         );
         let snapshot = serde_json::json!({
             "bid_a": sig.entry_a, "bid_b": sig.entry_b,
