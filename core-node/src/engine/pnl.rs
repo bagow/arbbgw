@@ -68,8 +68,8 @@ pub fn get_fallback_prices(
     is_a_higher: bool,
     entry_price_a: f64,
     entry_price_b: f64,
-    data_a: Option<&crate::state::MarketData>,
-    data_b: Option<&crate::state::MarketData>,
+    data_a: Option<&shared::TickerData>,
+    data_b: Option<&shared::TickerData>,
 ) -> (f64, f64, f64, f64, f64, f64) {
     let (mut c_price_a, mut c_price_b, mut exit_price_a, mut exit_price_b) = (entry_price_a, entry_price_b, entry_price_a, entry_price_b);
     let mut current_spread = 0.0;

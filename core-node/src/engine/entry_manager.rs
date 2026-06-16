@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+use crate::engine::risk_manager::LAST_MARGIN_LOG;
 use crate::engine::db::TradeRepository;
 use reqwest::Client;
 use std::sync::Arc;

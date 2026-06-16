@@ -22,7 +22,7 @@ pub fn is_position_missing_or_liquidated_error(err: &str) -> bool {
 
 
 pub async fn process_closes(
-    trades: &[crate::engine::db::Trade],
+    trades: &[crate::engine::real::Trade],
     prices: &crate::state::PriceMap,
     settings: &TradingSettings,
     http: &Client,
@@ -44,7 +44,7 @@ pub async fn process_closes(
     }
     // Tuple: (trade_id, price_a, price_b, spread, net_pnl, funding_rate_a, funding_rate_b, funding_next_ts, accumulated_funding_cost)
     let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)> = Vec::new();
-    for trade in &trades {
+    for trade in trades {
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
         let _elapsed_ms = now_ms() - trade.entry_time;
 
@@ -360,6 +360,7 @@ pub async fn process_closes(
 
             let q_a = c_a as f64 * mult_a;
             let q_b = c_b as f64 * mult_b;
+            let slippage_percent = settings.slippage_percent;
 
             let _e_ctx_c = Arc::clone(&e_ctx);
             let closing_guard = Arc::clone(&e_ctx.closing_in_flight);
@@ -379,7 +380,7 @@ pub async fn process_closes(
                         lev as f64,
                         exit_price_a,
                         use_ioc,
-                        settings.slippage_percent,
+                        slippage_percent,
                         mult_a,
                         tick_a,
                         close_verify_retries as u32,
@@ -396,7 +397,7 @@ pub async fn process_closes(
                         lev as f64,
                         exit_price_b,
                         use_ioc,
-                        settings.slippage_percent,
+                        slippage_percent,
                         mult_b,
                         tick_b,
                         close_verify_retries as u32,

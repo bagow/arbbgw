@@ -72,13 +72,13 @@ pub fn start_position_sync(
             // 3. Fetch positions from each exchange (1 API call per exchange)
             let mut all_positions: std::collections::HashMap<
                 String,
-                Vec<super::exchanges::traits::PositionInfo>,
+                Vec<crate::engine::exchanges::traits::PositionInfo>,
             > = std::collections::HashMap::new();
             for ex in &exchanges_in_use {
                 if !keys.supports(ex) {
                     continue;
                 }
-                if let Some(conn) = super::exchanges::get_connector(ex) {
+                if let Some(conn) = crate::engine::exchanges::get_connector(ex) {
                     match conn.fetch_positions(&http, &keys).await {
                         Ok(positions) => {
                             all_positions.insert(ex.clone(), positions);
@@ -187,7 +187,7 @@ pub fn start_position_sync(
                     .map(|v| *v)
                     .unwrap_or(0.000001);
 
-                if let Some(conn) = super::exchanges::get_connector(remaining_ex) {
+                if let Some(conn) = crate::engine::exchanges::get_connector(remaining_ex) {
                     match conn
                         .close_position(
                             &http,

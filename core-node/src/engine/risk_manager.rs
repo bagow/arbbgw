@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
 
 static EXCHANGE_BANS: OnceLock<DashMap<String, i64>> = OnceLock::new();
-static LAST_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
+pub static LAST_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
