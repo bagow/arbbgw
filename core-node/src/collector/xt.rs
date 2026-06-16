@@ -129,9 +129,14 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     ).await.context("XT WS connect failed")?;
     info!("[xt] Connected, subscribing {} symbols...", xt_symbols.len());
 
-    // Subscribe to ticker in chunks — XT format: ticker@symbol
-    for chunk in xt_symbols.chunks(30) {
-        let args: Vec<String> = chunk.iter().map(|s| format!("ticker@{}", s)).collect();
+    // Subscribe to ticker (for volume) AND depth (for bid/ask) — XT format: topic@symbol
+    // ticker only gives OHLC, no bid/ask. depth gives bids/asks levels.
+    for chunk in xt_symbols.chunks(20) {
+        let mut args: Vec<String> = Vec::new();
+        for s in chunk {
+            args.push(format!("ticker@{}", s));
+            args.push(format!("depth@{}", s));
+        }
         ws.send(Message::Text(json!({
             "method": "SUBSCRIBE",
             "params": args,
@@ -156,62 +161,86 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                         info!("[xt] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(400)]);
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                        // XT ticker push: {"topic":"ticker","event":"ticker@btc_usdt","data":{...}}
-                        let is_ticker = v["topic"].as_str() == Some("ticker")
-                            || v["event"].as_str().map(|e| e.starts_with("ticker@")).unwrap_or(false)
-                            || v["topic"].as_str() == Some("bookTicker")
-                            || v["event"].as_str() == Some("bookTicker");
-                        if is_ticker {
-                            // Extract symbol from event "ticker@btc_usdt" or "symbol" field
-                            let xt_sym = v["data"]["s"].as_str()
-                                .or_else(|| v["symbol"].as_str())
-                                .or_else(|| {
-                                    v["event"].as_str().and_then(|e| {
-                                        e.strip_prefix("ticker@").or_else(|| e.strip_prefix("bookTicker@"))
-                                    })
+                        let topic = v["topic"].as_str().unwrap_or("");
+                        
+                        // Extract symbol from event "topic@symbol" or data.s
+                        let xt_sym = v["data"]["s"].as_str()
+                            .or_else(|| v["symbol"].as_str())
+                            .or_else(|| {
+                                v["event"].as_str().and_then(|e| {
+                                    e.split_once('@').map(|(_, sym)| sym)
                                 })
-                                .unwrap_or("");
-                            let std_sym = xt_to_standard(xt_sym);
-                            if !std_sym.ends_with("USDT") { continue; }
-                            // Try multiple field name formats
-                            let bid: f64 = v["data"]["bp"].as_str().and_then(|s| s.parse().ok())
-                                .or_else(|| v["data"]["b"].as_str().and_then(|s| s.parse().ok()))
-                                .unwrap_or(0.0);
-                            let ask: f64 = v["data"]["ap"].as_str().and_then(|s| s.parse().ok())
-                                .or_else(|| v["data"]["a"].as_str().and_then(|s| s.parse().ok()))
-                                .unwrap_or(0.0);
-                            let bid_sz: f64 = v["data"]["bv"].as_str().and_then(|s| s.parse().ok())
-                                .or_else(|| v["data"]["bq"].as_str().and_then(|s| s.parse().ok()))
-                                .unwrap_or(0.0);
-                            let ask_sz: f64 = v["data"]["av"].as_str().and_then(|s| s.parse().ok())
-                                .or_else(|| v["data"]["aq"].as_str().and_then(|s| s.parse().ok()))
-                                .unwrap_or(0.0);
-                            if bid <= 0.0 || ask <= 0.0 { continue; }
-                            let mid = (bid + ask) / 2.0;
+                            })
+                            .unwrap_or("");
+                        let std_sym = xt_to_standard(xt_sym);
+                        if !std_sym.ends_with("USDT") { continue; }
+                        
+                        if topic == "ticker" {
+                            // Ticker: OHLC + volume — update vol and fallback price
+                            let close: f64 = v["data"]["c"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            let vol: f64 = v["data"]["v"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                             let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                             if let Some(mut ex_map) = price_map.get_mut("xt") {
-                                if let Some(entry) = ex_map.get_mut(&std_sym) {
-                                    entry.bid = bid; entry.ask = ask; entry.price = mid;
-                                    entry.bid_size = bid_sz * mid; entry.ask_size = ask_sz * mid;
-                                    entry.last_updated = ts;
-                                } else {
-                                    ex_map.insert(std_sym.clone(), TickerData {
-                                        bid, ask, price: mid, vol: 0.0, funding_rate: 0.0,
-                                        bid_size: bid_sz * mid, ask_size: ask_sz * mid, last_updated: ts,
-                                    });
-                                }
+                                let entry = ex_map.entry(std_sym.clone()).or_insert(TickerData {
+                                    bid: 0.0, ask: 0.0, price: 0.0, vol: 0.0, funding_rate: 0.0,
+                                    bid_size: 0.0, ask_size: 0.0, last_updated: ts,
+                                });
+                                if vol > 0.0 { entry.vol = vol; }
+                                if close > 0.0 && entry.price == 0.0 { entry.price = close; }
                             }
-                            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-                            l2_books.insert(
-                                format!("xt:{}", std_sym),
-                                crate::state::L2Snapshot {
-                                    bids: vec![(bid, bid_sz)],
-                                    asks: vec![(ask, ask_sz)],
-                                    updated_ms: now_ms,
+                        } else if topic == "depth" || topic == "depth_update" {
+                            // Depth: bid/ask levels — extract best bid/ask
+                            let parse_side = |key: &str| -> Option<(f64, f64)> {
+                                v["data"][key].as_array().and_then(|arr| {
+                                    arr.first().and_then(|level| {
+                                        let px: f64 = level[0].as_str()?.parse().ok()?;
+                                        let sz: f64 = level[1].as_str()?.parse().ok()?;
+                                        if px > 0.0 { Some((px, sz)) } else { None }
+                                    })
+                                })
+                            };
+                            
+                            let best_bid = parse_side("b").or_else(|| parse_side("bids"));
+                            let best_ask = parse_side("a").or_else(|| parse_side("asks"));
+                            
+                            if let (Some((bid, bid_sz)), Some((ask, ask_sz))) = (best_bid, best_ask) {
+                                if bid <= 0.0 || ask <= 0.0 { continue; }
+                                let mid = (bid + ask) / 2.0;
+                                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                if let Some(mut ex_map) = price_map.get_mut("xt") {
+                                    if let Some(entry) = ex_map.get_mut(&std_sym) {
+                                        entry.bid = bid; entry.ask = ask; entry.price = mid;
+                                        entry.bid_size = bid_sz * mid; entry.ask_size = ask_sz * mid;
+                                        entry.last_updated = ts;
+                                    } else {
+                                        ex_map.insert(std_sym.clone(), TickerData {
+                                            bid, ask, price: mid, vol: 0.0, funding_rate: 0.0,
+                                            bid_size: bid_sz * mid, ask_size: ask_sz * mid, last_updated: ts,
+                                        });
+                                    }
                                 }
-                            );
-                            signal.notify_one();
-                            tick_count += 1;
+                                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                                l2_books.insert(
+                                    format!("xt:{}", std_sym),
+                                    crate::state::L2Snapshot {
+                                        bids: v["data"]["b"].as_array().or_else(|| v["data"]["bids"].as_array())
+                                            .map(|arr| arr.iter().take(5).filter_map(|l| {
+                                                let px: f64 = l[0].as_str()?.parse().ok()?;
+                                                let sz: f64 = l[1].as_str()?.parse().ok()?;
+                                                Some((px, sz))
+                                            }).collect()).unwrap_or_else(|| vec![(bid, bid_sz)]),
+                                        asks: v["data"]["a"].as_array().or_else(|| v["data"]["asks"].as_array())
+                                            .map(|arr| arr.iter().take(5).filter_map(|l| {
+                                                let px: f64 = l[0].as_str()?.parse().ok()?;
+                                                let sz: f64 = l[1].as_str()?.parse().ok()?;
+                                                Some((px, sz))
+                                            }).collect()).unwrap_or_else(|| vec![(ask, ask_sz)]),
+                                        updated_ms: now_ms,
+                                    }
+                                );
+                                signal.notify_one();
+                                tick_count += 1;
+                            }
                         }
                     }
                 }

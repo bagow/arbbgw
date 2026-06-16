@@ -137,11 +137,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     ).await.context("AscendEX WS connect failed")?;
     info!("[ascendex] Connected, subscribing {} symbols...", ws_symbols.len());
 
-    // Subscribe to bbo channel in chunks
-    for chunk in ws_symbols.chunks(20) {
-        let args: Vec<String> = chunk.iter().map(|s| format!("futures/bbo:{}", s)).collect();
-        ws.send(Message::Text(json!({"op":"sub","ch": args}).to_string().into())).await?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    // Subscribe to bbo channel — ch must be a string, not array
+    for sym in &ws_symbols {
+        let ch = format!("futures/bbo:{}", sym);
+        ws.send(Message::Text(json!({"op":"sub","ch": ch}).to_string().into())).await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     price_map.entry("ascendex".to_string()).or_default();

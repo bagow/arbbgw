@@ -180,8 +180,9 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                             let sym = v["symbol"].as_str().unwrap_or("");
                             if !sym.ends_with("USDT") { continue; }
                             
-                            let parse_levels = |key: &str| -> Vec<(f64, f64)> {
-                                v["data"][key].as_array().map(|arr| {
+                            let depth_data = if v["data"].is_array() { &v["data"][0] } else { &v["data"] };
+                            let parse_levels = |data: &Value, key: &str| -> Vec<(f64, f64)> {
+                                data[key].as_array().map(|arr| {
                                     arr.iter().filter_map(|l| {
                                         let px: f64 = l[0].as_str()?.parse().ok()?;
                                         let sz: f64 = l[1].as_str()?.parse().ok()?;
@@ -190,8 +191,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                 }).unwrap_or_default()
                             };
                             
-                            let bids = parse_levels("b");
-                            let asks = parse_levels("a");
+                            let bids = parse_levels(depth_data, "b");
+                            let asks = parse_levels(depth_data, "a");
                             if bids.is_empty() || asks.is_empty() { continue; }
                             
                             let bid = bids[0].0;
