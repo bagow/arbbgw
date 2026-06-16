@@ -55,6 +55,10 @@ pub fn prewarm_http(http: reqwest::Client) {
             "https://api-futures.kucoin.com/api/v1/timestamp",
         ];
         for url in endpoints {
+            // Skip Binance if banned (any request extends the ban)
+            if url.contains("binance") && crate::engine::exchanges::binance::is_binance_banned() {
+                continue;
+            }
             let _ = http.get(url).timeout(Duration::from_secs(5)).send().await;
         }
         info!(

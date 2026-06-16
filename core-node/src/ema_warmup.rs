@@ -240,23 +240,43 @@ async fn fetch_xt_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> 
 // ─── Binance: fetch 15-min klines ─────────────────────────────────────────────
 
 async fn fetch_binance_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
+    // Check ban + weight before REST request (each kline = weight 5)
+    if crate::engine::exchanges::binance::check_before_binance_rest().is_err() {
+        return None;
+    }
+    // Throttle if weight > 75% — sleep to let window reset
+    if crate::engine::exchanges::binance::binance_remaining_weight() < 600 {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        if crate::engine::exchanges::binance::check_before_binance_rest().is_err() {
+            return None;
+        }
+    }
+
     let from = now_secs() - LOOKBACK_SECS;
     let url = format!(
         "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval=15m&startTime={}&limit=100",
         pair,
         from * 1000
     );
-    let v: Value = match http
+    let r = match http
         .get(&url)
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
     {
-        Ok(r) if r.status().is_success() => match r.json().await {
-            Ok(j) => j,
-            Err(_) => return None,
-        },
-        _ => return None,
+        Ok(r) => r,
+        Err(_) => return None,
+    };
+
+    // Record response for weight tracking
+    crate::engine::exchanges::binance::record_binance_response(
+        r.status().as_u16(), r.headers(),
+    );
+
+    if !r.status().is_success() { return None; }
+    let v: Value = match r.json().await {
+        Ok(j) => j,
+        Err(_) => return None,
     };
     let arr = match v.as_array() {
         Some(a) => a,

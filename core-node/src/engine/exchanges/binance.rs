@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::Value;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::time::Duration;
 
 use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
@@ -9,67 +9,176 @@ use crate::engine::real::{binance_sign, now_ms, ExchangeKeys};
 
 pub struct BinanceConnector;
 
-// ── IP BAN TRACKING ──────────────────────────────────────────────────────────
-// Module-level atomic: stores the Unix timestamp (ms) until which this IP is banned.
-// 0 = not banned. All Binance API calls check this before sending requests.
-static BINANCE_BANNED_UNTIL_MS: AtomicI64 = AtomicI64::new(0);
+// ── IP BAN + WEIGHT TRACKING ────────────────────────────────────────────────
+// Single source of truth for ALL Binance REST rate limiting.
+// Used by: engine connector, collector, ema_warmup, prewarm.
+//
+// Binance Futures limits:
+//   - 2400 weight per minute (per IP)
+//   - 429 = rate limit hit → must stop immediately
+//   - 418 = IP auto-ban (after ignoring 429) → 2 min to 3 DAYS
+//   - ANY request during ban EXTENDS the ban!
 
-/// Check if we're currently IP-banned. Returns Err if banned, Ok if clear.
-fn check_ip_ban() -> Result<(), String> {
+static BINANCE_BANNED_UNTIL_MS: AtomicI64 = AtomicI64::new(0);
+static LAST_BAN_LOG_MS: AtomicI64 = AtomicI64::new(0);
+static BAN_COUNT: AtomicU32 = AtomicU32::new(0);
+static USED_WEIGHT_1M: AtomicU32 = AtomicU32::new(0);
+static WEIGHT_WINDOW_RESET_MS: AtomicI64 = AtomicI64::new(0);
+
+const WEIGHT_LIMIT: u32 = 2400;
+const WEIGHT_HARD_STOP: u32 = 2200; // Block new requests above this
+
+/// PUBLIC: Check ban + weight before ANY Binance REST request.
+/// Call from collector, ema_warmup, or any code that hits fapi.binance.com.
+pub fn check_before_binance_rest() -> Result<(), String> {
+    let now = now_ms() as i64;
+
+    // 1. Check IP ban
     let banned_until = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
-    if banned_until > 0 {
-        let now = now_ms() as i64;
-        if now < banned_until {
-            let remaining_s = (banned_until - now) / 1000;
-            // Only log once per ~60s to avoid spam
-            static LAST_BAN_LOG: AtomicI64 = AtomicI64::new(0);
-            let last = LAST_BAN_LOG.load(Ordering::Relaxed);
-            if now - last > 60_000 {
-                LAST_BAN_LOG.store(now, Ordering::Relaxed);
-                tracing::warn!(
-                    "[binance] 🚫 IP banned for {}s more (until {}). All requests skipped.",
-                    remaining_s, banned_until
-                );
-            }
-            return Err(format!("Binance IP banned for {}s more", remaining_s));
-        } else {
-            // Ban expired — clear it
-            BINANCE_BANNED_UNTIL_MS.store(0, Ordering::Relaxed);
-            tracing::info!("[binance] ✅ IP ban expired. Resuming normal operations.");
+    if banned_until > 0 && now < banned_until {
+        let remaining_s = (banned_until - now) / 1000;
+        let last_log = LAST_BAN_LOG_MS.load(Ordering::Relaxed);
+        if now - last_log > 60_000 {
+            LAST_BAN_LOG_MS.store(now, Ordering::Relaxed);
+            tracing::warn!(
+                "[binance] 🚫 IP banned for {}s more. ALL REST requests blocked.",
+                remaining_s
+            );
         }
+        return Err(format!("Binance IP banned for {}s more", remaining_s));
     }
+    // Ban expired? Clear.
+    if banned_until > 0 && now >= banned_until {
+        BINANCE_BANNED_UNTIL_MS.store(0, Ordering::Relaxed);
+        BAN_COUNT.store(0, Ordering::Relaxed);
+        tracing::info!("[binance] ✅ IP ban expired. Resuming normal operations.");
+    }
+
+    // 2. Check weight — reset window if expired
+    let reset_at = WEIGHT_WINDOW_RESET_MS.load(Ordering::Relaxed);
+    if now > reset_at {
+        USED_WEIGHT_1M.store(0, Ordering::Relaxed);
+        WEIGHT_WINDOW_RESET_MS.store(now + 60_000, Ordering::Relaxed);
+    }
+
+    // 3. Block if weight too high
+    let used = USED_WEIGHT_1M.load(Ordering::Relaxed);
+    if used >= WEIGHT_HARD_STOP {
+        let wait_s = (reset_at - now).max(0) / 1000;
+        tracing::warn!(
+            "[binance] ⚠️ Weight {}/{} near limit! Blocking. Reset in {}s.",
+            used, WEIGHT_LIMIT, wait_s
+        );
+        return Err(format!("Binance weight {}/{} too high", used, WEIGHT_LIMIT));
+    }
+
     Ok(())
 }
 
-/// Scan any Binance JSON response for ban indicators and update the atomic.
+/// PUBLIC: Is Binance currently banned? (no-request check)
+pub fn is_binance_banned() -> bool {
+    let until = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
+    until > 0 && (now_ms() as i64) < until
+}
+
+/// PUBLIC: Remaining ban time in seconds (0 if not banned).
+pub fn binance_ban_remaining_secs() -> i64 {
+    let until = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
+    if until <= 0 { return 0; }
+    ((until - now_ms() as i64) / 1000).max(0)
+}
+
+/// PUBLIC: How much weight remains in the current window.
+pub fn binance_remaining_weight() -> u32 {
+    let now = now_ms() as i64;
+    let reset_at = WEIGHT_WINDOW_RESET_MS.load(Ordering::Relaxed);
+    if now > reset_at { return WEIGHT_LIMIT; }
+    WEIGHT_LIMIT.saturating_sub(USED_WEIGHT_1M.load(Ordering::Relaxed))
+}
+
+/// PUBLIC: Set a ban directly (e.g. from Binance error "banned until TIMESTAMP").
+pub fn set_binance_ban(until_ms: i64) {
+    BINANCE_BANNED_UNTIL_MS.fetch_max(until_ms, Ordering::Relaxed);
+    BAN_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// PUBLIC: Record response from Binance REST. Tracks weight + detects bans.
+pub fn record_binance_response(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+) {
+    let now = now_ms() as i64;
+
+    // Parse X-MBX-USED-WEIGHT-1M
+    if let Some(w) = headers.get("X-MBX-USED-WEIGHT-1M") {
+        if let Ok(weight) = w.to_str().unwrap_or("").parse::<u32>() {
+            let old = USED_WEIGHT_1M.swap(weight, Ordering::Relaxed);
+            let reset_at = WEIGHT_WINDOW_RESET_MS.load(Ordering::Relaxed);
+            if now > reset_at || weight < old {
+                WEIGHT_WINDOW_RESET_MS.store(now + 60_000, Ordering::Relaxed);
+            }
+            if weight > 1800 {
+                tracing::warn!("[binance] ⚠️ HIGH WEIGHT: {}/{}", weight, WEIGHT_LIMIT);
+            }
+        }
+    }
+
+    // 429: rate limit
+    if status == 429 {
+        let ban_count = BAN_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        let base_s: i64 = match ban_count { 1 => 120, 2 => 300, 3 => 600, _ => 1800 };
+        let retry_s = headers.get("Retry-After")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let cooldown = retry_s.max(base_s);
+        let ban_until = now + cooldown * 1000 + 10_000;
+        BINANCE_BANNED_UNTIL_MS.fetch_max(ban_until, Ordering::Relaxed);
+        tracing::error!(
+            "[binance] 🔴 RATE LIMIT (429)! Ban #{} — backoff {}s.",
+            ban_count, cooldown
+        );
+    }
+
+    // 418: IP auto-ban
+    if status == 418 {
+        let ban_count = BAN_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        let base_s: i64 = match ban_count { 1 => 600, 2 => 1800, 3 => 7200, _ => 21600 };
+        let retry_s = headers.get("Retry-After")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let cooldown = retry_s.max(base_s);
+        let ban_until = now + cooldown * 1000 + 30_000;
+        BINANCE_BANNED_UNTIL_MS.fetch_max(ban_until, Ordering::Relaxed);
+        tracing::error!(
+            "[binance] 💀 IP BANNED (418)! Ban #{} — NO requests for {}s! \
+             Every request EXTENDS the ban!",
+            ban_count, cooldown
+        );
+    }
+}
+
+// ── Private helpers (used internally by connector methods) ───────────────────
+
+fn check_ip_ban() -> Result<(), String> {
+    check_before_binance_rest()
+}
+
 fn detect_ban_from_response(body: &Value) {
     let code = body["code"].as_i64().unwrap_or(0);
     let msg = body["msg"].as_str().unwrap_or("");
-
-    // -1003 = "Too many requests" / "IP banned until XXXX"
-    // -1015 = "Too many orders"
     if code == -1003 || code == -1015 {
-        // Try to parse "banned until TIMESTAMP" from the message
         if let Some(pos) = msg.find("banned until ") {
             let after = &msg[pos + 13..];
             let ts_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(ban_ts) = ts_str.parse::<i64>() {
-                let old = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
-                if ban_ts > old {
-                    BINANCE_BANNED_UNTIL_MS.store(ban_ts, Ordering::Relaxed);
-                    // Register in global ban registry
-                    crate::engine::risk_manager::ban_exchange("binance", ban_ts);
-                }
+                set_binance_ban(ban_ts);
+                crate::engine::risk_manager::ban_exchange("binance", ban_ts);
             }
         } else {
-            // No explicit timestamp — apply a 2-minute cooldown
-            let cooldown = now_ms() as i64 + 120_000;
-            let old = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
-            if cooldown > old {
-                BINANCE_BANNED_UNTIL_MS.store(cooldown, Ordering::Relaxed);
-                // Register in global ban registry
-                crate::engine::risk_manager::ban_exchange("binance", cooldown);
-            }
+            let cooldown = now_ms() as i64 + 300_000;
+            set_binance_ban(cooldown);
         }
     }
 }
@@ -79,44 +188,12 @@ async fn check_rate_limits(
     headers: &reqwest::header::HeaderMap,
     body: Option<&Value>,
 ) -> Result<(), String> {
-    // Check response body for ban codes
-    if let Some(b) = body {
-        detect_ban_from_response(b);
-    }
-
-    if status.as_u16() == 429 {
-        // Set a 2-minute cooldown for 429 without explicit ban timestamp
-        let cooldown = now_ms() as i64 + 120_000;
-        BINANCE_BANNED_UNTIL_MS.fetch_max(cooldown, Ordering::Relaxed);
-        if let Some(retry_after) = headers.get("Retry-After") {
-            if let Ok(sec) = retry_after.to_str().unwrap_or("").parse::<u64>() {
-                tracing::error!(
-                    "[binance] 🔴 RATE LIMIT HIT (429)! Auto-backoff for {} seconds.",
-                    sec
-                );
-                let ban_ts = now_ms() as i64 + (sec as i64 * 1000);
-                BINANCE_BANNED_UNTIL_MS.fetch_max(ban_ts, Ordering::Relaxed);
-            }
-        } else {
-            tracing::error!("[binance] 🔴 RATE LIMIT HIT (429)! Auto-backoff 120s.");
-        }
-        return Err("Binance HTTP 429 Too Many Requests (Rate limit hit)".into());
-    }
-    if status.as_u16() == 418 {
-        // 418 = hard IP ban, set 10 minute cooldown
-        let ban_ts = now_ms() as i64 + 600_000;
-        BINANCE_BANNED_UNTIL_MS.fetch_max(ban_ts, Ordering::Relaxed);
-        tracing::error!("[binance] 💀 IP COMPLETELY BANNED (HTTP 418). Auto-backoff 10 min.");
-        return Err("Binance HTTP 418 IP Banned".into());
-    }
-
-    if let Some(w) = headers.get("X-MBX-USED-WEIGHT-1M") {
-        if let Ok(weight) = w.to_str().unwrap_or("").parse::<u32>() {
-            if weight > 4000 {
-                tracing::warn!("[binance] ⚠️ HIGH RATE LIMIT WEIGHT: {}/6000", weight);
-            }
-        }
-    }
+    // Track weight + ban from headers
+    record_binance_response(status.as_u16(), headers);
+    // Check body for API-level ban codes
+    if let Some(b) = body { detect_ban_from_response(b); }
+    if status.as_u16() == 429 { return Err("Binance 429 rate limit hit".into()); }
+    if status.as_u16() == 418 { return Err("Binance 418 IP banned".into()); }
     Ok(())
 }
 

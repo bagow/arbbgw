@@ -37,7 +37,18 @@ pub async fn run(
             continue;
         }
 
-        // Pre-flight ban check: test REST before opening WS connections
+        // Pre-flight ban check: use connector's centralized ban state.
+        // CRITICAL: Do NOT send ANY HTTP request while banned — it extends the ban!
+        if crate::engine::exchanges::binance::is_binance_banned() {
+            let remaining = crate::engine::exchanges::binance::binance_ban_remaining_secs();
+            error!("[binance] IP still banned ({}s remaining). NO requests sent. Waiting...", remaining);
+            // Wait ban duration + 30s safety margin, capped at 15 min
+            let wait = (remaining as u64 + 30).min(900);
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            continue;
+        }
+
+        // Ban is cleared — do a lightweight ping to confirm connectivity
         let http_check = Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
             .build().unwrap();
@@ -47,9 +58,13 @@ pub async fn run(
         {
             Ok(resp) => {
                 let status = resp.status().as_u16();
+                let headers = resp.headers().clone();
+                // Record response for weight tracking + ban detection
+                crate::engine::exchanges::binance::record_binance_response(status, &headers);
                 if status == 418 || status == 429 || status == 403 {
-                    error!("[binance] IP still banned/rate-limited (HTTP {}). Backing off 10 min.", status);
-                    tokio::time::sleep(Duration::from_secs(600)).await;
+                    error!("[binance] Ping returned HTTP {}. Ban recorded by guard.", status);
+                    // Guard already set the ban duration — just loop back
+                    tokio::time::sleep(Duration::from_secs(10)).await;
                     continue;
                 }
             }
@@ -107,45 +122,51 @@ pub async fn run(
 
 async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2OrderbookMap) -> Result<()> {
     // Seed 24h volume from REST miniTicker snapshot
-    let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
-    let mut target_url = "https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
-    let mut resp = http.get(&target_url).timeout(Duration::from_secs(15)).send().await;
-    
-    if let Ok(ref r) = resp {
-        let status = r.status().as_u16();
-        if status == 403 || status == 418 || status == 429 {
-            target_url = "https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
-            tracing::warn!("[binance] Using proxy fallback for volume due to HTTP {}", status);
-            resp = http.get(&target_url).timeout(Duration::from_secs(15)).send().await;
-        }
-    }
+    // Check ban before REST call (weight=40 for ticker/24hr!)
+    if crate::engine::exchanges::binance::check_before_binance_rest().is_ok() {
+        let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
+        let mut target_url = "https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
+        let mut resp = http.get(&target_url).timeout(Duration::from_secs(15)).send().await;
 
-    if let Ok(r) = resp {
-        if let Ok(arr) = r.json::<Vec<Value>>().await {
-            for t in &arr {
-                let sym = t["symbol"].as_str().unwrap_or("");
-                if !sym.ends_with("USDT") {
-                    continue;
-                }
-                let vol: f64 = t["quoteVolume"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                if vol > 0.0 {
-                    let mut entry = price_map.entry("binance".to_string()).or_default();
-                    entry
-                        .entry(sym.to_string())
-                        .or_insert_with(|| TickerData {
-                            vol,
-                            ..Default::default()
-                        })
-                        .vol = vol;
-                }
+        if let Ok(ref r) = resp {
+            let status = r.status().as_u16();
+            crate::engine::exchanges::binance::record_binance_response(status, r.headers());
+            if status == 403 || status == 418 || status == 429 {
+                target_url = "https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
+                tracing::warn!("[binance] Using proxy fallback for volume due to HTTP {}", status);
+                resp = http.get(&target_url).timeout(Duration::from_secs(15)).send().await;
             }
-            info!("[binance] Seeded volume for {} symbols", arr.len());
+        }
+
+        if let Ok(r) = resp {
+            if let Ok(arr) = r.json::<Vec<Value>>().await {
+                for t in &arr {
+                    let sym = t["symbol"].as_str().unwrap_or("");
+                    if !sym.ends_with("USDT") {
+                        continue;
+                    }
+                    let vol: f64 = t["quoteVolume"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
+                    if vol > 0.0 {
+                        let mut entry = price_map.entry("binance".to_string()).or_default();
+                        entry
+                            .entry(sym.to_string())
+                            .or_insert_with(|| TickerData {
+                                vol,
+                                ..Default::default()
+                            })
+                            .vol = vol;
+                    }
+                }
+                info!("[binance] Seeded volume for {} symbols", arr.len());
+            }
+        } else {
+            warn!("[binance] Failed to fetch volume from REST/Proxy.");
         }
     } else {
-        warn!("[binance] Failed to fetch volume from REST/Proxy. Using fallback volumes via WS discovery.");
+        warn!("[binance] Skipping volume seed — IP banned.");
     }
 
     // WS: !bookTicker — instant bid/ask for every USDT future
