@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::json;
-use serde_json::Value;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -568,18 +567,6 @@ impl ExchangeConnector for KucoinConnector {
         Ok(())
     }
 
-    async fn get_funding_rate(&self, _http: &Client, pair: &str) -> Result<(f64, i64), String> {
-        let sym = format!("{}M", pair);
-        let path = format!("/api/v1/funding-rate/{}/current", sym);
-        match super::ws_kucoin::send_kucoin_public(&path).await {
-            Ok(json) => {
-                let rate = json["data"]["value"].as_f64().unwrap_or(0.0);
-                let next = json["data"]["timePoint"].as_i64().unwrap_or(0) + 8 * 3600 * 1000;
-                Ok((rate, next))
-            }
-            Err(_) => Ok((0.0, 0))
-        }
-    }
 
     async fn fetch_positions(&self, _http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {
         let path = "/api/v1/positions";
@@ -609,28 +596,4 @@ impl ExchangeConnector for KucoinConnector {
         Ok(positions)
     }
 
-    async fn fetch_orderbook(&self, _http: &Client, pair: &str, _depth: u32) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
-        let sym = format!("{}M", pair);
-        let path = format!("/api/v1/level2/depth20?symbol={}", sym);
-        let json = super::ws_kucoin::send_kucoin_public(&path).await?;
-        if json["code"].as_str() != Some("200000") {
-            return Err(format!("Kucoin API returned error: {}", json));
-        }
-        let parse_levels = |levels: &Value| -> Vec<(f64, f64)> {
-            let mut out = Vec::new();
-            if let Some(arr) = levels.as_array() {
-                for item in arr {
-                    if let (Some(px_val), Some(sz_val)) = (item.get(0), item.get(1)) {
-                        let px = px_val.as_f64().or_else(|| px_val.as_str().and_then(|s| s.parse().ok()));
-                        let sz = sz_val.as_f64().or_else(|| sz_val.as_str().and_then(|s| s.parse().ok())).or_else(|| sz_val.as_i64().map(|i| i as f64));
-                        if let (Some(p), Some(s)) = (px, sz) { out.push((p, s)); }
-                    }
-                }
-            }
-            out
-        };
-        let bids = parse_levels(&json["data"]["bids"]);
-        let asks = parse_levels(&json["data"]["asks"]);
-        Ok((bids, asks))
-    }
 }

@@ -63,39 +63,6 @@ pub fn calculate_exit_spread(
     }
 }
 
-/// Helper to get L1 prices or fallback to entry prices if missing/empty
-#[allow(dead_code)]
-pub fn get_fallback_prices(
-    is_a_higher: bool,
-    entry_price_a: f64,
-    entry_price_b: f64,
-    data_a: Option<&shared::TickerData>,
-    data_b: Option<&shared::TickerData>,
-) -> (f64, f64, f64, f64, f64, f64) {
-    let (mut c_price_a, mut c_price_b, mut exit_price_a, mut exit_price_b) = (entry_price_a, entry_price_b, entry_price_a, entry_price_b);
-    let mut current_spread = 0.0;
-    let mut exit_spread = 0.0;
-
-    if let (Some(da), Some(db)) = (data_a, data_b) {
-        if da.bid <= 0.0 || da.ask <= 0.0 || db.bid <= 0.0 || db.ask <= 0.0 {
-            // Empty orderbook, fallback
-            c_price_a = if da.price > 0.0 { da.price } else { entry_price_a };
-            c_price_b = if db.price > 0.0 { db.price } else { entry_price_b };
-            exit_price_a = c_price_a;
-            exit_price_b = c_price_b;
-        } else {
-            c_price_a = da.price;
-            c_price_b = db.price;
-            exit_price_a = if is_a_higher { da.ask } else { da.bid };
-            exit_price_b = if is_a_higher { db.bid } else { db.ask };
-
-            current_spread = calculate_current_spread(is_a_higher, da.bid, da.ask, db.bid, db.ask);
-            exit_spread = calculate_exit_spread(is_a_higher, da.bid, da.ask, db.bid, db.ask);
-        }
-    }
-
-    (c_price_a, c_price_b, exit_price_a, exit_price_b, current_spread, exit_spread)
-}
 
 /// Calculate incremental funding based on a dt fraction
 pub fn calculate_funding_increment(

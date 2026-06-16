@@ -35,11 +35,6 @@ pub fn get_cached_fill(order_id: &str) -> Option<(f64, f64, f64)> {
     get_exec_cache().get(order_id).map(|v| *v)
 }
 
-/// Remove cached fill (cleanup after use)
-#[allow(dead_code)]
-pub fn remove_cached_fill(order_id: &str) {
-    get_exec_cache().remove(order_id);
-}
 
 pub fn get_or_init_bybit_ws(api_key: String, api_secret: String) -> mpsc::Sender<(Value, ResponseSender)> {
     BYBIT_WS_TX.get_or_init(|| {

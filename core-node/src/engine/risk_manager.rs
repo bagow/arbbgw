@@ -97,17 +97,4 @@ pub fn deduct_cached_balance(
     }
 }
 
-#[allow(dead_code)]
-pub fn is_margin_error(err: &str) -> bool {
-    let s = err.to_lowercase();
-    s.contains("insufficient")
-        || s.contains("exceeds the balance")
-        || s.contains("minimum amount")
-        || s.contains("notional must be no smaller")
-        || s.contains("maximum allowable position")
-        || s.contains("margin is insufficient")
-        || s.contains("less than the minimum")
-        || s.contains("order amount exceeds")
-        || s.contains("not enough")
-        || s.contains("balance not enough")
-}
+

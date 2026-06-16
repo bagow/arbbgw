@@ -250,9 +250,6 @@ impl ExchangeConnector for XtConnector {
         }
     }
 
-    async fn get_funding_rate(&self, _http: &Client, _pair: &str) -> Result<(f64, i64), String> {
-        Ok((0.0, 0))
-    }
 
     async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {
         let v = xt_request(http, keys, "GET", "/future/user/v1/position/list", "", 10_000).await?;
@@ -276,20 +273,4 @@ impl ExchangeConnector for XtConnector {
         Ok(positions)
     }
 
-    async fn fetch_orderbook(&self, http: &Client, pair: &str, depth: u32) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
-        let sym = to_xt_symbol(pair);
-        let url = format!("https://fapi.xt.com/future/market/v1/public/q/depth?symbol={}&level={}", sym, depth.min(50));
-        let resp = http.get(&url).timeout(Duration::from_secs(5)).send().await.map_err(|e| e.to_string())?;
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let parse = |key: &str| -> Vec<(f64, f64)> {
-            v["result"][key].as_array().map(|arr| {
-                arr.iter().filter_map(|l| {
-                    let px: f64 = l[0].as_str()?.parse().ok()?;
-                    let sz: f64 = l[1].as_str()?.parse().ok()?;
-                    Some((px, sz))
-                }).collect()
-            }).unwrap_or_default()
-        };
-        Ok((parse("b"), parse("a")))
-    }
 }

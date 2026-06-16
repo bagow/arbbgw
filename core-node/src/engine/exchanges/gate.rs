@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use reqwest::Client;
-use serde::Deserialize;
 use serde_json::json;
 use serde_json::Value;
 use std::time::Duration;
@@ -71,19 +70,6 @@ async fn try_gate_ws_order(
     Err(format!("Gate WS: {}", errs))
 }
 
-#[derive(Deserialize, Debug)]
-#[allow(non_snake_case)]
-#[allow(dead_code)]
-struct GateBalanceResponse {
-    available: String,
-    total: String,
-}
-
-#[derive(Deserialize, Debug)]
-#[allow(dead_code)]
-struct GateFeeResponse {
-    taker_fee: String,
-}
 
 #[async_trait]
 impl ExchangeConnector for GateConnector {
@@ -438,10 +424,6 @@ impl ExchangeConnector for GateConnector {
         Ok(())
     }
 
-    async fn get_funding_rate(&self, _http: &Client, _pair: &str) -> Result<(f64, i64), String> {
-        // Funding rate is non-critical background data — available from collector WS streams
-        Ok((0.0, 0))
-    }
 
     async fn fetch_positions(
         &self,
@@ -479,41 +461,5 @@ impl ExchangeConnector for GateConnector {
         Ok(positions)
     }
 
-    async fn fetch_orderbook(
-        &self,
-        _http: &Client,
-        pair: &str,
-        depth: u32,
-    ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
-        use super::ws_gate::send_gate_ws_request;
-        let contract = pair.replace("USDT", "_USDT");
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "request_id": req_id,
-            "channel": "futures.order_book_query",
-            "event": "api",
-            "payload": [contract, depth]
-        });
-        let resp = send_gate_ws_request(ws_req).await?;
-        let json = &resp["data"]["result"];
 
-        let parse_levels = |levels: &Value| -> Vec<(f64, f64)> {
-            let mut out = Vec::new();
-            if let Some(arr) = levels.as_array() {
-                for item in arr {
-                    if let Some(px_str) = item["p"].as_str() {
-                        let sz = item["s"].as_i64().unwrap_or(0) as f64;
-                        if let Ok(px) = px_str.parse::<f64>() {
-                            out.push((px, sz));
-                        }
-                    }
-                }
-            }
-            out
-        };
-
-        let bids = parse_levels(&json["bids"]);
-        let asks = parse_levels(&json["asks"]);
-        Ok((bids, asks))
-    }
 }

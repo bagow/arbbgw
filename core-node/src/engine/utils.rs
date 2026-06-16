@@ -53,31 +53,6 @@ pub fn symbols_match(a: &str, b: &str) -> bool {
     normalize_symbol(a) == normalize_symbol(b)
 }
 
-/// Round price to the nearest valid tick size for the given exchange:pair.
-/// If tick size is unknown, rounds based on price magnitude (safe fallback).
-#[allow(dead_code)]
-pub fn round_to_tick(
-    price: f64,
-    exchange: &str,
-    pair: &str,
-    e_ctx: &crate::state::EngineContext,
-) -> f64 {
-    let key = format!("{}:{}", exchange, pair);
-    let tick = e_ctx.tick_sizes.get(&key).map(|v| *v).unwrap_or(0.0);
-    if tick > 0.0 {
-        (price / tick).round() * tick
-    } else {
-        if price > 1000.0 {
-            (price * 100.0).round() / 100.0
-        } else if price > 10.0 {
-            (price * 1000.0).round() / 1000.0
-        } else if price > 0.1 {
-            (price * 10000.0).round() / 10000.0
-        } else {
-            (price * 100000.0).round() / 100000.0
-        }
-    }
-}
 
 /// Get cached taker fee rate for an exchange (as fraction, e.g. 0.0005 = 0.05%).
 pub fn get_exchange_fee(

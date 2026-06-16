@@ -598,10 +598,6 @@ impl ExchangeConnector for BybitConnector {
         Ok(())
     }
 
-    async fn get_funding_rate(&self, _http: &Client, _pair: &str) -> Result<(f64, i64), String> {
-        // Funding rate is non-critical background data — available from collector WS streams
-        Ok((0.0, 0))
-    }
 
     async fn fetch_positions(
         &self,
@@ -650,34 +646,4 @@ impl ExchangeConnector for BybitConnector {
         Ok(positions)
     }
 
-    async fn fetch_orderbook(
-        &self,
-        _http: &Client,
-        pair: &str,
-        depth: u32,
-    ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
-        use super::ws_bybit::send_bybit_ws_request;
-        let bybit_limit = if depth <= 1 { 1 } else { 50 };
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "reqId": req_id,
-            "op": "order.book",
-            "args": [{"category": "linear", "symbol": pair, "limit": bybit_limit}]
-        });
-        let resp = send_bybit_ws_request(ws_req).await?;
-        let parse_levels = |levels: &Value| -> Vec<(f64, f64)> {
-            let mut out = Vec::new();
-            if let Some(arr) = levels.as_array() {
-                for item in arr {
-                    if let (Some(px_str), Some(sz_str)) = (item.get(0).and_then(|v| v.as_str()), item.get(1).and_then(|v| v.as_str())) {
-                        if let (Ok(px), Ok(sz)) = (px_str.parse::<f64>(), sz_str.parse::<f64>()) { out.push((px, sz)); }
-                    }
-                }
-            }
-            out
-        };
-        let bids = parse_levels(&resp["data"]["b"]);
-        let asks = parse_levels(&resp["data"]["a"]);
-        Ok((bids, asks))
-    }
 }

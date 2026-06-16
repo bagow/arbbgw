@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use reqwest::Client;
-use serde::Deserialize;
 use serde_json::Value;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -228,21 +227,6 @@ async fn execute_binance_order(
     }
 }
 
-#[derive(Deserialize, Debug)]
-#[allow(non_snake_case)]
-#[allow(dead_code)]
-struct BinanceBalanceAccountResponse {
-    availableBalance: String,
-    totalWalletBalance: String,
-    totalMarginBalance: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
-#[allow(non_snake_case)]
-#[allow(dead_code)]
-struct BinanceFeeResponse {
-    takerCommissionRate: String,
-}
 
 #[async_trait]
 impl ExchangeConnector for BinanceConnector {
@@ -915,35 +899,6 @@ impl ExchangeConnector for BinanceConnector {
         }
     }
 
-    async fn get_funding_rate(&self, _http: &Client, pair: &str) -> Result<(f64, i64), String> {
-        use crate::engine::exchanges::ws_trader::send_ws_request;
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "id": req_id,
-            "method": "v1/ticker.price",
-            "params": {
-                "symbol": pair
-            }
-        });
-        // v1/ticker.price is a public method, no auth needed
-        // If this doesn't return funding data, fallback to 0.0 (non-critical)
-        match send_ws_request(ws_req).await {
-            Ok(resp) => {
-                let rate = resp["result"]["lastFundingRate"]
-                    .as_str()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(0.0);
-                let next_ts = resp["result"]["nextFundingTime"]
-                    .as_i64()
-                    .unwrap_or(0);
-                Ok((rate, next_ts))
-            }
-            Err(_) => {
-                // Funding rate is non-critical background data
-                Ok((0.0, 0))
-            }
-        }
-    }
 
     async fn fetch_positions(
         &self,
@@ -1026,48 +981,4 @@ impl ExchangeConnector for BinanceConnector {
         Ok(positions)
     }
 
-    async fn fetch_orderbook(
-        &self,
-        _http: &Client,
-        pair: &str,
-        depth: u32,
-    ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
-        use crate::engine::exchanges::ws_trader::send_ws_request;
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "id": req_id,
-            "method": "v2/depth",
-            "params": {
-                "symbol": pair,
-                "limit": depth
-            }
-        });
-        let resp = send_ws_request(ws_req).await?;
-        if let Some(err) = resp.get("error") {
-            return Err(format!("Binance WS depth error: {}", err));
-        }
-        let json = &resp["result"];
-
-        let parse_levels = |levels: &Value| -> Vec<(f64, f64)> {
-            let mut out = Vec::new();
-            if let Some(arr) = levels.as_array() {
-                for item in arr {
-                    if let (Some(px_str), Some(sz_str)) = (
-                        item.get(0).and_then(|v| v.as_str()),
-                        item.get(1).and_then(|v| v.as_str()),
-                    ) {
-                        if let (Ok(px), Ok(sz)) = (px_str.parse::<f64>(), sz_str.parse::<f64>()) {
-                            out.push((px, sz));
-                        }
-                    }
-                }
-            }
-            out
-        };
-
-        let bids = parse_levels(&json["bids"]);
-        let asks = parse_levels(&json["asks"]);
-
-        Ok((bids, asks))
-    }
 }

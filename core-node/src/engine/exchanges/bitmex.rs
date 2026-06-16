@@ -275,9 +275,6 @@ impl ExchangeConnector for BitmexConnector {
         }
     }
 
-    async fn get_funding_rate(&self, _http: &Client, _pair: &str) -> Result<(f64, i64), String> {
-        Ok((0.0, 0))
-    }
 
     async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {
         let v = bitmex_request(http, keys, "GET", "/api/v1/position?filter={\"isOpen\":true}", "", 10_000).await?;
@@ -305,22 +302,4 @@ impl ExchangeConnector for BitmexConnector {
         Ok(positions)
     }
 
-    async fn fetch_orderbook(&self, http: &Client, pair: &str, depth: u32) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String> {
-        let sym = to_bitmex_symbol(pair);
-        let url = format!("https://www.bitmex.com/api/v1/orderBook/L2?symbol={}&depth={}", sym, depth);
-        let resp = http.get(&url).timeout(Duration::from_secs(5)).send().await.map_err(|e| e.to_string())?;
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        let mut bids = Vec::new();
-        let mut asks = Vec::new();
-        if let Some(arr) = v.as_array() {
-            for entry in arr {
-                let side = entry["side"].as_str().unwrap_or("");
-                let px: f64 = entry["price"].as_f64().unwrap_or(0.0);
-                let sz: f64 = entry["size"].as_f64().unwrap_or(0.0);
-                if side == "Buy" { bids.push((px, sz)); }
-                else if side == "Sell" { asks.push((px, sz)); }
-            }
-        }
-        Ok((bids, asks))
-    }
 }

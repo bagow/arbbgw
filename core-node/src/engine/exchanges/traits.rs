@@ -122,9 +122,6 @@ pub trait ExchangeConnector: Send + Sync {
         leverage: f64,
     ) -> Result<(), String>;
 
-    /// Fetches funding rate and next timestamp. Returns (rate, next_timestamp_ms)
-    #[allow(dead_code)]
-    async fn get_funding_rate(&self, http: &Client, pair: &str) -> Result<(f64, i64), String>;
 
     /// Fetch all open positions with non-zero size, including accumulated metrics if available.
     async fn fetch_positions(
@@ -132,14 +129,5 @@ pub trait ExchangeConnector: Send + Sync {
         http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<Vec<PositionInfo>, String>;
-
-    /// Fetches the orderbook (depth) for a given pair.
-    /// Returns (bids, asks) where each element is (price, quantity).
-    #[allow(dead_code)]
-    async fn fetch_orderbook(
-        &self,
-        http: &Client,
-        pair: &str,
-        depth: u32,
-    ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>;
 }
+
