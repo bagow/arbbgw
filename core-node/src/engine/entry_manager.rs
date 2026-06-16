@@ -459,7 +459,7 @@ pub async fn process_entries(
             crate::engine::execution::verify_fill(
                 &conn_ensure_a, &http, &keys, &pair, &oid_a,
                 fill_a, fee_a_val, actual_vol_phys_a, qty_a, dry_run,
-                &crate::engine::execution::VerifyConfig {
+                crate::engine::execution::VerifyConfig {
                     fast_retries: max_retries_a,
                     fast_delay_ms: ts.fill_verify_delay_ms as u64,
                     slow_retries: 8,
@@ -472,7 +472,7 @@ pub async fn process_entries(
             crate::engine::execution::verify_fill(
                 &conn_ensure_b, &http, &keys, &pair, &oid_b,
                 fill_b, fee_b_val, actual_vol_phys_b, qty_b, dry_run,
-                &crate::engine::execution::VerifyConfig {
+                crate::engine::execution::VerifyConfig {
                     fast_retries: max_retries_b,
                     fast_delay_ms: ts.fill_verify_delay_ms as u64,
                     slow_retries: 8,

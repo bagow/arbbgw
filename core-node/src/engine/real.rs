@@ -7,12 +7,9 @@
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use serde_json::Value;
 use sha2::Sha256;
-use tokio_rusqlite::Connection;
-use tracing::{error, info};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -93,9 +90,7 @@ impl ExchangeKeys {
 
 pub use crate::engine::utils::now_ms;
 pub use crate::engine::utils::now_secs;
-pub use crate::engine::utils::normalize_symbol;
 pub use crate::engine::utils::symbols_match;
-pub use crate::engine::utils::round_to_tick;
 pub use crate::engine::utils::get_exchange_fee;
 
 fn hmac_sha256_hex(secret: &[u8], data: &str) -> String {

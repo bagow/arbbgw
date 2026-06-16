@@ -317,7 +317,7 @@ pub async fn run_hft_cycle(
         let vr_a = crate::engine::execution::verify_fill(
             &conn_a, &http, &keys, &pair, &oid_a,
             fill_a, fee_a_val, actual_vol_phys_a, qty_a, dry_run,
-            &crate::engine::execution::VerifyConfig {
+            crate::engine::execution::VerifyConfig {
                 fast_retries: ts.fill_verify_retries,
                 fast_delay_ms: ts.fill_verify_delay_ms as u64,
                 slow_retries: 6,
@@ -365,7 +365,7 @@ pub async fn run_hft_cycle(
         let vr_b = crate::engine::execution::verify_fill(
             &conn_b, &http, &keys, &pair, &oid_b,
             fill_b, fee_b_val, actual_vol_phys_b, final_qty_b, dry_run,
-            &crate::engine::execution::VerifyConfig {
+            crate::engine::execution::VerifyConfig {
                 fast_retries: ts.fill_verify_retries,
                 fast_delay_ms: ts.fill_verify_delay_ms as u64,
                 slow_retries: 6,

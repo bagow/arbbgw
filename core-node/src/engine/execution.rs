@@ -57,7 +57,7 @@ pub async fn verify_fill(
     initial_phys: Option<f64>,
     expected_qty: f64,
     dry_run: bool,
-    config: &VerifyConfig,
+    config: VerifyConfig,
     label: &str,
 ) -> VerifyResult {
     let mut fill_price = initial_fill_price;

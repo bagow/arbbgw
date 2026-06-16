@@ -2,7 +2,6 @@ use crate::engine::db::TradeRepository;
 use reqwest::Client;
 use std::sync::Arc;
 use tokio_rusqlite::Connection;
-use tracing::{error, info};
 
 use shared::{SpreadRow, TechnicalSettings, TradingSettings};
 
