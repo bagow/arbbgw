@@ -129,9 +129,9 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     ).await.context("XT WS connect failed")?;
     info!("[xt] Connected, subscribing {} symbols...", xt_symbols.len());
 
-    // Subscribe to bookTicker in chunks — XT format: bookTicker@symbol
+    // Subscribe to ticker in chunks — XT format: ticker@symbol
     for chunk in xt_symbols.chunks(30) {
-        let args: Vec<String> = chunk.iter().map(|s| format!("bookTicker@{}", s)).collect();
+        let args: Vec<String> = chunk.iter().map(|s| format!("ticker@{}", s)).collect();
         ws.send(Message::Text(json!({
             "method": "SUBSCRIBE",
             "params": args,
@@ -157,25 +157,36 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                         info!("[xt] FIRST MSG (len={}): {}", text.len(), &text[..text.len().min(300)]);
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                        // XT bookTicker push: {"topic":"bookTicker","event":"bookTicker@btc_usdt","data":{...}}
-                        // Also accept: {"event":"bookTicker","symbol":"btc_usdt","data":{...}}
-                        let is_book_ticker = v["topic"].as_str() == Some("bookTicker")
-                            || v["event"].as_str() == Some("bookTicker")
-                            || v["event"].as_str().map(|e| e.starts_with("bookTicker@")).unwrap_or(false);
-                        if is_book_ticker {
-                            // Extract symbol from "symbol" field or from event "bookTicker@btc_usdt"
-                            let xt_sym = v["symbol"].as_str()
-                                .or_else(|| v["data"]["s"].as_str())
+                        // XT ticker push: {"topic":"ticker","event":"ticker@btc_usdt","data":{...}}
+                        let is_ticker = v["topic"].as_str() == Some("ticker")
+                            || v["event"].as_str().map(|e| e.starts_with("ticker@")).unwrap_or(false)
+                            || v["topic"].as_str() == Some("bookTicker")
+                            || v["event"].as_str() == Some("bookTicker");
+                        if is_ticker {
+                            // Extract symbol from event "ticker@btc_usdt" or "symbol" field
+                            let xt_sym = v["data"]["s"].as_str()
+                                .or_else(|| v["symbol"].as_str())
                                 .or_else(|| {
-                                    v["event"].as_str().and_then(|e| e.strip_prefix("bookTicker@"))
+                                    v["event"].as_str().and_then(|e| {
+                                        e.strip_prefix("ticker@").or_else(|| e.strip_prefix("bookTicker@"))
+                                    })
                                 })
                                 .unwrap_or("");
                             let std_sym = xt_to_standard(xt_sym);
                             if !std_sym.ends_with("USDT") { continue; }
-                            let bid: f64 = v["data"]["b"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                            let ask: f64 = v["data"]["a"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                            let bid_sz: f64 = v["data"]["bq"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                            let ask_sz: f64 = v["data"]["aq"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            // Try multiple field name formats
+                            let bid: f64 = v["data"]["bp"].as_str().and_then(|s| s.parse().ok())
+                                .or_else(|| v["data"]["b"].as_str().and_then(|s| s.parse().ok()))
+                                .unwrap_or(0.0);
+                            let ask: f64 = v["data"]["ap"].as_str().and_then(|s| s.parse().ok())
+                                .or_else(|| v["data"]["a"].as_str().and_then(|s| s.parse().ok()))
+                                .unwrap_or(0.0);
+                            let bid_sz: f64 = v["data"]["bv"].as_str().and_then(|s| s.parse().ok())
+                                .or_else(|| v["data"]["bq"].as_str().and_then(|s| s.parse().ok()))
+                                .unwrap_or(0.0);
+                            let ask_sz: f64 = v["data"]["av"].as_str().and_then(|s| s.parse().ok())
+                                .or_else(|| v["data"]["aq"].as_str().and_then(|s| s.parse().ok()))
+                                .unwrap_or(0.0);
                             if bid <= 0.0 || ask <= 0.0 { continue; }
                             let mid = (bid + ask) / 2.0;
                             let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();

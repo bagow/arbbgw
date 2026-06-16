@@ -255,10 +255,18 @@ async fn handler(
                             // L1 ticker update
                             if let Some(data_arr) = v["data"].as_array() {
                                 for d in data_arr {
-                                    let bid: f64 = d["bestBid"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                                    let ask: f64 = d["bestAsk"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                                    let bid_sz: f64 = d["bestBidSz"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                                    let ask_sz: f64 = d["bestAskSz"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                                    let bid: f64 = d["bidPr"].as_str().and_then(|s| s.parse().ok())
+                                        .or_else(|| d["bestBid"].as_str().and_then(|s| s.parse().ok()))
+                                        .unwrap_or(0.0);
+                                    let ask: f64 = d["askPr"].as_str().and_then(|s| s.parse().ok())
+                                        .or_else(|| d["bestAsk"].as_str().and_then(|s| s.parse().ok()))
+                                        .unwrap_or(0.0);
+                                    let bid_sz: f64 = d["bidSz"].as_str().and_then(|s| s.parse().ok())
+                                        .or_else(|| d["bestBidSz"].as_str().and_then(|s| s.parse().ok()))
+                                        .unwrap_or(0.0);
+                                    let ask_sz: f64 = d["askSz"].as_str().and_then(|s| s.parse().ok())
+                                        .or_else(|| d["bestAskSz"].as_str().and_then(|s| s.parse().ok()))
+                                        .unwrap_or(0.0);
                                     let last: f64 = d["lastPr"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     if bid <= 0.0 || ask <= 0.0 { continue; }
                                     let mult = sym_map.get(inst_id).copied().unwrap_or(1.0);
