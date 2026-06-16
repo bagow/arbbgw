@@ -82,34 +82,28 @@ pub async fn run_hft_cycle(
                 c_price_b = db.price;
                 exit_price_a = if is_a_higher { da.ask } else { da.bid };
                 exit_price_b = if is_a_higher { db.bid } else { db.ask };
-                current_spread = if is_a_higher {
-                    (da.bid - db.ask) / db.ask.max(1e-12) * 100.0
-                } else {
-                    (db.bid - da.ask) / da.ask.max(1e-12) * 100.0
-                };
-                exit_spread = if is_a_higher {
-                    (da.ask - db.bid) / db.bid.max(1e-12) * 100.0
-                } else {
-                    (db.ask - da.bid) / da.bid.max(1e-12) * 100.0
-                };
+                current_spread = crate::engine::pnl::calculate_current_spread(
+                    is_a_higher, da.bid, da.ask, db.bid, db.ask,
+                );
+                exit_spread = crate::engine::pnl::calculate_exit_spread(
+                    is_a_higher, da.bid, da.ask, db.bid, db.ask,
+                );
             }
         }
 
         let trade_coins = trade.volume / trade.entry_price_a.max(1e-12);
 
         // Live PnL
-        let live_pnl_a = if is_a_higher {
-            (trade.entry_price_a - c_price_a) * trade_coins
-        } else {
-            (c_price_a - trade.entry_price_a) * trade_coins
-        };
-        let live_pnl_b = if is_a_higher {
-            (c_price_b - trade.entry_price_b) * trade_coins
-        } else {
-            (trade.entry_price_b - c_price_b) * trade_coins
-        };
-        let live_gross_pnl = live_pnl_a + live_pnl_b;
-        let live_net_pnl = live_gross_pnl - trade.commission_cost - trade.slippage_cost - trade.funding_cost;
+        let live_pnl = crate::engine::pnl::calculate_gross_pnl(
+            is_a_higher, trade.entry_price_a, trade.entry_price_b,
+            c_price_a, c_price_b, trade_coins, trade_coins,
+        );
+        let live_pnl_a = live_pnl.pnl_a;
+        let live_pnl_b = live_pnl.pnl_b;
+        let live_gross_pnl = live_pnl.gross_pnl;
+        let live_net_pnl = crate::engine::pnl::calculate_net_pnl(
+            live_gross_pnl, trade.commission_cost, trade.slippage_cost, trade.funding_cost,
+        );
 
         // ── HFT EXIT CONDITIONS ──
         let timeout_hit = elapsed_ms >= settings.hft_timeout_ms;

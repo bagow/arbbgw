@@ -99,18 +99,13 @@ pub async fn process_closes(
                 exit_price_a = if is_a_higher { da.ask } else { da.bid };
                 exit_price_b = if is_a_higher { db.bid } else { db.ask };
 
-                // Use absolute worst-case bid/ask for current spread so trailing stops trigger correctly on volatile orderbook spikes
-                // rather than lagging mark prices.
-                current_spread = if is_a_higher {
-                    (da.bid - db.ask) / db.ask.max(1e-12) * 100.0
-                } else {
-                    (db.bid - da.ask) / da.ask.max(1e-12) * 100.0
-                };
-                exit_spread = if is_a_higher {
-                    (da.ask - db.bid) / db.bid.max(1e-12) * 100.0
-                } else {
-                    (db.ask - da.bid) / da.bid.max(1e-12) * 100.0
-                };
+                // Use absolute worst-case bid/ask for current spread so trailing stops trigger correctly
+                current_spread = calculate_current_spread(
+                    is_a_higher, da.bid, da.ask, db.bid, db.ask,
+                );
+                exit_spread = calculate_exit_spread(
+                    is_a_higher, da.bid, da.ask, db.bid, db.ask,
+                );
             }
         }
 
@@ -123,38 +118,25 @@ pub async fn process_closes(
         let coins_b = trade.contracts_b * mult_b_live;
 
         // PnL for DISPLAY (using mark/mid prices — matches exchange PnL)
-        let live_pnl_a = if is_a_higher {
-            (trade.entry_price_a - c_price_a) * coins_a
-        } else {
-            (c_price_a - trade.entry_price_a) * coins_a
-        };
-        let live_pnl_b = if is_a_higher {
-            (c_price_b - trade.entry_price_b) * coins_b
-        } else {
-            (trade.entry_price_b - c_price_b) * coins_b
-        };
-        let live_gross_pnl = live_pnl_a + live_pnl_b;
+        let live_pnl = calculate_gross_pnl(
+            is_a_higher, trade.entry_price_a, trade.entry_price_b,
+            c_price_a, c_price_b, coins_a, coins_b,
+        );
+        let live_pnl_a = live_pnl.pnl_a;
+        let live_pnl_b = live_pnl.pnl_b;
+        let live_gross_pnl = live_pnl.gross_pnl;
 
-        // Use the accumulated real funding cost from DB (column updated every live-update cycle
-        // using real rates fetched from exchange API — NOT from the settings constant).
+        // Use the accumulated real funding cost from DB
         let fund_cost = trade.funding_cost;
-        // Slippage is NOT subtracted — gross_pnl already uses actual fill prices.
-        let _live_net_pnl =
-            live_gross_pnl - trade.commission_cost - fund_cost;
+        let _live_net_pnl = calculate_net_pnl(live_gross_pnl, trade.commission_cost, 0.0, fund_cost);
 
         // PnL for CLOSE TRIGGERS (using bid/ask — pessimistic, for safe execution)
-        let exec_pnl_a = if is_a_higher {
-            (trade.entry_price_a - exit_price_a) * coins_a
-        } else {
-            (exit_price_a - trade.entry_price_a) * coins_a
-        };
-        let exec_pnl_b = if is_a_higher {
-            (exit_price_b - trade.entry_price_b) * coins_b
-        } else {
-            (trade.entry_price_b - exit_price_b) * coins_b
-        };
-        let exec_gross_pnl = exec_pnl_a + exec_pnl_b;
-        let exec_net_pnl = exec_gross_pnl - trade.commission_cost - trade.slippage_cost - fund_cost;
+        let exec_pnl = calculate_gross_pnl(
+            is_a_higher, trade.entry_price_a, trade.entry_price_b,
+            exit_price_a, exit_price_b, coins_a, coins_b,
+        );
+        let exec_gross_pnl = exec_pnl.gross_pnl;
+        let exec_net_pnl = calculate_net_pnl(exec_gross_pnl, trade.commission_cost, trade.slippage_cost, fund_cost);
         let exec_net_pct = exec_net_pnl / trade.volume * 100.0;
 
         let top_spread = trade.highest_spread.max(current_spread);
@@ -482,22 +464,17 @@ pub async fn process_closes(
             let fund_next = next_a.min(next_b); // nearest funding event
 
             // BUG-4 FIX: Incremental funding accumulation instead of linear extrapolation.
-            // Each flush cycle adds (rate × dt) to the running total in DB, properly tracking
-            // rate changes over time. Old code extrapolated current rate across entire position
-            // lifetime — wildly overestimating when rates spike temporarily.
             let dt_8h = ts.live_update_throttle_ms as f64 / (8.0 * 3_600_000.0);
-            let notional_a = trade.entry_price_a * coins_a;
-            let notional_b = trade.entry_price_b * coins_b;
-            let long_a = !is_a_higher;
-            let long_b = is_a_higher;
-            let fund_incr_a = if long_a { notional_a * fr_a * dt_8h } else { -notional_a * fr_a * dt_8h };
-            let fund_incr_b = if long_b { notional_b * fr_b * dt_8h } else { -notional_b * fr_b * dt_8h };
-            let acc_fund_cost = trade.funding_cost + fund_incr_a + fund_incr_b;
+            let fund_increment = calculate_funding_increment(
+                is_a_higher, trade.entry_price_a, trade.entry_price_b,
+                coins_a, coins_b, fr_a, fr_b, dt_8h,
+            );
+            let acc_fund_cost = trade.funding_cost + fund_increment;
 
             // Net PnL with incrementally accumulated funding cost.
-            // Slippage is NOT subtracted — gross_pnl already uses actual fill prices.
-            let real_live_net_pnl =
-                live_gross_pnl - trade.commission_cost - acc_fund_cost;
+            let real_live_net_pnl = calculate_net_pnl(
+                live_gross_pnl, trade.commission_cost, 0.0, acc_fund_cost,
+            );
 
             live_updates.push((
                 trade.id,

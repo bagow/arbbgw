@@ -275,16 +275,12 @@ pub async fn execute_close(
     }
 
     // Compute real PnL from actual fill prices
-    let pnl_a = if is_a_higher {
-        (entry_a - real_exit_a) * trade_coins_a
-    } else {
-        (real_exit_a - entry_a) * trade_coins_a
-    };
-    let pnl_b = if is_a_higher {
-        (real_exit_b - entry_b) * trade_coins_b
-    } else {
-        (entry_b - real_exit_b) * trade_coins_b
-    };
+    let pnl_result = crate::engine::pnl::calculate_gross_pnl(
+        is_a_higher, entry_a, entry_b,
+        real_exit_a, real_exit_b, trade_coins_a, trade_coins_b,
+    );
+    let pnl_a = pnl_result.pnl_a;
+    let pnl_b = pnl_result.pnl_b;
 
     CloseResult {
         real_exit_a,
