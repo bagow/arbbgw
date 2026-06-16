@@ -152,9 +152,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
                     msg_count += 1;
-                    if !first_msg_logged {
-                        first_msg_logged = true;
-                        info!("[xt] FIRST MSG (len={}): {}", text.len(), &text[..text.len().min(300)]);
+                    if msg_count <= 5 {
+                        info!("[xt] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(400)]);
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         // XT ticker push: {"topic":"ticker","event":"ticker@btc_usdt","data":{...}}
