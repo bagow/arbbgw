@@ -763,6 +763,8 @@ impl ExchangeConnector for BinanceConnector {
                 resp["result"].as_array().cloned().unwrap_or_default()
             },
             Err(e) => {
+                // Check ban before REST fallback — REST requests during ban extend the ban!
+                check_ip_ban()?;
                 tracing::warn!("[binance] WS balance fetch failed ({}). Trying REST fallback...", e);
                 let rest_qs = format!("timestamp={}", ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
@@ -833,6 +835,7 @@ impl ExchangeConnector for BinanceConnector {
                     .ok_or_else(|| "Failed to parse Binance fee from WS".to_string())
             },
             Err(e) => {
+                check_ip_ban()?;
                 tracing::warn!("[binance] WS fee fetch failed ({}). Trying REST fallback...", e);
                 let rest_qs = format!("symbol=BTCUSDT&timestamp={}", ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
@@ -885,6 +888,7 @@ impl ExchangeConnector for BinanceConnector {
             Err(e) => {
                 // Use trace! not warn! — when Binance WS is dead this fires 1000s of times
                 tracing::trace!("[binance] WS setLeverage failed ({}). Trying REST...", e);
+                if check_ip_ban().is_err() { return Ok(()); }
                 let rest_qs = format!("leverage={}&symbol={}&timestamp={}", lev, pair, ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
                 let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
@@ -929,6 +933,8 @@ impl ExchangeConnector for BinanceConnector {
                 resp["result"].as_array().cloned().unwrap_or_default()
             },
             Err(e) => {
+                // Check ban before REST fallback — REST requests during ban extend the ban!
+                check_ip_ban()?;
                 tracing::warn!("[binance] WS positions fetch failed ({}). Trying REST fallback...", e);
                 let rest_qs = format!("timestamp={}", ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
