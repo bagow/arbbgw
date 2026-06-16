@@ -13,4 +13,5 @@ pub mod pnl;
 pub mod risk_manager;
 pub mod exit_manager;
 pub mod entry_manager;
+pub mod execution;
 pub mod workers;

@@ -453,115 +453,42 @@ pub async fn process_entries(
         let ioc_no_fill_b = use_ioc && fill_b <= 0.0;
         let max_retries_a = if ioc_no_fill_a { 5_i64 } else { ts.fill_verify_retries };
         let max_retries_b = if ioc_no_fill_b { 5_i64 } else { ts.fill_verify_retries };
-        let skip_slow_a = false; // Never skip slow verify — orphaned positions are worse than latency
-        let skip_slow_b = false;
 
-        // 3. Parallel verification loops (if needed)
-        let verify_a_fut = async {
-            let mut phys = actual_vol_phys_a;
-            let mut got = dry_run || fill_a > 0.0;
-            if got && phys.is_some() { return (got, phys, fill_a, fee_a_val); }
-    
-            for attempt in 0..max_retries_a {
-                if got && phys.is_some() { break; }
-                if attempt > 0 { tokio::time::sleep(std::time::Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
-        
-                if let Some(ref oid) = oid_a {
-                    if let Ok((p, f, ev)) = conn_ensure_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
-                        if p > 0.0 { fill_a = p; }
-                        if f > 1e-9 { fee_a_val = f; }
-                        if ev > 1e-12 { phys = Some(ev); got = true; }
-                    }
-                }
-            }
-    
-            if !got && oid_a.is_some() && !dry_run && !skip_slow_a {
-                tracing::warn!("[real] ⏳ {}: Leg A orderId={} accepted but fill not yet confirmed. Extended wait...", pair, oid_a.as_deref().unwrap_or("?"));
-                for slow_attempt in 0..8 {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if let Some(ref oid) = oid_a {
-                        if let Ok((p, f, ev)) = conn_ensure_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
-                            if ev > 1e-12 {
-                                phys = Some(ev); got = true;
-                                if p > 0.0 { fill_a = p; }
-                                if f > 1e-9 { fee_a_val = f; }
-                                tracing::info!("[real] ✅ {}: Leg A fill confirmed on slow attempt {} — qty={}, price={}", pair, slow_attempt + 1, ev, p);
-                                break;
-                            }
-                            if p == 0.0 && f == 0.0 && ev == 0.0 { break; }
-                        }
-                    }
-                }
-        
-                if phys.unwrap_or(0.0) <= 1e-12 {
-                    tracing::warn!("[real] 🔍 {}: Leg A fill unverified. Checking position...", pair);
-                    if let Ok(positions) = conn_ensure_a.fetch_positions(&http, &keys).await {
-                        if let Some(pos) = positions.iter().find(|p| symbols_match(&p.symbol, &pair) && p.size.abs() > 1e-12) {
-                            phys = Some(pos.size.abs()); got = true;
-                            if pos.entry_price > 0.0 { fill_a = pos.entry_price; }
-                        }
-                    }
-                }
-            }
-            (got, phys, fill_a, fee_a_val)
-        };
-
-        let verify_b_fut = async {
-            let mut phys = actual_vol_phys_b;
-            let mut got = dry_run || fill_b > 0.0;
-            if got && phys.is_some() { return (got, phys, fill_b, fee_b_val); }
-    
-            for attempt in 0..max_retries_b {
-                if got && phys.is_some() { break; }
-                if attempt > 0 { tokio::time::sleep(std::time::Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
-        
-                if let Some(ref oid) = oid_b {
-                    if let Ok((p, f, ev)) = conn_ensure_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
-                        if p > 0.0 { fill_b = p; }
-                        if f > 1e-9 { fee_b_val = f; }
-                        if ev > 1e-12 { phys = Some(ev); got = true; }
-                    }
-                }
-            }
-    
-            if !got && oid_b.is_some() && !dry_run && !skip_slow_b {
-                tracing::warn!("[real] ⏳ {}: Leg B orderId={} accepted but fill not yet confirmed. Extended wait...", pair, oid_b.as_deref().unwrap_or("?"));
-                for slow_attempt in 0..8 {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if let Some(ref oid) = oid_b {
-                        if let Ok((p, f, ev)) = conn_ensure_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
-                            if ev > 1e-12 {
-                                phys = Some(ev); got = true;
-                                if p > 0.0 { fill_b = p; }
-                                if f > 1e-9 { fee_b_val = f; }
-                                tracing::info!("[real] ✅ {}: Leg B fill confirmed on slow attempt {} — qty={}, price={}", pair, slow_attempt + 1, ev, p);
-                                break;
-                            }
-                            if p == 0.0 && f == 0.0 && ev == 0.0 { break; }
-                        }
-                    }
-                }
-        
-                if phys.unwrap_or(0.0) <= 1e-12 {
-                    tracing::warn!("[real] 🔍 {}: Leg B fill unverified. Checking position...", pair);
-                    if let Ok(positions) = conn_ensure_b.fetch_positions(&http, &keys).await {
-                        if let Some(pos) = positions.iter().find(|p| symbols_match(&p.symbol, &pair) && p.size.abs() > 1e-12) {
-                            phys = Some(pos.size.abs()); got = true;
-                            if pos.entry_price > 0.0 { fill_b = pos.entry_price; }
-                        }
-                    }
-                }
-            }
-            (got, phys, fill_b, fee_b_val)
-        };
-
-        let (ver_a, ver_b) = tokio::join!(verify_a_fut, verify_b_fut);
-        actual_vol_phys_a = ver_a.1;
-        fill_a = ver_a.2;
-        fee_a_val = ver_a.3;
-        actual_vol_phys_b = ver_b.1;
-        fill_b = ver_b.2;
-        fee_b_val = ver_b.3;
+        // 3. Parallel verification via shared execution helper
+        let (ver_a, ver_b) = tokio::join!(
+            crate::engine::execution::verify_fill(
+                &conn_ensure_a, &http, &keys, &pair, &oid_a,
+                fill_a, fee_a_val, actual_vol_phys_a, qty_a, dry_run,
+                &crate::engine::execution::VerifyConfig {
+                    fast_retries: max_retries_a,
+                    fast_delay_ms: ts.fill_verify_delay_ms as u64,
+                    slow_retries: 8,
+                    slow_delay_ms: 500,
+                    position_fallback: true,
+                    mult: mult_a,
+                },
+                "real",
+            ),
+            crate::engine::execution::verify_fill(
+                &conn_ensure_b, &http, &keys, &pair, &oid_b,
+                fill_b, fee_b_val, actual_vol_phys_b, qty_b, dry_run,
+                &crate::engine::execution::VerifyConfig {
+                    fast_retries: max_retries_b,
+                    fast_delay_ms: ts.fill_verify_delay_ms as u64,
+                    slow_retries: 8,
+                    slow_delay_ms: 500,
+                    position_fallback: true,
+                    mult: mult_b,
+                },
+                "real",
+            )
+        );
+        actual_vol_phys_a = ver_a.phys_volume;
+        fill_a = ver_a.fill_price;
+        fee_a_val = ver_a.fee;
+        actual_vol_phys_b = ver_b.phys_volume;
+        fill_b = ver_b.fill_price;
+        fee_b_val = ver_b.fee;
 
         // 4. Handle asymmetry (Trimming)
         let phys_a = actual_vol_phys_a.unwrap_or(0.0);
@@ -620,15 +547,10 @@ pub async fn process_entries(
             continue;
         }
 
-        let min_phys = phys_a.min(phys_b);
-        let step_a = mult_a.max(1e-12);
-        let step_b = mult_b.max(1e-12);
-        let valid_a = (min_phys / step_a).floor() * step_a;
-        let valid_b = (min_phys / step_b).floor() * step_b;
-        let matched_phys = valid_a.min(valid_b);
-
-        let delta_a = phys_a - matched_phys;
-        let delta_b = phys_b - matched_phys;
+        let mv = crate::engine::execution::match_volumes(phys_a, phys_b, mult_a, mult_b);
+        let matched_phys = mv.matched_phys;
+        let delta_a = mv.delta_a;
+        let delta_b = mv.delta_b;
 
         // ── DELTA TRIMMING (Phase 3) ──
         let mut trimming_loss = 0.0;
@@ -831,15 +753,9 @@ pub async fn process_entries(
 
         // opened_this_cycle is already set to true earlier
         let dir = sig.direction.clone();
-        let actual_entry_spread = if fill_a > 0.0 && fill_b > 0.0 {
-            if is_a_higher {
-                (fill_a - fill_b) / fill_b.max(1e-12) * 100.0
-            } else {
-                (fill_b - fill_a) / fill_a.max(1e-12) * 100.0
-            }
-        } else {
-            sig.spread
-        };
+        let actual_entry_spread = crate::engine::execution::compute_entry_spread(
+            fill_a, fill_b, is_a_higher, sig.spread,
+        );
 
         // BUG-6 FIX: Include trimming_loss in commission so net PnL (gross - comm - fund)
         // correctly accounts for the cost of dumping excess asymmetric fill volume.

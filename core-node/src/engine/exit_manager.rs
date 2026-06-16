@@ -357,168 +357,67 @@ pub async fn process_closes(
             tokio::spawn(async move {
                 let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
-                // Place close orders in parallel (Connectors handle limit projection, retries & fallback native)
-                let (ra, rb) = tokio::join!(
-                    conn_a.close_position(
-                        &h,
-                        &k,
-                        &pair,
-                        is_a_higher,
-                        q_a,
-                        dry_run,
-                        lev as f64,
-                        exit_price_a,
-                        use_ioc,
-                        slippage_percent,
-                        mult_a,
-                        tick_a,
-                        close_verify_retries as u32,
-                        close_verify_delay,
-                        api_timeout_ms
-                    ),
-                    conn_b.close_position(
-                        &h,
-                        &k,
-                        &pair,
-                        !is_a_higher,
-                        q_b,
-                        dry_run,
-                        lev as f64,
-                        exit_price_b,
-                        use_ioc,
-                        slippage_percent,
-                        mult_b,
-                        tick_b,
-                        close_verify_retries as u32,
-                        close_verify_delay,
-                        api_timeout_ms
-                    )
-                );
 
-                let mut real_exit_a = 0.0;
-                let mut real_exit_b = 0.0;
-                let mut exit_fee = 0.0;
-                let mut error_msg = String::new();
-                let mut leg_a_external = false;
-                let mut leg_b_external = false;
-
-                match ra {
-                    Ok(rc) => {
-                        real_exit_a = rc.final_price;
-                        exit_fee += rc.total_fee;
-                    }
-                    Err(e) => {
-                        if is_position_missing_or_liquidated_error(&e) {
-                            leg_a_external = true;
-                            // Leg already gone on exchange (liquidation/external close).
-                            // Use entry price as a neutral marker to allow DB finalization.
-                            real_exit_a = entry_a;
-                            tracing::warn!(
-                                "[real] leg A already absent for id={} {} on {}: {}",
-                                id,
-                                pair,
-                                exa,
-                                e
-                            );
-                        } else {
-                            error_msg.push_str(&format!("Leg A close failed: {} ", e));
-                        }
-                    }
-                }
-                match rb {
-                    Ok(rc) => {
-                        real_exit_b = rc.final_price;
-                        exit_fee += rc.total_fee;
-                    }
-                    Err(e) => {
-                        if is_position_missing_or_liquidated_error(&e) {
-                            leg_b_external = true;
-                            // Leg already gone on exchange (liquidation/external close).
-                            real_exit_b = entry_b;
-                            tracing::warn!(
-                                "[real] leg B already absent for id={} {} on {}: {}",
-                                id,
-                                pair,
-                                exb,
-                                e
-                            );
-                        } else {
-                            error_msg.push_str(&format!("Leg B close failed: {}", e));
-                        }
-                    }
-                }
+                let cr = crate::engine::execution::execute_close(
+                    &conn_a, &conn_b, &h, &k, &pair,
+                    is_a_higher, q_a, q_b, lev as f64,
+                    exit_price_a, exit_price_b,
+                    use_ioc, slippage_percent, mult_a, mult_b, tick_a, tick_b,
+                    close_verify_retries as u32, close_verify_delay, api_timeout_ms,
+                    entry_a, entry_b, ca_coins, cb_coins,
+                ).await;
 
                 let repo_close = TradeRepository::new(db_c.clone());
 
-                if real_exit_a <= 0.0 || real_exit_b <= 0.0 {
+                if cr.real_exit_a <= 0.0 || cr.real_exit_b <= 0.0 {
                     tracing::error!(
                         "[real] ⚠️ CLOSE FAILED OR UNVERIFIED id={} {}. Error: {}",
-                        id,
-                        pair,
-                        error_msg
+                        id, pair, cr.error_msg
                     );
-                    let keep_closing = leg_a_external || leg_b_external || r == "MANUAL";
+                    let keep_closing = cr.leg_a_external || cr.leg_b_external || r == "MANUAL";
                     repo_close
-                        .record_close_failure(id, &error_msg, keep_closing)
+                        .record_close_failure(id, &cr.error_msg, keep_closing)
                         .await;
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     closing_guard.remove(&trade_id_for_guard);
                     return;
                 }
 
-                let close_reason_db = if leg_a_external && leg_b_external {
+                let close_reason_db = if cr.leg_a_external && cr.leg_b_external {
                     "EXTERNAL_CLOSE".to_string()
-                } else if leg_a_external || leg_b_external {
+                } else if cr.leg_a_external || cr.leg_b_external {
                     "EXTERNAL_PARTIAL_CLOSE".to_string()
                 } else {
                     r.clone()
                 };
 
-                // ✅ Fill confirmed — compute real PnL and mark CLOSED
-                // BUG-2 FIX: Use per-leg coin amounts (contracts × multiplier)
-                let real_pna = if is_a_higher {
-                    (entry_a - real_exit_a) * ca_coins
-                } else {
-                    (real_exit_a - entry_a) * ca_coins
-                };
-                let real_pnb = if is_a_higher {
-                    (real_exit_b - entry_b) * cb_coins
-                } else {
-                    (entry_b - real_exit_b) * cb_coins
-                };
-                let real_gp = real_pna + real_pnb;
+                let real_gp = cr.pnl_a + cr.pnl_b;
 
-                let slip_cost_exit_a = if real_exit_a > 0.0 {
+                let slip_cost_exit_a = if cr.real_exit_a > 0.0 {
                     if is_a_higher {
-                        ((real_exit_a - exit_price_a) * ca_coins).max(0.0)
+                        ((cr.real_exit_a - exit_price_a) * ca_coins).max(0.0)
                     } else {
-                        ((exit_price_a - real_exit_a) * ca_coins).max(0.0)
+                        ((exit_price_a - cr.real_exit_a) * ca_coins).max(0.0)
                     }
                 } else {
                     0.0
                 };
-                let slip_cost_exit_b = if real_exit_b > 0.0 {
+                let slip_cost_exit_b = if cr.real_exit_b > 0.0 {
                     if !is_a_higher {
-                        ((real_exit_b - exit_price_b) * cb_coins).max(0.0)
+                        ((cr.real_exit_b - exit_price_b) * cb_coins).max(0.0)
                     } else {
-                        ((exit_price_b - real_exit_b) * cb_coins).max(0.0)
+                        ((exit_price_b - cr.real_exit_b) * cb_coins).max(0.0)
                     }
                 } else {
                     0.0
                 };
                 let exit_slip = slip_cost_exit_a + slip_cost_exit_b;
 
-                info!("[real] [EXCHANGE_VERIFIED] PnL id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", id, real_pna, real_pnb, real_gp, exit_fee, exit_slip);
+                info!("[real] [EXCHANGE_VERIFIED] PnL id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", id, cr.pnl_a, cr.pnl_b, real_gp, cr.exit_fee, exit_slip);
 
                 // Verify positions are actually gone from both exchanges
-                let pos_check_a = crate::engine::exchanges::get_connector(&exa)
-                    .unwrap()
-                    .fetch_positions(&h, &k)
-                    .await;
-                let pos_check_b = crate::engine::exchanges::get_connector(&exb)
-                    .unwrap()
-                    .fetch_positions(&h, &k)
-                    .await;
+                let pos_check_a = conn_a.fetch_positions(&h, &k).await;
+                let pos_check_b = conn_b.fetch_positions(&h, &k).await;
                 let still_a = pos_check_a
                     .as_ref()
                     .ok()
@@ -559,15 +458,15 @@ pub async fn process_closes(
                 repo_close
                     .mark_trade_closed_confirmed(
                         id,
-                        real_exit_a,
-                        real_exit_b,
+                        cr.real_exit_a,
+                        cr.real_exit_b,
                         exit_spread,
                         real_gp,
-                        real_pna,
-                        real_pnb,
+                        cr.pnl_a,
+                        cr.pnl_b,
                         &close_reason_db,
                         fund_cost,
-                        exit_fee,
+                        cr.exit_fee,
                         exit_slip,
                     )
                     .await;

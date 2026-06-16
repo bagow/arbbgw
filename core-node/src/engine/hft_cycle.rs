@@ -13,7 +13,7 @@ use tokio_rusqlite::Connection;
 use tracing::{error, info};
 
 use crate::engine::real::now_ms;
-use crate::engine::utils::{cooldown_active, is_position_missing_or_liquidated_error};
+use crate::engine::utils::cooldown_active;
 use crate::engine::risk_manager::{has_sufficient_margin, mark_balance_low};
 use shared::{SpreadRow, TechnicalSettings, TradingSettings};
 use std::sync::atomic::AtomicI64;
@@ -179,56 +179,33 @@ pub async fn run_hft_cycle(
                 let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
                 let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
 
-                let (ra, rb) = tokio::join!(
-                    conn_a.close_position(&h, &k, &pair, is_a_higher, q_a, false, lev as f64, exit_price_a, use_ioc, 0.5, mult_a, tick_a, close_verify_retries as u32, close_verify_delay, api_timeout_ms),
-                    conn_b.close_position(&h, &k, &pair, !is_a_higher, q_b, false, lev as f64, exit_price_b, use_ioc, 0.5, mult_b, tick_b, close_verify_retries as u32, close_verify_delay, api_timeout_ms)
-                );
-
-                let mut real_exit_a = 0.0;
-                let mut real_exit_b = 0.0;
-                let mut exit_fee = 0.0;
-                let mut error_msg = String::new();
-                let mut leg_a_ext = false;
-                let mut leg_b_ext = false;
-
-                match ra {
-                    Ok(rc) => { real_exit_a = rc.final_price; exit_fee += rc.total_fee; }
-                    Err(e) => {
-                        if is_position_missing_or_liquidated_error(&e) {
-                            leg_a_ext = true; real_exit_a = entry_a;
-                        } else { error_msg.push_str(&format!("A: {} ", e)); }
-                    }
-                }
-                match rb {
-                    Ok(rc) => { real_exit_b = rc.final_price; exit_fee += rc.total_fee; }
-                    Err(e) => {
-                        if is_position_missing_or_liquidated_error(&e) {
-                            leg_b_ext = true; real_exit_b = entry_b;
-                        } else { error_msg.push_str(&format!("B: {}", e)); }
-                    }
-                }
+                let cr = crate::engine::execution::execute_close(
+                    &conn_a, &conn_b, &h, &k, &pair,
+                    is_a_higher, q_a, q_b, lev as f64,
+                    exit_price_a, exit_price_b,
+                    use_ioc, 0.5, mult_a, mult_b, tick_a, tick_b,
+                    close_verify_retries as u32, close_verify_delay, api_timeout_ms,
+                    entry_a, entry_b, tc, tc,
+                ).await;
 
                 let repo_close = TradeRepository::new(db_c);
-                if real_exit_a <= 0.0 || real_exit_b <= 0.0 {
-                    error!("[hft] CLOSE FAILED id={} {}: {}", id, pair, error_msg);
-                    repo_close.record_close_failure(id, &error_msg, leg_a_ext || leg_b_ext || r == "MANUAL").await;
+                if cr.real_exit_a <= 0.0 || cr.real_exit_b <= 0.0 {
+                    error!("[hft] CLOSE FAILED id={} {}: {}", id, pair, cr.error_msg);
+                    repo_close.record_close_failure(id, &cr.error_msg, cr.leg_a_external || cr.leg_b_external || r == "MANUAL").await;
                     closing_guard.remove(&trade_id_for_guard);
                     return;
                 }
 
-                let close_reason_db = if leg_a_ext && leg_b_ext { "EXTERNAL_CLOSE".to_string() }
-                    else if leg_a_ext || leg_b_ext { "EXTERNAL_PARTIAL".to_string() }
+                let close_reason_db = if cr.leg_a_external && cr.leg_b_external { "EXTERNAL_CLOSE".to_string() }
+                    else if cr.leg_a_external || cr.leg_b_external { "EXTERNAL_PARTIAL".to_string() }
                     else { r.clone() };
 
-                let real_pna = if is_a_higher { (entry_a - real_exit_a) * tc } else { (real_exit_a - entry_a) * tc };
-                let real_pnb = if is_a_higher { (real_exit_b - entry_b) * tc } else { (entry_b - real_exit_b) * tc };
-                let real_gp = real_pna + real_pnb;
-
-                info!("[hft] [VERIFIED] PnL id={} gross={:.4} fee={:.4} reason={}", id, real_gp, exit_fee, close_reason_db);
+                let real_gp = cr.pnl_a + cr.pnl_b;
+                info!("[hft] [VERIFIED] PnL id={} gross={:.4} fee={:.4} reason={}", id, real_gp, cr.exit_fee, close_reason_db);
 
                 repo_close.mark_trade_closed_confirmed(
-                    id, real_exit_a, real_exit_b, exit_spread, real_gp,
-                    real_pna, real_pnb, &close_reason_db, fund_cost, exit_fee, 0.0,
+                    id, cr.real_exit_a, cr.real_exit_b, exit_spread, real_gp,
+                    cr.pnl_a, cr.pnl_b, &close_reason_db, fund_cost, cr.exit_fee, 0.0,
                 ).await;
                 closing_guard.remove(&trade_id_for_guard);
             });
@@ -343,62 +320,22 @@ pub async fn run_hft_cycle(
         fee_a_val = inf_fee_a;
 
         // Verify fill A
-        let mut got_a = dry_run || fill_a > 0.0;
-
-        // LATENCY OPTIMIZATION: skip verify loop if inline fill available (Bybit exec reports)
-        if got_a && fill_a > 0.0 && actual_vol_phys_a.is_none() {
-            actual_vol_phys_a = Some(qty_a);
-            tracing::info!("[hft] ⚡ Inline fill A: price={:.6} fee={:.6} — skipping verify", fill_a, fee_a_val);
-        }
-
-        for attempt in 0..ts.fill_verify_retries {
-            if got_a && actual_vol_phys_a.is_some() { break; }
-            if attempt > 0 { tokio::time::sleep(std::time::Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
-            if let Some(ref oid) = oid_a {
-                if let Ok((p, f, ev)) = conn_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
-                    if p > 0.0 { fill_a = p; }
-                    if f > 1e-9 { fee_a_val = f; }
-                    if ev > 1e-12 { actual_vol_phys_a = Some(ev); got_a = true; }
-                }
-            }
-        }
-
-        // SLOW verify for Leg A (HFT)
-        if !got_a && oid_a.is_some() && !dry_run {
-            tracing::warn!("[hft] ⏳ {}: Leg A orderId={} fill not confirmed. Extended wait...", pair, oid_a.as_deref().unwrap_or("?"));
-            for slow_attempt in 0..6 {
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                if let Some(ref oid) = oid_a {
-                    match conn_a.fetch_order(&http, &keys, &pair, oid, mult_a).await {
-                        Ok((p, f, ev)) => {
-                            if ev > 1e-12 {
-                                actual_vol_phys_a = Some(ev); got_a = true;
-                                if p > 0.0 { fill_a = p; }
-                                if f > 1e-9 { fee_a_val = f; }
-                                tracing::info!("[hft] ✅ {}: Leg A fill on slow attempt {}", pair, slow_attempt + 1);
-                                break;
-                            }
-                            if p == 0.0 && f == 0.0 && ev == 0.0 { break; }
-                        }
-                        Err(_) => {}
-                    }
-                }
-            }
-        }
-
-        // Position fallback for Leg A (HFT)
-        if actual_vol_phys_a.unwrap_or(0.0) <= 1e-12 && oid_a.is_some() && !dry_run {
-            if let Ok(positions) = conn_a.fetch_positions(&http, &keys).await {
-                if let Some(pos) = positions.iter().find(|p| {
-                    crate::engine::real::symbols_match(&p.symbol, &pair) && p.size.abs() > 1e-12
-                }) {
-                    tracing::warn!("[hft] 🚨 {}: Position FOUND on {} despite verify failure!", pair, exa);
-                    actual_vol_phys_a = Some(pos.size.abs());
-                    got_a = true;
-                    if pos.entry_price > 0.0 { fill_a = pos.entry_price; }
-                }
-            }
-        }
+        let vr_a = crate::engine::execution::verify_fill(
+            &conn_a, &http, &keys, &pair, &oid_a,
+            fill_a, fee_a_val, actual_vol_phys_a, qty_a, dry_run,
+            &crate::engine::execution::VerifyConfig {
+                fast_retries: ts.fill_verify_retries,
+                fast_delay_ms: ts.fill_verify_delay_ms as u64,
+                slow_retries: 6,
+                slow_delay_ms: 400,
+                position_fallback: true,
+                mult: mult_a,
+            },
+            "hft",
+        ).await;
+        fill_a = vr_a.fill_price;
+        fee_a_val = vr_a.fee;
+        actual_vol_phys_a = vr_a.phys_volume;
 
         let filled_a = actual_vol_phys_a.unwrap_or(0.0);
         if filled_a <= 1e-12 && !dry_run { continue; }
@@ -431,48 +368,22 @@ pub async fn run_hft_cycle(
         fee_b_val = inf_fee_b;
 
         // Verify fill B
-        let mut got_b = dry_run || fill_b > 0.0;
-
-        // LATENCY OPTIMIZATION: skip verify loop if inline fill available
-        if got_b && fill_b > 0.0 && actual_vol_phys_b.is_none() {
-            actual_vol_phys_b = Some(final_qty_b);
-            tracing::info!("[hft] ⚡ Inline fill B: price={:.6} fee={:.6} — skipping verify", fill_b, fee_b_val);
-        }
-
-        for attempt in 0..ts.fill_verify_retries {
-            if got_b && actual_vol_phys_b.is_some() { break; }
-            if attempt > 0 { tokio::time::sleep(std::time::Duration::from_millis(ts.fill_verify_delay_ms as u64)).await; }
-            if let Some(ref oid) = oid_b {
-                if let Ok((p, f, ev)) = conn_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
-                    if p > 0.0 { fill_b = p; }
-                    if f > 1e-9 { fee_b_val = f; }
-                    if ev > 1e-12 { actual_vol_phys_b = Some(ev); got_b = true; }
-                }
-            }
-        }
-
-        // SLOW verify for Leg B (HFT)
-        if !got_b && oid_b.is_some() && !dry_run {
-            tracing::warn!("[hft] ⏳ {}: Leg B orderId={} fill not confirmed. Extended wait...", pair, oid_b.as_deref().unwrap_or("?"));
-            for slow_attempt in 0..6 {
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                if let Some(ref oid) = oid_b {
-                    match conn_b.fetch_order(&http, &keys, &pair, oid, mult_b).await {
-                        Ok((p, f, ev)) => {
-                            if ev > 1e-12 {
-                                actual_vol_phys_b = Some(ev); got_b = true;
-                                if p > 0.0 { fill_b = p; }
-                                if f > 1e-9 { fee_b_val = f; }
-                                tracing::info!("[hft] ✅ {}: Leg B fill on slow attempt {}", pair, slow_attempt + 1);
-                                break;
-                            }
-                            if p == 0.0 && f == 0.0 && ev == 0.0 { break; }
-                        }
-                        Err(_) => {}
-                    }
-                }
-            }
-        }
+        let vr_b = crate::engine::execution::verify_fill(
+            &conn_b, &http, &keys, &pair, &oid_b,
+            fill_b, fee_b_val, actual_vol_phys_b, final_qty_b, dry_run,
+            &crate::engine::execution::VerifyConfig {
+                fast_retries: ts.fill_verify_retries,
+                fast_delay_ms: ts.fill_verify_delay_ms as u64,
+                slow_retries: 6,
+                slow_delay_ms: 400,
+                position_fallback: false,
+                mult: mult_b,
+            },
+            "hft",
+        ).await;
+        fill_b = vr_b.fill_price;
+        fee_b_val = vr_b.fee;
+        actual_vol_phys_b = vr_b.phys_volume;
 
         let phys_a = actual_vol_phys_a.unwrap_or(0.0);
         let phys_b = actual_vol_phys_b.unwrap_or(0.0);
@@ -488,10 +399,8 @@ pub async fn run_hft_cycle(
         }
 
         // Match volumes
-        let min_phys = phys_a.min(phys_b);
-        let step_a = mult_a.max(1e-12);
-        let step_b = mult_b.max(1e-12);
-        let matched_phys = ((min_phys / step_a).floor() * step_a).min((min_phys / step_b).floor() * step_b);
+        let mv = crate::engine::execution::match_volumes(phys_a, phys_b, mult_a, mult_b);
+        let matched_phys = mv.matched_phys;
 
         if matched_phys < 1e-12 {
             e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + ts.asymmetric_cooldown_ms);
@@ -508,10 +417,9 @@ pub async fn run_hft_cycle(
         // 🛡️ Apply cooldown to the pair so we don't spam duplicate entries
         e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + ts.pair_cooldown_ms);
 
-        let actual_entry_spread = if fill_a > 0.0 && fill_b > 0.0 {
-            if is_a_higher { (fill_a - fill_b) / fill_b.max(1e-12) * 100.0 }
-            else { (fill_b - fill_a) / fill_a.max(1e-12) * 100.0 }
-        } else { sig.spread };
+        let actual_entry_spread = crate::engine::execution::compute_entry_spread(
+            fill_a, fill_b, is_a_higher, sig.spread,
+        );
 
         let entry_comm = fee_a_val + fee_b_val;
         let contracts_a_db = matched_phys / mult_a;
