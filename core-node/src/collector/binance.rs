@@ -48,8 +48,8 @@ pub async fn run(
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 if status == 418 || status == 429 || status == 403 {
-                    error!("[binance] IP still banned/rate-limited (HTTP {}). Backing off 5 min.", status);
-                    tokio::time::sleep(Duration::from_secs(300)).await;
+                    error!("[binance] IP still banned/rate-limited (HTTP {}). Backing off 10 min.", status);
+                    tokio::time::sleep(Duration::from_secs(600)).await;
                     continue;
                 }
             }
