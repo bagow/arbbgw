@@ -129,11 +129,11 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     ).await.context("XT WS connect failed")?;
     info!("[xt] Connected, subscribing {} symbols...", xt_symbols.len());
 
-    // Subscribe to bookTicker in chunks
+    // Subscribe to bookTicker in chunks — XT format: bookTicker@symbol
     for chunk in xt_symbols.chunks(30) {
-        let args: Vec<String> = chunk.iter().map(|s| format!("{}@bookTicker", s)).collect();
+        let args: Vec<String> = chunk.iter().map(|s| format!("bookTicker@{}", s)).collect();
         ws.send(Message::Text(json!({
-            "method": "subscribe",
+            "method": "SUBSCRIBE",
             "params": args,
             "id": 1
         }).to_string().into())).await?;
@@ -157,9 +157,19 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                         info!("[xt] FIRST MSG (len={}): {}", text.len(), &text[..text.len().min(300)]);
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                        // XT bookTicker event: {"event":"bookTicker","data":{...},"symbol":"btc_usdt"}
-                        if v["event"].as_str() == Some("bookTicker") {
-                            let xt_sym = v["symbol"].as_str().unwrap_or("");
+                        // XT bookTicker push: {"topic":"bookTicker","event":"bookTicker@btc_usdt","data":{...}}
+                        // Also accept: {"event":"bookTicker","symbol":"btc_usdt","data":{...}}
+                        let is_book_ticker = v["topic"].as_str() == Some("bookTicker")
+                            || v["event"].as_str() == Some("bookTicker")
+                            || v["event"].as_str().map(|e| e.starts_with("bookTicker@")).unwrap_or(false);
+                        if is_book_ticker {
+                            // Extract symbol from "symbol" field or from event "bookTicker@btc_usdt"
+                            let xt_sym = v["symbol"].as_str()
+                                .or_else(|| v["data"]["s"].as_str())
+                                .or_else(|| {
+                                    v["event"].as_str().and_then(|e| e.strip_prefix("bookTicker@"))
+                                })
+                                .unwrap_or("");
                             let std_sym = xt_to_standard(xt_sym);
                             if !std_sym.ends_with("USDT") { continue; }
                             let bid: f64 = v["data"]["b"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);

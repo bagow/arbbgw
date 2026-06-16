@@ -166,20 +166,20 @@ async fn shard_handler(
     l2_books: &L2OrderbookMap,
 ) -> Result<()> {
     let (mut ws, _) = connect_async_tls_with_config(
-        "wss://open-api-swap.bingx.com/swap-market",
+        "wss://open-api-ws.bingx.com/market",
         None, false, None,
     ).await.context("BingX WS connect failed")?;
     info!("[bingx] Shard {} connected, subscribing to {} symbols", shard_idx, symbols.len());
 
-    // Subscribe in chunks of 20
+    // Subscribe in chunks of 20 — new format: SYMBOL@topic
     for chunk in symbols.chunks(20) {
         let subs: Vec<Value> = chunk.iter().flat_map(|s| {
             let ws_sym = if s.ends_with("USDT") && !s.contains('-') {
                 format!("{}-USDT", &s[..s.len()-4])
             } else { s.clone() };
             vec![
-                json!({"id": uuid_lite(), "dataType": format!("MARKET.PRICE_FEED.{}", ws_sym)}),
-                json!({"id": uuid_lite(), "dataType": format!("MARKET.DEPTH.step0.{}", ws_sym)}),
+                json!({"id": uuid_lite(), "dataType": format!("{}@bookTicker", ws_sym)}),
+                json!({"id": uuid_lite(), "dataType": format!("{}@depth5", ws_sym)}),
             ]
         }).collect();
         for sub in subs {
@@ -234,64 +234,74 @@ async fn shard_handler(
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let data_type = v["dataType"].as_str().unwrap_or("");
-                        if data_type.starts_with("MARKET.DEPTH.step0.") {
-                            let sym_raw = data_type.trim_start_matches("MARKET.DEPTH.step0.").replace('-', "");
-                            if sym_raw.ends_with("USDT") {
-                                let bids: Vec<(f64, f64)> = v["data"]["bids"].as_array().map(|arr| {
-                                    arr.iter().filter_map(|x| {
-                                        let p = x[0].as_str()?.parse().ok()?;
-                                        let q = x[1].as_str()?.parse().ok()?;
-                                        Some((p, q))
-                                    }).collect()
-                                }).unwrap_or_default();
-                                let asks: Vec<(f64, f64)> = v["data"]["asks"].as_array().map(|arr| {
-                                    arr.iter().filter_map(|x| {
-                                        let p = x[0].as_str()?.parse().ok()?;
-                                        let q = x[1].as_str()?.parse().ok()?;
-                                        Some((p, q))
-                                    }).collect()
-                                }).unwrap_or_default();
-                                if !bids.is_empty() || !asks.is_empty() {
-                                    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-                                    if let Some(mut ex_map) = price_map.get_mut("bingx") {
-                                        if let Some(entry) = ex_map.get_mut(&sym_raw) {
-                                            if let Some(&(bp, bq)) = bids.first() {
-                                                entry.bid_size = bq * bp;
-                                            }
-                                            if let Some(&(ap, aq)) = asks.first() {
-                                                entry.ask_size = aq * ap;
-                                            }
-                                        }
-                                    }
-                                    l2_books.insert(format!("bingx:{}", sym_raw), crate::state::L2Snapshot { bids, asks, updated_ms: now_ms });
-                                }
-                            }
-                        }
-                        if data_type.starts_with("MARKET.PRICE_FEED.") {
-                            let sym_raw = data_type.trim_start_matches("MARKET.PRICE_FEED.").replace('-', "");
-                            if sym_raw.ends_with("USDT") {
-                                let bid: f64 = v["data"]["bidPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                                let ask: f64 = v["data"]["askPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                                let last: f64 = v["data"]["lastPrice"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                                if bid <= 0.0 || ask <= 0.0 { continue; }
-                                let mid = (bid + ask) / 2.0;
-                                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                        // Extract symbol from dataType "BTC-USDT@topic"
+                        let extract_sym = |dt: &str, suffix: &str| -> Option<String> {
+                            if dt.ends_with(suffix) {
+                                let raw = &dt[..dt.len()-suffix.len()];
+                                let std = raw.replace('-', "");
+                                if std.ends_with("USDT") { Some(std) } else { None }
+                            } else { None }
+                        };
+
+                        if let Some(sym_raw) = extract_sym(data_type, "@depth5").or_else(|| extract_sym(data_type, "@depth")) {
+                            let bids: Vec<(f64, f64)> = v["data"]["bids"].as_array().map(|arr| {
+                                arr.iter().filter_map(|x| {
+                                    let p = x[0].as_str().or_else(|| x["price"].as_str())?.parse().ok()?;
+                                    let q = x[1].as_str().or_else(|| x["quantity"].as_str())?.parse().ok()?;
+                                    Some((p, q))
+                                }).collect()
+                            }).unwrap_or_default();
+                            let asks: Vec<(f64, f64)> = v["data"]["asks"].as_array().map(|arr| {
+                                arr.iter().filter_map(|x| {
+                                    let p = x[0].as_str().or_else(|| x["price"].as_str())?.parse().ok()?;
+                                    let q = x[1].as_str().or_else(|| x["quantity"].as_str())?.parse().ok()?;
+                                    Some((p, q))
+                                }).collect()
+                            }).unwrap_or_default();
+                            if !bids.is_empty() || !asks.is_empty() {
+                                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
                                 if let Some(mut ex_map) = price_map.get_mut("bingx") {
                                     if let Some(entry) = ex_map.get_mut(&sym_raw) {
-                                        entry.bid = bid; entry.ask = ask;
-                                        entry.price = if last > 0.0 { last } else { mid };
-                                        entry.last_updated = ts;
-                                    } else {
-                                        ex_map.insert(sym_raw.clone(), TickerData {
-                                            bid, ask, price: if last > 0.0 { last } else { mid },
-                                            vol: 0.0, funding_rate: 0.0,
-                                            bid_size: 0.0, ask_size: 0.0, last_updated: ts,
-                                        });
+                                        if let Some(&(bp, bq)) = bids.first() {
+                                            entry.bid_size = bq * bp;
+                                        }
+                                        if let Some(&(ap, aq)) = asks.first() {
+                                            entry.ask_size = aq * ap;
+                                        }
                                     }
                                 }
-                                signal.notify_one();
-                                tick_count += 1;
+                                l2_books.insert(format!("bingx:{}", sym_raw), crate::state::L2Snapshot { bids, asks, updated_ms: now_ms });
                             }
+                        }
+                        if let Some(sym_raw) = extract_sym(data_type, "@bookTicker") {
+                            // New format: data.b = bid price, data.B = bid qty, data.a = ask price, data.A = ask qty
+                            let bid: f64 = v["data"]["b"].as_str().and_then(|s| s.parse().ok())
+                                .or_else(|| v["data"]["bidPrice"].as_str().and_then(|s| s.parse().ok()))
+                                .unwrap_or(0.0);
+                            let ask: f64 = v["data"]["a"].as_str().and_then(|s| s.parse().ok())
+                                .or_else(|| v["data"]["askPrice"].as_str().and_then(|s| s.parse().ok()))
+                                .unwrap_or(0.0);
+                            let last: f64 = v["data"]["c"].as_str().and_then(|s| s.parse().ok())
+                                .or_else(|| v["data"]["lastPrice"].as_str().and_then(|s| s.parse().ok()))
+                                .unwrap_or(0.0);
+                            if bid <= 0.0 || ask <= 0.0 { continue; }
+                            let mid = (bid + ask) / 2.0;
+                            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                            if let Some(mut ex_map) = price_map.get_mut("bingx") {
+                                if let Some(entry) = ex_map.get_mut(&sym_raw) {
+                                    entry.bid = bid; entry.ask = ask;
+                                    entry.price = if last > 0.0 { last } else { mid };
+                                    entry.last_updated = ts;
+                                } else {
+                                    ex_map.insert(sym_raw.clone(), TickerData {
+                                        bid, ask, price: if last > 0.0 { last } else { mid },
+                                        vol: 0.0, funding_rate: 0.0,
+                                        bid_size: 0.0, ask_size: 0.0, last_updated: ts,
+                                    });
+                                }
+                            }
+                            signal.notify_one();
+                            tick_count += 1;
                         }
                     }
                 }

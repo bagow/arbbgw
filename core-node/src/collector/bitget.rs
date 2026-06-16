@@ -237,9 +237,12 @@ async fn handler(
                     // Bitget sends "pong" as plain text
                     if text.as_str() == "pong" { continue; }
                     msg_count += 1;
-                    if !first_msg_logged {
-                        first_msg_logged = true;
-                        info!("[bitget] FIRST MSG (len={}): {}", text.len(), &text[..text.len().min(300)]);
+                    if msg_count <= 3 {
+                        info!("[bitget] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(300)]);
+                    }
+                    // Also log when we get first non-ack message
+                    if msg_count == 315 || msg_count == 500 || msg_count == 1000 {
+                        info!("[bitget] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(300)]);
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let action = v["action"].as_str().unwrap_or("");
