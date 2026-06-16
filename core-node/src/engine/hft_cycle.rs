@@ -12,7 +12,8 @@ use std::sync::Arc;
 use tokio_rusqlite::Connection;
 use tracing::{error, info};
 
-use crate::engine::real::{has_sufficient_margin, mark_balance_low, now_ms};
+use crate::engine::real::now_ms;
+use crate::engine::risk_manager::{has_sufficient_margin, mark_balance_low};
 use shared::{SpreadRow, TechnicalSettings, TradingSettings};
 use std::sync::atomic::AtomicI64;
 
@@ -515,8 +516,8 @@ pub async fn run_hft_cycle(
         // Book the trade
         if dry_run { fill_a = entry_a; fill_b = entry_b; }
         let final_vol_usd = matched_phys * entry_a;
-        crate::engine::real::deduct_cached_balance(&exa, final_vol_usd, settings.leverage as f64, &e_ctx);
-        crate::engine::real::deduct_cached_balance(&exb, final_vol_usd, settings.leverage as f64, &e_ctx);
+        crate::engine::risk_manager::deduct_cached_balance(&exa, final_vol_usd, settings.leverage as f64, &e_ctx);
+        crate::engine::risk_manager::deduct_cached_balance(&exb, final_vol_usd, settings.leverage as f64, &e_ctx);
 
         // 🛡️ Apply cooldown to the pair so we don't spam duplicate entries
         e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + ts.pair_cooldown_ms);

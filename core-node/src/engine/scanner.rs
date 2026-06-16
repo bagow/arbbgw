@@ -83,8 +83,8 @@ pub fn generate_signals(
 
         // ── EXCHANGE BAN GUARD ──
         // Skip if either exchange is globally banned (IP ban, rate limit detected by connector)
-        if crate::engine::real::is_exchange_banned(&row.exchange_a)
-            || crate::engine::real::is_exchange_banned(&row.exchange_b)
+        if crate::engine::risk_manager::is_exchange_banned(&row.exchange_a)
+            || crate::engine::risk_manager::is_exchange_banned(&row.exchange_b)
         {
             continue;
         }

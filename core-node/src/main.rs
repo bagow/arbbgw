@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
     );
 
     // ── Pre-warm and fetch loops ──────────────────────────────────────────────
-    engine::real::start_multiplier_fetcher(
+    engine::workers::market_data::start_multiplier_fetcher(
         http.clone(),
         engine_ctx.clone(),
         real_settings_cache.clone(),
@@ -283,7 +283,7 @@ async fn main() -> Result<()> {
 
     // ── Position sync — enabled with symbol normalization in real.rs ───────────
     // Detects externally closed/liquidated legs and emergency-closes the remaining leg.
-    engine::real::start_position_sync(
+    engine::workers::position_sync::start_position_sync(
         http.clone(),
         exchange_keys.clone(),
         real_db.clone(),

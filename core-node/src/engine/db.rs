@@ -336,4 +336,41 @@ impl TradeRepository {
             id, r, gross_pnl, exit_fee, exit_slip, fund_cost
         );
     }
+
+    pub async fn emergency_close_trade(&self, id: i64) {
+        let _ = self.db.call(move |conn| {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+            conn.execute(
+                "UPDATE trades SET status='CLOSED', exit_time=?, close_reason='EXTERNAL_CLOSE', \
+                 gross_pnl=COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0), \
+                 pnl=COALESCE(curr_gross_pnl, \
+                     (COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
+                      -COALESCE(commission_cost,0.0)-COALESCE(funding_cost,0.0))), \
+                 curr_gross_pnl=COALESCE(curr_gross_pnl, \
+                     (COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
+                      -COALESCE(commission_cost,0.0)-COALESCE(funding_cost,0.0))) \
+                 WHERE id=?",
+                tokio_rusqlite::params![now, id]
+            )?;
+            Ok(())
+        }).await;
+    }
+
+    pub async fn emergency_partial_close_trade(&self, id: i64, total_fee: f64) {
+        let _ = self.db.call(move |conn| {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+            conn.execute(
+                "UPDATE trades SET status='CLOSED', exit_time=?, close_reason='EXTERNAL_PARTIAL_CLOSE', \
+                 commission_cost=?, \
+                 gross_pnl=COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0), \
+                 pnl=(COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
+                     -?-COALESCE(funding_cost,0.0)), \
+                 curr_gross_pnl=(COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \
+                     -?-COALESCE(funding_cost,0.0)) \
+                 WHERE id=?",
+                tokio_rusqlite::params![now, total_fee, total_fee, total_fee, id]
+            )?;
+            Ok(())
+        }).await;
+    }
 }

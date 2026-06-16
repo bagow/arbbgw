@@ -59,7 +59,7 @@ fn detect_ban_from_response(body: &Value) {
                 if ban_ts > old {
                     BINANCE_BANNED_UNTIL_MS.store(ban_ts, Ordering::Relaxed);
                     // Register in global ban registry
-                    crate::engine::real::ban_exchange("binance", ban_ts);
+                    crate::engine::risk_manager::ban_exchange("binance", ban_ts);
                 }
             }
         } else {
@@ -69,7 +69,7 @@ fn detect_ban_from_response(body: &Value) {
             if cooldown > old {
                 BINANCE_BANNED_UNTIL_MS.store(cooldown, Ordering::Relaxed);
                 // Register in global ban registry
-                crate::engine::real::ban_exchange("binance", cooldown);
+                crate::engine::risk_manager::ban_exchange("binance", cooldown);
             }
         }
     }
