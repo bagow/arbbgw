@@ -150,6 +150,7 @@ function renderTabBar() {
 async function switchTab(id) {
     activeTabId = id;
     localStorage.setItem('activeTabId', id);
+    _lastStatsHash = null; // Force chart recreation on profile switch
     renderTabBar();
     const profile = profiles.find(p => p.id === id);
     if (!profile) return;
@@ -454,29 +455,27 @@ function renderHistoryReconcile(exchangesData) {
         ? new Date(baseTs).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false }) + ' UTC'
         : 'n/a';
     return `
-        <div id="history-reconcile-box" style="margin:0 0 14px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-panel-2);font-size:0.85rem;font-family:var(--font-mono);display:flex;gap:16px;flex-wrap:wrap;">
-            <span style="color:var(--text-sub);">History window: all CLOSED trades in DB</span>
-            <span style="color:var(--text-sub);">CEX window start: <strong>${baseTsText}</strong></span>
-            <span style="color:var(--text-sub);">CEX Δ: <strong style="color:${cexDelta>=0?'var(--green)':'var(--red)'}">${fmtPnL(cexDelta)}</strong></span>
-            <span style="color:var(--text-sub);">DB expected Δ: <strong style="color:${dbExpected>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbExpected)}</strong></span>
-            <span style="color:${Math.abs(residual)>0.05?'var(--red)':'var(--text-sub)'};">Residual: <strong>${fmtPnL(residual)}</strong></span>
+        <div id="history-reconcile-box" class="reconcile-bar" style="margin:0 0 14px 0;">
+            <div class="reconcile-item"><span class="reconcile-label">Window</span><span class="reconcile-value" style="color:var(--text-sub)">All closed</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">CEX Start</span><span class="reconcile-value">${baseTsText}</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">CEX Δ</span><span class="reconcile-value" style="color:${cexDelta>=0?'var(--green)':'var(--red)'}">${fmtPnL(cexDelta)}</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">DB Expected Δ</span><span class="reconcile-value" style="color:${dbExpected>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbExpected)}</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">Residual</span><span class="reconcile-value" style="color:${Math.abs(residual)>0.05?'var(--red)':'var(--text-sub)'}">${fmtPnL(residual)}</span></div>
         </div>
     `;
 }
 
 function renderSubNavStats(active, stats, mode) {
+    const pnl = stats?.total_pnl || 0;
+    const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
     return `
         ${active !== null ? `
-        <span style="font-size:.8rem;color:var(--text-sub);">
+        <span style="font-size:.78rem;color:var(--text-sub);font-variant-numeric:tabular-nums;">
             Active: <strong style="color:var(--text)">${active.length}</strong>
-            &nbsp;|&nbsp; PnL:
-            <strong style="color:${(stats?.total_pnl||0)>=0?'var(--green)':'var(--red)'}">
-                ${fmtPnL(stats?.total_pnl||0)}
-            </strong>
+            ·
+            PnL: <strong class="${pnlClass}">${fmtPnL(pnl)}</strong>
         </span>` : ''}
-        <span class="mode-badge mode-badge--real">
-            💰 Real
-        </span>
+        <span class="mode-badge mode-badge--real">💰 Real</span>
     `;
 }
 
@@ -577,43 +576,36 @@ function renderCexTab(profile, exchangesData) {
     let staleBanner = '';
     if (maxKnownAgeMs >= STALE_WARN_MS) {
         const isCritical = maxKnownAgeMs >= STALE_CRIT_MS;
-        const staleColor = isCritical ? 'var(--red)' : '#b08900';
-        const staleBg = isCritical ? 'rgba(239,68,68,0.08)' : 'rgba(245,158,11,0.08)';
-        const staleBorder = isCritical ? 'rgba(239,68,68,0.35)' : 'rgba(245,158,11,0.35)';
+        const cls = isCritical ? 'stale-banner--crit' : 'stale-banner--warn';
         staleBanner = `
-            <div style="margin-bottom:14px;padding:10px 12px;border:1px solid ${staleBorder};border-radius:8px;background:${staleBg};font-size:0.85rem;color:${staleColor};font-family:var(--font-mono);">
-                Data is stale (${(maxKnownAgeMs / 1000).toFixed(1)}s). Affected: ${staleParts.join(', ')}.
+            <div class="stale-banner ${cls}" style="margin-bottom:14px;">
+                ⚠ Data is stale (${(maxKnownAgeMs / 1000).toFixed(1)}s). Affected: ${staleParts.join(', ')}.
             </div>
         `;
     }
     const driftColor = Math.abs(cexVsDbDelta) > 0.05 ? 'var(--red)' : 'var(--text-sub)';
     const reconcileBar = `
-        <div style="margin-bottom:14px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-panel-2);font-size:0.85rem;font-family:var(--font-mono);display:flex;gap:16px;flex-wrap:wrap;">
-            <span style="color:var(--text-sub);">CEX balance delta (UTC day): <strong style="color:${cexDeltaTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(cexDeltaTotal)}</strong></span>
-            <span style="color:var(--text-sub);">DB closed today: <strong style="color:${dbClosedTodayTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbClosedTodayTotal)}</strong></span>
-            <span style="color:${driftColor};">Drift: <strong>${fmtPnL(cexVsDbDelta)}</strong></span>
-            <span style="color:var(--text-sub);">DB open live: <strong style="color:${dbOpenLivePnlTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbOpenLivePnlTotal)}</strong></span>
-            <span style="color:var(--text-sub);">DB expected delta: <strong style="color:${dbExpectedDeltaTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbExpectedDeltaTotal)}</strong></span>
-            <span style="color:${Math.abs(unexplainedResidual)>0.05?'var(--red)':'var(--text-sub)'};">Residual: <strong>${fmtPnL(unexplainedResidual)}</strong></span>
+        <div class="reconcile-bar" style="margin-bottom:14px;">
+            <div class="reconcile-item"><span class="reconcile-label">CEX \u0394 (UTC)</span><span class="reconcile-value" style="color:${cexDeltaTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(cexDeltaTotal)}</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">DB Closed</span><span class="reconcile-value" style="color:${dbClosedTodayTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbClosedTodayTotal)}</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">Drift</span><span class="reconcile-value" style="color:${driftColor}">${fmtPnL(cexVsDbDelta)}</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">Open Live</span><span class="reconcile-value" style="color:${dbOpenLivePnlTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbOpenLivePnlTotal)}</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">Expected \u0394</span><span class="reconcile-value" style="color:${dbExpectedDeltaTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbExpectedDeltaTotal)}</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">Residual</span><span class="reconcile-value" style="color:${Math.abs(unexplainedResidual)>0.05?'var(--red)':'var(--text-sub)'}">${fmtPnL(unexplainedResidual)}</span></div>
         </div>
     `;
 
     let html = `
-        <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:20px;">
-            <div style="color:var(--text-sub);font-size:0.85rem;font-family:var(--font-mono);">
-                Snapshot age: <span style="font-weight:600;color:var(--text);">${snapshotAgeText}</span>
-                <span style="margin-left:12px;">CEX window start: <span style="font-weight:600;color:var(--text);">${cexBaselineText}</span></span>
-                <span style="margin-left:12px;">Balances: <span style="font-weight:600;color:var(--text);">${balancesAgeText}</span></span>
-                <span style="margin-left:12px;">Positions: <span style="font-weight:600;color:var(--text);">${positionsAgeText}</span></span>
-                <span style="margin-left:12px;">Fees: <span style="font-weight:600;color:var(--text);">${feesAgeText}</span></span>
-            </div>
-            <div style="color:var(--text-sub);font-size:0.85rem;font-family:var(--font-mono);margin-left:auto;">
-                Updating in: <span id="poll-countdown" style="font-weight:600;color:var(--text);">10s</span>
-            </div>
+        <div class="cex-meta" style="margin-bottom:16px;padding:10px 0;border-bottom:1px solid var(--border-dim);">
+            <span>Snapshot: <strong>${snapshotAgeText}</strong></span>
+            <span>Balances: <strong>${balancesAgeText}</strong></span>
+            <span>Positions: <strong>${positionsAgeText}</strong></span>
+            <span>Fees: <strong>${feesAgeText}</strong></span>
+            <span>Update: <strong id="poll-countdown">10s</strong></span>
         </div>
         ${reconcileBar}
         ${staleBanner}
-        <div class="cex-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px;">
+        <div class="cex-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;">
     `;
     
     for (const exA of exNames) {
@@ -649,66 +641,60 @@ function renderCexTab(profile, exchangesData) {
         }
         
         const isEnabled = !disabledMap[exA];
+        const dailyPnlColor = dailyPnl > 0 ? 'var(--green)' : dailyPnl < 0 ? 'var(--red)' : 'var(--text-sub)';
         
         html += `
-            <div class="stat-card" style="display:flex;flex-direction:column; background:var(--bg-panel); border:1px solid var(--border); border-radius:12px; padding:20px;">
-                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
-                    <div style="display:flex;flex-direction:column;gap:4px;">
-                        <div style="display:flex;align-items:center;gap:10px;">
-                            <div style="width:10px;height:10px;border-radius:50%;background:${isEnabled?'var(--green)':'var(--text-sub)'}"></div>
-                            <h3 style="margin:0;font-size:1.2rem;font-weight:600;text-transform:uppercase;">${exA}</h3>
+            <div class="cex-card">
+                <div class="cex-card-header">
+                    <div>
+                        <div class="cex-card-title">
+                            <div class="cex-status-dot ${isEnabled ? 'on' : 'off'}"></div>
+                            <h3 style="margin:0;font-size:1.1rem;font-weight:700;text-transform:uppercase;">${exA}</h3>
                         </div>
-                        <div style="font-size:0.85rem;font-family:var(--font-mono);margin-left:20px;">
-                            <span style="color:var(--text-sub);">Today: </span>
-                            <span style="color:${dailyPnl > 0 ? 'var(--green)' : dailyPnl < 0 ? 'var(--red)' : 'var(--text-sub)'};">
-                                ${dailyPnl > 0 ? '+' : ''}$${dailyPnl.toFixed(2)} <span style="font-size:0.75rem;">(${dailyPct > 0 ? '+' : ''}${dailyPct.toFixed(2)}%)</span>
-                            </span>
-                            <div style="color:var(--text-sub);font-size:0.75rem;margin-top:2px;">
-                                CEX Δ: <span style="color:${cexBalanceDelta > 0 ? 'var(--green)' : cexBalanceDelta < 0 ? 'var(--red)' : 'var(--text-sub)'};">${fmtPnL(cexBalanceDelta)}</span>
-                            </div>
-                            <div style="color:var(--text-sub);font-size:0.75rem;margin-top:2px;">
-                                Residual: <span style="color:${Math.abs(residualEx) > 0.05 ? 'var(--red)' : 'var(--text-sub)'};">${fmtPnL(residualEx)}</span>
-                            </div>
+                        <div style="font-size:.82rem;font-family:var(--font-mono);margin-top:4px;margin-left:18px;">
+                            <span style="color:${dailyPnlColor}">${dailyPnl > 0 ? '+' : ''}$${dailyPnl.toFixed(2)} <span style="font-size:.72rem;opacity:.7">(${dailyPct > 0 ? '+' : ''}${dailyPct.toFixed(2)}%)</span></span>
                         </div>
                     </div>
-                    <div style="text-align:right;">
-                        <span style="font-size:0.75rem;color:var(--text-sub);display:block;text-transform:uppercase;letter-spacing:0.5px;">Wallet</span>
-                        <span style="font-family:var(--font-mono);font-weight:600;color:${bal > 0 ? 'var(--green)' : 'var(--text-sub)'};">$${bal.toFixed(2)}</span>
-                        <span style="font-size:0.75rem;color:var(--text-sub);display:block;text-transform:uppercase;letter-spacing:0.5px;margin-top:6px;">Available</span>
-                        <span style="font-family:var(--font-mono);font-weight:600;color:${marginBal > 0 ? 'var(--green)' : 'var(--text-sub)'};">$${marginBal.toFixed(2)}</span>
+                    <div class="cex-wallet">
+                        <div class="cex-wallet-label">Wallet</div>
+                        <div class="cex-wallet-value" style="color:${bal > 0 ? 'var(--green)' : 'var(--text-sub)'}">$${bal.toFixed(2)}</div>
+                        <div class="cex-wallet-label" style="margin-top:4px;">Available</div>
+                        <div class="cex-wallet-value" style="color:${marginBal > 0 ? 'var(--green)' : 'var(--text-sub)'}">$${marginBal.toFixed(2)}</div>
                     </div>
                 </div>
-                <div style="display:flex;gap:16px;margin-bottom:12px;padding:8px 0;border-bottom:1px solid var(--border-dim);">
-                    <span style="font-size:0.8rem;color:var(--text-sub);">Tickers: <strong style="color:var(--text);">${maxTickers}+</strong></span>
-                    <span style="font-size:0.8rem;color:var(--text-sub);">Fee: <strong style="color:var(--text);">${(fee * 100).toFixed(3)}%</strong></span>
+                <div class="cex-meta">
+                    <span>Tickers: <strong>${maxTickers}+</strong></span>
+                    <span>Fee: <strong>${(fee * 100).toFixed(3)}%</strong></span>
+                    <span>CEX \u0394: <strong style="color:${cexBalanceDelta > 0 ? 'var(--green)' : cexBalanceDelta < 0 ? 'var(--red)' : 'var(--text-sub)'}">${fmtPnL(cexBalanceDelta)}</strong></span>
+                    <span>Res: <strong style="color:${Math.abs(residualEx) > 0.05 ? 'var(--red)' : 'var(--text-sub)'}">${fmtPnL(residualEx)}</strong></span>
                 </div>
                 
-                <div style="margin-bottom:16px;">
-                    ${pairsList || '<div class="text-sub" style="font-size:0.9rem;padding:12px 0;">No matching pairs found.</div>'}
+                <div style="margin-bottom:12px;">
+                    ${pairsList || '<div class="text-sub" style="font-size:.85rem;padding:8px 0;">No matching pairs.</div>'}
                 </div>
 
-                <div style="flex:1;margin-bottom:20px;">
-                    <div style="font-size:0.8rem;color:var(--text-sub);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">Active Positions</div>
-                    ${positions.length === 0 ? '<div class="text-sub" style="font-size:0.85rem;">No active positions</div>' : positions.map(pos => {
+                <div style="flex:1;margin-bottom:16px;">
+                    <div style="font-size:.72rem;color:var(--text-sub);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em;font-weight:600;">Active Positions</div>
+                    ${positions.length === 0 ? '<div class="text-sub" style="font-size:.82rem;">No active positions</div>' : positions.map(pos => {
                         const isLong = pos.size > 0;
                         const pnlColor = pos.unrealized_pnl >= 0 ? 'var(--green)' : 'var(--red)';
-                        const dirStr = isLong ? '<span style="color:var(--green)">[L]</span>' : '<span style="color:var(--red)">[S]</span>';
-                        return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:0.85rem;margin-bottom:6px;font-family:var(--font-mono);">
-                            <span>${dirStr} ${pos.symbol} <span style="color:var(--text-sub)">${Math.abs(pos.size)}</span></span>
+                        const dirBadge = isLong ? '<span class="badge badge-long">L</span>' : '<span class="badge badge-short">S</span>';
+                        return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:.82rem;margin-bottom:4px;font-family:var(--font-mono);">
+                            <span>${dirBadge} ${pos.symbol} <span style="color:var(--text-sub)">${Math.abs(pos.size)}</span></span>
                             <span style="display:flex;align-items:center;gap:6px;">
                                 <span style="color:${pnlColor}">${pos.unrealized_pnl >= 0 ? '+' : ''}$${pos.unrealized_pnl.toFixed(4)}</span>
-                                <button onclick="closeActivePosition('${exA}', '${pos.symbol}', ${pos.size})" style="background:none;border:none;color:var(--text-sub);cursor:pointer;font-size:1.1rem;line-height:1;padding:0;" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--text-sub)'" title="Market Close Position">×</button>
+                                <button onclick="closeActivePosition('${exA}', '${pos.symbol}', ${pos.size})" style="background:none;border:none;color:var(--text-sub);cursor:pointer;font-size:1rem;line-height:1;padding:0;transition:color .15s;" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--text-sub)'" title="Market Close">\u00d7</button>
                             </span>
                         </div>`;
                     }).join('')}
                 </div>
                 
-                <label style="display:flex;align-items:center;gap:12px;cursor:pointer;padding-top:16px;border-top:1px solid var(--border-dim); user-select:none;">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding-top:14px;border-top:1px solid var(--border-dim);user-select:none;">
                     <input type="checkbox" 
                            ${isEnabled ? 'checked' : ''} 
                            onchange="toggleExchange('${profile.id}', '${exA}', this)"
-                           style="width: 18px; height: 18px; cursor:pointer;">
-                    <span style="font-weight:500; font-size:0.95rem;">${isEnabled ? 'Trading Enabled' : 'Trading Disabled'}</span>
+                           style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent);">
+                    <span style="font-weight:500;font-size:.88rem;">${isEnabled ? 'Trading Enabled' : 'Trading Disabled'}</span>
                 </label>
             </div>
         `;
@@ -1034,7 +1020,59 @@ function renderDashboardHTML(profileId) {
     `;
 }
 
+// ─── KPI Cards helper (extracted for reuse) ───────────────────────────────────
+function renderKPICards(pid, stats, exchanges) {
+    const kpiEl = document.getElementById(`dash-kpi-${pid}`);
+    if (!kpiEl) return;
+    const totalPnl = stats.total_pnl || 0;
+    const totalTrades = stats.total_trades || 0;
+    const wins = stats.wins || 0;
+    const winRate = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(1) : '0.0';
+    const avgPnl = stats.avg_pnl || 0;
+    const avgDuration = stats.avg_duration || 0;
+    const realBalances = (exchanges && exchanges.balances) || {};
+    const totalBalance = Object.values(realBalances).reduce((s, v) => s + v, 0);
+
+    const kpis = [
+        ['💰', 'Total Balance', `$${totalBalance.toFixed(2)}`, 'var(--text)'],
+        ['📈', 'Total PnL', fmtPnL(totalPnl), totalPnl >= 0 ? 'var(--green)' : 'var(--red)'],
+        ['📊', 'Trades', totalTrades, 'var(--text)'],
+        ['🎯', 'Win Rate', `${winRate}%`, wins / (totalTrades || 1) >= 0.5 ? 'var(--green)' : 'var(--red)'],
+        ['⚡', 'Avg PnL', fmtPnL(avgPnl), avgPnl >= 0 ? 'var(--green)' : 'var(--red)'],
+        ['⏱', 'Avg Duration', typeof fmtDuration === 'function' ? fmtDuration(avgDuration) : avgDuration + 'ms', 'var(--text)'],
+    ];
+    kpiEl.innerHTML = kpis.map(([icon, label, value, color]) => `
+        <div class="kpi-card">
+            <div class="kpi-label">${icon} ${label}</div>
+            <div class="kpi-value" style="color:${color}">${value}</div>
+        </div>
+    `).join('');
+}
+
+// ─── Top tables helper (extracted for reuse) ──────────────────────────────────
+function renderTopTables(pid, stats) {
+    const ttEl = document.getElementById(`dash-toptokens-${pid}`);
+    if (ttEl && stats.top_tokens && stats.top_tokens.length > 0) {
+        ttEl.innerHTML = stats.top_tokens.map(t => `<tr><td><strong>${t.token}</strong></td><td style="text-align:right;color:${(t.pnl||0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl||0)}</td></tr>`).join('');
+    } else if (ttEl) {
+        ttEl.innerHTML = '<tr><td colspan="2" style="text-align:center;color:var(--text-sub)">No data</td></tr>';
+    }
+    const tpEl = document.getElementById(`dash-toppairs-${pid}`);
+    if (tpEl && stats.top_exchange_pairs && stats.top_exchange_pairs.length > 0) {
+        tpEl.innerHTML = stats.top_exchange_pairs.map(p => `<tr><td><strong>${p.pair}</strong></td><td style="text-align:right;color:${(p.pnl||0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(p.pnl||0)}</td></tr>`).join('');
+    } else if (tpEl) {
+        tpEl.innerHTML = '<tr><td colspan="2" style="text-align:center;color:var(--text-sub)">No data</td></tr>';
+    }
+}
+
 // ─── Per-profile dashboard chart rendering ────────────────────────────────────
+
+// Hash stats to detect actual data changes and skip unnecessary chart updates
+let _lastStatsHash = null;
+function statsHash(stats) {
+    if (!stats) return '';
+    return `${stats.total_trades}_${stats.total_pnl}_${stats.wins}_${stats.losses}_${(stats.equity_curve||[]).length}`;
+}
 
 function renderDashboardCharts(profileId, stats, exchanges) {
     const pid = profileId;
@@ -1042,57 +1080,30 @@ function renderDashboardCharts(profileId, stats, exchanges) {
     // Guard: Chart.js must be loaded
     if (typeof Chart === 'undefined') return;
 
-    // Ensure old instances destroyed (safety net)
+    // Skip update if stats haven't changed (prevents chart jank on poll)
+    const hash = statsHash(stats);
+    if (_lastStatsHash === hash && chartInstances[pid] && Object.keys(chartInstances[pid]).length > 0) {
+        // Stats unchanged — just update KPI text, skip expensive chart work
+        renderKPICards(pid, stats, exchanges);
+        renderTopTables(pid, stats);
+        return;
+    }
+    _lastStatsHash = hash;
+
+    // Only destroy if instances exist — avoids unnecessary GC pressure
     if (chartInstances[pid]) {
         Object.values(chartInstances[pid]).forEach(c => { try { c.destroy(); } catch {} });
     }
     chartInstances[pid] = {};
 
     // KPI cards
-    const kpiEl = document.getElementById(`dash-kpi-${pid}`);
-    if (kpiEl) {
-        const totalPnl = stats.total_pnl || 0;
-        const totalTrades = stats.total_trades || 0;
-        const wins = stats.wins || 0;
-        const winRate = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(1) : '0.0';
-        const avgPnl = stats.avg_pnl || 0;
-        const avgDuration = stats.avg_duration || 0;
-        // Calculate total balance from real exchange data
-        const realBalances = (exchanges && exchanges.balances) || {};
-        const totalBalance = Object.values(realBalances).reduce((s, v) => s + v, 0);
-        kpiEl.innerHTML = [
-            ['Total Balance', `$${totalBalance.toFixed(2)}`, 'var(--text)'],
-            ['Total PnL', fmtPnL(totalPnl), totalPnl >= 0 ? 'var(--green)' : 'var(--red)'],
-            ['Trades', totalTrades, 'var(--text)'],
-            ['Win Rate', `${winRate}%`, wins / (totalTrades || 1) >= 0.5 ? 'var(--green)' : 'var(--red)'],
-            ['Avg PnL', fmtPnL(avgPnl), avgPnl >= 0 ? 'var(--green)' : 'var(--red)'],
-            ['Avg Duration', typeof fmtDuration === 'function' ? fmtDuration(avgDuration) : avgDuration + 'ms', 'var(--text)'],
-        ].map(([label, value, color]) => `
-            <div style="background:var(--bg-row-alt);border:1px solid var(--border-dim);border-radius:10px;padding:14px 16px;">
-                <div style="font-size:.75rem;color:var(--text-sub);margin-bottom:4px;">${label}</div>
-                <div style="font-size:1.2rem;font-weight:700;color:${color};">${value}</div>
-            </div>
-        `).join('');
-    }
+    renderKPICards(pid, stats, exchanges);
 
-    // Top Tokens array
-    const ttEl = document.getElementById(`dash-toptokens-${pid}`);
-    if (ttEl && stats.top_tokens && stats.top_tokens.length > 0) {
-        ttEl.innerHTML = stats.top_tokens.map(t => `<tr><td><strong>${t.token}</strong></td><td style="text-align:right;color:${(t.pnl||0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl||0)}</td></tr>`).join('');
-    } else if (ttEl) {
-        ttEl.innerHTML = '<tr><td colspan="2" style="text-align:center;color:var(--text-sub)">No data</td></tr>';
-    }
-
-    // Top Exchange Pairs array
-    const tpEl = document.getElementById(`dash-toppairs-${pid}`);
-    if (tpEl && stats.top_exchange_pairs && stats.top_exchange_pairs.length > 0) {
-        tpEl.innerHTML = stats.top_exchange_pairs.map(p => `<tr><td><strong>${p.pair}</strong></td><td style="text-align:right;color:${(p.pnl||0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(p.pnl||0)}</td></tr>`).join('');
-    } else if (tpEl) {
-        tpEl.innerHTML = '<tr><td colspan="2" style="text-align:center;color:var(--text-sub)">No data</td></tr>';
-    }
+    // Top Tokens & Exchange Pairs
+    renderTopTables(pid, stats);
 
     Chart.defaults.color = '#94a3b8';
-    Chart.defaults.borderColor = '#334155';
+    Chart.defaults.borderColor = '#1c2235';
 
     // Balance Analysis Chart
     const balCtx = document.getElementById(`dash-balance-${pid}`);
