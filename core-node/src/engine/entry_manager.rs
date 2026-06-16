@@ -362,21 +362,6 @@ pub async fn process_entries(
             }
         }
 
-        // ── PRICE SANITY CHECK (execution-time) ────────────────────────────────
-        // Reject if entry prices differ >50% between exchanges.
-        // Catches pairs where spreads.rs passed but prices diverged by execution time
-        // (e.g. HUSDT: KuCoin 0.020 vs Bybit 0.218 = different contract specs).
-        if limit_price_a > 0.0 && limit_price_b > 0.0 {
-            let price_ratio = limit_price_a / limit_price_b.max(1e-15);
-            if price_ratio > 1.5 || price_ratio < 0.667 {
-                error!(
-                    "[real] 🚫 PRICE ANOMALY {}: A={:.6} B={:.6} ratio={:.3} — разные контракты? Пропускаем.",
-                    pair, limit_price_a, limit_price_b, price_ratio
-                );
-                e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 60_000);
-                continue;
-            }
-        }
 
         // ── ALL CHECKS PASSED — log FIRE and execute ─────────────────────────
         info!(

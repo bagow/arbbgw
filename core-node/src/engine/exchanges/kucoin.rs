@@ -135,9 +135,11 @@ impl ExchangeConnector for KucoinConnector {
             for _wait in 0..25 {  // 25 × 20ms = 500ms
                 if let Some(state) = cache.get(oid_str) {
                     if state.status == "done" || state.filled_size > 0.0 {
-                        let mult = if multiplier > 0.0 { multiplier } else { 1.0 };
-                        inline_price = if state.filled_size > 0.0 && mult > 0.0 {
-                            state.deal_value / (state.filled_size * mult)
+                        // Price = dealValue / dealSize = contract price (matches WS bestBidPrice).
+                        // Do NOT divide by multiplier — that gives per-unit price which
+                        // differs from WS prices and causes phantom 900%+ spreads.
+                        inline_price = if state.filled_size > 0.0 {
+                            state.deal_value / state.filled_size
                         } else { 0.0 };
                         inline_fee = state.fee.abs();
                         tracing::info!(
@@ -506,11 +508,13 @@ impl ExchangeConnector for KucoinConnector {
             break;
         }
 
-        // Note: KuCoin multiplier is dynamically passed to correctly compute price
+        // Price = dealValue / dealSize = contract price (matches WS bestBidPrice).
+        // Do NOT divide by multiplier — that gives per-unit price which
+        // differs from WS prices and causes phantom 900%+ spreads.
         let mult = if multiplier > 0.0 { multiplier } else { 1.0 };
 
-        let price = if final_size > 0.0 && mult > 0.0 {
-            final_val / (final_size * mult)
+        let price = if final_size > 0.0 {
+            final_val / final_size
         } else {
             0.0
         };
