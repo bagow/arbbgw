@@ -163,4 +163,3 @@ pub fn get_exchange_fee(
         .map(|v| *v)
         .unwrap_or(default_fee)
 }
-}
