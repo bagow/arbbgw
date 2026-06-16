@@ -766,6 +766,13 @@ pub async fn run_cycle(
 
         let now = now_ms();
 
+        // ── EXCHANGE BAN GUARD ──
+        if crate::engine::real::is_exchange_banned(&exa)
+            || crate::engine::real::is_exchange_banned(&exb)
+        {
+            continue;
+        }
+
         // ── BALANCE LOW GUARD (zero-latency) ─────────────────────────────────
         if !has_sufficient_margin(&exa, actual_vol_a, settings.leverage as f64, &e_ctx) {
             let now_m = now_ms() as i64;

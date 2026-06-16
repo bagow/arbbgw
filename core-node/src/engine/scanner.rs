@@ -81,6 +81,14 @@ pub fn generate_signals(
             continue;
         }
 
+        // ── EXCHANGE BAN GUARD ──
+        // Skip if either exchange is globally banned (IP ban, rate limit detected by connector)
+        if crate::engine::real::is_exchange_banned(&row.exchange_a)
+            || crate::engine::real::is_exchange_banned(&row.exchange_b)
+        {
+            continue;
+        }
+
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
         let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
         let entry_b = if is_a_higher { row.ask_b } else { row.bid_b };

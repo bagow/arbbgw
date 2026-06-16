@@ -53,18 +53,13 @@ fn detect_ban_from_response(body: &Value) {
         // Try to parse "banned until TIMESTAMP" from the message
         if let Some(pos) = msg.find("banned until ") {
             let after = &msg[pos + 13..];
-            // Extract digits
             let ts_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(ban_ts) = ts_str.parse::<i64>() {
                 let old = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
                 if ban_ts > old {
                     BINANCE_BANNED_UNTIL_MS.store(ban_ts, Ordering::Relaxed);
-                    let now = now_ms() as i64;
-                    let dur_s = (ban_ts - now) / 1000;
-                    tracing::error!(
-                        "[binance] 🔴 IP BAN DETECTED! Banned for {}s (until {}). Auto-backing off.",
-                        dur_s, ban_ts
-                    );
+                    // Register in global ban registry
+                    crate::engine::real::ban_exchange("binance", ban_ts);
                 }
             }
         } else {
@@ -73,9 +68,8 @@ fn detect_ban_from_response(body: &Value) {
             let old = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
             if cooldown > old {
                 BINANCE_BANNED_UNTIL_MS.store(cooldown, Ordering::Relaxed);
-                tracing::error!(
-                    "[binance] 🔴 RATE LIMIT -1003 without ban timestamp. Auto-cooldown 120s."
-                );
+                // Register in global ban registry
+                crate::engine::real::ban_exchange("binance", cooldown);
             }
         }
     }

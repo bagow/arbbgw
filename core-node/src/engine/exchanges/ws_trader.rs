@@ -33,6 +33,9 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>) {
                 // 418 = IP banned by Binance. Back off aggressively.
                 if err_str.contains("418") {
                     tracing::error!("[binance_ws] IP BANNED (418). Backing off {}s...", backoff_secs);
+                    // Register ban globally so scanner/cycle skip Binance immediately
+                    let ban_until = crate::engine::real::now_ms() + (backoff_secs as i64 * 1000);
+                    crate::engine::real::ban_exchange("binance", ban_until);
                     tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(300); // max 5 min
                 } else {

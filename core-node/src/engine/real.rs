@@ -98,6 +98,49 @@ pub fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+// ─── GLOBAL EXCHANGE BAN REGISTRY ─────────────────────────────────────────────
+// Connectors write bans here (via ban_exchange). Scanner/cycle read (via is_exchange_banned).
+// Bans auto-expire at the specified timestamp.
+use std::sync::OnceLock;
+use dashmap::DashMap;
+
+static EXCHANGE_BANS: OnceLock<DashMap<String, i64>> = OnceLock::new();
+
+fn ban_map() -> &'static DashMap<String, i64> {
+    EXCHANGE_BANS.get_or_init(|| DashMap::new())
+}
+
+/// Mark an exchange as banned until `until_ms` (Unix timestamp in ms).
+/// Called by connectors when they detect IP bans, rate limits, etc.
+pub fn ban_exchange(exchange: &str, until_ms: i64) {
+    let map = ban_map();
+    let current = map.get(exchange).map(|v| *v).unwrap_or(0);
+    if until_ms > current {
+        map.insert(exchange.to_lowercase(), until_ms);
+        let dur_s = (until_ms - now_ms()) / 1000;
+        tracing::error!(
+            "[ban_registry] 🔴 {} ЗАБАНЕН на {}с (до {}). Торговля приостановлена.",
+            exchange, dur_s.max(0), until_ms
+        );
+    }
+}
+
+/// Check if an exchange is currently banned. Returns true if banned.
+pub fn is_exchange_banned(exchange: &str) -> bool {
+    let map = ban_map();
+    if let Some(entry) = map.get(&exchange.to_lowercase()) {
+        let until = *entry;
+        if until > 0 && now_ms() < until {
+            return true;
+        }
+        // Ban expired — remove it
+        drop(entry);
+        map.remove(&exchange.to_lowercase());
+        tracing::info!("[ban_registry] ✅ {} бан истёк. Торговля возобновлена.", exchange);
+    }
+    false
+}
+
 pub fn normalize_symbol(sym: &str) -> String {
     let mut s = sym.to_uppercase();
     s = s.replace(['-', '_', '/'], "");
