@@ -195,6 +195,20 @@ async fn main() -> Result<()> {
         real_settings_cache.clone(),
     );
 
+    // ── Pre-init KuCoin Private WS so execution reports arrive for the first trade ──
+    // Without this, first IOC order's fill is missed because WS connects AFTER the order.
+    if exchange_keys.supports("kucoin") {
+        info!("[startup] Pre-initializing KuCoin Private WS...");
+        engine::exchanges::ws_kucoin_private::ensure_private_ws(
+            &exchange_keys.kucoin_key,
+            &exchange_keys.kucoin_secret,
+            &exchange_keys.kucoin_passphrase,
+        ).await;
+        // Give WS time to connect and subscribe before first trade
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        info!("[startup] KuCoin Private WS ready.");
+    }
+
     // ── Spawn collectors ─────────────────────────────────────────────────────
     {
         let p = prices.clone();

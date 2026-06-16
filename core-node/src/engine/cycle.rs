@@ -1090,15 +1090,15 @@ pub async fn run_cycle(
         if fill_a > 0.0 { actual_vol_phys_a = Some(qty_a); }
         if fill_b > 0.0 { actual_vol_phys_b = Some(qty_b); }
 
-        // IOC FAST PATH: IOC orders fill instantly or expire.
-        // If place_order returned no fill, limit retries to 2 quick checks (not 10+8 slow).
-        // This avoids 40+ seconds of pointless REST polling.
+        // IOC verify: Even if inline fill returned 0 (e.g., WS lag), give enough
+        // retries for execution report to arrive. Don't skip slow path — a filled
+        // IOC order that we miss leads to orphaned positions and asymmetric losses.
         let ioc_no_fill_a = use_ioc && fill_a <= 0.0;
         let ioc_no_fill_b = use_ioc && fill_b <= 0.0;
-        let max_retries_a = if ioc_no_fill_a { 2_i64 } else { ts.fill_verify_retries };
-        let max_retries_b = if ioc_no_fill_b { 2_i64 } else { ts.fill_verify_retries };
-        let skip_slow_a = ioc_no_fill_a; // no extended wait for IOC
-        let skip_slow_b = ioc_no_fill_b;
+        let max_retries_a = if ioc_no_fill_a { 5_i64 } else { ts.fill_verify_retries };
+        let max_retries_b = if ioc_no_fill_b { 5_i64 } else { ts.fill_verify_retries };
+        let skip_slow_a = false; // Never skip slow verify — orphaned positions are worse than latency
+        let skip_slow_b = false;
 
         // 3. Parallel verification loops (if needed)
         let verify_a_fut = async {

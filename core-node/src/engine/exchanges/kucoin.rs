@@ -126,8 +126,31 @@ impl ExchangeConnector for KucoinConnector {
         }
 
         let order_id = v["data"]["orderId"].as_str().map(|s| s.to_string());
-        if order_id.is_some() {
-            Ok((order_id, 0.0, 0.0))
+        if let Some(ref oid_str) = order_id {
+            // Wait up to 500ms for WS execution report (like Bybit).
+            // Without this, KuCoin returns (orderId, 0.0, 0.0) immediately,
+            // triggering IOC fast-path (2 retries) → ASYMMETRIC_CLOSE.
+            let cache = super::ws_kucoin_private::get_order_cache();
+            let mut inline_price = 0.0;
+            let mut inline_fee = 0.0;
+            for _wait in 0..25 {  // 25 × 20ms = 500ms
+                if let Some(state) = cache.get(oid_str) {
+                    if state.status == "done" || state.filled_size > 0.0 {
+                        let mult = if multiplier > 0.0 { multiplier } else { 1.0 };
+                        inline_price = if state.filled_size > 0.0 && mult > 0.0 {
+                            state.deal_value / (state.filled_size * mult)
+                        } else { 0.0 };
+                        inline_fee = state.fee.abs();
+                        tracing::info!(
+                            "[kucoin] ⚡ Inline fill {} price={:.6} fee={:.6} size={:.1}",
+                            pair, inline_price, inline_fee, state.filled_size
+                        );
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Ok((order_id, inline_price, inline_fee))
         } else {
             Err("KuCoin failed to return orderId".to_string())
         }
