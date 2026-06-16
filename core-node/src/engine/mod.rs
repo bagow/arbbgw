@@ -8,6 +8,7 @@ pub mod hft_cycle;
 pub mod hft_scanner;
 pub mod real;
 pub mod scanner;
+pub mod scanner_common;
 pub mod pnl;
 pub mod risk_manager;
 pub mod exit_manager;

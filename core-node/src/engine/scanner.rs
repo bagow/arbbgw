@@ -193,53 +193,10 @@ pub fn generate_signals(
             .map(|v| *v)
             .unwrap_or(0.000001);
 
-        let lmap = &e_ctx.launch_times;
         let min_age_secs = ts.min_listing_age_days * 24 * 3600;
-
-        let mut oldest_elapsed = -1i64;
-        let mut missing_date_for_legs = false;
-
-        // 1. Check the active legs
-        for ex in [&row.exchange_a, &row.exchange_b] {
-            let age = lmap
-                .get(&format!("{}:{}", ex, row.pair))
-                .map(|r| *r)
-                .unwrap_or(0);
-            if age > 0 {
-                let el = now_s - age;
-                if el > oldest_elapsed {
-                    oldest_elapsed = el;
-                }
-            } else {
-                missing_date_for_legs = true;
-            }
-        }
-
-        // 2. Check all other potential exchanges to find the absolute oldest listing
-        for ex in ["binance", "bybit", "gate", "kucoin", "bitget", "bingx", "bitmex", "ascendex", "xt", "toobit"] {
-            if ex == row.exchange_a || ex == row.exchange_b {
-                continue;
-            }
-            let age = lmap
-                .get(&format!("{}:{}", ex, row.pair))
-                .map(|r| *r)
-                .unwrap_or(0);
-            if age > 0 {
-                let el = now_s - age;
-                if el > oldest_elapsed {
-                    oldest_elapsed = el;
-                }
-            }
-        }
-
-        // If active spread legs failed to report a launch time, fallback to i64::MAX to prevent false rejections
-        let final_oldest_elapsed = if missing_date_for_legs {
-            i64::MAX
-        } else if oldest_elapsed == -1 {
-            i64::MAX
-        } else {
-            oldest_elapsed
-        };
+        let final_oldest_elapsed = crate::engine::scanner_common::check_listing_age(
+            &row.exchange_a, &row.exchange_b, &row.pair, e_ctx, now_s,
+        );
 
         if final_oldest_elapsed < min_age_secs {
             if worth_diag {
@@ -387,62 +344,25 @@ pub fn generate_signals(
             }
 
             // ENSURE PERFECT PHYSICAL BALANCE (0.0% COIN DUST)
-            let big_step = mult_a.max(mult_b);
-            let target_phys = profile.trade_volume / entry_a.max(1e-12);
-            let mut base_steps = (target_phys / big_step).round();
-            if base_steps < 1.0 {
-                base_steps = 1.0;
-            }
-
-            let mut phys_qty = 0.0;
-            let mut found_match = false;
-            // Iterate gracefully to find the nearest perfect multiple for BOTH exchanges
-            for delta in 0..=5 {
-                for dir in [1.0, -1.0] {
-                    let test_steps = base_steps + (delta as f64) * dir;
-                    if test_steps < 1.0 {
-                        continue;
+            let lot = match crate::engine::scanner_common::compute_lot_size(
+                profile.trade_volume, entry_a, mult_a, mult_b, ts.vol_tolerance_pct,
+            ) {
+                Some(l) => l,
+                None => {
+                    if let Some(p) = &diag_prefix {
+                        tracing::info!("{} -> physically impossible to balance lot sizes", p);
                     }
-                    let test_phys = test_steps * big_step;
-
-                    let c_a = (test_phys / mult_a).round();
-                    let c_b = (test_phys / mult_b).round();
-
-                    if (c_a * mult_a - test_phys).abs() < 1e-8
-                        && (c_b * mult_b - test_phys).abs() < 1e-8
-                    {
-                        phys_qty = test_phys;
-                        found_match = true;
-                        break;
-                    }
+                    continue;
                 }
-                if found_match {
-                    break;
-                }
-            }
+            };
 
-            if !found_match {
-                if let Some(p) = &diag_prefix {
-                    tracing::info!("{} -> physically impossible to balance lot sizes", p);
-                }
-                continue;
-            } // Physically impossible to balance lot sizes
-
-            let max_v = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
-
-            // Loop down scaling big_step until volumetric match fits inside the max_v limit
-            while phys_qty * entry_a > max_v && phys_qty > big_step {
-                phys_qty -= big_step;
-            }
-            if phys_qty <= 0.0 {
-                continue;
-            } // Couldn't fit
-
-            let contracts_a = (phys_qty / mult_a).round();
-            let contracts_b = (phys_qty / mult_b).round();
+            let phys_qty = lot.phys_qty;
+            let contracts_a = lot.contracts_a;
+            let contracts_b = lot.contracts_b;
 
             let actual_vol_a = phys_qty * entry_a;
             let actual_vol_b = phys_qty * entry_b;
+            let max_v = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
 
             if actual_vol_a > max_v {
                 if let Some(p) = &diag_prefix {
