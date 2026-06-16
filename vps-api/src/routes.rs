@@ -125,7 +125,15 @@ pub async fn handle_get_all_settings(State(state): State<AppState>) -> Response 
 }
 
 // ─── GET /api/logs/core-node ───
-pub async fn handle_get_logs(State(_state): State<AppState>, headers: HeaderMap) -> Response {
+#[derive(serde::Deserialize)]
+pub struct LogsQuery {
+    mode: Option<String>,
+}
+pub async fn handle_get_logs(
+    State(_state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<LogsQuery>,
+) -> Response {
     if check_basic_auth(&headers, &_state).is_none() {
         return (
             StatusCode::UNAUTHORIZED,
@@ -133,19 +141,33 @@ pub async fn handle_get_logs(State(_state): State<AppState>, headers: HeaderMap)
         )
             .into_response();
     }
-    match tokio::process::Command::new("sudo")
-        .args([
-            "journalctl",
-            "-u",
-            "core-node",
-            "-n",
-            "3000",
-            "-r",
-            "--no-pager",
-        ])
-        .output()
-        .await
-    {
+    let mode = query.mode.unwrap_or_default();
+    let result = if mode == "trade" {
+        // Trade mode: fetch more lines but grep server-side for trade-relevant logs only.
+        // This gives much deeper history since scanner noise is excluded.
+        tokio::process::Command::new("bash")
+            .args([
+                "-c",
+                "sudo journalctl -u core-node -n 50000 -r --no-pager | grep -E '\\[real\\]|\\[settings\\]|EXCHANGE_VERIFIED|SANITY|Closing|MANUAL_CLOSE|KILL-SWITCH|ASYMMETRIC' | head -500",
+            ])
+            .output()
+            .await
+    } else {
+        // Technical mode: raw logs, more lines
+        tokio::process::Command::new("sudo")
+            .args([
+                "journalctl",
+                "-u",
+                "core-node",
+                "-n",
+                "5000",
+                "-r",
+                "--no-pager",
+            ])
+            .output()
+            .await
+    };
+    match result {
         Ok(out) => {
             let mut s = String::from_utf8_lossy(&out.stdout).to_string();
             if s.trim().is_empty() {

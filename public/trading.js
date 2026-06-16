@@ -1472,9 +1472,8 @@ window.setLogView = function(mode) {
     window.logViewMode = mode;
     document.getElementById('btn-log-trade').classList.toggle('mt-nav-btn--active', mode === 'trade');
     document.getElementById('btn-log-tech').classList.toggle('mt-nav-btn--active', mode === 'tech');
-    if (window.lastFetchedLogs) {
-        window.renderLogsHTML(window.lastFetchedLogs);
-    }
+    // Re-fetch from server since mode affects server-side filtering
+    window.fetchLogs(false);
 };
 
 window.renderLogsHTML = function(text) {
@@ -1698,7 +1697,8 @@ window.fetchLogs = async function(isBackground = false) {
     
     try {
         const creds = localStorage.getItem('cex_auth') || '';
-        const res = await fetch(`${API_BASE}/api/logs/core-node`, {
+        const logMode = window.logViewMode || 'trade';
+        const res = await fetch(`${API_BASE}/api/logs/core-node?mode=${logMode}`, {
             headers: { 'Authorization': 'Basic ' + creds }
         });
         if (res.status === 401) throw new Error("Unauthorized");
