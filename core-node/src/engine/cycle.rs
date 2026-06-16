@@ -974,15 +974,19 @@ pub async fn run_cycle(
                         (pb - pa) / pa.max(1e-12) * 100.0
                     };
 
-                    if vwap_spread < break_even_pct {
+                    // VWAP threshold = max(break_even, min_entry_spread)
+                    // User's min_entry_spread setting always takes priority over calculated BE
+                    let vwap_threshold = break_even_pct.max(settings.min_entry_spread as f64);
+
+                    if vwap_spread < vwap_threshold {
                         tracing::warn!(
-                            "[real] 🛑 ABORT {}: VWAP spread {:.4}% < break-even {:.4}% (L1 spread={:.4}%). Structural loss.",
-                            pair, vwap_spread, break_even_pct, sig.spread
+                            "[real] 🛑 ABORT {}: VWAP spread {:.4}% < порог {:.4}% (L1={:.4}%, BE={:.4}%, min_spread={:.2}%)",
+                            pair, vwap_spread, vwap_threshold, sig.spread, break_even_pct, settings.min_entry_spread
                         );
                         e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 5_000);
                         continue;
                     }
-                    tracing::info!("[real] ✅ VWAP entry OK {}: VWAP spread={:.4}% > BE={:.4}%", pair, vwap_spread, break_even_pct);
+                    tracing::info!("[real] ✅ VWAP OK {}: {:.4}% > порог {:.4}%", pair, vwap_spread, vwap_threshold);
                 }
             }
         }
