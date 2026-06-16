@@ -18,7 +18,8 @@
 //! We measure price change per exchange over the last ~3 seconds using price_history,
 //! keyed by "exchange:PAIR". If asymmetry < hft_min_velocity_asymmetry_pct, skip.
 
-use crate::engine::real::{now_ms, now_secs, ExchangeKeys};
+use crate::engine::utils::{now_ms, now_secs, cooldown_active, get_exchange_fee};
+use crate::engine::real::ExchangeKeys;
 use crate::state::{EngineContext, PriceMap};
 use shared::{SpreadRow, TechnicalSettings, TradeSignal, TradingSettings};
 use std::collections::HashSet;
@@ -38,16 +39,6 @@ fn update_exchange_price_snapshot(e_ctx: &EngineContext, exchange: &str, pair: &
     if should_update {
         e_ctx.price_history.insert(key, (current_price, now));
     }
-}
-
-fn cooldown_active(marker: i64, now: i64, cooldown_ms: i64) -> bool {
-    if marker <= 0 {
-        return false;
-    }
-    if marker > now {
-        return true;
-    }
-    now - marker < cooldown_ms
 }
 
 /// HFT signal generator — scans for raw instantaneous spread opportunities.
@@ -110,6 +101,14 @@ pub fn generate_hft_signals(
         // Pair cooldown
         let cd_pair = pair_cd.get(&row.pair).map(|v| *v).unwrap_or(0);
         if cooldown_active(cd_pair, now, ts.pair_cooldown_ms) {
+            continue;
+        }
+
+        // ── EXCHANGE BAN GUARD ──
+        // (was missing in HFT scanner — bug found during audit)
+        if crate::engine::risk_manager::is_exchange_banned(&row.exchange_a)
+            || crate::engine::risk_manager::is_exchange_banned(&row.exchange_b)
+        {
             continue;
         }
 
@@ -229,9 +228,9 @@ pub fn generate_hft_signals(
         }
 
         let fee_a =
-            crate::engine::real::get_exchange_fee(&row.exchange_a, ts.default_fee_rate, e_ctx);
+            get_exchange_fee(&row.exchange_a, ts.default_fee_rate, e_ctx);
         let fee_b =
-            crate::engine::real::get_exchange_fee(&row.exchange_b, ts.default_fee_rate, e_ctx);
+            get_exchange_fee(&row.exchange_b, ts.default_fee_rate, e_ctx);
 
         // ── FILTER 1: SPIKE-ABOVE-NORM ───────────────────────────────────────
         // The spread must be a fresh deviation ABOVE its EMA structural baseline.

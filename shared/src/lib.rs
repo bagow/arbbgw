@@ -471,14 +471,3 @@ impl TechnicalSettings {
     }
 }
 
-// ─── Order result ─────────────────────────────────────────────────────────────
-
-/// Result of placing one order leg on an exchange.
-#[derive(Debug, Clone)]
-pub struct OrderResult {
-    pub order_id: String,
-    /// Actually filled quantity in USD (may differ from requested if partial fill).
-    pub filled_usd: f64,
-    /// "FILLED" | "PARTIAL" | "CANCELLED"
-    pub status: String,
-}

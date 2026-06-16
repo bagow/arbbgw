@@ -6,15 +6,7 @@ use tracing::{error, info};
 
 use shared::{SpreadRow, TechnicalSettings, TradingSettings};
 
-pub fn cooldown_active(marker: i64, now: i64, cooldown_ms: i64) -> bool {
-    if marker <= 0 {
-        return false;
-    }
-    if marker > now {
-        return true;
-    }
-    now - marker < cooldown_ms
-}
+pub use crate::engine::utils::cooldown_active;
 
 pub async fn run_cycle(
     signals: Vec<shared::TradeSignal>,

@@ -13,26 +13,12 @@ use tokio_rusqlite::Connection;
 use tracing::{error, info};
 
 use crate::engine::real::now_ms;
+use crate::engine::utils::{cooldown_active, is_position_missing_or_liquidated_error};
 use crate::engine::risk_manager::{has_sufficient_margin, mark_balance_low};
 use shared::{SpreadRow, TechnicalSettings, TradingSettings};
 use std::sync::atomic::AtomicI64;
 
 static LAST_HFT_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
-
-fn cooldown_active(marker: i64, now: i64, cooldown_ms: i64) -> bool {
-    if marker <= 0 { return false; }
-    if marker > now { return true; }
-    now - marker < cooldown_ms
-}
-
-fn is_position_missing_or_liquidated_error(err: &str) -> bool {
-    let s = err.to_lowercase();
-    s.contains("position not found")
-        || s.contains("no position")
-        || s.contains("position size is zero")
-        || s.contains("reduce-only")
-        || s.contains("liquidat")
-}
 
 pub async fn run_hft_cycle(
     signals: Vec<shared::TradeSignal>,

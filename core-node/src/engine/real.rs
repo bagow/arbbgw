@@ -89,88 +89,14 @@ impl ExchangeKeys {
     }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers (delegated to engine::utils) ─────────────────────────────────────
 
-pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
-
-
-pub fn normalize_symbol(sym: &str) -> String {
-    let mut s = sym.to_uppercase();
-    s = s.replace(['-', '_', '/'], "");
-    if s == "XBTUSDTM" {
-        return "BTCUSDT".to_string();
-    }
-    if s == "XBTUSDT" {
-        return "BTCUSDT".to_string();
-    }
-    if s.ends_with("USDTM") {
-        s = s.trim_end_matches('M').to_string();
-    }
-    s
-}
-
-pub fn symbols_match(a: &str, b: &str) -> bool {
-    normalize_symbol(a) == normalize_symbol(b)
-}
-
-/// Round price to the nearest valid tick size for the given exchange:pair.
-/// If tick size is unknown, rounds to 8 decimal places (safe fallback).
-pub fn round_to_tick(
-    price: f64,
-    exchange: &str,
-    pair: &str,
-    e_ctx: &crate::state::EngineContext,
-) -> f64 {
-    let key = format!("{}:{}", exchange, pair);
-    let tick = e_ctx.tick_sizes.get(&key).map(|v| *v).unwrap_or(0.0);
-    if tick > 0.0 {
-        (price / tick).round() * tick
-    } else {
-        // Fallback: round based on price magnitude
-        if price > 1000.0 {
-            (price * 100.0).round() / 100.0
-        }
-        // 0.01
-        else if price > 10.0 {
-            (price * 1000.0).round() / 1000.0
-        }
-        // 0.001
-        else if price > 0.1 {
-            (price * 10000.0).round() / 10000.0
-        }
-        // 0.0001
-        else {
-            (price * 100000.0).round() / 100000.0
-        } // 0.00001
-    }
-}
-
-/// Get cached taker fee rate for an exchange (as fraction, e.g. 0.0005 = 0.05%).
-pub fn get_exchange_fee(
-    exchange: &str,
-    default_fee: f64,
-    e_ctx: &crate::state::EngineContext,
-) -> f64 {
-    e_ctx
-        .fee_rates
-        .get(exchange)
-        .map(|v| *v)
-        .unwrap_or(default_fee)
-}
-
-// Restored from market_data
-pub fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
+pub use crate::engine::utils::now_ms;
+pub use crate::engine::utils::now_secs;
+pub use crate::engine::utils::normalize_symbol;
+pub use crate::engine::utils::symbols_match;
+pub use crate::engine::utils::round_to_tick;
+pub use crate::engine::utils::get_exchange_fee;
 
 fn hmac_sha256_hex(secret: &[u8], data: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC any key");

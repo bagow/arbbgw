@@ -1,23 +1,11 @@
-use crate::engine::real::{now_ms, now_secs, ExchangeKeys};
+use crate::engine::utils::{now_ms, now_secs, cooldown_active, get_exchange_fee};
+use crate::engine::real::ExchangeKeys;
 use crate::state::{EngineContext, PriceMap};
 use shared::{SpreadRow, TechnicalSettings, TradeSignal, TradingSettings};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 static LAST_DIAG_LOG: AtomicI64 = AtomicI64::new(0);
-
-fn cooldown_active(marker: i64, now: i64, cooldown_ms: i64) -> bool {
-    if marker <= 0 {
-        return false;
-    }
-    // Support both contracts during migration:
-    // 1) marker = last event timestamp
-    // 2) marker = blocked-until timestamp
-    if marker > now {
-        return true;
-    }
-    now - marker < cooldown_ms
-}
 
 /// Core logic of token analysis: translates bare `SpreadRow` into ready-to-execute `TradeSignal`.
 pub fn generate_signals(
@@ -267,9 +255,9 @@ pub fn generate_signals(
         }
 
         let fee_a =
-            crate::engine::real::get_exchange_fee(&row.exchange_a, ts.default_fee_rate, e_ctx);
+            get_exchange_fee(&row.exchange_a, ts.default_fee_rate, e_ctx);
         let fee_b =
-            crate::engine::real::get_exchange_fee(&row.exchange_b, ts.default_fee_rate, e_ctx);
+            get_exchange_fee(&row.exchange_b, ts.default_fee_rate, e_ctx);
 
         // (Qty basis is now handled universally by sending phys_amount to exchange connectors)
 

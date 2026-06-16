@@ -15,6 +15,9 @@ build/
 secrets.json
 cex-keys.txt
 
+# Databases
+*.db
+
 # Logs
 *.log
 npm-debug.log*

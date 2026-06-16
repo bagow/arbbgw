@@ -7,18 +7,8 @@ use shared::{TechnicalSettings, TradingSettings};
 use crate::engine::pnl::*;
 use crate::engine::risk_manager::*;
 use crate::engine::real::*;
+use crate::engine::utils::is_position_missing_or_liquidated_error;
 use crate::state::EngineContext;
-use now_ms;
-
-pub fn is_position_missing_or_liquidated_error(err: &str) -> bool {
-
-    let s = err.to_lowercase();
-    s.contains("position not found")
-        || s.contains("no position")
-        || s.contains("position size is zero")
-        || s.contains("reduce-only")
-        || s.contains("liquidat")
-}
 
 
 pub async fn process_closes(
@@ -33,6 +23,7 @@ pub async fn process_closes(
 ) -> Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)> {
     let dry_run = false;
     let repo = TradeRepository::new(db.clone());
+    // Tuple: (trade_id, price_a, price_b, spread, net_pnl, funding_rate_a, funding_rate_b, funding_next_ts, accumulated_funding_cost)
     let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)> = Vec::new();
     // ── Close qualifying trades ────────────────────────────────────────────────
     if !trades.is_empty() {
@@ -42,8 +33,6 @@ pub async fn process_closes(
             settings.id
         );
     }
-    // Tuple: (trade_id, price_a, price_b, spread, net_pnl, funding_rate_a, funding_rate_b, funding_next_ts, accumulated_funding_cost)
-    let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)> = Vec::new();
     for trade in trades {
         let is_a_higher = trade.direction.starts_with(&trade.exchange_a);
         let _elapsed_ms = now_ms() - trade.entry_time;
@@ -99,8 +88,8 @@ pub async fn process_closes(
                 } else {
                     trade.entry_price_b
                 };
-                exit_price_a = if is_a_higher { c_price_a } else { c_price_a };
-                exit_price_b = if is_a_higher { c_price_b } else { c_price_b };
+                exit_price_a = c_price_a;
+                exit_price_b = c_price_b;
                 if !manual_close {
                     continue;
                 }

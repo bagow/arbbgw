@@ -1,17 +1,11 @@
 use crate::state::EngineContext;
+use crate::engine::utils::now_ms;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
 
 static EXCHANGE_BANS: OnceLock<DashMap<String, i64>> = OnceLock::new();
 pub static LAST_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
 
 fn ban_map() -> &'static DashMap<String, i64> {
     EXCHANGE_BANS.get_or_init(|| DashMap::new())

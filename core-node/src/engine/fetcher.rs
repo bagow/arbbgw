@@ -3,12 +3,14 @@ use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 
+use crate::engine::exchanges::get_connector;
+use crate::engine::exchanges::traits::ExchangeConnector;
 use crate::engine::real::ExchangeKeys;
 
 /// Spawn background task that refreshes balances and fee rates.
 /// Adaptive intervals:
 ///   - Normal mode : every 25s — full refresh (balance + fee rates) for all exchanges
-///   - Recovery mode: every 2s  — balance ONLY for the exchange(s) with balance_low=true
+///   - Recovery mode: every 5s  — balance ONLY for the exchange(s) with balance_low=true
 ///     Fee rates are NOT re-fetched in recovery mode to avoid rate limits.
 pub fn start_balance_fetcher(
     http: Client,
@@ -23,18 +25,6 @@ pub fn start_balance_fetcher(
             "binance", "gate", "kucoin", "bybit", "bitget",
             "bingx", "bitmex", "ascendex", "xt", "toobit",
         ];
-
-        let binance  = crate::engine::exchanges::binance::BinanceConnector;
-        let gate     = crate::engine::exchanges::gate::GateConnector;
-        let kucoin   = crate::engine::exchanges::kucoin::KucoinConnector;
-        let bybit    = crate::engine::exchanges::bybit::BybitConnector;
-        let bitget   = crate::engine::exchanges::bitget::BitgetConnector;
-        let bingx    = crate::engine::exchanges::bingx::BingxConnector;
-        let bitmex   = crate::engine::exchanges::bitmex::BitmexConnector;
-        let ascendex = crate::engine::exchanges::ascendex::AscendexConnector;
-        let xt       = crate::engine::exchanges::xt::XtConnector;
-        let toobit   = crate::engine::exchanges::toobit::ToobitConnector;
-        use crate::engine::exchanges::traits::ExchangeConnector;
 
         loop {
             // Check which exchanges are explicitly enabled
@@ -61,23 +51,14 @@ pub fn start_balance_fetcher(
                 .collect();
 
             if !low_exchanges.is_empty() {
+                // Recovery mode: only fetch balances for low exchanges
                 for ex in &low_exchanges {
-                    let fetch_res = match *ex {
-                        "binance"  => binance.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "gate"     => gate.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "kucoin"   => kucoin.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "bybit"    => bybit.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "bitget"   => bitget.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "bingx"    => bingx.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "bitmex"   => bitmex.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "ascendex" => ascendex.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "xt"       => xt.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        "toobit"   => toobit.fetch_balances(&http, &keys).await.map(|(w, _a)| w).map_err(|e| e.to_string()),
-                        _ => Err("Unknown exchange".to_string()),
+                    let conn = match get_connector(ex) {
+                        Some(c) => c,
+                        None => continue,
                     };
-
-                    match fetch_res {
-                        Ok(bal) => {
+                    match conn.fetch_balances(&http, &keys).await {
+                        Ok((bal, _)) => {
                             e_ctx.balances.insert(ex.to_string(), bal);
                             if bal > 1.0 {
                                 info!("[balance] {} recovered (${:.2}) — clearing balance_low flag, trades unblocked", ex, bal);
@@ -94,162 +75,28 @@ pub fn start_balance_fetcher(
                 }
                 tokio::time::sleep(Duration::from_millis(fast_interval_ms)).await;
             } else {
+                // Normal mode: full refresh for all active exchanges
                 for ex in &active_exchanges {
                     if !keys.supports(ex) {
                         continue;
                     }
-                    match *ex {
-                        "binance" => {
-                            match binance.fetch_balances(&http, &keys).await {
-                                Ok((w, a)) => {
-                                    e_ctx.balances.insert(ex.to_string(), w);
-                                    e_ctx.margin_balances.insert(ex.to_string(), a);
-                                }
-                                Err(e) => error!("[binance] balance fetch err: {}", e),
-                            }
-                            if let Ok(pos) = binance.fetch_positions(&http, &keys).await {
-                                e_ctx.positions.insert(ex.to_string(), pos);
-                            }
-                            if let Ok(fee) = binance.fetch_taker_fee(&http, &keys).await {
-                                e_ctx.fee_rates.insert(ex.to_string(), fee);
-                            }
+                    let conn = match get_connector(ex) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+
+                    match conn.fetch_balances(&http, &keys).await {
+                        Ok((w, a)) => {
+                            e_ctx.balances.insert(ex.to_string(), w);
+                            e_ctx.margin_balances.insert(ex.to_string(), a);
                         }
-                        "gate" => {
-                            match gate.fetch_balances(&http, &keys).await {
-                                Ok((w, a)) => {
-                                    e_ctx.balances.insert(ex.to_string(), w);
-                                    e_ctx.margin_balances.insert(ex.to_string(), a);
-                                }
-                                Err(e) => error!("[gate] balance fetch err: {}", e),
-                            }
-                            if let Ok(pos) = gate.fetch_positions(&http, &keys).await {
-                                e_ctx.positions.insert(ex.to_string(), pos);
-                            }
-                            if let Ok(fee) = gate.fetch_taker_fee(&http, &keys).await {
-                                e_ctx.fee_rates.insert(ex.to_string(), fee);
-                            }
-                        }
-                        "kucoin" => {
-                            match kucoin.fetch_balances(&http, &keys).await {
-                                Ok((w, a)) => {
-                                    e_ctx.balances.insert(ex.to_string(), w);
-                                    e_ctx.margin_balances.insert(ex.to_string(), a);
-                                }
-                                Err(e) => error!("[kucoin] balance fetch err: {}", e),
-                            }
-                            if let Ok(pos) = kucoin.fetch_positions(&http, &keys).await {
-                                e_ctx.positions.insert(ex.to_string(), pos);
-                            }
-                            if let Ok(fee) = kucoin.fetch_taker_fee(&http, &keys).await {
-                                e_ctx.fee_rates.insert(ex.to_string(), fee);
-                            }
-                        }
-                        "bitget" => {
-                            match bitget.fetch_balances(&http, &keys).await {
-                                Ok((w, a)) => {
-                                    e_ctx.balances.insert(ex.to_string(), w);
-                                    e_ctx.margin_balances.insert(ex.to_string(), a);
-                                }
-                                Err(e) => error!("[bitget] balance fetch err: {}", e),
-                            }
-                            if let Ok(pos) = bitget.fetch_positions(&http, &keys).await {
-                                e_ctx.positions.insert(ex.to_string(), pos);
-                            }
-                            if let Ok(fee) = bitget.fetch_taker_fee(&http, &keys).await {
-                                e_ctx.fee_rates.insert(ex.to_string(), fee);
-                            }
-                        }
-                        "bybit" => {
-                            match bybit.fetch_balances(&http, &keys).await {
-                                Ok((w, a)) => {
-                                    e_ctx.balances.insert(ex.to_string(), w);
-                                    e_ctx.margin_balances.insert(ex.to_string(), a);
-                                }
-                                Err(e) => error!("[bybit] balance fetch err: {}", e),
-                            }
-                            if let Ok(pos) = bybit.fetch_positions(&http, &keys).await {
-                                e_ctx.positions.insert(ex.to_string(), pos);
-                            }
-                            if let Ok(fee) = bybit.fetch_taker_fee(&http, &keys).await {
-                                e_ctx.fee_rates.insert(ex.to_string(), fee);
-                            }
-                        }
-                        "bingx" => {
-                            match bingx.fetch_balances(&http, &keys).await {
-                                Ok((w, a)) => {
-                                    e_ctx.balances.insert(ex.to_string(), w);
-                                    e_ctx.margin_balances.insert(ex.to_string(), a);
-                                }
-                                Err(e) => error!("[bingx] balance fetch err: {}", e),
-                            }
-                            if let Ok(pos) = bingx.fetch_positions(&http, &keys).await {
-                                e_ctx.positions.insert(ex.to_string(), pos);
-                            }
-                            if let Ok(fee) = bingx.fetch_taker_fee(&http, &keys).await {
-                                e_ctx.fee_rates.insert(ex.to_string(), fee);
-                            }
-                        }
-                        "bitmex" => {
-                            match bitmex.fetch_balances(&http, &keys).await {
-                                Ok((w, a)) => {
-                                    e_ctx.balances.insert(ex.to_string(), w);
-                                    e_ctx.margin_balances.insert(ex.to_string(), a);
-                                }
-                                Err(e) => tracing::error!("[bitmex] balance err: {}", e),
-                            }
-                            if let Ok(pos) = bitmex.fetch_positions(&http, &keys).await {
-                                e_ctx.positions.insert(ex.to_string(), pos);
-                            }
-                            if let Ok(fee) = bitmex.fetch_taker_fee(&http, &keys).await {
-                                e_ctx.fee_rates.insert(ex.to_string(), fee);
-                            }
-                        }
-                        "ascendex" => {
-                            match ascendex.fetch_balances(&http, &keys).await {
-                                Ok((w, a)) => {
-                                    e_ctx.balances.insert(ex.to_string(), w);
-                                    e_ctx.margin_balances.insert(ex.to_string(), a);
-                                }
-                                Err(e) => tracing::error!("[ascendex] balance err: {}", e),
-                            }
-                            if let Ok(pos) = ascendex.fetch_positions(&http, &keys).await {
-                                e_ctx.positions.insert(ex.to_string(), pos);
-                            }
-                            if let Ok(fee) = ascendex.fetch_taker_fee(&http, &keys).await {
-                                e_ctx.fee_rates.insert(ex.to_string(), fee);
-                            }
-                        }
-                        "xt" => {
-                            match xt.fetch_balances(&http, &keys).await {
-                                Ok((w, a)) => {
-                                    e_ctx.balances.insert(ex.to_string(), w);
-                                    e_ctx.margin_balances.insert(ex.to_string(), a);
-                                }
-                                Err(e) => tracing::error!("[xt] balance err: {}", e),
-                            }
-                            if let Ok(pos) = xt.fetch_positions(&http, &keys).await {
-                                e_ctx.positions.insert(ex.to_string(), pos);
-                            }
-                            if let Ok(fee) = xt.fetch_taker_fee(&http, &keys).await {
-                                e_ctx.fee_rates.insert(ex.to_string(), fee);
-                            }
-                        }
-                        "toobit" => {
-                            match toobit.fetch_balances(&http, &keys).await {
-                                Ok((w, a)) => {
-                                    e_ctx.balances.insert(ex.to_string(), w);
-                                    e_ctx.margin_balances.insert(ex.to_string(), a);
-                                }
-                                Err(e) => tracing::error!("[toobit] balance err: {}", e),
-                            }
-                            if let Ok(pos) = toobit.fetch_positions(&http, &keys).await {
-                                e_ctx.positions.insert(ex.to_string(), pos);
-                            }
-                            if let Ok(fee) = toobit.fetch_taker_fee(&http, &keys).await {
-                                e_ctx.fee_rates.insert(ex.to_string(), fee);
-                            }
-                        }
-                        _ => {}
+                        Err(e) => error!("[{}] balance fetch err: {}", ex, e),
+                    }
+                    if let Ok(pos) = conn.fetch_positions(&http, &keys).await {
+                        e_ctx.positions.insert(ex.to_string(), pos);
+                    }
+                    if let Ok(fee) = conn.fetch_taker_fee(&http, &keys).await {
+                        e_ctx.fee_rates.insert(ex.to_string(), fee);
                     }
                 }
                 // Diagnostic: log current fee_rates and balances
