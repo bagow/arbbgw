@@ -177,10 +177,23 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                     .cloned()
                                     .unwrap_or_default();
                                 if std_sym.is_empty() { continue; }
-                                let bid: f64 = data["b"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                                let ask: f64 = data["a"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                                let bid_sz: f64 = data["bq"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                                let ask_sz: f64 = data["aq"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                                // AscendEX bbo format: "bid":["65790","0.00759"], "ask":["65963.29","0.00079"]
+                                let bid: f64 = data.get("bid").and_then(|v| v.as_array())
+                                    .and_then(|arr| arr.first()?.as_str()?.parse().ok())
+                                    .or_else(|| data.get("b").and_then(|v| v.as_str()?.parse().ok()))
+                                    .unwrap_or(0.0);
+                                let ask: f64 = data.get("ask").and_then(|v| v.as_array())
+                                    .and_then(|arr| arr.first()?.as_str()?.parse().ok())
+                                    .or_else(|| data.get("a").and_then(|v| v.as_str()?.parse().ok()))
+                                    .unwrap_or(0.0);
+                                let bid_sz: f64 = data.get("bid").and_then(|v| v.as_array())
+                                    .and_then(|arr| arr.get(1)?.as_str()?.parse().ok())
+                                    .or_else(|| data.get("bq").and_then(|v| v.as_str()?.parse().ok()))
+                                    .unwrap_or(0.0);
+                                let ask_sz: f64 = data.get("ask").and_then(|v| v.as_array())
+                                    .and_then(|arr| arr.get(1)?.as_str()?.parse().ok())
+                                    .or_else(|| data.get("aq").and_then(|v| v.as_str()?.parse().ok()))
+                                    .unwrap_or(0.0);
                                 if bid <= 0.0 || ask <= 0.0 { continue; }
                                 let mid = (bid + ask) / 2.0;
                                 let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
