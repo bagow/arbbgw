@@ -256,6 +256,10 @@ async fn ws_shard(
         symbols.len()
     );
 
+    // Send initial ping immediately to establish keepalive
+    let ts0 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    ws.send(Message::Text(json!({"time":ts0, "channel":"futures.ping"}).to_string().into())).await?;
+
     // Subscribe to L1 book_ticker for all symbols in this shard
     for chunk in symbols.chunks(50) {
         let ts = std::time::SystemTime::now()
@@ -270,44 +274,23 @@ async fn ws_shard(
         .await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-
-    // Pause between L1 and L2 subscription phases to avoid overwhelming Gate
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
-    // Subscribe to L2 order_book (20 levels) for all symbols in this shard
-    for chunk in symbols.chunks(10) {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // payload format: ["CONTRACT", "depth_level", "0"] where "0" = real-time
-        let payload: Vec<Value> = chunk.iter()
-            .map(|s| json!([s, "20", "0"]))
-            .collect();
-        for item in payload {
-            ws.send(Message::Text(
-                json!({"time":ts,"channel":"futures.order_book","event":"subscribe","payload": item})
-                    .to_string()
-                    .into(),
-            ))
-            .await?;
-            tokio::time::sleep(Duration::from_millis(150)).await;
-        }
-    }
-    info!("[gate] Shard {} subscribed L1+L2 OK", idx);
+    info!("[gate] Shard {} subscribed L1 OK ({} symbols)", idx, symbols.len());
 
     // Ensure gate map exists for mutably getting later
     price_map.entry("gate".to_string()).or_default();
 
-    let mut ping = tokio::time::interval(Duration::from_secs(20));
-    // Heartbeat: refresh L2 timestamps every 500ms for static books
-    let mut heartbeat = tokio::time::interval(Duration::from_millis(500));
-    heartbeat.tick().await; // skip immediate
+    let mut ping = tokio::time::interval(Duration::from_secs(15));
+    let mut msg_count: u64 = 0;
+    let mut tick_count: u64 = 0;
 
     loop {
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
+                    msg_count += 1;
+                    if msg_count <= 3 {
+                        info!("[gate] Shard {} MSG #{} (len={}): {}", idx, msg_count, text.len(), &text[..text.len().min(300)]);
+                    }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let channel = v["channel"].as_str().unwrap_or("");
                         let event = v["event"].as_str().unwrap_or("");
@@ -340,85 +323,7 @@ async fn ws_shard(
                                         }
                                     }
                                     signal.notify_one();
-                                }
-                            }
-                        } else if channel == "futures.order_book" {
-                            // L2: order book depth
-                            if let Some(result) = v["result"].as_object() {
-                                let raw_sym = result.get("contract").and_then(|v| v.as_str())
-                                    .or_else(|| result.get("s").and_then(|v| v.as_str()))
-                                    .unwrap_or("");
-                                if let Some((std_sym, mult)) = sym_map.get(raw_sym) {
-                                    let now_ms = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default().as_millis() as i64;
-                                    let parse_level = |arr: &Value| -> Vec<(f64, f64)> {
-                                        arr.as_array().map(|levels| {
-                                            levels.iter().filter_map(|l| {
-                                                // Handle {"p": "...", "s": ...} format
-                                                if let Some(obj) = l.as_object() {
-                                                    let p = obj.get("p").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok())
-                                                        .or_else(|| obj.get("p").and_then(|v| v.as_f64()))?;
-                                                    let q = obj.get("s").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok())
-                                                        .or_else(|| obj.get("s").and_then(|v| v.as_f64()))
-                                                        .or_else(|| obj.get("s").and_then(|v| v.as_i64()).map(|v| v as f64))?;
-                                                    return Some((p, q * mult));
-                                                }
-                                                // Handle ["...", "..."] format
-                                                let p = l[0].as_str().and_then(|s| s.parse::<f64>().ok())
-                                                    .or_else(|| l[0].as_f64())?;
-                                                let q = l[1].as_str().and_then(|s| s.parse::<f64>().ok())
-                                                    .or_else(|| l[1].as_f64())?;
-                                                Some((p, q * mult))
-                                            }).collect()
-                                        }).unwrap_or_default()
-                                    };
-                                    let mut new_bids = parse_level(&v["result"]["bids"]);
-                                    if new_bids.is_empty() { new_bids = parse_level(&v["result"]["b"]); }
-                                    let mut new_asks = parse_level(&v["result"]["asks"]);
-                                    if new_asks.is_empty() { new_asks = parse_level(&v["result"]["a"]); }
-                                    
-                                    if !new_bids.is_empty() || !new_asks.is_empty() {
-                                        let key = format!("gate:{}", std_sym);
-                                        if event == "all" || !l2_books.contains_key(&key) {
-                                            l2_books.insert(
-                                                key,
-                                                L2Snapshot { bids: new_bids, asks: new_asks, updated_ms: now_ms },
-                                            );
-                                        } else {
-                                            if let Some(mut book) = l2_books.get_mut(&key) {
-                                                // Apply bids
-                                                for (p, q) in new_bids {
-                                                    if q == 0.0 {
-                                                        book.bids.retain(|&(bp, _)| (bp - p).abs() > 1e-8);
-                                                    } else {
-                                                        if let Some(idx) = book.bids.iter().position(|&(bp, _)| (bp - p).abs() <= 1e-8) {
-                                                            book.bids[idx].1 = q;
-                                                        } else {
-                                                            book.bids.push((p, q));
-                                                        }
-                                                    }
-                                                }
-                                                book.bids.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                                                
-                                                // Apply asks
-                                                for (p, q) in new_asks {
-                                                    if q == 0.0 {
-                                                        book.asks.retain(|&(ap, _)| (ap - p).abs() > 1e-8);
-                                                    } else {
-                                                        if let Some(idx) = book.asks.iter().position(|&(ap, _)| (ap - p).abs() <= 1e-8) {
-                                                            book.asks[idx].1 = q;
-                                                        } else {
-                                                            book.asks.push((p, q));
-                                                        }
-                                                    }
-                                                }
-                                                book.asks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-                                                
-                                                book.updated_ms = now_ms;
-                                            }
-                                        }
-                                    }
+                                    tick_count += 1;
                                 }
                             }
                         } else if channel == "futures.pong" || channel == "futures.ping" {
@@ -435,17 +340,7 @@ async fn ws_shard(
             _ = ping.tick() => {
                 let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                 ws.send(Message::Text(json!({"time":ts, "channel":"futures.ping"}).to_string().into())).await?;
-            }
-            _ = heartbeat.tick() => {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-                for mut entry in l2_books.iter_mut() {
-                    if entry.key().starts_with("gate:") {
-                        entry.value_mut().updated_ms = now_ms;
-                    }
-                }
+                info!("[gate] Shard {} DIAG: msgs={} ticks={}", idx, msg_count, tick_count);
             }
         }
     }
