@@ -1,6 +1,7 @@
 //! BingX USDT-M Perpetual WebSocket collector
 //! Public WS: wss://open-api-swap.bingx.com/swap-market
 //! Subscribes to ticker and depth channels for all USDT pairs
+//! Uses sharding to avoid WS connection limits (~100 symbols per shard)
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
@@ -11,49 +12,100 @@ use tracing::{error, info, warn};
 
 use crate::state::{L2OrderbookMap, PriceMap, TickerData, UpdateSignal};
 
+const SHARD_SIZE: usize = 100;
+
 pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
     l2_books: L2OrderbookMap,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
-    let mut backoff = Duration::from_secs(1);
     loop {
         let is_disabled = {
             let p = settings.read().await;
             !p.is_empty() && p.iter().all(|x| x.disabled_exchanges.contains(&"bingx".to_string()))
         };
         if is_disabled {
-            if backoff == Duration::from_secs(1) { info!("[bingx] Disabled globally. Sleeping..."); }
-            backoff = Duration::from_secs(5);
-            tokio::time::sleep(backoff).await;
+            info!("[bingx] Disabled globally. Sleeping...");
+            tokio::time::sleep(Duration::from_secs(10)).await;
             continue;
         }
 
-        let disable_watcher = async {
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                let dis = settings.read().await;
-                if !dis.is_empty() && dis.iter().all(|x| x.disabled_exchanges.contains(&"bingx".to_string())) { break; }
-            }
-        };
-
-        tokio::select! {
-            res = handler(&prices, &signal, &l2_books) => {
-                match res {
-                    Ok(_) => { warn!("[bingx] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
-                    Err(e) => error!("[bingx] Error: {}. Reconnecting in {:?}", e, backoff),
-                }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(60));
-            }
-            _ = disable_watcher => { info!("[bingx] disabled dynamically."); backoff = Duration::from_secs(1); }
+        // Seed symbols from REST
+        let symbols = seed_symbols(&prices).await;
+        if symbols.is_empty() {
+            error!("[bingx] No symbols loaded from REST. Retrying in 30s...");
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            continue;
         }
+
+        // Split into shards
+        let shards: Vec<Vec<String>> = symbols.chunks(SHARD_SIZE).map(|c| c.to_vec()).collect();
+        info!("[bingx] Starting {} shards for {} symbols", shards.len(), symbols.len());
+
+        // Spawn all shards as tasks
+        let mut handles = Vec::new();
+        for (idx, shard_symbols) in shards.into_iter().enumerate() {
+            let pm = prices.clone();
+            let sig = signal.clone();
+            let l2 = l2_books.clone();
+            let stgs = settings.clone();
+            handles.push(tokio::spawn(async move {
+                run_shard(idx, shard_symbols, pm, sig, l2, stgs).await;
+            }));
+        }
+
+        // Wait for any shard to exit (means we need full restart)
+        // Use a timeout to periodically re-check disabled status
+        tokio::select! {
+            _ = futures_util::future::join_all(handles) => {
+                warn!("[bingx] All shards exited. Restarting...");
+            }
+            _ = async {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    let dis = settings.read().await;
+                    if !dis.is_empty() && dis.iter().all(|x| x.disabled_exchanges.contains(&"bingx".to_string())) {
+                        break;
+                    }
+                }
+            } => {
+                info!("[bingx] Disabled dynamically.");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
-    let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
+async fn run_shard(
+    shard_idx: usize,
+    symbols: Vec<String>,
+    prices: PriceMap,
+    signal: UpdateSignal,
+    l2_books: L2OrderbookMap,
+    _settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
+) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match shard_handler(shard_idx, &symbols, &prices, &signal, &l2_books).await {
+            Ok(_) => {
+                warn!("[bingx] Shard {} WS closed. Reconnecting...", shard_idx);
+                backoff = Duration::from_secs(1);
+            }
+            Err(e) => {
+                error!("[bingx] Shard {} error: {}. Reconnecting in {:?}", shard_idx, e, backoff);
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(10));
+    }
+}
+
+async fn seed_symbols(price_map: &PriceMap) -> Vec<String> {
+    let http = Client::builder()
+        .user_agent("Mozilla/5.0")
+        .build()
+        .unwrap();
 
     // Seed from REST snapshot
     if let Ok(resp) = http
@@ -70,7 +122,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                     price_map.entry("bingx".to_string()).or_default().entry(sym).or_default();
                     seeded += 1;
                 }
-                info!("[bingx] Seeded {} symbols from REST", seeded);
+                info!("[bingx] Seeded {} symbols from REST contracts", seeded);
             }
         }
     }
@@ -102,50 +154,51 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         }
     }
 
-    let symbols: Vec<String> = {
-        let map = price_map.get("bingx");
-        match map { Some(m) => m.keys().cloned().collect(), None => vec![] }
-    };
+    let map = price_map.get("bingx");
+    match map { Some(m) => m.keys().cloned().collect(), None => vec![] }
+}
 
-    if symbols.is_empty() { return Err(anyhow::anyhow!("No BingX symbols loaded")); }
-
+async fn shard_handler(
+    shard_idx: usize,
+    symbols: &[String],
+    price_map: &PriceMap,
+    signal: &UpdateSignal,
+    l2_books: &L2OrderbookMap,
+) -> Result<()> {
     let (mut ws, _) = connect_async_tls_with_config(
         "wss://open-api-swap.bingx.com/swap-market",
         None, false, None,
     ).await.context("BingX WS connect failed")?;
-    info!("[bingx] Connected, subscribing {} symbols...", symbols.len());
+    info!("[bingx] Shard {} connected, subscribing to {} symbols", shard_idx, symbols.len());
 
-    price_map.entry("bingx".to_string()).or_default();
-
-
-
-    // Subscribe in chunks of 30
-    for chunk in symbols.chunks(30) {
+    // Subscribe in chunks of 20
+    for chunk in symbols.chunks(20) {
         let subs: Vec<Value> = chunk.iter().flat_map(|s| {
             let ws_sym = if s.ends_with("USDT") && !s.contains('-') {
                 format!("{}-USDT", &s[..s.len()-4])
             } else { s.clone() };
-            let mut res = vec![json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.PRICE_FEED", ws_sym)})];
-            res.push(json!({"id": uuid_lite(), "dataType": format!("{}.{}","MARKET.DEPTH.step0", ws_sym)}));
-            res
+            vec![
+                json!({"id": uuid_lite(), "dataType": format!("MARKET.PRICE_FEED.{}", ws_sym)}),
+                json!({"id": uuid_lite(), "dataType": format!("MARKET.DEPTH.step0.{}", ws_sym)}),
+            ]
         }).collect();
         for sub in subs {
             ws.send(Message::Text(sub.to_string().into())).await?;
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    info!("[bingx] Subscribed L1 tickers & L2 depth for {} symbols", symbols.len());
+    info!("[bingx] Shard {} subscribed L1+L2 for {} symbols", shard_idx, symbols.len());
 
     let mut ping = tokio::time::interval(Duration::from_secs(15));
-    
-    // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
+
+    // Reconnect after 30 min to refresh subscriptions
     let conn_start = std::time::Instant::now();
     let max_conn_age = Duration::from_secs(1800);
 
     loop {
         if conn_start.elapsed() > max_conn_age {
-            info!("[bingx] Refreshing L2 subscriptions after 30min...");
+            info!("[bingx] Shard {} refreshing after 30min...", shard_idx);
             break;
         }
         tokio::select! {
@@ -164,19 +217,13 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                         Message::Close(_) => break,
                         _ => continue,
                     }
-                    if text == "Ping" {
+                    if text == "Ping" || text.contains("\"Ping\"") || text.contains("\"ping\"") {
                         let _ = ws.send(Message::Text("Pong".into())).await;
                         continue;
                     }
-                    if text.contains("\"Ping\"") || text.contains("\"ping\"") {
-                        let _ = ws.send(Message::Text("Pong".into())).await;
-                        continue;
-                    }
-                    if text.is_empty() { continue; }
-                    if text == "Pong" { continue; }
+                    if text.is_empty() || text == "Pong" { continue; }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let data_type = v["dataType"].as_str().unwrap_or("");
-                        // MARKET.PRICE_FEED.BTC-USDT
                         if data_type.starts_with("MARKET.DEPTH.step0.") {
                             let sym_raw = data_type.trim_start_matches("MARKET.DEPTH.step0.").replace('-', "");
                             if sym_raw.ends_with("USDT") {
@@ -196,16 +243,13 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                 }).unwrap_or_default();
                                 if !bids.is_empty() || !asks.is_empty() {
                                     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-                                    // BUG-3 FIX: Update L1 depth (bid_size/ask_size) from L2 data
-                                    // so scanner depth filter sees real BingX liquidity.
-                                    // Other collectors do this inline; BingX was missing it entirely.
                                     if let Some(mut ex_map) = price_map.get_mut("bingx") {
                                         if let Some(entry) = ex_map.get_mut(&sym_raw) {
                                             if let Some(&(bp, bq)) = bids.first() {
-                                                entry.bid_size = bq * bp; // USD depth at best bid
+                                                entry.bid_size = bq * bp;
                                             }
                                             if let Some(&(ap, aq)) = asks.first() {
-                                                entry.ask_size = aq * ap; // USD depth at best ask
+                                                entry.ask_size = aq * ap;
                                             }
                                         }
                                     }
@@ -244,17 +288,17 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             },
             _ = ping.tick() => {
                 let _ = ws.send(Message::Ping(vec![])).await;
-                // WS heartbeat: update last_updated for all pairs with valid prices.
-                // If the WS is alive, the exchange would notify us of price changes —
-                // so existing bid/ask data is as current as the last received update.
+                // Heartbeat: refresh last_updated for symbols with valid prices
                 let now_ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
                 if let Some(mut ex_map) = price_map.get_mut("bingx") {
-                    for (_, entry) in ex_map.iter_mut() {
-                        if entry.bid > 0.0 && entry.ask > 0.0 {
-                            entry.last_updated = now_ts;
+                    for sym in symbols {
+                        if let Some(entry) = ex_map.get_mut(sym) {
+                            if entry.bid > 0.0 && entry.ask > 0.0 {
+                                entry.last_updated = now_ts;
+                            }
                         }
                     }
                 }

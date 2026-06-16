@@ -179,7 +179,7 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2
                     }
                 }
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+                backoff = (backoff * 2).min(Duration::from_secs(5));
             }
         }));
     }

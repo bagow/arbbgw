@@ -57,7 +57,7 @@ pub async fn run(
                     Err(e) => error!("[bitget] Error: {}. Reconnecting in {:?}", e, backoff),
                 }
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(60));
+                backoff = (backoff * 2).min(Duration::from_secs(5));
             }
             _ = disable_watcher => {
                 info!("[bitget] Exchange was disabled dynamically. Dropping connection.");

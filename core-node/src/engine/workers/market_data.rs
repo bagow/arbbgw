@@ -628,14 +628,13 @@ pub fn start_multiplier_fetcher(
                             let lmap = &e_ctx.launch_times;
                             let mut count = 0u32;
                             for c in arr {
-                                let sym_raw = c["symbol"].as_str().unwrap_or("");
-                                // AscendEX uses "BTC/USDT" format
-                                let sym = sym_raw.replace('/', "");
-                                if !sym.ends_with("USDT") {
+                                // AscendEX: displayName="BTCUSDT", symbol="BTC-PERP"
+                                let sym = c["displayName"].as_str().unwrap_or("");
+                                if !sym.ends_with("USDT") || sym.is_empty() {
                                     continue;
                                 }
-                                // lotSize = qty step
-                                if let Some(ls) = c["lotSize"].as_str() {
+                                // lotSize is inside lotSizeFilter
+                                if let Some(ls) = c["lotSizeFilter"]["lotSize"].as_str() {
                                     if let Ok(lot) = ls.parse::<f64>() {
                                         if lot > 0.0 {
                                             map.insert(format!("ascendex:{}", sym), lot);
@@ -643,16 +642,16 @@ pub fn start_multiplier_fetcher(
                                         }
                                     }
                                 }
-                                // tickSize = price step
-                                if let Some(ts) = c["tickSize"].as_str() {
+                                // tickSize is inside priceFilter
+                                if let Some(ts) = c["priceFilter"]["tickSize"].as_str() {
                                     if let Ok(tick) = ts.parse::<f64>() {
                                         if tick > 0.0 {
                                             tmap.insert(format!("ascendex:{}", sym), tick);
                                         }
                                     }
                                 }
-                                // listingTime
-                                if let Some(lt) = c["listingTime"].as_i64() {
+                                // listingTime → tradingStartTime
+                                if let Some(lt) = c["tradingStartTime"].as_i64() {
                                     if lt > 0 {
                                         lmap.insert(format!("ascendex:{}", sym), lt / 1000);
                                     }
@@ -784,12 +783,12 @@ pub fn start_multiplier_fetcher(
                 }
 
                 if let Ok(resp) = http
-                    .get("https://openapi.toobit.com/openApi/swap/v2/quote/contracts")
+                    .get("https://api.toobit.com/api/v1/exchangeInfo")
                     .send()
                     .await
                 {
                     if let Ok(json) = resp.json::<Value>().await {
-                        if let Some(arr) = json["data"].as_array() {
+                        if let Some(arr) = json["symbols"].as_array() {
                             let map = &e_ctx.multipliers;
                             let tmap = &e_ctx.tick_sizes;
                             let lmap = &e_ctx.launch_times;
@@ -799,25 +798,28 @@ pub fn start_multiplier_fetcher(
                                 if !sym.ends_with("USDT") {
                                     continue;
                                 }
-                                // quantityPrecision → step = 10^(-N)
-                                if let Some(qp) = c["quantityPrecision"].as_i64() {
-                                    let step = 10f64.powi(-(qp as i32));
-                                    if step > 0.0 {
-                                        map.insert(format!("toobit:{}", sym), step);
-                                        count += 1;
-                                    }
-                                }
-                                // pricePrecision → tick = 10^(-N)
-                                if let Some(pp) = c["pricePrecision"].as_i64() {
-                                    let tick = 10f64.powi(-(pp as i32));
-                                    if tick > 0.0 {
-                                        tmap.insert(format!("toobit:{}", sym), tick);
-                                    }
-                                }
-                                // launchTime
-                                if let Some(lt) = c["launchTime"].as_i64() {
-                                    if lt > 0 {
-                                        lmap.insert(format!("toobit:{}", sym), lt / 1000);
+                                // Parse filters array for LOT_SIZE and PRICE_FILTER
+                                if let Some(filters) = c["filters"].as_array() {
+                                    for f in filters {
+                                        let ft = f["filterType"].as_str().unwrap_or("");
+                                        if ft == "LOT_SIZE" {
+                                            if let Some(ss) = f["stepSize"].as_str() {
+                                                if let Ok(step) = ss.parse::<f64>() {
+                                                    if step > 0.0 {
+                                                        map.insert(format!("toobit:{}", sym), step);
+                                                        count += 1;
+                                                    }
+                                                }
+                                            }
+                                        } else if ft == "PRICE_FILTER" {
+                                            if let Some(ts) = f["tickSize"].as_str() {
+                                                if let Ok(tick) = ts.parse::<f64>() {
+                                                    if tick > 0.0 {
+                                                        tmap.insert(format!("toobit:{}", sym), tick);
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

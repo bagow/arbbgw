@@ -45,7 +45,7 @@ pub async fn run(
                     Err(e) => error!("[xt] Error: {}. Reconnecting in {:?}", e, backoff),
                 }
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(60));
+                backoff = (backoff * 2).min(Duration::from_secs(10));
             }
             _ = disable_watcher => { info!("[xt] disabled dynamically."); backoff = Duration::from_secs(1); }
         }
@@ -59,6 +59,7 @@ fn xt_to_standard(sym: &str) -> String {
 
 async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
     let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
+    info!("[xt] Loading symbols from REST...");
 
     // Seed from REST
     let mut xt_symbols: Vec<String> = Vec::new(); // "btc_usdt" format
@@ -119,8 +120,9 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         }
     }
 
-    if xt_symbols.is_empty() { return Err(anyhow::anyhow!("No XT USDT perp symbols")); }
+    if xt_symbols.is_empty() { return Err(anyhow::anyhow!("No XT USDT perp symbols found from REST")); }
 
+    info!("[xt] Connecting WS with {} symbols...", xt_symbols.len());
     let (mut ws, _) = connect_async_tls_with_config(
         "wss://fstream.xt.com/ws/market",
         None, false, None,

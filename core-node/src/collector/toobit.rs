@@ -45,7 +45,7 @@ pub async fn run(
                     Err(e) => error!("[toobit] Error: {}. Reconnecting in {:?}", e, backoff),
                 }
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(60));
+                backoff = (backoff * 2).min(Duration::from_secs(10));
             }
             _ = disable_watcher => { info!("[toobit] disabled dynamically."); backoff = Duration::from_secs(1); }
         }
