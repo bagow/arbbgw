@@ -1402,7 +1402,7 @@ function renderHistoryTable(profileId, history) {
                 <td>${(t.entry_spread??0).toFixed(2)}% &rarr; ${(t.exit_spread??0).toFixed(2)}%</td>
                 <td><span style="color:var(--text-sub)">${t.direction}</span></td>
                 <td>$${t.volume}</td>
-                <td><span class="badge ${t.close_reason==='TP'?'badge-long':t.close_reason==='STOP'?'badge-short':'badge-neutral'}">${t.close_reason??'—'}</span></td>
+                <td><span class="badge ${t.close_reason==='TP'||t.close_reason==='ZERO_SPREAD'?'badge-long':t.close_reason==='STOP'?'badge-short':'badge-neutral'}">${t.close_reason??'—'}</span></td>
                 <td style="color:var(--text-sub)">${time}</td>
             </tr>${detailRow}`;
     }).join('');
