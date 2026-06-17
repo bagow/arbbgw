@@ -18,6 +18,7 @@ pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
     l2_books: L2OrderbookMap,
+    _l2_wanted: std::sync::Arc<dashmap::DashSet<String>>,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     loop {

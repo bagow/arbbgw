@@ -300,6 +300,18 @@ async fn main() -> Result<()> {
                     keys.clone(),
                 );
 
+                // ── UPDATE L2 WANTED SET (demand-driven subscriptions) ──
+                // Populate from spread rows so collectors know which pairs need L2.
+                // Using spread rows (not signals) avoids chicken-and-egg:
+                // signals require L2, but L2 needs subscription BEFORE signal generation.
+                {
+                    e_ctx.l2_wanted.clear();
+                    for row in spreads.iter().take(200) {
+                        e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_a, row.pair));
+                        e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_b, row.pair));
+                    }
+                }
+
                 // ── EVALUATE SMART SIGNALS & RUN ENGINE ──
                 let signals = crate::engine::scanner::generate_signals(
                     &spreads,

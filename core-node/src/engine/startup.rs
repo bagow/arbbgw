@@ -20,8 +20,9 @@ macro_rules! spawn_collector {
         let p = $prices.clone();
         let s = $signal.clone();
         let l2 = $e_ctx.l2_books.clone();
+        let l2w = $e_ctx.l2_wanted.clone();
         let sc = $settings.clone();
-        tokio::spawn(async move { $mod(p, s, l2, sc).await });
+        tokio::spawn(async move { $mod(p, s, l2, l2w, sc).await });
     }};
 }
 

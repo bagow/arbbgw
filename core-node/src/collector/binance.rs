@@ -15,6 +15,7 @@ pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
     l2_books: L2OrderbookMap,
+    l2_wanted: std::sync::Arc<dashmap::DashSet<String>>,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     // Track whether L2 depth stream is already spawned to avoid duplicates
@@ -82,9 +83,10 @@ pub async fn run(
             l2_spawned.store(true, std::sync::atomic::Ordering::Relaxed);
             let l2_books_for_depth = l2_books.clone();
             let prices_for_depth = prices.clone();
+            let l2_wanted_for_depth = l2_wanted.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(20)).await;
-                run_l2_depth_stream(l2_books_for_depth, prices_for_depth).await;
+                run_l2_depth_stream(l2_books_for_depth, prices_for_depth, l2_wanted_for_depth).await;
             });
         }
 
@@ -257,7 +259,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
 
 /// Separate L2 depth stream for top-volume pairs (dynamic, top 200 by volume).
 /// Rebuilds symbol list from price_map on each reconnect — handles REST seed failures.
-async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::PriceMap) {
+async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::PriceMap, l2_wanted: std::sync::Arc<dashmap::DashSet<String>>) {
     // Hardcoded fallback covers common pairs when REST/price_map is empty
     const FALLBACK: &[&str] = &[
         "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","DOGEUSDT","XRPUSDT","PEPEUSDT",
@@ -273,39 +275,17 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
 
     let _backoff = Duration::from_secs(1);
     loop {
-        // Rebuild symbol list on every reconnect attempt
-        let mut vol_syms: Vec<(f64, String)> = {
-            let map = price_map.get("binance");
-            match map {
-                Some(m) => m.iter()
-                    .map(|(k, v)| (v.vol, k.clone()))
-                    .filter(|(_, k)| k.ends_with("USDT"))
-                    .collect(),
-                None => vec![],
-            }
-        };
-        vol_syms.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let symbols: Vec<String> = if vol_syms.is_empty() {
+        // Build symbol list from l2_wanted (demand-driven) + fallback
+        let wanted_syms: std::collections::HashSet<String> = l2_wanted.iter()
+            .filter(|k| k.starts_with("binance:"))
+            .map(|k| k[8..].to_string())
+            .collect();
+
+        let symbols: Vec<String> = if wanted_syms.is_empty() {
             FALLBACK.iter().map(|s| s.to_string()).collect()
         } else {
-            vol_syms.into_iter().map(|(_, s)| s).collect()
+            wanted_syms.into_iter().collect()
         };
-        // Filter symbols: only subscribe to L2 depth if the symbol exists on at least one OTHER exchange
-        let mut needed_symbols = Vec::new();
-        for sym in symbols {
-            let mut count = 0;
-            for ex in price_map.iter() {
-                if ex.key() != "binance" && ex.value().contains_key(&sym) {
-                    count += 1;
-                    break;
-                }
-            }
-            if count > 0 {
-                needed_symbols.push(sym);
-            }
-        }
-        
-        let symbols = needed_symbols;
 
         info!("[binance_l2] Starting L2 subscriptions for {} symbols (requires {} connections)", symbols.len(), (symbols.len() + 199) / 200);
 

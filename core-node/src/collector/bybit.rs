@@ -4,7 +4,10 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
 
@@ -48,6 +51,7 @@ pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
     l2_books: L2OrderbookMap,
+    l2_wanted: std::sync::Arc<dashmap::DashSet<String>>,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -85,7 +89,7 @@ pub async fn run(
         };
 
         tokio::select! {
-            res = handler(&prices, &signal, &l2_books) => {
+            res = handler(&prices, &signal, &l2_books, &l2_wanted) => {
                 match res {
                     Ok(_)  => { warn!("[bybit] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
                     Err(e) => error!("[bybit] Error: {}. Reconnecting in {:?}", e, backoff),
@@ -101,7 +105,7 @@ pub async fn run(
     }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
+async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap, l2_wanted: &std::sync::Arc<dashmap::DashSet<String>>) -> Result<()> {
     let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
 
     // ── SYMBOL LIST: disk cache → REST fetch → stale disk fallback ──────────
@@ -198,43 +202,95 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
     info!("[bybit] Seeded {} USDT linear tickers", symbols.len());
 
-    // WS: subscribe to tickers in batches of 10
-    let (mut ws, _) =
+    // WS: connect and split into reader/writer for concurrent access
+    let (ws, _) =
         connect_async_tls_with_config("wss://stream.bybit.com/v5/public/linear", None, false, None)
             .await
             .context("Bybit WS connect failed")?;
+    let (write_half, read_half) = ws.split();
+    let writer = Arc::new(Mutex::new(write_half));
     info!("[bybit] Connected, subscribing...");
 
     // Subscribe to L1 (orderbook.1) for all symbols
-    for chunk in symbols.chunks(10) {
-        let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.1.{}", s)).collect();
-        ws.send(Message::Text(
-            json!({"op":"subscribe","args":args}).to_string().into(),
-        ))
-        .await?;
-        tokio::time::sleep(Duration::from_millis(150)).await;
+    {
+        let mut w = writer.lock().await;
+        for chunk in symbols.chunks(10) {
+            let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.1.{}", s)).collect();
+            w.send(Message::Text(
+                json!({"op":"subscribe","args":args}).to_string().into(),
+            ))
+            .await?;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+    info!("[bybit] Subscribed L1 for {} symbols", symbols.len());
+
+    // ── Dynamic L2 subscription manager ─────────────────────────────────────
+    // Instead of static top-150, subscribe only to pairs in l2_wanted.
+    // Checks every 5s for changes and sends subscribe/unsubscribe.
+    let l2_sub_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    {
+        let writer_sub = writer.clone();
+        let l2_wanted_sub = l2_wanted.clone();
+        let l2_books_sub = l2_books.clone();
+        let alive = l2_sub_alive.clone();
+        tokio::spawn(async move {
+            let mut current_subs: HashSet<String> = HashSet::new();
+            while alive.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if !alive.load(std::sync::atomic::Ordering::Relaxed) { break; }
+
+                let wanted: HashSet<String> = l2_wanted_sub.iter()
+                    .filter(|k| k.starts_with("bybit:"))
+                    .map(|k| k[6..].to_string())
+                    .collect();
+
+                let to_add: Vec<_> = wanted.difference(&current_subs).cloned().collect();
+                let to_remove: Vec<_> = current_subs.difference(&wanted).cloned().collect();
+
+                if !to_add.is_empty() {
+                    let mut w = writer_sub.lock().await;
+                    for chunk in to_add.chunks(10) {
+                        let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.50.{}", s)).collect();
+                        let _ = w.send(Message::Text(json!({"op":"subscribe","args":args}).to_string().into())).await;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    info!("[bybit_l2] Subscribed {} new L2 pairs (total {})", to_add.len(), wanted.len());
+                }
+                if !to_remove.is_empty() {
+                    let mut w = writer_sub.lock().await;
+                    for chunk in to_remove.chunks(10) {
+                        let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.50.{}", s)).collect();
+                        let _ = w.send(Message::Text(json!({"op":"unsubscribe","args":args}).to_string().into())).await;
+                    }
+                    // Clean stale L2 entries for unsubscribed pairs
+                    for sym in &to_remove {
+                        l2_books_sub.remove(&format!("bybit:{}", sym));
+                    }
+                    info!("[bybit_l2] Unsubscribed {} stale L2 pairs", to_remove.len());
+                }
+
+                current_subs = wanted;
+
+                // Heartbeat: refresh timestamps for subscribed L2 books
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                for sym in &current_subs {
+                    let key = format!("bybit:{}", sym);
+                    if let Some(mut book) = l2_books_sub.get_mut(&key) {
+                        book.updated_ms = now_ms;
+                    }
+                }
+            }
+        });
     }
 
-    // Subscribe to L2 (orderbook.50) for TOP symbols only.
-    // Bybit WS has ~200-300 subscription limit per connection.
-    // Subscribing to ALL 500+ symbols (1000+ topics) causes connection resets.
-    let l2_limit = 150.min(symbols.len());
-    let l2_symbols = &symbols[..l2_limit]; // Already sorted by volume desc
-    for chunk in l2_symbols.chunks(10) {
-        let args: Vec<String> = chunk.iter().map(|s| format!("orderbook.50.{}", s)).collect();
-        ws.send(Message::Text(json!({
-            "op": "subscribe",
-            "args": args
-        }).to_string().into())).await?;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    info!("[bybit] Subscribed L1 for {} symbols, L2 depth for top {} by volume", symbols.len(), l2_limit);
-
-    // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
+    // Reconnect after 30 min to refresh WS connection
     let conn_start = std::time::Instant::now();
     let max_conn_age = Duration::from_secs(1800);
 
-    let mut _ping = tokio::time::interval(Duration::from_secs(20));
     #[derive(Deserialize)]
     struct BybitMsg<'a> {
         #[serde(borrow)]
@@ -258,18 +314,15 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     price_map.entry("bybit".to_string()).or_default();
 
     let mut ping = tokio::time::interval(Duration::from_secs(20));
-    // Heartbeat: refresh L2 timestamps every 500ms for static books
-    // (Bybit orderbook.50 goes silent when book doesn't change, same as Binance)
-    let mut heartbeat = tokio::time::interval(Duration::from_millis(500));
-    heartbeat.tick().await; // skip immediate
+    let mut read = read_half;
     loop {
-        // Reconnect periodically to refresh L2 subscriptions (new pairs may appear)
+        // Reconnect periodically to refresh WS connection
         if conn_start.elapsed() > max_conn_age {
-            info!("[bybit] Refreshing L2 subscriptions after 30min...");
+            info!("[bybit] Refreshing WS connection after 30min...");
             break;
         }
         tokio::select! {
-            msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
+            msg = tokio::time::timeout(Duration::from_secs(30), read.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(v) = serde_json::from_str::<BybitMsg>(&text) {
                         let topic = match v.topic {
@@ -395,25 +448,15 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
-                Some(Err(e)) => return Err(e.into()),
+                Some(Err(e)) => { l2_sub_alive.store(false, std::sync::atomic::Ordering::Relaxed); return Err(e.into()); }
                 _ => {}
             },
-            _ = ping.tick() => { ws.send(Message::Text(json!({"op":"ping"}).to_string().into())).await?; }
-            _ = heartbeat.tick() => {
-                // Refresh timestamps for ALL bybit L2 books while WS is alive.
-                // Bybit orderbook.50 doesn't push updates for static books,
-                // causing false staleness rejections in the trade engine.
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-                for mut entry in l2_books.iter_mut() {
-                    if entry.key().starts_with("bybit:") {
-                        entry.value_mut().updated_ms = now_ms;
-                    }
-                }
+            _ = ping.tick() => {
+                let mut w = writer.lock().await;
+                w.send(Message::Text(json!({"op":"ping"}).to_string().into())).await?;
             }
         }
     }
+    l2_sub_alive.store(false, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }

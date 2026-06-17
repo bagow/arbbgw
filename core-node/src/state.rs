@@ -6,7 +6,7 @@
 //! Движок читает PriceMap без блокировок (DashMap = concurrent RwLock per shard)
 //! и ждёт `signal.notified()` вместо polling — нулевой overhead в idle.
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Notify;
 
@@ -76,6 +76,10 @@ pub struct EngineContext {
     pub price_history: Arc<DashMap<String, (f64, i64)>>,
     /// Live L2 orderbook depth cache — updated by WS collectors in real-time.
     pub l2_books: L2OrderbookMap,
+    /// Demand-driven L2 subscription set — keys like "bybit:HUSDT".
+    /// Populated by scanner (spread rows) + cycle (open trades).
+    /// Collectors subscribe only to pairs present here.
+    pub l2_wanted: Arc<DashSet<String>>,
     /// Per-trade MIRAGE cooldown: trade_id → last_mirage_log_ms.
     /// Prevents logging MIRAGE spam (was 10+ per second, now max 1 per 10s).
     pub mirage_cooldown: Arc<DashMap<i64, i64>>,
@@ -109,6 +113,7 @@ impl Default for EngineContext {
             high_latency_strikes: Arc::new(DashMap::new()),
             price_history: Arc::new(DashMap::new()),
             l2_books: Arc::new(DashMap::new()),
+            l2_wanted: Arc::new(DashSet::new()),
             mirage_cooldown: Arc::new(DashMap::new()),
             position_missing_counter: Arc::new(DashMap::new()),
             asymmetric_fail_counter: Arc::new(DashMap::new()),

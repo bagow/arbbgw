@@ -23,6 +23,12 @@ pub async fn run_cycle(
     let num_active = trades.len() as i64;
     let open_pairs: std::collections::HashSet<String> = trades.iter().map(|t| t.pair.clone()).collect();
 
+    // Ensure open trade pairs have L2 subscriptions for exit VWAP checks
+    for t in &trades {
+        e_ctx.l2_wanted.insert(format!("{}:{}", t.exchange_a, t.pair));
+        e_ctx.l2_wanted.insert(format!("{}:{}", t.exchange_b, t.pair));
+    }
+
     if !trades.is_empty() {
         tracing::debug!("[real] Processing {} open trades for profile {}", trades.len(), settings.id);
     }
