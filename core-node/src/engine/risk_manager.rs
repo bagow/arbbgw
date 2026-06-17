@@ -27,6 +27,12 @@ pub fn ban_exchange(exchange: &str, until_ms: i64) {
 
 /// Check if an exchange is currently banned. Returns true if banned.
 pub fn is_exchange_banned(exchange: &str) -> bool {
+    // Binance has its own IP ban tracking (in binance.rs) — check it too
+    if exchange.eq_ignore_ascii_case("binance") {
+        if crate::engine::exchanges::binance::is_binance_banned() {
+            return true;
+        }
+    }
     let map = ban_map();
     if let Some(entry) = map.get(&exchange.to_lowercase()) {
         let until = *entry;

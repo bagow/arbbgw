@@ -249,6 +249,13 @@ pub async fn run_hft_cycle(
         let pair = sig.pair.clone();
         let now = now_ms();
 
+        // Exchange ban check (prevents asymmetric failures on banned exchanges)
+        if crate::engine::risk_manager::is_exchange_banned(&exa)
+            || crate::engine::risk_manager::is_exchange_banned(&exb)
+        {
+            continue;
+        }
+
         // Margin check
         if !has_sufficient_margin(&exa, sig.actual_vol_a_usd, settings.leverage as f64, &e_ctx) {
             continue;
