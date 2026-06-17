@@ -91,10 +91,10 @@ pub struct EngineContext {
     pub asymmetric_fail_counter: Arc<DashMap<String, (u32, i64)>>,
     /// Profiles DB connection — used for kill-switch status persistence in server_cache.
     pub profiles_db: Option<tokio_rusqlite::Connection>,
-    /// WS order channel health flag per exchange. Set to false on WS timeout,
-    /// set to true on successful WS order placement. Prevents firing trades
-    /// on exchanges with broken WS order channels.
-    pub ws_order_healthy: Arc<DashMap<String, bool>>,
+    /// WS order channel unhealthy-until timestamp per exchange.
+    /// Set to `now + TTL_ms` on WS timeout/failure. Auto-recovers when timestamp expires.
+    /// Prevents firing trades on exchanges with recently broken WS order channels.
+    pub ws_order_unhealthy_until: Arc<DashMap<String, i64>>,
 }
 
 impl Default for EngineContext {
@@ -124,7 +124,7 @@ impl Default for EngineContext {
             position_missing_counter: Arc::new(DashMap::new()),
             asymmetric_fail_counter: Arc::new(DashMap::new()),
             profiles_db: None,
-            ws_order_healthy: Arc::new(DashMap::new()),
+            ws_order_unhealthy_until: Arc::new(DashMap::new()),
         }
     }
 }

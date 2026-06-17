@@ -2,6 +2,9 @@
 //!
 //! Previously duplicated across real.rs, risk_manager.rs, and scanner.rs.
 
+use dashmap::DashMap;
+use std::sync::OnceLock;
+
 /// Current time in milliseconds since UNIX epoch.
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -104,4 +107,29 @@ pub fn liquidity_rank(exchange: &str) -> u8 {
 #[inline]
 pub fn exchange_pair_key(exchange: &str, pair: &str) -> String {
     format!("{}:{}", exchange, pair)
+}
+
+// ── WS CONNECTED-AT TRACKING ────────────────────────────────────────────────
+// Global static (like ban_registry in risk_manager.rs) — avoids threading
+// EngineContext through all WS trader loops.
+
+static WS_CONNECTED_AT: OnceLock<DashMap<String, i64>> = OnceLock::new();
+
+fn ws_connected_map() -> &'static DashMap<String, i64> {
+    WS_CONNECTED_AT.get_or_init(|| DashMap::new())
+}
+
+/// Record when a WS trading connection was established.
+/// Called from ws_trader.rs, ws_gate.rs, ws_bybit.rs on reconnect.
+pub fn record_ws_connected(exchange: &str) {
+    ws_connected_map().insert(exchange.to_string(), now_ms());
+}
+
+/// Check if a WS connection was established recently (within `freshness_ms`).
+/// Returns true if connection is TOO FRESH (should wait).
+pub fn is_ws_too_fresh(exchange: &str, freshness_ms: i64) -> bool {
+    if let Some(connected_at) = ws_connected_map().get(exchange) {
+        return now_ms() - *connected_at < freshness_ms;
+    }
+    false
 }

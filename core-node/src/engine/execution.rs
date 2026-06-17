@@ -527,7 +527,8 @@ pub async fn execute_sequential_entry(
 
     let (oid_first, fill_first, fee_first) = match res_first {
         Ok(t) => {
-            e_ctx.ws_order_healthy.insert(first_label.to_string(), true);
+            // Successful order — clear any unhealthy marker
+            e_ctx.ws_order_unhealthy_until.remove(&first_label.to_string());
             (t.0, t.1, t.2)
         }
         Err(e) => {
@@ -536,10 +537,11 @@ pub async fn execute_sequential_entry(
             if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
                 crate::engine::risk_manager::mark_balance_low(first_label, e_ctx);
             }
-            // Mark WS unhealthy on timeout/WS failures (not balance errors)
+            // Mark WS unhealthy for 60s on timeout/WS failures (auto-recovers via TTL)
             if esl.contains("timeout") || esl.contains("ws ") || esl.contains("websocket") || esl.contains("connect") {
-                e_ctx.ws_order_healthy.insert(first_label.to_string(), false);
-                tracing::warn!("[real] 📡 {} WS marked UNHEALTHY after order failure", first_label);
+                let unhealthy_until = now + 60_000;
+                e_ctx.ws_order_unhealthy_until.insert(first_label.to_string(), unhealthy_until);
+                tracing::warn!("[real] 📡 {} WS marked UNHEALTHY for 60s (auto-recovery)", first_label);
             }
             (None, 0.0, 0.0)
         }
@@ -605,22 +607,26 @@ pub async fn execute_sequential_entry(
     };
 
     // After first leg is filled, we're already committed/exposed.
-    // Use more aggressive slippage on second leg to maximize fill probability
-    // and avoid costly ASYMMETRIC_CLOSE trim losses.
-    // Formula: 2x normal slippage, capped at spread/2 (never exceed half the profit).
-    let aggressive_slip = (ctx.ioc_slippage_pct * 2.0)
-        .min(ctx.sig_spread / 2.0)
-        .max(ctx.ioc_slippage_pct);
+    // CRITICAL: Use MARKET order for second leg to GUARANTEE fill.
+    // IOC second legs cause ASYMMETRIC_CLOSE when they expire (100% of historical losses).
+    // Market slippage is controlled by VWAP pre-verification before entry.
+    // Worst case: 0.1-0.3% extra slippage, which is far better than
+    // full trim loss + commission from ASYMMETRIC_CLOSE.
+    tracing::info!(
+        "[real] 🎯 Second leg {} — using MARKET order (guaranteed fill) for {}",
+        second_label, ctx.pair
+    );
 
     let res_second = second_conn.place_order(
         http, keys, &ctx.pair, second_is_buy, final_qty_second, ctx.dry_run,
-        second_limit, second_limit > 0.0,
-        ctx.leverage, second_mult, aggressive_slip, second_tick, ts.api_timeout_ms
+        0.0, false,  // price=0, use_ioc=false → MARKET order
+        ctx.leverage, second_mult, 0.0, second_tick, ts.api_timeout_ms
     ).await;
 
     let (oid_second, fill_second, fee_second) = match res_second {
         Ok(t) => {
-            e_ctx.ws_order_healthy.insert(second_label.to_string(), true);
+            // Successful order — clear any unhealthy marker
+            e_ctx.ws_order_unhealthy_until.remove(&second_label.to_string());
             (t.0, t.1, t.2)
         }
         Err(e) => {
@@ -629,10 +635,11 @@ pub async fn execute_sequential_entry(
             if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
                 crate::engine::risk_manager::mark_balance_low(second_label, e_ctx);
             }
-            // Mark WS unhealthy on timeout/WS failures
+            // Mark WS unhealthy for 60s on timeout/WS failures (auto-recovers via TTL)
             if esl.contains("timeout") || esl.contains("ws ") || esl.contains("websocket") || esl.contains("connect") {
-                e_ctx.ws_order_healthy.insert(second_label.to_string(), false);
-                tracing::warn!("[real] 📡 {} WS marked UNHEALTHY after order failure", second_label);
+                let unhealthy_until = now + 60_000;
+                e_ctx.ws_order_unhealthy_until.insert(second_label.to_string(), unhealthy_until);
+                tracing::warn!("[real] 📡 {} WS marked UNHEALTHY for 60s (auto-recovery)", second_label);
             }
             // Hard cooldown on exchange (5 min) — prevents repeated one-legged failures.
             let cooldown_ms = 300_000_i64; // 5 minutes

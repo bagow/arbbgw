@@ -254,6 +254,7 @@ async fn bybit_ws_loop(
         };
 
         tracing::info!("[bybit_ws] connected to v5/trade WS");
+        crate::engine::utils::record_ws_connected("bybit");
         let (mut write, mut read) = ws_stream.split();
 
         // ── AUTHENTICATE ──

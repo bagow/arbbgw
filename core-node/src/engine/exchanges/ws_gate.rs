@@ -55,6 +55,7 @@ async fn gate_ws_loop(
         };
 
         tracing::info!("[gate_ws] connected to futures WS v4");
+        crate::engine::utils::record_ws_connected("gate");
         let (mut write, mut read) = ws_stream.split();
 
         // Gate doesn't have a separate auth step — each request carries auth inline.

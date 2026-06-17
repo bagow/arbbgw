@@ -125,15 +125,30 @@ pub async fn process_entries(
             continue;
         }
 
-        // ── WS ORDER HEALTH CHECK ──
-        // Skip trades involving exchanges with recently broken WS order channels
-        // to prevent asymmetric fills (one leg fills, other timeouts).
+        // ── WS ORDER HEALTH CHECK (auto-recovery via TTL) ──
+        // Skip trades involving exchanges with recently broken WS order channels.
+        // unhealthy_until is a timestamp; once expired, the exchange auto-recovers.
         {
-            let ws_ok_a = e_ctx.ws_order_healthy.get(&exa).map(|v| *v).unwrap_or(true);
-            let ws_ok_b = e_ctx.ws_order_healthy.get(&exb).map(|v| *v).unwrap_or(true);
-            if !ws_ok_a || !ws_ok_b {
-                let unhealthy = if !ws_ok_a { &exa } else { &exb };
-                tracing::info!("[real] ⏭️ SKIP {}: {} WS order channel unhealthy", pair, unhealthy);
+            let now_ws = now_ms() as i64;
+            let unhealthy_a = e_ctx.ws_order_unhealthy_until.get(&exa).map(|v| *v > now_ws).unwrap_or(false);
+            let unhealthy_b = e_ctx.ws_order_unhealthy_until.get(&exb).map(|v| *v > now_ws).unwrap_or(false);
+            if unhealthy_a || unhealthy_b {
+                let unhealthy = if unhealthy_a { &exa } else { &exb };
+                let remaining = e_ctx.ws_order_unhealthy_until.get(unhealthy).map(|v| (*v - now_ws) / 1000).unwrap_or(0);
+                tracing::info!("[real] ⏭️ SKIP {}: {} WS order channel unhealthy (auto-recovery in {}s)", pair, unhealthy, remaining);
+                continue;
+            }
+        }
+
+        // ── WS FRESHNESS GUARD ──
+        // Skip trades if WS trading connection was just established (< 5s ago).
+        // Protects against unstable post-reconnect fills (e.g. Binance IOC EXPIRED).
+        {
+            let fresh_a = crate::engine::utils::is_ws_too_fresh(&exa, 5_000);
+            let fresh_b = crate::engine::utils::is_ws_too_fresh(&exb, 5_000);
+            if fresh_a || fresh_b {
+                let fresh_ex = if fresh_a { &exa } else { &exb };
+                tracing::info!("[real] ⏭️ SKIP {}: {} WS just reconnected (<5s), waiting for stability", pair, fresh_ex);
                 continue;
             }
         }
