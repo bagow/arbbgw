@@ -218,14 +218,15 @@ function getEnabledExchanges() {
     return KNOWN_EXCHANGES.filter(ex => !disabled.includes(ex));
 }
 
-/** Fetch klines from ALL known exchanges in parallel for the given pair. */
+/** Fetch klines for the pair's two exchanges (fast — only 2 requests). */
 async function loadChartData(row) {
     const key = rowKey(row);
     scannerState.loadKey = key;
 
-    const enabledEx = getEnabledExchanges();
+    // Only fetch the 2 exchanges from the clicked row (not all 6+)
+    const pairExchanges = [row.exchangeA, row.exchangeB];
     const results = await Promise.all(
-        enabledEx.map(ex => fetchKlines(ex, row.pair, scannerState.timeframeSec)
+        pairExchanges.map(ex => fetchKlines(ex, row.pair, scannerState.timeframeSec)
             .then(kl => [ex, kl])
         )
     );
@@ -1155,6 +1156,7 @@ function connectWS(row) {
     try { ws = new WebSocket(cfg.url); } catch { if(wsStatus) wsStatus.className = 'ws-indicator ws-indicator--err'; return; }
 
     ws.onopen = () => { if(wsStatus) wsStatus.className = 'ws-indicator ws-indicator--on'; if (cfg.onOpen) cfg.onOpen(ws); };
+    let wsDrawPending = false;
     ws.onmessage = e => {
         let price;
         try { price = cfg.extract(e); } catch { return; }
@@ -1163,7 +1165,11 @@ function connectWS(row) {
         scannerState.liveTicks[exTarget].push({ ts: Date.now(), close: price });
         const cutoff = Date.now() - 30 * 60_000;
         scannerState.liveTicks[exTarget] = scannerState.liveTicks[exTarget].filter(p => p.ts >= cutoff);
-        drawCharts();
+        // Throttle redraws to ~2fps max (WS can fire 30+/sec)
+        if (!wsDrawPending) {
+            wsDrawPending = true;
+            requestAnimationFrame(() => { wsDrawPending = false; drawCharts(); });
+        }
     };
     ws.onerror = () => { if(wsStatus) wsStatus.className = 'ws-indicator ws-indicator--err'; };
     ws.onclose = () => {

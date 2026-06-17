@@ -1293,6 +1293,9 @@ pub async fn handle_get_klines(
         "kucoin" => fetch_kucoin_klines(&client, &pair, &interval, limit, query.end_time).await,
         "okx" => fetch_okx_klines(&client, &pair, &interval, limit, query.end_time).await,
         "htx" => fetch_htx_klines(&client, &pair, &interval, limit, query.end_time).await,
+        "bingx" => fetch_bingx_klines(&client, &pair, &interval, limit, query.end_time).await,
+        "xt" => fetch_xt_klines(&client, &pair, &interval, limit, query.end_time).await,
+        "bitget" => fetch_bitget_klines(&client, &pair, &interval, limit, query.end_time).await,
         _ => Ok(vec![]),
     };
 
@@ -1513,4 +1516,101 @@ async fn fetch_htx_klines(
             volume: c["vol"].as_f64().unwrap_or(0.0),
         })
     }).collect())
+}
+
+async fn fetch_bingx_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    // BingX uses format: BTC-USDT
+    let bingx_pair = if pair.ends_with("USDT") {
+        format!("{}-USDT", &pair[..pair.len()-4])
+    } else {
+        pair.to_string()
+    };
+    let bingx_iv = match interval {
+        "1m" => "1m", "3m" => "3m", "5m" => "5m", "15m" => "15m", "1h" => "1h",
+        _ => "1m",
+    };
+    let mut url = format!(
+        "https://open-api.bingx.com/openApi/swap/v3/quote/klines?symbol={}&interval={}&limit={}",
+        bingx_pair, bingx_iv, limit.min(1440)
+    );
+    if let Some(et) = end_time { url.push_str(&format!("&endTime={}", et)); }
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let data: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let list = data.as_array().cloned().unwrap_or_default();
+    Ok(list.iter().filter_map(|c| {
+        Some(Kline {
+            ts: c["time"].as_i64()?,
+            open: c["open"].as_str()?.parse().ok()?,
+            high: c["high"].as_str()?.parse().ok()?,
+            low: c["low"].as_str()?.parse().ok()?,
+            close: c["close"].as_str()?.parse().ok()?,
+            volume: c["volume"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        })
+    }).collect())
+}
+
+async fn fetch_xt_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    // XT uses lowercase with underscore: btc_usdt
+    let xt_pair = if pair.ends_with("USDT") {
+        format!("{}_usdt", pair[..pair.len()-4].to_lowercase())
+    } else {
+        pair.to_lowercase()
+    };
+    let xt_iv = match interval {
+        "1m" => "1m", "3m" => "3m", "5m" => "5m", "15m" => "15m", "1h" => "1h",
+        _ => "1m",
+    };
+    let mut url = format!(
+        "https://fapi.xt.com/future/market/v1/public/q/kline?symbol={}&interval={}&limit={}",
+        xt_pair, xt_iv, limit.min(200)
+    );
+    if let Some(et) = end_time { url.push_str(&format!("&endTime={}", et)); }
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let data: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let list = data["result"].as_array().cloned().unwrap_or_default();
+    Ok(list.iter().filter_map(|c| {
+        Some(Kline {
+            ts: c["t"].as_i64()?,
+            open: c["o"].as_str().and_then(|s| s.parse().ok()).or_else(|| c["o"].as_f64())?,
+            high: c["h"].as_str().and_then(|s| s.parse().ok()).or_else(|| c["h"].as_f64())?,
+            low: c["l"].as_str().and_then(|s| s.parse().ok()).or_else(|| c["l"].as_f64())?,
+            close: c["c"].as_str().and_then(|s| s.parse().ok()).or_else(|| c["c"].as_f64())?,
+            volume: c["v"].as_str().and_then(|s| s.parse().ok()).or_else(|| c["v"].as_f64()).unwrap_or(0.0),
+        })
+    }).collect())
+}
+
+async fn fetch_bitget_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    // Bitget uses format: BTCUSDT (same as input)
+    let bg_iv = match interval {
+        "1m" => "1m", "3m" => "3m", "5m" => "5m", "15m" => "15m", "1h" => "1H",
+        _ => "1m",
+    };
+    let mut url = format!(
+        "https://api.bitget.com/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol={}&granularity={}&limit={}",
+        pair, bg_iv, limit.min(1000)
+    );
+    if let Some(et) = end_time { url.push_str(&format!("&endTime={}", et)); }
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let data: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let list = data["data"].as_array().cloned().unwrap_or_default();
+    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
+        let arr = c.as_array()?;
+        Some(Kline {
+            ts: arr.get(0)?.as_str()?.parse().ok()?,
+            open: arr.get(1)?.as_str()?.parse().ok()?,
+            high: arr.get(2)?.as_str()?.parse().ok()?,
+            low: arr.get(3)?.as_str()?.parse().ok()?,
+            close: arr.get(4)?.as_str()?.parse().ok()?,
+            volume: arr.get(5)?.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        })
+    }).collect();
+    klines.sort_by_key(|k| k.ts);
+    Ok(klines)
 }

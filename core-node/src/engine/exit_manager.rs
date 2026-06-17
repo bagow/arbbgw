@@ -39,7 +39,7 @@ pub async fn process_closes(
         let manual_close = trade.close_reason.as_deref() == Some("MANUAL_CLOSE");
         let closing_retry = trade.status == "CLOSING";
         if manual_close {
-            info!(
+            tracing::debug!(
                 "[real] MANUAL_CLOSE detected for trade {} {} on {}/{}",
                 trade.id, trade.pair, trade.exchange_a, trade.exchange_b
             );
