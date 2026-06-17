@@ -166,24 +166,26 @@ pub fn compute_spreads(
 
                 cnt_passed += 1;
 
-                // ── STRUCTURAL SPREAD (MID-PRICE EMA) ──
+                // ── STRUCTURAL SPREAD (EXECUTABLE SPREAD EMA) ──
                 let is_a_first = name_a < name_b;
                 let (name1, name2) = if is_a_first {
                     (name_a.clone(), name_b.clone())
                 } else {
                     (name_b.clone(), name_a.clone())
                 };
-                // mid1 corresponds to name1, mid2 corresponds to name2
                 let (data1, data2) = if is_a_first {
                     (&data_a, &data_b)
                 } else {
                     (&data_b, &data_a)
                 };
 
+                // Executable spreads in canonical order (what we'd actually GET trading)
+                let exec_12 = (data1.bid - data2.ask) / data2.ask * 100.0; // sell 1, buy 2
+                let exec_21 = (data2.bid - data1.ask) / data1.ask * 100.0; // sell 2, buy 1
+
+                // Mid premiums — used ONLY for zero-crossing detection (direction stability)
                 let mid1 = (data1.bid + data1.ask) / 2.0;
                 let mid2 = (data2.bid + data2.ask) / 2.0;
-
-                // Track mathematically symmetric directional premiums based on Mid price
                 let premium_1_over_2 = (mid1 - mid2) / mid2 * 100.0;
                 let premium_2_over_1 = (mid2 - mid1) / mid1 * 100.0;
 
@@ -200,14 +202,16 @@ pub fn compute_spreads(
                             0.0
                         };
 
-                        let new_12 = e.ema_12 + alpha * (premium_1_over_2 - e.ema_12);
-                        let new_21 = e.ema_21 + alpha * (premium_2_over_1 - e.ema_21);
+                        // EMA tracks EXECUTABLE spread (bid-ask), not mid premium
+                        let new_12 = e.ema_12 + alpha * (exec_12 - e.ema_12);
+                        let new_21 = e.ema_21 + alpha * (exec_21 - e.ema_21);
 
-                        let new_max_12 = e.max_12.max(premium_1_over_2);
-                        let new_min_12 = e.min_12.min(premium_1_over_2);
-                        let new_max_21 = e.max_21.max(premium_2_over_1);
-                        let new_min_21 = e.min_21.min(premium_2_over_1);
+                        let new_max_12 = e.max_12.max(exec_12);
+                        let new_min_12 = e.min_12.min(exec_12);
+                        let new_max_21 = e.max_21.max(exec_21);
+                        let new_min_21 = e.min_21.min(exec_21);
 
+                        // Zero-crossing still based on MID premium (direction stability check)
                         let new_cross_12 = if premium_1_over_2 <= 0.0 { now_f64 } else { e.last_cross_12 };
                         let new_cross_21 = if premium_2_over_1 <= 0.0 { now_f64 } else { e.last_cross_21 };
 
@@ -233,61 +237,47 @@ pub fn compute_spreads(
                             new_cross_21,
                         )
                     } else {
-                        // Default cross to NOW — conservative: assume NO structural spread
-                        // until proven by 24h of no zero-crossing.
                         let cross_12 = now_f64;
                         let cross_21 = now_f64;
                         ema_map.insert(
                             ema_key.clone(),
                             EmaEntry {
-                                ema_12: premium_1_over_2,
-                                ema_21: premium_2_over_1,
-                                max_12: premium_1_over_2,
-                                min_12: premium_1_over_2,
-                                max_21: premium_2_over_1,
-                                min_21: premium_2_over_1,
+                                ema_12: exec_12,
+                                ema_21: exec_21,
+                                max_12: exec_12,
+                                min_12: exec_12,
+                                max_21: exec_21,
+                                min_21: exec_21,
                                 last_cross_12: cross_12,
                                 last_cross_21: cross_21,
                                 last_ts: now_f64,
                             },
                         );
                         (
-                            premium_1_over_2,
-                            premium_2_over_1,
-                            premium_1_over_2,
-                            premium_1_over_2,
-                            premium_2_over_1,
-                            premium_2_over_1,
+                            exec_12,
+                            exec_21,
+                            exec_12,
+                            exec_12,
+                            exec_21,
+                            exec_21,
                             cross_12,
                             cross_21,
                         )
                     };
 
-                // Map values depending on trade direction.
-                // name1 is ALWAYS alphabetically first. name2 is ALWAYS alphabetically second.
+                // Map EMA values to trade direction
                 let is_dir_1_over_2 = direction == format!("{name1}>{name2}");
 
-                let (
-                    ema_mid_spread,
-                    current_mid_spread,
-                    structural_max,
-                    structural_min,
-                    last_cross,
-                ) = if is_dir_1_over_2 {
-                    (ema_12, premium_1_over_2, max_12, min_12, cross_12)
+                let (structural_max, structural_min, last_cross) = if is_dir_1_over_2 {
+                    (max_12, min_12, cross_12)
                 } else {
-                    (ema_21, premium_2_over_1, max_21, min_21, cross_21)
+                    (max_21, min_21, cross_21)
                 };
 
-                // Isolating the penalty: calculate the pure deviation mathematically.
-                // mid_deviation = Current Mid Premium - Historical Mid EMA.
-                let mid_deviation = current_mid_spread - ema_mid_spread;
-
-                // Create a "Synthetic Base Executable Spread" such that:
-                // spread - structural_spread = mid_deviation.
-                // Therefore, structural_spread = spread - mid_deviation.
-                // This tracks the historical behavior of the actual executable spread cleanly!
-                let structural_spread = spread - mid_deviation;
+                // structural_spread = EMA of the executable spread in the trade direction.
+                // This IS the level the spread converges to — directly measured, always correct.
+                // For HUSDT with persistent 3% premium: structural ≈ 3% → guard blocks marginal entries.
+                let structural_spread = if is_dir_1_over_2 { ema_12 } else { ema_21 };
 
                 let has_structural_spread = (now_f64 - last_cross) > 86000.0;
 
