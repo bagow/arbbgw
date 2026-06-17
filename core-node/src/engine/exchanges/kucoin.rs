@@ -289,7 +289,13 @@ impl ExchangeConnector for KucoinConnector {
         ).await?;
 
         if v_resp["code"].as_str() != Some("200000") {
+            let api_code = v_resp["code"].as_str().unwrap_or("");
+            let api_msg = v_resp["msg"].as_str().unwrap_or("");
             tracing::error!("[kucoin] close rejected: {}", v_resp);
+            // If exchange says no position exists, return error immediately (don't retry)
+            if api_code == "300009" || api_msg.to_lowercase().contains("no open position") {
+                return Err(format!("Kucoin API error {}: {}", api_code, api_msg));
+            }
         }
 
         let order_id = v_resp["data"]["orderId"].as_str().map(|s| s.to_string());
@@ -364,8 +370,10 @@ impl ExchangeConnector for KucoinConnector {
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| {
+                let api_code = v_fb["code"].as_str().unwrap_or("?");
+                let api_msg = v_fb["msg"].as_str().unwrap_or("unknown");
                 tracing::error!("[kucoin] Fallback rejected, response: {}", v_fb);
-                "Kucoin Fallback rejected".to_string()
+                format!("Kucoin Fallback rejected {}: {}", api_code, api_msg)
             })?;
 
         for _ in 0..5 {

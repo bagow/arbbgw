@@ -295,6 +295,10 @@ impl ExchangeConnector for BitgetConnector {
                 }
                 Err(e) => {
                     warn!("[bitget] close {} attempt {} failed: {}", pair, attempt, e);
+                    // No position to close — stop retrying immediately
+                    if e.contains("22002") || e.to_lowercase().contains("no position") {
+                        return Err(e);
+                    }
                 }
             }
 

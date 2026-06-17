@@ -72,9 +72,13 @@ pub fn is_position_missing_or_liquidated_error(err: &str) -> bool {
     let s = err.to_lowercase();
     s.contains("position not found")
         || s.contains("no position")
+        || s.contains("no open position")
         || s.contains("position size is zero")
         || s.contains("reduce-only")
         || s.contains("liquidat")
+        || s.contains("fallback rejected")
+        || s.contains("22002")  // Bitget error code for "No position to close"
+        || s.contains("300009") // Kucoin error code for "No open positions to close"
 }
 
 /// Static liquidity ranking for exchanges.
