@@ -326,7 +326,7 @@ async fn shard_handler(
             },
             _ = diag_timer.tick() => {
                 if shard_idx == 0 {
-                    info!("[bingx] Shard 0 DIAG: msgs={} ticks={}", msg_count, tick_count);
+                    tracing::debug!("[bingx] Shard 0 DIAG: msgs={} ticks={}", msg_count, tick_count);
                 }
             }
         }

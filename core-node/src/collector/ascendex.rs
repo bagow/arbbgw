@@ -162,7 +162,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                 Some(Ok(Message::Text(text))) => {
                     msg_count += 1;
                     if msg_count <= 5 {
-                        info!("[ascendex] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(400)]);
+                        tracing::debug!("[ascendex] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(400)]);
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let m = v["m"].as_str().unwrap_or("");
@@ -230,7 +230,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             },
             _ = ping.tick() => {
                 ws.send(Message::Text(json!({"op":"ping"}).to_string().into())).await?;
-                info!("[ascendex] DIAG: msgs={} ticks={}", msg_count, tick_count);
+                tracing::debug!("[ascendex] DIAG: msgs={} ticks={}", msg_count, tick_count);
                 let now_ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default().as_secs();

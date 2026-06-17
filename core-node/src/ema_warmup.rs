@@ -15,7 +15,7 @@ use crate::spreads::{warmup_ema_from_premiums, unverified_ema_keys};
 use crate::state::PriceMap;
 
 const LOOKBACK_SECS: u64 = 86_400; // 24 hours
-const MAX_CONCURRENT: usize = 20; // Max parallel REST requests (avoid rate limits)
+const MAX_CONCURRENT: usize = 10; // Max parallel REST requests (avoid rate limits)
 
 // ─── Gate.io: fetch 15-min candles for a USDT perp ────────────────────────────
 
@@ -560,6 +560,188 @@ async fn run_retry_unverified(
     count
 }
 
+// ─── Toobit: fetch 15-min klines (Binance-compatible format) ──────────────────
+
+async fn fetch_toobit_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
+    let from = now_secs() - LOOKBACK_SECS;
+    let url = format!(
+        "https://api.toobit.com/quote/v1/klines?symbol={}&interval=15m&startTime={}&limit=100",
+        pair,
+        from * 1000
+    );
+    let v: Value = match http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(j) => j,
+            Err(_) => return None,
+        },
+        _ => return None,
+    };
+    let arr = match v.as_array() {
+        Some(a) => a,
+        None => return Some(vec![]),
+    };
+    // Toobit klines = Binance format: [openTime, open, high, low, close, vol, ...]
+    let res: Vec<(f64, f64)> = arr
+        .iter()
+        .filter_map(|c| {
+            let ts = c[0].as_f64()? / 1000.0;
+            let close = c[4]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| c[4].as_f64())?;
+            Some((ts, close))
+        })
+        .collect();
+    Some(res)
+}
+
+// ─── AscendEX: fetch 15-min klines ───────────────────────────────────────────
+
+async fn fetch_ascendex_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
+    // AscendEX symbol: BTCUSDT → BTC-PERP
+    let sym = pair.replace("USDT", "-PERP");
+    let from = (now_secs() - LOOKBACK_SECS) * 1000;
+    let to = now_secs() * 1000;
+    let url = format!(
+        "https://ascendex.com/api/pro/v1/barhist?symbol={}&interval=15&from={}&to={}",
+        sym, from, to
+    );
+    let v: Value = match http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(j) => j,
+            Err(_) => return None,
+        },
+        _ => return None,
+    };
+    // AscendEX response: { "code": 0, "data": [{ "m":"bar", "s":"BTC-PERP", "data": { "ts":..., "c":"...", ... } }, ...] }
+    let arr = match v["data"].as_array() {
+        Some(a) => a,
+        None => return Some(vec![]),
+    };
+    let res: Vec<(f64, f64)> = arr
+        .iter()
+        .filter_map(|c| {
+            let d = &c["data"];
+            let ts = d["ts"].as_i64()? as f64 / 1000.0;
+            let close = d["c"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| d["c"].as_f64())?;
+            Some((ts, close))
+        })
+        .collect();
+    Some(res)
+}
+
+// ─── BitMEX: fetch 5-min klines (no 15m available) ───────────────────────────
+
+async fn fetch_bitmex_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)>> {
+    // BitMEX symbol: BTCUSDT → XBTUSDT (only for BTC)
+    let sym = if pair.starts_with("BTC") {
+        pair.replacen("BTC", "XBT", 1)
+    } else {
+        pair.to_string()
+    };
+    let start_time = chrono_format_secs(now_secs() - LOOKBACK_SECS);
+    let url = format!(
+        "https://www.bitmex.com/api/v1/trade/bucketed?binSize=5m&symbol={}&count=100&startTime={}&reverse=false",
+        sym, start_time
+    );
+    let v: Value = match http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(j) => j,
+            Err(_) => return None,
+        },
+        _ => return None,
+    };
+    let arr = match v.as_array() {
+        Some(a) => a,
+        None => return Some(vec![]),
+    };
+    // BitMEX response: [{ "timestamp": "2026-...", "close": 65600.1, ... }]
+    let res: Vec<(f64, f64)> = arr
+        .iter()
+        .filter_map(|c| {
+            let ts_str = c["timestamp"].as_str()?;
+            let ts = parse_iso_timestamp(ts_str)?;
+            let close = c["close"].as_f64()?;
+            if close <= 0.0 { return None; }
+            Some((ts, close))
+        })
+        .collect();
+    Some(res)
+}
+
+/// Format epoch secs as ISO 8601 string for BitMEX API
+fn chrono_format_secs(secs: u64) -> String {
+    // Simple ISO 8601 without chrono dependency
+    let s = secs;
+    let days = s / 86400;
+    let rem = s % 86400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let sec = rem % 60;
+    // Epoch = 1970-01-01. Simple conversion for recent dates.
+    let mut y = 1970i64;
+    let mut d = days as i64;
+    loop {
+        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let yd = if leap { 366 } else { 365 };
+        if d < yd { break; }
+        d -= yd;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let mdays = [31, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut mo = 0usize;
+    for i in 0..12 {
+        if d < mdays[i] { mo = i; break; }
+        d -= mdays[i];
+    }
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z", y, mo + 1, d + 1, h, m, sec)
+}
+
+/// Parse ISO 8601 timestamp string to epoch seconds
+fn parse_iso_timestamp(s: &str) -> Option<f64> {
+    // Expected: "2026-06-17T07:00:00.000Z"
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let mo: i64 = s.get(5..7)?.parse().ok()?;
+    let d: i64 = s.get(8..10)?.parse().ok()?;
+    let h: i64 = s.get(11..13)?.parse().ok()?;
+    let mi: i64 = s.get(14..16)?.parse().ok()?;
+    let sec: i64 = s.get(17..19)?.parse().ok()?;
+
+    // Days from epoch to year start
+    let mut days: i64 = 0;
+    for yr in 1970..y {
+        let leap = yr % 4 == 0 && (yr % 100 != 0 || yr % 400 == 0);
+        days += if leap { 366 } else { 365 };
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let mdays = [31, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    for i in 0..(mo - 1) as usize {
+        days += mdays[i];
+    }
+    days += d - 1;
+
+    Some((days * 86400 + h * 3600 + mi * 60 + sec) as f64)
+}
+
 // ─── Dispatch to the right exchange API ──────────────────────────────────────
 
 async fn fetch_candles_for(http: &Client, exchange: &str, pair: &str) -> Option<Vec<(f64, f64)>> {
@@ -572,6 +754,9 @@ async fn fetch_candles_for(http: &Client, exchange: &str, pair: &str) -> Option<
         "bingx" => fetch_bingx_candles(http, pair).await,
         "bitget" => fetch_bitget_candles(http, pair).await,
         "xt" => fetch_xt_candles(http, pair).await,
+        "toobit" => fetch_toobit_candles(http, pair).await,
+        "ascendex" => fetch_ascendex_candles(http, pair).await,
+        "bitmex" => fetch_bitmex_candles(http, pair).await,
         _ => Some(vec![]),
     }
 }

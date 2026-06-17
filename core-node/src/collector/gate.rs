@@ -289,7 +289,7 @@ async fn ws_shard(
                 Some(Ok(Message::Text(text))) => {
                     msg_count += 1;
                     if msg_count <= 3 {
-                        info!("[gate] Shard {} MSG #{} (len={}): {}", idx, msg_count, text.len(), &text[..text.len().min(300)]);
+                        tracing::debug!("[gate] Shard {} MSG #{} (len={}): {}", idx, msg_count, text.len(), &text[..text.len().min(300)]);
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let channel = v["channel"].as_str().unwrap_or("");
@@ -340,7 +340,7 @@ async fn ws_shard(
             _ = ping.tick() => {
                 let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                 ws.send(Message::Text(json!({"time":ts, "channel":"futures.ping"}).to_string().into())).await?;
-                info!("[gate] Shard {} DIAG: msgs={} ticks={}", idx, msg_count, tick_count);
+                tracing::debug!("[gate] Shard {} DIAG: msgs={} ticks={}", idx, msg_count, tick_count);
             }
         }
     }

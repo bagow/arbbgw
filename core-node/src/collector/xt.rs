@@ -158,7 +158,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                 Some(Ok(Message::Text(text))) => {
                     msg_count += 1;
                     if msg_count <= 5 {
-                        info!("[xt] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(400)]);
+                        tracing::debug!("[xt] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(400)]);
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let topic = v["topic"].as_str().unwrap_or("");
@@ -251,7 +251,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             _ = ping.tick() => {
                 ws.send(Message::Text(json!({"method":"ping","id":2}).to_string().into())).await?;
                 let _ = ws.send(Message::Text("ping".into())).await; // Fallback text ping
-                info!("[xt] DIAG: msgs={} ticks={}", msg_count, tick_count);
+                tracing::debug!("[xt] DIAG: msgs={} ticks={}", msg_count, tick_count);
             }
         }
     }

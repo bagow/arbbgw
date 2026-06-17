@@ -173,7 +173,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                     }
                     msg_count += 1;
                     if msg_count <= 3 {
-                        info!("[toobit] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(400)]);
+                        tracing::debug!("[toobit] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(400)]);
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         if v["topic"].as_str() == Some("depth") {
@@ -239,7 +239,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             _ = ping.tick() => {
                 let ts_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
                 ws.send(Message::Text(json!({"ping": ts_ms}).to_string().into())).await?;
-                info!("[toobit] DIAG: msgs={} ticks={}", msg_count, tick_count);
+                tracing::debug!("[toobit] DIAG: msgs={} ticks={}", msg_count, tick_count);
             }
         }
     }

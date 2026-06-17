@@ -432,7 +432,7 @@ function renderTable() {
           <td>${row.pair}</td><td>${row.exchangeA}</td><td>${row.exchangeB}</td>
           <td>${fmtPrice(row.priceA)}</td><td>${fmtPrice(row.priceB)}</td>
           <td class="spread-cell ${sc}">${fmtSpread(row.spread)}</td>
-          <td class="spread-cell ${scStruc}">${row.has_structural_spread ? fmtSpread(row.structural_spread) : '<span style="color:var(--text-sub);">None</span>'}</td>
+          <td class="spread-cell ${scStruc}">${row.has_structural_spread ? fmtSpread(row.structural_spread) : '<span style="color:var(--text-sub);">~' + fmtSpread(row.structural_spread) + '</span>'}</td>
           <td class="dir-cell">${row.direction || '–'}</td>`;
         tr.addEventListener('click', () => openModal(row));
         refs.tableBody.appendChild(tr);
