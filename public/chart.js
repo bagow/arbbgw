@@ -407,10 +407,13 @@ function renderTable() {
         try { disabled = typeof currentProfile.disabled_exchanges === 'string' ? JSON.parse(currentProfile.disabled_exchanges) : (currentProfile.disabled_exchanges || []); } catch(e){}
         filtered = filtered.filter(r => !disabled.includes(r.exchangeA) && !disabled.includes(r.exchangeB));
     }
-    const sorted = [...filtered].sort((a, b) => {
-        const av = a[scannerState.sortKey] ?? 0, bv = b[scannerState.sortKey] ?? 0;
-        return typeof av === 'string' ? av.localeCompare(bv) * scannerState.sortDir : (av - bv) * scannerState.sortDir;
-    });
+    const sorted = [...filtered]
+        .map(r => { r.profit_pct = r.spread - r.structural_spread; return r; })
+        .filter(r => r.profit_pct > 0) // Hide rows with no real profit opportunity
+        .sort((a, b) => {
+            const av = a[scannerState.sortKey] ?? 0, bv = b[scannerState.sortKey] ?? 0;
+            return typeof av === 'string' ? av.localeCompare(bv) * scannerState.sortDir : (av - bv) * scannerState.sortDir;
+        });
     pairCount && (pairCount.textContent = `${sorted.length} pairs`);
     refs.tableBody.innerHTML = '';
     if (!sorted.length) {
