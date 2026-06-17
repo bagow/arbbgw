@@ -28,14 +28,6 @@ static WEIGHT_WINDOW_RESET_MS: AtomicI64 = AtomicI64::new(0);
 const WEIGHT_LIMIT: u32 = 2400;
 const WEIGHT_HARD_STOP: u32 = 2200; // Block new requests above this
 
-/// Quick check: is Binance currently IP-banned? Used by scanner/entry_manager
-/// to skip signals involving Binance before opening the first leg.
-pub fn is_binance_banned() -> bool {
-    let now = now_ms() as i64;
-    let banned_until = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
-    banned_until > 0 && now < banned_until
-}
-
 /// PUBLIC: Check ban + weight before ANY Binance REST request.
 /// Call from collector, ema_warmup, or any code that hits fapi.binance.com.
 pub fn check_before_binance_rest() -> Result<(), String> {
