@@ -414,7 +414,7 @@ function renderTable() {
     pairCount && (pairCount.textContent = `${sorted.length} pairs`);
     refs.tableBody.innerHTML = '';
     if (!sorted.length) {
-        refs.tableBody.innerHTML = `<tr class="placeholder-row"><td colspan="8">No pairs above threshold</td></tr>`;
+    refs.tableBody.innerHTML = `<tr class="placeholder-row"><td colspan="9">No pairs above threshold</td></tr>`;
         return;
     }
     for (const row of sorted) {
@@ -430,12 +430,19 @@ function renderTable() {
         }
         const strucTooltip = `Deviation: ${fmtSpread(deviation)} (spread ${fmtSpread(row.spread)} - structural ${fmtSpread(row.structural_spread)})`;
         
+        // Profit % = spread - structural (real arbitrage opportunity after structural premium)
+        const profitPct = row.spread - row.structural_spread;
+        row.profit_pct = profitPct; // store for sorting
+        const profitClass = profitPct >= 0.5 ? 'spread--high' : profitPct >= 0.2 ? 'spread--medium' : 'spread--low';
+        const profitStyle = profitPct < 0 ? 'color:var(--red);opacity:0.6' : '';
+
         tr.innerHTML = `
           <td>${row.pair}</td><td>${row.exchangeA}</td><td>${row.exchangeB}</td>
           <td>${fmtPrice(row.priceA)}</td><td>${fmtPrice(row.priceB)}</td>
           <td class="spread-cell ${sc}">${fmtSpread(row.spread)}</td>
           <td class="spread-cell ${scStruc}" title="${strucTooltip}">${row.has_structural_spread ? fmtSpread(row.structural_spread) : '<span style="color:var(--text-sub);">~' + fmtSpread(row.structural_spread) + '</span>'}</td>
-          <td class="dir-cell">${row.direction || '–'}</td>`;
+          <td class="spread-cell ${profitClass}" style="${profitStyle}">${fmtSpread(profitPct)}</td>
+          <td class="dir-cell">${row.direction || '\u2013'}</td>`;
         tr.addEventListener('click', () => openModal(row));
         refs.tableBody.appendChild(tr);
     }
