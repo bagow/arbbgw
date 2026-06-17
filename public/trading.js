@@ -1514,8 +1514,8 @@ window.renderLogsHTML = function(text) {
         // ── SKIP / REJECT ──
         if ((m = line.match(/SKIP (\S+) — no fresh L2 WS data for (\S+) \(age: (-?\d+)ms\) \/ (\S+) \(age: (-?\d+)ms\)/))) {
             const ageA = parseInt(m[3]), ageB = parseInt(m[5]);
-            const probA = ageA > 5000 ? `${m[2]} устарел ${(ageA/1000).toFixed(1)}с` : `${m[2]} ок`;
-            const probB = ageB > 5000 ? `${m[4]} устарел ${(ageB/1000).toFixed(1)}с` : `${m[4]} ок`;
+            const probA = ageA < 0 ? `${m[2]} нет данных` : ageA > 5000 ? `${m[2]} устарел ${(ageA/1000).toFixed(1)}с` : `${m[2]} ок`;
+            const probB = ageB < 0 ? `${m[4]} нет данных` : ageB > 5000 ? `${m[4]} устарел ${(ageB/1000).toFixed(1)}с` : `${m[4]} ок`;
             return `⏭ ${m[1]}: нет свежего ордербука — ${probA}, ${probB}`;
         }
         if ((m = line.match(/SKIP (\S+) L1 depth too shallow: A=([\d.]+)\$ B=([\d.]+)\$ < ([\d.]+)\$/))) {

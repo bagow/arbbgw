@@ -212,11 +212,43 @@ pub async fn process_entries(
         let cached_b = e_ctx.l2_books.get(&key_b).map(|v| v.clone());
         let now_cache = now_ms();
 
-        // L2 cache must exist AND be fresh (< 5s). No REST fallback.
-        let (ob_a_res, ob_b_res) = match (&cached_a, &cached_b) {
-            (Some(a), Some(b)) if (now_cache - a.updated_ms) < 5_000 && (now_cache - b.updated_ms) < 5_000 => {
-                (Ok((a.bids.clone(), a.asks.clone())), Ok((b.bids.clone(), b.asks.clone())))
-            },
+        // Helper: check if L2 is fresh, or build synthetic from L1 if L2 was never received.
+        // Exchanges without L2 WS (gate, bitget, kucoin, bingx, xt) never populate l2_books,
+        // so cached is None. We allow entry using L1 bid/ask (already validated in scanner).
+        // If L2 EXISTS but is STALE (>5s) — still block (data was live but stopped updating).
+        let make_l2 = |cached: &Option<crate::state::L2Snapshot>, ex_name: &str, price_data: &crate::state::TickerData| -> Option<(Vec<(f64, f64)>, Vec<(f64, f64)>)> {
+            match cached {
+                Some(snap) if (now_cache - snap.updated_ms) < 5_000 => {
+                    Some((snap.bids.clone(), snap.asks.clone()))
+                }
+                Some(snap) => {
+                    // L2 exists but stale
+                    tracing::debug!("[real] L2 stale for {} {} (age={}ms)", pair, ex_name, now_cache - snap.updated_ms);
+                    None
+                }
+                None => {
+                    // No L2 at all — build synthetic from L1 (bid/ask already passed scanner filters)
+                    if price_data.bid > 0.0 && price_data.ask > 0.0 {
+                        let bid_usd = price_data.bid_size; // already in USD from collectors
+                        let ask_usd = price_data.ask_size;
+                        let bid_coins = if price_data.bid > 0.0 { bid_usd / price_data.bid } else { 0.0 };
+                        let ask_coins = if price_data.ask > 0.0 { ask_usd / price_data.ask } else { 0.0 };
+                        Some((vec![(price_data.bid, bid_coins)], vec![(price_data.ask, ask_coins)]))
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+
+        let data_a_ref = prices.get(exa).and_then(|m| m.get(pair).map(|d| d.clone()));
+        let data_b_ref = prices.get(exb).and_then(|m| m.get(pair).map(|d| d.clone()));
+
+        let ob_a = data_a_ref.as_ref().and_then(|d| make_l2(&cached_a, exa, d));
+        let ob_b = data_b_ref.as_ref().and_then(|d| make_l2(&cached_b, exb, d));
+
+        let (ob_a_res, ob_b_res) = match (ob_a, ob_b) {
+            (Some(a), Some(b)) => (Ok(a), Ok(b)),
             _ => {
                 let a_age = cached_a.as_ref().map(|a| now_cache - a.updated_ms).unwrap_or(-1);
                 let b_age = cached_b.as_ref().map(|b| now_cache - b.updated_ms).unwrap_or(-1);
