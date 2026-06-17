@@ -195,14 +195,13 @@ impl Default for TradingSettings {
 
 impl TradingSettings {
     /// Minimum spread (as fraction, not %) needed to cover all round-trip costs.
-    /// Uses realistic exchange taker fee (0.05%) — NOT user-configured commission_rate,
-    /// since real engine reads actual fees from exchange API.
-    /// Slippage is still from settings since it varies by market conditions.
+    /// Uses realistic exchange taker fee (0.05%).
+    /// Slippage is NOT estimated here — VWAP L2 verification handles real impact.
     ///
-    /// Formula: 2 × (2×taker_fee + slippage) — fees on all 4 legs, slippage on 2 entry legs only.
+    /// Formula: 4 × taker_fee (fees on all 4 legs).
     pub fn break_even_fraction(&self) -> f64 {
         const TAKER_FEE: f64 = 0.05 / 100.0; // 0.05% — typical CEX futures taker rate
-        4.0 * TAKER_FEE + 2.0 * (self.slippage_percent / 100.0)
+        4.0 * TAKER_FEE
     }
 }
 

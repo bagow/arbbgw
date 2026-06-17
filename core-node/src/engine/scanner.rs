@@ -247,15 +247,12 @@ pub fn generate_signals(
                 continue;
             }
 
-            // Slippage: hardcoded by order type (not user-configurable — prevents misconfiguration)
-            // IOC orders have built-in price tolerance → minimal slippage
-            // Market orders have slightly more slippage
-            let slippage_pct = if ts.entry_order_type == "ioc" { 0.05 } else { 0.1 };
-            let slippage_frac = slippage_pct / 100.0;
-            // Fees apply on all 4 legs (entry + exit on both exchanges).
-            // Slippage only applies to 2 ENTRY legs — exit uses limit orders
-            // at convergence prices, so exit slippage ≈ 0.
-            let break_even_pct = (2.0 * (fee_a + fee_b) + 2.0 * slippage_frac) * 100.0;
+            // Break-even = pure exchange fees on all 4 legs (entry + exit on both exchanges).
+            // fee_a/fee_b are REAL taker rates fetched from exchange APIs (not estimates).
+            // Slippage is NOT included here — the L2 VWAP verification in entry_manager
+            // checks actual orderbook impact before execution, making hardcoded slippage
+            // estimates unnecessary and error-prone.
+            let break_even_pct = 2.0 * (fee_a + fee_b) * 100.0;
 
             // ── ABSOLUTE STRUCTURAL GUARD ──
             // Active ONLY when structural spread is reliable (legs did NOT swap in 24h+).

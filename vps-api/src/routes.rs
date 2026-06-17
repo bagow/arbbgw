@@ -291,7 +291,6 @@ pub async fn handle_get_unified(
                         COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0)
                         - COALESCE(commission_cost,0.0)
                         - COALESCE(funding_cost,0.0)
-                        - COALESCE(slippage_cost,0.0)
                     )
                 ), 0.0)
                  FROM trades
@@ -596,7 +595,9 @@ pub async fn handle_get_unified(
                 obj.insert("pnl_a".into(), json!(db_pnl_a));
                 obj.insert("pnl_b".into(), json!(db_pnl_b));
                 // Net PnL: trust curr_gross_pnl from DB
-                // (canonical: gross - commission - funding - slippage).
+                // (canonical: gross - commission - funding).
+                // NOTE: slippage is NOT subtracted — gross PnL uses real fill prices
+                // which inherently include slippage. Slippage column is diagnostic only.
                 obj.insert(
                     "current_pnl".into(),
                     json!(t.curr_gross_pnl.unwrap_or(gross)),

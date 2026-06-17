@@ -84,11 +84,17 @@ pub async fn process_closes(
 
 
         let triggered_tp = exec_net_pct >= settings.take_profit_percent;
-        let triggered_stop = top_spread > 0.0 && live_state.current_spread < stop_limit;
+        // Use pessimistic exit_spread for stop trigger — this is the actual price
+        // we'd get when closing. current_spread (optimistic) overstates our position.
+        let triggered_stop = top_spread > 0.0 && live_state.exit_spread < stop_limit;
         // Structural-aware exit: for pairs with structural spread > 0, the spread
         // will converge to structural_spread, not 0.0. Use it as the effective zero.
         let structural_target = trade.structural_spread.max(0.0);
-        let zero_spread = live_state.exit_spread <= structural_target && exec_net_pnl >= 0.0;
+        // Require minimum net profit to survive IOC exit slippage.
+        // Without this, temporary L1 spread compression triggers premature exits
+        // that lock in losses from exit slippage + fees.
+        let min_exit_profit_pct = 0.05;
+        let zero_spread = live_state.exit_spread <= structural_target && exec_net_pct >= min_exit_profit_pct;
 
         let mut reason_str = "";
         if manual_close { reason_str = "MANUAL"; }
