@@ -422,6 +422,9 @@ function renderPanel(profile, active, history, stats, exchanges) {
     if (activeSubTabId === 'scanner' && window.initScanner) {
         window.initScanner(profile.id);
     }
+
+    // Load blacklist into textarea from technical settings
+    loadBlacklistIntoTextarea();
 }
 
 /** Helper to update stats in sub-nav during polling without full re-render */
@@ -778,6 +781,19 @@ function renderSettingsForm(profile) {
                     <label>Slippage IOC (%)</label>
                     <input type="number" id="sf-slip-${p.id}" step="0.01" min="0.01" max="5" title="Max price tolerance for IOC limit orders (entry & close). Also used as fallback close tolerance. Set = (spread/4) to avoid killing your own PnL." value="${p.slippage_percent??0.5}" />
                 </div>
+
+                <!-- Blacklist textarea -->
+                <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid var(--border-dim);padding-top:16px;">
+                    <label style="display:block;text-transform:uppercase;font-size:.7rem;letter-spacing:.5px;color:var(--text-sub);margin-bottom:8px;">
+                        🚫 Blacklisted Pairs <span style="font-weight:400;text-transform:none;letter-spacing:0;">(one per line — excluded from scanner & trading)</span>
+                    </label>
+                    <textarea id="sf-blacklist"
+                        spellcheck="false"
+                        placeholder="BTCUSDT&#10;ETHUSDT&#10;..."
+                        style="width:100%;min-height:100px;max-height:220px;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-family:var(--font-mono);font-size:.85rem;line-height:1.6;resize:vertical;box-sizing:border-box;"
+                    ></textarea>
+                </div>
+
                 <div class="form-actions" style="grid-column:1/-1;display:flex;gap:16px;margin-top:24px;border-top:1px solid var(--border-dim);padding-top:24px;align-items:center;flex-wrap:wrap;">
                     <button type="button" id="sf-power-${p.id}"
                         onclick="toggleBotPower('${p.id}')"
@@ -859,6 +875,27 @@ async function loadTechnicalSettings() {
     }
 }
 
+// ── Blacklist load/save ──────────────────────────────────────────────────────
+
+let _blacklistOriginal = '';
+
+async function loadBlacklistIntoTextarea() {
+    const ta = document.getElementById('sf-blacklist');
+    if (!ta) return;
+    try {
+        const data = await apiFetch('/api/technical-settings');
+        const bl = data.find(d => d.key === 'blacklist');
+        if (bl && bl.value) {
+            // Convert comma-separated to newline-separated for textarea
+            const lines = bl.value.split(',').map(s => s.trim()).filter(s => s.length > 0);
+            ta.value = lines.join('\n');
+            _blacklistOriginal = bl.value;
+        }
+    } catch (e) {
+        console.warn('Failed to load blacklist:', e);
+    }
+}
+
 function renderTechSettingsTable(wrap, data) {
     const CATEGORY_LABELS = {
         spreads: '📊 Spread Computation',
@@ -868,11 +905,11 @@ function renderTechSettingsTable(wrap, data) {
         intervals: '🔄 Refresh Intervals',
         general: '⚙️ General',
     };
-    // Keys that exist in DB but have zero effect in engine code — hide from UI
+    // Keys that exist in DB but have zero effect in engine code or are managed elsewhere — hide from UI
     const HIDDEN_KEYS = new Set([
         'safety_margin', 'deviation_safety', 'max_price_ratio',
         'max_funding_diff', 'min_ioc_tolerance_pct', 'funding_cache_secs',
-        'depth_multiplier',
+        'depth_multiplier', 'blacklist',
     ]);
     // Group by category
     const groups = {};
@@ -1752,6 +1789,24 @@ window.saveSettings = async function (profileId) {
         await saveProfileSettings(profileId, settings);
         const p = profiles.find(pr => pr.id === profileId);
         if (p) Object.assign(p, settings);
+
+        // Save blacklist to technical settings (newline → comma-separated)
+        const ta = document.getElementById('sf-blacklist');
+        if (ta) {
+            const newBlacklist = ta.value.split('\n')
+                .map(s => s.trim().toUpperCase())
+                .filter(s => s.length > 0)
+                .join(',');
+            if (newBlacklist !== _blacklistOriginal) {
+                await apiFetch('/api/technical-settings', {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ blacklist: newBlacklist }),
+                });
+                _blacklistOriginal = newBlacklist;
+            }
+        }
+
         if (btn) { btn.textContent = 'Saved!'; btn.style.background = 'var(--green)'; }
         showToast('Settings saved successfully', 'success');
     } catch (e) {
