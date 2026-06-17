@@ -424,15 +424,17 @@ function renderTable() {
         const sc = row.spread >= 0.5 ? 'spread--high' : row.spread >= 0.2 ? 'spread--medium' : 'spread--low';
         
         let scStruc = '';
+        const deviation = row.spread - row.structural_spread;
         if (row.has_structural_spread) {
-            scStruc = row.structural_spread >= 0.5 ? 'spread--high' : row.structural_spread >= 0.2 ? 'spread--medium' : 'spread--low';
+            scStruc = deviation >= 0.5 ? 'spread--high' : deviation >= 0.2 ? 'spread--medium' : 'spread--low';
         }
+        const strucTooltip = `Deviation: ${fmtSpread(deviation)} (spread ${fmtSpread(row.spread)} - structural ${fmtSpread(row.structural_spread)})`;
         
         tr.innerHTML = `
           <td>${row.pair}</td><td>${row.exchangeA}</td><td>${row.exchangeB}</td>
           <td>${fmtPrice(row.priceA)}</td><td>${fmtPrice(row.priceB)}</td>
           <td class="spread-cell ${sc}">${fmtSpread(row.spread)}</td>
-          <td class="spread-cell ${scStruc}">${row.has_structural_spread ? fmtSpread(row.structural_spread) : '<span style="color:var(--text-sub);">~' + fmtSpread(row.structural_spread) + '</span>'}</td>
+          <td class="spread-cell ${scStruc}" title="${strucTooltip}">${row.has_structural_spread ? fmtSpread(row.structural_spread) : '<span style="color:var(--text-sub);">~' + fmtSpread(row.structural_spread) + '</span>'}</td>
           <td class="dir-cell">${row.direction || '–'}</td>`;
         tr.addEventListener('click', () => openModal(row));
         refs.tableBody.appendChild(tr);

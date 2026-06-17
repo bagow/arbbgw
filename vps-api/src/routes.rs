@@ -143,24 +143,24 @@ pub async fn handle_get_logs(
     }
     let mode = query.mode.unwrap_or_default();
     let result = if mode == "trade" {
-        // Trade mode: fetch more lines but grep server-side for trade-relevant logs only.
-        // This gives much deeper history since scanner noise is excluded.
+        // Trade mode: use --since instead of -n to avoid loading entire journal.
+        // Wrap in timeout to prevent Cloudflare Worker 30s timeout from killing request.
         tokio::process::Command::new("bash")
             .args([
                 "-c",
-                "sudo journalctl -u core-node -n 50000 -r --no-pager | grep -E '\\[real\\]|\\[settings\\]|EXCHANGE_VERIFIED|SANITY|Closing|MANUAL_CLOSE|KILL-SWITCH|ASYMMETRIC' | head -500",
+                "timeout 15 bash -c 'sudo journalctl -u core-node --since \"6 hours ago\" -r --no-pager | grep -E \"\\[real\\]|\\[settings\\]|EXCHANGE_VERIFIED|SANITY|Closing|MANUAL_CLOSE|KILL-SWITCH|ASYMMETRIC|Auto-verified|ema_warmup\" | head -500'",
             ])
             .output()
             .await
     } else {
-        // Technical mode: raw logs, more lines
+        // Technical mode: raw logs, limited lines for speed
         tokio::process::Command::new("sudo")
             .args([
                 "journalctl",
                 "-u",
                 "core-node",
                 "-n",
-                "5000",
+                "2000",
                 "-r",
                 "--no-pager",
             ])
@@ -171,7 +171,8 @@ pub async fn handle_get_logs(
         Ok(out) => {
             let mut s = String::from_utf8_lossy(&out.stdout).to_string();
             if s.trim().is_empty() {
-                s = String::from_utf8_lossy(&out.stderr).to_string();
+                // If grep found nothing, show a helpful message instead of blank page
+                s = format!("No trade-relevant logs in the last 6 hours (mode={}).\nStderr: {}", mode, String::from_utf8_lossy(&out.stderr));
             }
             (StatusCode::OK, s).into_response()
         }

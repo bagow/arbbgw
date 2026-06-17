@@ -180,6 +180,9 @@ pub struct Trade {
     /// Accumulated real funding cost since entry (updated every live-update cycle from exchange API).
     /// Positive = we net-paid funding; negative = we net-received funding.
     pub funding_cost: f64,
+    /// Structural spread at entry time — the "base level" that the spread will converge to.
+    /// Used by exit_manager to determine realistic zero-spread target.
+    pub structural_spread: f64,
 }
 
 pub async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
@@ -189,7 +192,7 @@ pub async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
             "SELECT id, pair, status, exchange_a, exchange_b, direction, volume, \
              entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, \
              pnl_a, pnl_b, close_reason, contracts_a, contracts_b, commission_cost, slippage_cost, \
-             COALESCE(funding_cost, 0.0) \
+             COALESCE(funding_cost, 0.0), COALESCE(structural_spread, 0.0) \
              FROM trades WHERE status IN ('OPEN','CLOSING') AND profile_id=?",
         )?;
         let trades = stmt
@@ -219,6 +222,7 @@ pub async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
                     commission_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
                     slippage_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
                     funding_cost: row.get::<_, Option<f64>>(19)?.unwrap_or(0.0),
+                    structural_spread: row.get::<_, Option<f64>>(20)?.unwrap_or(0.0),
                 })
             })?
             .filter_map(|t| t.ok())

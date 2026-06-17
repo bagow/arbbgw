@@ -253,6 +253,8 @@ pub async fn init_trades_db(db: &Connection) -> anyhow::Result<()> {
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_rate_a REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_rate_b REAL", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN funding_next_ts INTEGER", []);
+        // Structural spread at entry — used by exit_manager for realistic convergence target
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN structural_spread REAL DEFAULT 0.0", []);
         // 4. Create indexes AFTER ensuring columns exist
         let _ = conn.execute_batch(
             "

@@ -430,6 +430,7 @@ pub async fn run_hft_cycle(
             entry_comm, 0.0,
             oid_a.unwrap_or_default(), oid_b.unwrap_or_default(),
             contracts_a_db, contracts_b_db,
+            sig.structural_spread,
         ).await;
     }
 }

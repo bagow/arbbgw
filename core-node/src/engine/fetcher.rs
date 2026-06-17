@@ -90,7 +90,14 @@ pub fn start_balance_fetcher(
                             e_ctx.balances.insert(ex.to_string(), w);
                             e_ctx.margin_balances.insert(ex.to_string(), a);
                         }
-                        Err(e) => error!("[{}] balance fetch err: {}", ex, e),
+                        Err(e) => {
+                            let msg = e.to_string();
+                            if msg.contains("banned") || msg.contains("ban") {
+                                tracing::debug!("[{}] balance fetch skipped (banned)", ex);
+                            } else {
+                                error!("[{}] balance fetch err: {}", ex, msg);
+                            }
+                        }
                     }
                     if let Ok(pos) = conn.fetch_positions(&http, &keys).await {
                         e_ctx.positions.insert(ex.to_string(), pos);

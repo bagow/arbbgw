@@ -27,7 +27,7 @@ pub fn start_position_sync(
                     "SELECT id, pair, status, exchange_a, exchange_b, direction, volume, \
                      entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, \
                      pnl_a, pnl_b, close_reason, contracts_a, contracts_b, commission_cost, slippage_cost, \
-                     COALESCE(funding_cost, 0.0) \
+                     COALESCE(funding_cost, 0.0), COALESCE(structural_spread, 0.0) \
                      FROM trades WHERE status IN ('OPEN','CLOSING')"
                 )?;
                 let trades = stmt.query_map([], |row| Ok(Trade {
@@ -51,6 +51,7 @@ pub fn start_position_sync(
                     commission_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
                     slippage_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
                     funding_cost: row.get::<_, Option<f64>>(19)?.unwrap_or(0.0),
+                    structural_spread: row.get::<_, Option<f64>>(20)?.unwrap_or(0.0),
                 }))?.filter_map(|t| t.ok()).collect::<Vec<_>>();
                 Ok(trades)
             }).await.unwrap_or_default();
@@ -84,11 +85,12 @@ pub fn start_position_sync(
                             all_positions.insert(ex.clone(), positions);
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                "[pos_sync] Failed to fetch positions from {}: {}",
-                                ex,
-                                e
-                            );
+                            let msg = e.to_string();
+                            if msg.contains("banned") || msg.contains("ban") {
+                                tracing::debug!("[pos_sync] {} positions skipped (banned): {}", ex, msg);
+                            } else {
+                                tracing::warn!("[pos_sync] Failed to fetch positions from {}: {}", ex, msg);
+                            }
                         }
                     }
                 }

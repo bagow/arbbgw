@@ -143,7 +143,10 @@ pub async fn process_closes(
 
         let triggered_tp = exec_net_pct >= settings.take_profit_percent;
         let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
-        let zero_spread = exit_spread <= 0.0 && exec_net_pnl >= 0.0;
+        // Structural-aware exit: for pairs with structural spread > 0, the spread
+        // will converge to structural_spread, not 0.0. Use it as the effective zero.
+        let structural_target = trade.structural_spread.max(0.0);
+        let zero_spread = exit_spread <= structural_target && exec_net_pnl >= 0.0;
 
         let mut reason_str = "";
         if manual_close { reason_str = "MANUAL"; }

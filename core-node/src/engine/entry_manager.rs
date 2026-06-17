@@ -891,6 +891,7 @@ pub async fn process_entries(
             oid_b.unwrap_or_default(),
             contracts_a_db,
             contracts_b_db,
+            sig.structural_spread,
         )
         .await;
     }
