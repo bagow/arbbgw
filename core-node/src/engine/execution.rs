@@ -682,6 +682,31 @@ pub async fn execute_sequential_entry(
         tracing::error!("[real] ❌ FULL ASYMMETRY DUMPED {}. Trade canceled. Trimming Loss: {:.4}, Trimming Fee: {:.4}", ctx.pair, trimming_loss, trimming_fee);
         e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.asymmetric_cooldown_ms);
 
+        // ── PAIR BAN: Track repeated asymmetric failures per pair ──
+        // After 3 failures within 1 hour, ban pair for 5 minutes to prevent
+        // repeated losses on consistently illiquid pairs.
+        {
+            let now_ban = crate::engine::utils::now_ms();
+            let mut entry = e_ctx.asymmetric_fail_counter.entry(ctx.pair.clone()).or_insert((0, now_ban));
+            let (count, first_ts) = entry.value_mut();
+            // Reset counter if first failure was > 1 hour ago
+            if now_ban - *first_ts > 3_600_000 {
+                *count = 0;
+                *first_ts = now_ban;
+            }
+            *count += 1;
+            if *count >= 3 {
+                let ban_ms = 300_000_i64; // 5 minutes
+                e_ctx.pair_cooldown.insert(ctx.pair.clone(), now_ban + ban_ms);
+                tracing::error!(
+                    "[real] 🚫 PAIR BANNED {}: {} asymmetric failures in 1h. Cooldown {}s.",
+                    ctx.pair, count, ban_ms / 1000
+                );
+                *count = 0; // Reset after ban
+                *first_ts = now_ban;
+            }
+        }
+
         let (ent_a, ent_b) = if a_filled { (fill_a, 0.0) } else { (0.0, fill_b) };
         let fv_usd = if a_filled { delta_a * fill_a } else { delta_b * fill_b };
         let gross_pnl = -trimming_loss;
@@ -736,6 +761,23 @@ pub async fn execute_sequential_entry(
             tracing::error!("[real] 🚨 PRICE SANITY FAIL {}/{}: fill_b={:.8} entry_b={:.8} ratio={:.2}. Using L1 fallback!",
                 ctx.pair, ctx.exb, fill_b, ctx.sig_entry_b, ratio_b);
             fill_b = ctx.sig_entry_b;
+        }
+    }
+
+    // 🛡️ CROSS-LEG PRICE SANITY: Detect anomalies where fill_a/fill_b ratio
+    // diverges wildly from signal ratio (e.g. 900%+ spread from unit mismatch).
+    if fill_a > 0.0 && fill_b > 0.0 && ctx.sig_entry_a > 0.0 && ctx.sig_entry_b > 0.0 {
+        let fill_ratio = fill_a / fill_b;
+        let sig_ratio = ctx.sig_entry_a / ctx.sig_entry_b;
+        let cross_ratio = fill_ratio / sig_ratio;
+        if cross_ratio > 5.0 || cross_ratio < 0.2 {
+            tracing::error!(
+                "[real] 🚨 CROSS-LEG SANITY FAIL {}: fill_a/fill_b={:.6} sig_a/sig_b={:.6} cross_ratio={:.2}. Aborting trade + trimming.",
+                ctx.pair, fill_ratio, sig_ratio, cross_ratio
+            );
+            // Force matched_phys to 0 so the trade is fully trimmed below
+            phys_a = 0.0;
+            phys_b = 0.0;
         }
     }
 
@@ -819,7 +861,7 @@ pub fn spawn_close_task(
         let close_reason_db = if cr.leg_a_external && cr.leg_b_external {
             "EXTERNAL_CLOSE".to_string()
         } else if cr.leg_a_external || cr.leg_b_external {
-            "EXTERNAL_PARTIAL_CLOSE".to_string()
+            "LEG_MISSING_ON_CLOSE".to_string()
         } else {
             ctx.reason.clone()
         };

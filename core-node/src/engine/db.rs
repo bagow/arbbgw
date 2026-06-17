@@ -321,7 +321,7 @@ impl TradeRepository {
         let _ = self.db.call(move |conn| {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
             conn.execute(
-                "UPDATE trades SET status='CLOSED', exit_time=?, close_reason='EXTERNAL_PARTIAL_CLOSE', \
+                "UPDATE trades SET status='CLOSED', exit_time=?, close_reason='POSITION_SYNC_CLOSE', \
                  commission_cost=?, \
                  gross_pnl=COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0), \
                  pnl=(COALESCE(pnl_a,0.0)+COALESCE(pnl_b,0.0) \

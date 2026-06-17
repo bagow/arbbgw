@@ -60,6 +60,8 @@ pub fn start_position_sync(
                 // Clear ALL cached positions — no open trades means no positions to track.
                 // Without this, phantom positions stay in the UI forever after trades close.
                 e_ctx.positions.clear();
+                // Also clear position_missing_counter since there are no trades to track
+                e_ctx.position_missing_counter.clear();
                 continue;
             }
 
@@ -71,10 +73,12 @@ pub fn start_position_sync(
             }
 
             // 3. Fetch positions from each exchange (1 API call per exchange)
+            // Track which exchanges had fetch errors vs successful empty results
             let mut all_positions: std::collections::HashMap<
                 String,
                 Vec<crate::engine::exchanges::traits::PositionInfo>,
             > = std::collections::HashMap::new();
+            let mut fetch_errors: std::collections::HashSet<String> = std::collections::HashSet::new();
             for ex in &exchanges_in_use {
                 if !keys.supports(ex) {
                     continue;
@@ -86,6 +90,7 @@ pub fn start_position_sync(
                         }
                         Err(e) => {
                             let msg = e.to_string();
+                            fetch_errors.insert(ex.clone());
                             if msg.contains("banned") || msg.contains("ban") {
                                 tracing::debug!("[pos_sync] {} positions skipped (banned): {}", ex, msg);
                             } else {
@@ -97,12 +102,27 @@ pub fn start_position_sync(
             }
 
             // 4. Check each open trade against exchange positions
+            // Collect trade IDs that are still confirmed present (both positions alive)
+            let mut confirmed_present: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
             for trade in &open_trades {
                 // Ignore newly opened trades because REST APIs on exchanges (like KuCoin/Binance) 
                 // can aggressively cache positions, leading to false "missing position" detects.
                 // 120s grace period accounts for worst-case REST API cache staleness.
                 let age_ms = now_ms() - trade.entry_time;
                 if age_ms < 120_000 {
+                    continue;
+                }
+
+                // FIX: If either exchange returned a fetch error, do NOT make any decisions
+                // about this trade's positions — we simply don't have reliable data.
+                let a_had_error = fetch_errors.contains(&trade.exchange_a);
+                let b_had_error = fetch_errors.contains(&trade.exchange_b);
+                if a_had_error || b_had_error {
+                    tracing::debug!(
+                        "[pos_sync] Skipping trade id={} {} — exchange fetch error (a_err={} b_err={})",
+                        trade.id, trade.pair, a_had_error, b_had_error
+                    );
                     continue;
                 }
 
@@ -127,6 +147,21 @@ pub fn start_position_sync(
                 if trade.status == "CLOSING" && age_ms < 300_000 {
                     continue;
                 }
+
+                // CLOSING RECOVERY: If trade is stuck in CLOSING > 10 min AND both positions
+                // still exist, re-trigger the close. This prevents trades hanging for hours.
+                if trade.status == "CLOSING" && age_ms > 600_000 && has_pos_a && has_pos_b {
+                    tracing::warn!(
+                        "[pos_sync] Trade id={} {} stuck in CLOSING for {}s with BOTH positions alive. Reverting to OPEN for retry.",
+                        trade.id, trade.pair, age_ms / 1000
+                    );
+                    let repo = crate::engine::db::TradeRepository::new(db.clone());
+                    repo.revert_to_open(trade.id).await;
+                    // Clear closing_in_flight so exit_manager can re-trigger the close
+                    e_ctx.closing_in_flight.remove(&trade.id);
+                    continue;
+                }
+
                 if trade.status == "CLOSING" {
                     tracing::warn!(
                         "[pos_sync] Trade id={} {} stuck in CLOSING for {}s, checking positions...",
@@ -135,14 +170,34 @@ pub fn start_position_sync(
                 }
 
                 if has_pos_a && has_pos_b {
+                    confirmed_present.insert(trade.id);
                     continue; // Both positions exist, all normal
                 }
+
+                // ── CONFIRMATION COUNTER: Require 3 consecutive "missing" detections ──
+                // This prevents false positives from API cache staleness or transient errors.
+                let miss_count = {
+                    let mut entry = e_ctx.position_missing_counter.entry(trade.id).or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
+
+                if miss_count < 3 {
+                    tracing::warn!(
+                        "[pos_sync] Trade id={} {} — position missing detected ({}/3 confirmations). has_a={} has_b={} Waiting for more confirmations...",
+                        trade.id, trade.pair, miss_count, has_pos_a, has_pos_b
+                    );
+                    continue;
+                }
+
+                // Reset counter since we're acting
+                e_ctx.position_missing_counter.remove(&trade.id);
 
                 if !has_pos_a && !has_pos_b {
                     // BOTH positions gone externally
                     error!(
-                        "[pos_sync] Trade id={} {} — BOTH positions gone! Marking EXTERNAL_CLOSE",
-                        trade.id, trade.pair
+                        "[pos_sync] Trade id={} {} — BOTH positions gone (confirmed {}x)! Marking EXTERNAL_CLOSE",
+                        trade.id, trade.pair, miss_count
                     );
                     let repo = crate::engine::db::TradeRepository::new(db.clone()); repo.emergency_close_trade(trade.id).await;
                     continue;
@@ -155,8 +210,8 @@ pub fn start_position_sync(
                     (&trade.exchange_b, &trade.exchange_a)
                 };
                 error!(
-                    "[pos_sync] Trade id={} {} — {} gone, {} still open! Emergency closing",
-                    trade.id, trade.pair, missing_ex, remaining_ex
+                    "[pos_sync] Trade id={} {} — {} gone (confirmed {}x), {} still open! Emergency closing",
+                    trade.id, trade.pair, missing_ex, miss_count, remaining_ex
                 );
 
                 // FIX: DB stores direction as "binance>gate", NOT "A>B".
@@ -226,13 +281,11 @@ pub fn start_position_sync(
                     }
                 }
             }
+
+            // Clear confirmation counters for trades where both positions are confirmed present
+            for id in &confirmed_present {
+                e_ctx.position_missing_counter.remove(id);
+            }
         }
     });
 }
-
-
-
-
-
-
-
