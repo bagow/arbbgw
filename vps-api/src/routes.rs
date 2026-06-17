@@ -767,6 +767,16 @@ pub async fn handle_get_unified(
         fresh
     };
 
+    // 5. Check kill-switch status from server_cache
+    let kill_switch_active = state.db.call(|conn| {
+        let val: Result<String, _> = conn.query_row(
+            "SELECT value FROM server_cache WHERE key = 'kill_switch_active'",
+            [],
+            |r| r.get(0),
+        );
+        Ok::<bool, tokio_rusqlite::Error>(val.unwrap_or_else(|_| "0".to_string()) == "1")
+    }).await.unwrap_or(false);
+
     // Return payload matching frontend expectations
     (
         StatusCode::OK,
@@ -782,9 +792,37 @@ pub async fn handle_get_unified(
             "profile_active": active_enriched,
             "profile_history": history_trades,
             "profile_stats": stats,
+            "kill_switch_active": kill_switch_active,
         })),
     )
         .into_response()
+}
+
+// ─── POST /api/kill-switch/reset ───
+pub async fn handle_kill_switch_reset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if check_basic_auth(&headers, &state).is_none() {
+        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
+    }
+
+    let result = state.db.call(|conn| {
+        conn.execute(
+            "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','0',0) \
+             ON CONFLICT(key) DO UPDATE SET value='0'",
+            [],
+        )?;
+        Ok(())
+    }).await;
+
+    match result {
+        Ok(_) => {
+            tracing::info!("[api] Kill-switch reset requested by user");
+            (StatusCode::OK, Json(json!({"ok": true, "message": "Kill-switch reset. Engine will resume within 2 seconds."}))).into_response()
+        }
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("DB error: {}", e)),
+    }
 }
 
 // ─── GET /api/profiles/:id ───

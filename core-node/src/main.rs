@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         .tcp_nodelay(true)
         .build()?;
 
-    let engine_ctx = Arc::new(crate::state::EngineContext::default());
+    // engine_ctx is created after profiles_db init below (needs profiles_db for kill-switch persistence)
 
     // ── Profiles DB (settings) — open and ensure schema is current ───────────
     let profiles_db = Connection::open(&profiles_db_path)
@@ -93,6 +93,10 @@ async fn main() -> Result<()> {
         })
         .await;
 
+    // ── Engine context (created after profiles_db so kill-switch can persist state) ──
+    let mut ctx_default = crate::state::EngineContext::default();
+    ctx_default.profiles_db = Some(profiles_db.clone());
+    let engine_ctx = Arc::new(ctx_default);
 
     // ── Price map and signal ─────────────────────────────────────────────────
     let prices: PriceMap = Arc::new(dashmap::DashMap::new());
@@ -147,6 +151,7 @@ async fn main() -> Result<()> {
         "real",
         real_settings_cache.clone(),
         2,
+        Some(engine_ctx.clone()),
     );
 
     // ── Global technical settings (refreshed every 10s) ──────────────────────

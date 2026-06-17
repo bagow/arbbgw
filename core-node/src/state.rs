@@ -89,6 +89,12 @@ pub struct EngineContext {
     /// Asymmetric failure counter per pair: pair → (fail_count, first_fail_timestamp_ms).
     /// Bans pair for 5 min after 3+ failures within 1 hour.
     pub asymmetric_fail_counter: Arc<DashMap<String, (u32, i64)>>,
+    /// Profiles DB connection — used for kill-switch status persistence in server_cache.
+    pub profiles_db: Option<tokio_rusqlite::Connection>,
+    /// WS order channel health flag per exchange. Set to false on WS timeout,
+    /// set to true on successful WS order placement. Prevents firing trades
+    /// on exchanges with broken WS order channels.
+    pub ws_order_healthy: Arc<DashMap<String, bool>>,
 }
 
 impl Default for EngineContext {
@@ -117,6 +123,8 @@ impl Default for EngineContext {
             mirage_cooldown: Arc::new(DashMap::new()),
             position_missing_counter: Arc::new(DashMap::new()),
             asymmetric_fail_counter: Arc::new(DashMap::new()),
+            profiles_db: None,
+            ws_order_healthy: Arc::new(DashMap::new()),
         }
     }
 }

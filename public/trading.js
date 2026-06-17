@@ -178,8 +178,13 @@ async function refreshActiveTab() {
     const profile = profiles.find(p => p.id === activeTabId);
     if (!profile) return;
 
-    const { trades, real, exchanges, profiles: serverProfiles, profile_stats, profile_active, profile_history } = lastUnified;
-    console.log(`[DEBUG] Received Unified for ${activeTabId}:`, { profile_stats, trades_stats: trades?.stats });
+    const { trades, real, exchanges, profiles: serverProfiles, profile_stats, profile_active, profile_history, kill_switch_active } = lastUnified;
+    window._killSwitchActive = !!kill_switch_active;
+    // Dynamically show/hide Resume button based on kill-switch state
+    document.querySelectorAll('[id^="sf-resume-"]').forEach(btn => {
+        btn.style.display = window._killSwitchActive ? 'inline-flex' : 'none';
+    });
+    console.log(`[DEBUG] Received Unified for ${activeTabId}:`, { profile_stats, trades_stats: trades?.stats, kill_switch_active });
 
     // Sync local profile settings from server profiles data
     if (serverProfiles) {
@@ -773,12 +778,18 @@ function renderSettingsForm(profile) {
                     <label>Slippage IOC (%)</label>
                     <input type="number" id="sf-slip-${p.id}" step="0.01" min="0.01" max="5" title="Max price tolerance for IOC limit orders (entry & close). Also used as fallback close tolerance. Set = (spread/4) to avoid killing your own PnL." value="${p.slippage_percent??0.5}" />
                 </div>
-                <div class="form-actions" style="grid-column:1/-1;display:flex;gap:16px;margin-top:24px;border-top:1px solid var(--border-dim);padding-top:24px;align-items:center;">
+                <div class="form-actions" style="grid-column:1/-1;display:flex;gap:16px;margin-top:24px;border-top:1px solid var(--border-dim);padding-top:24px;align-items:center;flex-wrap:wrap;">
                     <button type="button" id="sf-power-${p.id}"
                         onclick="toggleBotPower('${p.id}')"
                         class="trading-save-btn"
                         style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:${p.is_active?'var(--red)':'var(--green)'};">
                         ${p.is_active ? 'Stop Bot' : 'Start Bot'}
+                    </button>
+                    <button type="button" id="sf-resume-${p.id}"
+                        onclick="resumeKillSwitch()"
+                        class="trading-save-btn"
+                        style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:#ff3b3b;display:${window._killSwitchActive?'inline-flex':'none'};animation:pulse-red 1.5s infinite;">
+                        ⚠️ Engine Suspended — Resume
                     </button>
                     <button type="button"
                         onclick="saveSettings('${p.id}')"
@@ -1774,6 +1785,22 @@ window.toggleBotPower = async function (profileId) {
         profile.is_active = previousState; // Revert locally
         console.error('Bot toggle failed:', e);
         showToast(`Action failed: ${e.message || 'Check ownership'}`, 'error');
+    }
+};
+
+window.resumeKillSwitch = async function () {
+    if (!confirm('Resume engine after kill-switch suspension?')) return;
+    try {
+        await apiFetch('/api/kill-switch/reset', { method: 'POST' });
+        window._killSwitchActive = false;
+        // Hide all resume buttons
+        document.querySelectorAll('[id^="sf-resume-"]').forEach(btn => {
+            btn.style.display = 'none';
+        });
+        showToast('Engine resumed! Kill-switch reset.', 'success');
+    } catch (e) {
+        console.error('Kill-switch reset failed:', e);
+        showToast(`Resume failed: ${e.message || 'Unknown error'}`, 'error');
     }
 };
 

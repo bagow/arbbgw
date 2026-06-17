@@ -125,6 +125,19 @@ pub async fn process_entries(
             continue;
         }
 
+        // ── WS ORDER HEALTH CHECK ──
+        // Skip trades involving exchanges with recently broken WS order channels
+        // to prevent asymmetric fills (one leg fills, other timeouts).
+        {
+            let ws_ok_a = e_ctx.ws_order_healthy.get(&exa).map(|v| *v).unwrap_or(true);
+            let ws_ok_b = e_ctx.ws_order_healthy.get(&exb).map(|v| *v).unwrap_or(true);
+            if !ws_ok_a || !ws_ok_b {
+                let unhealthy = if !ws_ok_a { &exa } else { &exb };
+                tracing::info!("[real] ⏭️ SKIP {}: {} WS order channel unhealthy", pair, unhealthy);
+                continue;
+            }
+        }
+
         // ── BALANCE LOW GUARD (zero-latency) ─────────────────────────────────
         if !has_sufficient_margin(&exa, actual_vol_a, settings.leverage as f64, &e_ctx) {
             let now_m = now_ms() as i64;

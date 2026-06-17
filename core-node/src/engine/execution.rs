@@ -496,12 +496,20 @@ pub async fn execute_sequential_entry(
     ).await;
 
     let (oid_first, fill_first, fee_first) = match res_first {
-        Ok(t) => (t.0, t.1, t.2),
+        Ok(t) => {
+            e_ctx.ws_order_healthy.insert(first_label.to_string(), true);
+            (t.0, t.1, t.2)
+        }
         Err(e) => {
             tracing::error!("[real] LEG_FIRST reject {}/{}: {}", first_label, ctx.pair, e);
             let esl = e.to_string().to_lowercase();
             if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
                 crate::engine::risk_manager::mark_balance_low(first_label, e_ctx);
+            }
+            // Mark WS unhealthy on timeout/WS failures (not balance errors)
+            if esl.contains("timeout") || esl.contains("ws ") || esl.contains("websocket") || esl.contains("connect") {
+                e_ctx.ws_order_healthy.insert(first_label.to_string(), false);
+                tracing::warn!("[real] 📡 {} WS marked UNHEALTHY after order failure", first_label);
             }
             (None, 0.0, 0.0)
         }
@@ -553,23 +561,37 @@ pub async fn execute_sequential_entry(
         (&conn_ensure_a, !ctx.is_a_higher, ctx.limit_price_a, ctx.mult_a, ctx.tick_a)
     };
 
+    // After first leg is filled, we're already committed/exposed.
+    // Use more aggressive slippage on second leg to maximize fill probability
+    // and avoid costly ASYMMETRIC_CLOSE trim losses.
+    // Formula: 2x normal slippage, capped at spread/2 (never exceed half the profit).
+    let aggressive_slip = (ctx.ioc_slippage_pct * 2.0)
+        .min(ctx.sig_spread / 2.0)
+        .max(ctx.ioc_slippage_pct);
+
     let res_second = second_conn.place_order(
         http, keys, &ctx.pair, second_is_buy, final_qty_second, ctx.dry_run,
         second_limit, second_limit > 0.0,
-        ctx.leverage, second_mult, ctx.ioc_slippage_pct, second_tick, ts.api_timeout_ms
+        ctx.leverage, second_mult, aggressive_slip, second_tick, ts.api_timeout_ms
     ).await;
 
     let (oid_second, fill_second, fee_second) = match res_second {
-        Ok(t) => (t.0, t.1, t.2),
+        Ok(t) => {
+            e_ctx.ws_order_healthy.insert(second_label.to_string(), true);
+            (t.0, t.1, t.2)
+        }
         Err(e) => {
             tracing::error!("[real] LEG_SECOND reject {}/{}: {}", second_label, ctx.pair, e);
             let esl = e.to_string().to_lowercase();
             if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
                 crate::engine::risk_manager::mark_balance_low(second_label, e_ctx);
             }
+            // Mark WS unhealthy on timeout/WS failures
+            if esl.contains("timeout") || esl.contains("ws ") || esl.contains("websocket") || esl.contains("connect") {
+                e_ctx.ws_order_healthy.insert(second_label.to_string(), false);
+                tracing::warn!("[real] 📡 {} WS marked UNHEALTHY after order failure", second_label);
+            }
             // Hard cooldown on exchange (5 min) — prevents repeated one-legged failures.
-            // balance_low gets cleared by fetcher after 5s if balance is fine,
-            // but exchange_cooldown is time-based and can't be reset early.
             let cooldown_ms = 300_000_i64; // 5 minutes
             e_ctx.exchange_cooldown.insert(second_label.to_string(), now + cooldown_ms);
             tracing::error!(
@@ -687,7 +709,21 @@ pub async fn execute_sequential_entry(
         let trims = e_ctx.consecutive_trims.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         if trims >= 3 {
             e_ctx.is_killed.store(true, std::sync::atomic::Ordering::Relaxed);
-            tracing::error!("[real] 💀 KILL-SWITCH TRIGGERED: 3 consecutive FULL TRIMS (total asymmetry). Suspending new entries.");
+            tracing::error!("[real] 💀 KILL-SWITCH TRIGGERED: {} consecutive FULL TRIMS (total asymmetry). Suspending new entries. Use Resume button on frontend to reset.", trims);
+            // Persist kill-switch state to server_cache so frontend can show status + Resume button
+            if let Some(ref pdb) = e_ctx.profiles_db {
+                let pdb = pdb.clone();
+                tokio::spawn(async move {
+                    let _ = pdb.call(move |conn| {
+                        conn.execute(
+                            "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','1',0) \
+                             ON CONFLICT(key) DO UPDATE SET value='1'",
+                            [],
+                        )?;
+                        Ok(())
+                    }).await;
+                });
+            }
         }
         let total_fee = fee_a_val + fee_b_val + trimming_fee;
         tracing::error!("[real] ❌ FULL ASYMMETRY DUMPED {}. Trade canceled. Trimming Loss: {:.4}, Trimming Fee: {:.4}", ctx.pair, trimming_loss, trimming_fee);

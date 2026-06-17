@@ -145,11 +145,13 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
 }
 
 /// Spawn background task refreshing ALL profiles from DB every `interval_secs`.
+/// Also monitors kill-switch reset requests from frontend (server_cache key 'kill_switch_active').
 pub fn spawn_all_settings_refresher(
     db: Connection,
     mode: &'static str,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<TradingSettings>>>,
     interval_secs: u64,
+    e_ctx: Option<std::sync::Arc<crate::state::EngineContext>>,
 ) {
     tokio::spawn(async move {
         let m = mode.to_string();
@@ -157,6 +159,31 @@ pub fn spawn_all_settings_refresher(
             tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
             let fresh = load_all_settings(&db, &m).await;
             *settings.write().await = fresh;
+
+            // ── KILL-SWITCH RESET CHECK ──
+            // Frontend writes kill_switch_active='0' via Resume button.
+            // When we see '0' and engine is killed, reset the kill-switch.
+            if let Some(ref ctx) = e_ctx {
+                if ctx.is_killed.load(std::sync::atomic::Ordering::Relaxed) {
+                    let reset_requested = db.call(|conn| {
+                        let val: Result<String, _> = conn.query_row(
+                            "SELECT value FROM server_cache WHERE key = 'kill_switch_active'",
+                            [],
+                            |r| r.get(0),
+                        );
+                        Ok(val.unwrap_or_else(|_| "1".to_string()))
+                    }).await.unwrap_or_else(|_| "1".to_string());
+
+                    if reset_requested == "0" {
+                        ctx.is_killed.store(false, std::sync::atomic::Ordering::Relaxed);
+                        ctx.consecutive_trims.store(0, std::sync::atomic::Ordering::Relaxed);
+                        ctx.consecutive_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+                        // Clear all exchange cooldowns so trading resumes immediately
+                        ctx.exchange_cooldown.clear();
+                        tracing::info!("[settings] ✅ KILL-SWITCH RESET by user via frontend Resume button. Engine resumed.");
+                    }
+                }
+            }
         }
     });
 }
