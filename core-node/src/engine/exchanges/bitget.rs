@@ -299,36 +299,51 @@ impl ExchangeConnector for BitgetConnector {
                 }
                 Err(e) => {
                     warn!("[bitget] close {} attempt {} failed: {}", pair, attempt, e);
-                    // No position to close — try one-way mode fallback (without tradeSide/holdSide)
+                    // 22002 = No position to close with given params (marginMode/holdSide mismatch)
+                    // Use Bitget Flash Close API which auto-detects all params
                     if e.contains("22002") || e.to_lowercase().contains("no position") {
-                        info!("[bitget] close {} — retrying with one-way mode (no tradeSide/holdSide)", pair);
-                        let fallback_body = serde_json::json!({
+                        info!("[bitget] close {} — using flash-close-positions API", pair);
+                        let hold = if is_buy { "short" } else { "long" };
+                        let flash_body = serde_json::json!({
                             "symbol": pair,
                             "productType": "USDT-FUTURES",
-                            "marginMode": "crossed",
-                            "marginCoin": "USDT",
-                            "side": side,
-                            "orderType": "market",
-                            "size": format_price(phys_amount)
+                            "holdSide": hold
                         })
                         .to_string();
-                        match bitget_request(http, keys, "POST", "/api/v2/mix/order/place-order", &fallback_body, api_timeout_ms).await {
+                        match bitget_request(http, keys, "POST", "/api/v2/mix/order/close-positions", &flash_body, api_timeout_ms).await {
                             Ok(v) => {
-                                let oid = v["data"]["orderId"].as_str().unwrap_or("?");
-                                info!("[bitget] close {} one-way fallback → orderId={}", pair, oid);
-                                tokio::time::sleep(Duration::from_millis(500)).await;
-                                if let Ok((px, fee, filled)) = self.fetch_order(http, keys, pair, oid, multiplier).await {
-                                    if filled > 0.0 {
+                                let success = v["data"]["successList"].as_array();
+                                let fail = v["data"]["failureList"].as_array();
+                                if let Some(arr) = success {
+                                    if !arr.is_empty() {
+                                        let oid = arr[0]["orderId"].as_str().unwrap_or("?");
+                                        info!("[bitget] flash-close {} → orderId={}", pair, oid);
+                                        tokio::time::sleep(Duration::from_millis(500)).await;
+                                        if let Ok((px, fee, filled)) = self.fetch_order(http, keys, pair, oid, multiplier).await {
+                                            if filled > 0.0 {
+                                                return Ok(CloseReceipt {
+                                                    final_price: px,
+                                                    total_fee: fee,
+                                                    closed_volume: filled,
+                                                });
+                                            }
+                                        }
+                                        // Even if fetch_order fails, the close was submitted
                                         return Ok(CloseReceipt {
-                                            final_price: px,
-                                            total_fee: fee,
-                                            closed_volume: filled,
+                                            final_price: 0.0,
+                                            total_fee: 0.0,
+                                            closed_volume: phys_amount,
                                         });
+                                    }
+                                }
+                                if let Some(arr) = fail {
+                                    for f in arr {
+                                        warn!("[bitget] flash-close {} failed entry: {:?}", pair, f);
                                     }
                                 }
                             }
                             Err(e2) => {
-                                warn!("[bitget] close {} one-way fallback also failed: {}", pair, e2);
+                                warn!("[bitget] flash-close {} also failed: {}", pair, e2);
                             }
                         }
                         return Err(e);
