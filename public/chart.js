@@ -408,12 +408,7 @@ function renderTable() {
         filtered = filtered.filter(r => !disabled.includes(r.exchangeA) && !disabled.includes(r.exchangeB));
     }
     const sorted = [...filtered]
-        .map(r => {
-            // Clamp structural to 0: negative = no persistent premium in this direction
-            const effectiveStructural = Math.max(0, r.structural_spread);
-            r.profit_pct = r.spread - effectiveStructural;
-            return r;
-        })
+        .map(r => { r.profit_pct = r.spread - r.structural_spread; return r; })
         .filter(r => r.profit_pct > 0) // Hide rows with no real profit opportunity
         .sort((a, b) => {
             const av = a[scannerState.sortKey] ?? 0, bv = b[scannerState.sortKey] ?? 0;
@@ -432,14 +427,13 @@ function renderTable() {
         const sc = row.spread >= 0.5 ? 'spread--high' : row.spread >= 0.2 ? 'spread--medium' : 'spread--low';
         
         let scStruc = '';
-        const effectiveStruc = Math.max(0, row.structural_spread);
-        const deviation = row.spread - effectiveStruc;
+        const deviation = row.spread - row.structural_spread;
         if (row.has_structural_spread) {
             scStruc = deviation >= 0.5 ? 'spread--high' : deviation >= 0.2 ? 'spread--medium' : 'spread--low';
         }
-        const strucTooltip = `Profit: ${fmtSpread(row.profit_pct)} (spread ${fmtSpread(row.spread)} - structural ${fmtSpread(effectiveStruc)})`;
+        const strucTooltip = `Profit: ${fmtSpread(row.profit_pct)} (spread ${fmtSpread(row.spread)} - structural ${fmtSpread(row.structural_spread)})`;
         
-        // Profit already computed in filter stage with clamped structural
+        // Profit already computed in filter stage (structural always ≥ 0 from backend)
         const profitPct = row.profit_pct;
         const profitClass = profitPct >= 0.5 ? 'spread--high' : profitPct >= 0.2 ? 'spread--medium' : 'spread--low';
         const profitStyle = profitPct < 0 ? 'color:var(--red);opacity:0.6' : '';

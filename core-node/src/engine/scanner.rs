@@ -220,10 +220,8 @@ pub fn generate_signals(
                 continue;
             }
 
-            // Clamp structural to 0: negative structural means no persistent premium
-            // in this direction, so the full spread IS the opportunity.
-            let effective_structural = row.structural_spread.max(0.0);
-            let structural_deviation = row.spread - effective_structural;
+            // structural_spread is always ≥ 0 (clamped at source in spreads.rs)
+            let structural_deviation = row.spread - row.structural_spread;
             let dev_threshold = if profile.min_structural_deviation > 0.0 {
                 profile.min_structural_deviation
             } else {
@@ -258,7 +256,7 @@ pub fn generate_signals(
             // If structural_spread is high (persistent premium), this blocks entry
             // because the spread will never converge enough to cover fees.
             {
-                let profit_potential = row.spread - effective_structural - break_even_pct;
+                let profit_potential = row.spread - row.structural_spread - break_even_pct;
                 if profit_potential <= 0.0 {
                     if let Some(p) = &diag_prefix {
                         tracing::debug!("{} -> structural_guard: profit impossible (spread={:.4}% - structural={:.4}% - BE={:.4}% = {:.4}%)",

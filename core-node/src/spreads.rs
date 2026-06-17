@@ -318,7 +318,9 @@ pub fn compute_spreads(
                     vol_b: data_b.vol,
                     funding_a: data_a.funding_rate,
                     funding_b: data_b.funding_rate,
-                    structural_spread: (structural_spread * 10000.0).round() / 10000.0,
+                    // Structural spread ≥ 0 always: it's the persistent gap that "always exists".
+                    // Negative EMA = no premium in this direction → structural = 0.
+                    structural_spread: (structural_spread.max(0.0) * 10000.0).round() / 10000.0,
                     structural_max,
                     structural_min,
                     spread: (spread * 10000.0).round() / 10000.0,
