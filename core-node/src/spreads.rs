@@ -298,7 +298,7 @@ pub fn compute_spreads(
                         verified.insert(ema_key.clone());
                         tracing::info!(
                             "[spreads] Auto-verified {} after {:.0}s observation, EMA={:.3}%",
-                            ema_key, observation_age, ema_mid_spread
+                            ema_key, observation_age, structural_spread
                         );
                     }
                 }
