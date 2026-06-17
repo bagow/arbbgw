@@ -241,11 +241,11 @@ pub async fn process_entries(
             }
         };
 
-        let data_a_ref = prices.get(exa).and_then(|m| m.get(pair).map(|d| d.clone()));
-        let data_b_ref = prices.get(exb).and_then(|m| m.get(pair).map(|d| d.clone()));
+        let data_a_ref = prices.get(&exa).and_then(|m| m.get(&pair).cloned());
+        let data_b_ref = prices.get(&exb).and_then(|m| m.get(&pair).cloned());
 
-        let ob_a = data_a_ref.as_ref().and_then(|d| make_l2(&cached_a, exa, d));
-        let ob_b = data_b_ref.as_ref().and_then(|d| make_l2(&cached_b, exb, d));
+        let ob_a = data_a_ref.as_ref().and_then(|d| make_l2(&cached_a, &exa, d));
+        let ob_b = data_b_ref.as_ref().and_then(|d| make_l2(&cached_b, &exb, d));
 
         let (ob_a_res, ob_b_res) = match (ob_a, ob_b) {
             (Some(a), Some(b)) => (Ok(a), Ok(b)),
