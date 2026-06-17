@@ -723,12 +723,15 @@ window.closeActivePosition = async function(exchange, symbol, size) {
         });
         if (res.ok) {
             flashMessage('Close order submitted!', 'success');
-            setTimeout(window.fetchUnifiedData, 500);
         } else {
-            flashMessage('Failed to close position', 'error');
+            let errText = `Failed to close ${symbol} on ${exchange}`;
+            try { const body = await res.text(); if (body) errText += ': ' + body; } catch(e) {}
+            flashMessage(errText, 'error');
         }
+        // Refresh data regardless of success/failure to update positions display
+        setTimeout(window.fetchUnifiedData, 500);
     } catch (e) {
-        flashMessage('Error closing position', 'error');
+        flashMessage('Error closing position: ' + e.message, 'error');
     }
 };
 

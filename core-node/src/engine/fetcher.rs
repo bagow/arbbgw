@@ -76,6 +76,13 @@ pub fn start_balance_fetcher(
                 tokio::time::sleep(Duration::from_millis(fast_interval_ms)).await;
             } else {
                 // Normal mode: full refresh for all active exchanges
+                // Clear positions for disabled exchanges to prevent stale ghost positions
+                for ex in &all_exchanges {
+                    if !active_exchanges.contains(ex) {
+                        e_ctx.positions.remove(*ex);
+                    }
+                }
+
                 for ex in &active_exchanges {
                     if !keys.supports(ex) {
                         continue;
@@ -99,8 +106,13 @@ pub fn start_balance_fetcher(
                             }
                         }
                     }
-                    if let Ok(pos) = conn.fetch_positions(&http, &keys).await {
-                        e_ctx.positions.insert(ex.to_string(), pos);
+                    match conn.fetch_positions(&http, &keys).await {
+                        Ok(pos) => {
+                            e_ctx.positions.insert(ex.to_string(), pos);
+                        }
+                        Err(e) => {
+                            warn!("[{}] fetch_positions err: {} — keeping stale cache", ex, e);
+                        }
                     }
                     if let Ok(fee) = conn.fetch_taker_fee(&http, &keys).await {
                         e_ctx.fee_rates.insert(ex.to_string(), fee);

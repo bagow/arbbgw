@@ -231,6 +231,8 @@ impl ExchangeConnector for BitgetConnector {
 
         let side = if is_buy { "buy" } else { "sell" };
         let trade_side = "close";
+        // Hedge Mode requires holdSide to know which position to close
+        let hold_side = if is_buy { "short" } else { "long" };
 
         for attempt in 0..retries {
             let slip = slippage_percent / 100.0;
@@ -256,6 +258,7 @@ impl ExchangeConnector for BitgetConnector {
                     "marginCoin": "USDT",
                     "side": side,
                     "tradeSide": trade_side,
+                    "holdSide": hold_side,
                     "orderType": "limit",
                     "force": "ioc",
                     "price": price_str,
@@ -270,6 +273,7 @@ impl ExchangeConnector for BitgetConnector {
                     "marginCoin": "USDT",
                     "side": side,
                     "tradeSide": trade_side,
+                    "holdSide": hold_side,
                     "orderType": "market",
                     "size": qty_str
                 })
@@ -320,6 +324,7 @@ impl ExchangeConnector for BitgetConnector {
             "marginCoin": "USDT",
             "side": side,
             "tradeSide": "close",
+            "holdSide": hold_side,
             "orderType": "market",
             "size": format_price(qty)
         })

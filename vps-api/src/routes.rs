@@ -1289,13 +1289,18 @@ pub async fn handle_close_exchange_position(
 
     match res {
         Ok(resp) => {
-            if resp.status().is_success() {
-                axum::http::StatusCode::OK
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if status.is_success() {
+                (axum::http::StatusCode::OK, body)
             } else {
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, body)
             }
         }
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("core-node unreachable: {}", e),
+        ),
     }
 }
 
