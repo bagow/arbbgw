@@ -76,3 +76,21 @@ pub fn is_position_missing_or_liquidated_error(err: &str) -> bool {
         || s.contains("reduce-only")
         || s.contains("liquidat")
 }
+
+/// Static liquidity ranking for exchanges.
+/// Lower = more liquid. Used to determine entry order (less liquid first).
+pub fn liquidity_rank(exchange: &str) -> u8 {
+    match exchange {
+        "binance" => 1,
+        "bybit" => 2,
+        "gate" => 3,
+        "bitget" => 4,
+        "bingx" => 5,
+        "kucoin" => 6,
+        "bitmex" => 7,
+        "ascendex" => 8,
+        "toobit" => 9,
+        "xt" => 10,
+        _ => 50,
+    }
+}

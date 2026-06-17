@@ -8,10 +8,14 @@
 
 use std::sync::Arc;
 use reqwest::Client;
+use tokio_rusqlite::Connection;
 
 use crate::engine::exchanges::traits::ExchangeConnector;
 use crate::engine::real::ExchangeKeys;
 use crate::engine::utils::is_position_missing_or_liquidated_error;
+use crate::state::EngineContext;
+use crate::engine::db::TradeRepository;
+use shared::TechnicalSettings;
 
 // ─── FILL VERIFICATION ──────────────────────────────────────────────────────
 
@@ -354,4 +358,502 @@ pub fn verify_l2_vwap(
     } else {
         None
     }
+}
+
+// ─── NEW ABSTRACTED HELPERS ──────────────────────────────────────────────────
+
+pub async fn trim_asymmetric_legs(
+    http: &Client,
+    keys: &Arc<ExchangeKeys>,
+    pair: &str,
+    exa: &str,
+    exb: &str,
+    is_a_higher: bool,
+    delta_a: f64,
+    delta_b: f64,
+    mult_a: f64,
+    mult_b: f64,
+    fill_a: f64,
+    fill_b: f64,
+    api_timeout_ms: u64,
+    e_ctx: &EngineContext,
+) -> (f64, f64) {
+    let mut trimming_loss = 0.0;
+    let mut trimming_fee = 0.0;
+    let hc = http.clone();
+    let kc = Arc::clone(keys);
+    let fp = pair.to_string();
+    let key_a = format!("{}:{}", exa, pair);
+    let key_b = format!("{}:{}", exb, pair);
+
+    if delta_a > 1e-12 {
+        let phys_to_dump = delta_a;
+        if phys_to_dump >= mult_a.min(1e-8) {
+            let is_buy = is_a_higher;
+            tracing::error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys", pair, phys_to_dump);
+            let tick_for_close = e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001);
+            match crate::engine::exchanges::get_connector(exa).unwrap()
+                .trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_a, tick_for_close, fill_a, api_timeout_ms).await {
+                Ok(rc) => {
+                    trimming_fee += rc.total_fee;
+                    let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_a };
+                    let gross_loss = if is_buy { (fill_a - close_price) * delta_a } else { (close_price - fill_a) * delta_a };
+                    trimming_loss += gross_loss.min(0.0).abs();
+                }
+                Err(e) => { tracing::error!("[real] Failed to trim DELTA A: {}", e); }
+            }
+        }
+    }
+    
+    if delta_b > 1e-12 {
+        let phys_to_dump = delta_b;
+        if phys_to_dump >= mult_b.min(1e-8) {
+            let is_buy = !is_a_higher;
+            tracing::error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys", pair, phys_to_dump);
+            let tick_for_close = e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001);
+            match crate::engine::exchanges::get_connector(exb).unwrap()
+                .trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_b, tick_for_close, fill_b, api_timeout_ms).await {
+                Ok(rc) => {
+                    trimming_fee += rc.total_fee;
+                    let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_b };
+                    let gross_loss = if is_buy { (fill_b - close_price) * delta_b } else { (close_price - fill_b) * delta_b };
+                    trimming_loss += gross_loss.min(0.0).abs();
+                }
+                Err(e) => { tracing::error!("[real] Failed to trim DELTA B: {}", e); }
+            }
+        }
+    }
+    (trimming_fee, trimming_loss)
+}
+
+pub struct SequentialEntryContext {
+    pub pair: String,
+    pub exa: String,
+    pub exb: String,
+    pub is_a_higher: bool,
+    pub qty_a: f64,
+    pub qty_b: f64,
+    pub limit_price_a: f64,
+    pub limit_price_b: f64,
+    pub mult_a: f64,
+    pub mult_b: f64,
+    pub tick_a: f64,
+    pub tick_b: f64,
+    pub ioc_slippage_pct: f64,
+    pub leverage: f64,
+    pub dry_run: bool,
+    pub sig_spread: f64,
+    pub sig_structural_spread: f64,
+    pub sig_direction: String,
+    pub sig_entry_a: f64,
+    pub sig_entry_b: f64,
+    pub profile_id: String,
+}
+
+pub async fn execute_sequential_entry(
+    ctx: SequentialEntryContext,
+    http: &Client,
+    keys: &Arc<ExchangeKeys>,
+    db: &Connection,
+    e_ctx: &Arc<EngineContext>,
+    ts: &TechnicalSettings,
+    sort_by_liquidity: bool,
+) -> bool {
+    let now = crate::engine::utils::now_ms();
+    let conn_ensure_a = crate::engine::exchanges::get_connector(&ctx.exa).unwrap();
+    let conn_ensure_b = crate::engine::exchanges::get_connector(&ctx.exb).unwrap();
+    
+    let rank_a = crate::engine::utils::liquidity_rank(&ctx.exa);
+    let rank_b = crate::engine::utils::liquidity_rank(&ctx.exb);
+    let a_is_less_liquid = if sort_by_liquidity { rank_a >= rank_b } else { true };
+
+    let (first_label, second_label) = if a_is_less_liquid {
+        (ctx.exa.as_str(), ctx.exb.as_str())
+    } else {
+        (ctx.exb.as_str(), ctx.exa.as_str())
+    };
+
+    if sort_by_liquidity {
+        tracing::info!(
+            "[real] 🔄 Последовательное исполнение: сначала {} (менее ликв.), затем {} для {}...",
+            first_label, second_label, ctx.pair
+        );
+    }
+
+    let t0_exec = std::time::Instant::now();
+
+    // ── PHASE 1: Less liquid leg (or Leg A for HFT) ─────────────────────────
+    let (first_conn, first_is_buy, first_qty, first_limit, first_mult, first_tick) = if a_is_less_liquid {
+        (&conn_ensure_a, !ctx.is_a_higher, ctx.qty_a, ctx.limit_price_a, ctx.mult_a, ctx.tick_a)
+    } else {
+        (&conn_ensure_b, ctx.is_a_higher, ctx.qty_b, ctx.limit_price_b, ctx.mult_b, ctx.tick_b)
+    };
+
+    let res_first = first_conn.place_order(
+        http, keys, &ctx.pair, first_is_buy, first_qty, ctx.dry_run,
+        first_limit, first_limit > 0.0,
+        ctx.leverage, first_mult, ctx.ioc_slippage_pct, first_tick, ts.api_timeout_ms
+    ).await;
+
+    let (oid_first, fill_first, fee_first) = match res_first {
+        Ok(t) => (t.0, t.1, t.2),
+        Err(e) => {
+            tracing::error!("[real] LEG_FIRST reject {}/{}: {}", first_label, ctx.pair, e);
+            let esl = e.to_string().to_lowercase();
+            if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
+                crate::engine::risk_manager::mark_balance_low(first_label, e_ctx);
+            }
+            (None, 0.0, 0.0)
+        }
+    };
+
+    let first_phys_init = if fill_first > 0.0 { Some(first_qty) } else { None };
+    let first_max_retries = if fill_first <= 0.0 { 5_i64 } else { ts.fill_verify_retries };
+
+    let ver_first = verify_fill(
+        first_conn, http, keys, &ctx.pair, &oid_first,
+        fill_first, fee_first, first_phys_init, first_qty, ctx.dry_run,
+        VerifyConfig {
+            fast_retries: first_max_retries,
+            fast_delay_ms: ts.fill_verify_delay_ms as u64,
+            slow_retries: 8,
+            slow_delay_ms: 500,
+            position_fallback: true,
+            mult: first_mult,
+        },
+        "real",
+    ).await;
+
+    let first_phys = ver_first.phys_volume.unwrap_or(0.0);
+
+    if first_phys <= 1e-12 {
+        tracing::info!(
+            "[real] ⏭️ {} IOC не заполнен для {} — нет экспозиции, пропускаем ({}ms)",
+            first_label, ctx.pair, t0_exec.elapsed().as_millis()
+        );
+        e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + 10_000);
+        return true;
+    }
+
+    if sort_by_liquidity {
+        tracing::info!(
+            "[real] ✅ Первая нога {} заполнена: price={:.6} qty={:.6}. Открываем {}...",
+            first_label, ver_first.fill_price, first_phys, second_label
+        );
+    }
+
+    // ── PHASE 2: More liquid leg (or Leg B for HFT) ─────────────────────────
+    let final_qty_second = if ctx.dry_run { 
+        if a_is_less_liquid { ctx.qty_b } else { ctx.qty_a } 
+    } else { first_phys };
+
+    let (second_conn, second_is_buy, second_limit, second_mult, second_tick) = if a_is_less_liquid {
+        (&conn_ensure_b, ctx.is_a_higher, ctx.limit_price_b, ctx.mult_b, ctx.tick_b)
+    } else {
+        (&conn_ensure_a, !ctx.is_a_higher, ctx.limit_price_a, ctx.mult_a, ctx.tick_a)
+    };
+
+    let res_second = second_conn.place_order(
+        http, keys, &ctx.pair, second_is_buy, final_qty_second, ctx.dry_run,
+        second_limit, second_limit > 0.0,
+        ctx.leverage, second_mult, ctx.ioc_slippage_pct, second_tick, ts.api_timeout_ms
+    ).await;
+
+    let (oid_second, fill_second, fee_second) = match res_second {
+        Ok(t) => (t.0, t.1, t.2),
+        Err(e) => {
+            tracing::error!("[real] LEG_SECOND reject {}/{}: {}", second_label, ctx.pair, e);
+            let esl = e.to_string().to_lowercase();
+            if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
+                crate::engine::risk_manager::mark_balance_low(second_label, e_ctx);
+            }
+            (None, 0.0, 0.0)
+        }
+    };
+
+    let second_phys_init = if fill_second > 0.0 { Some(final_qty_second) } else { None };
+    let second_max_retries = if fill_second <= 0.0 { 5_i64 } else { ts.fill_verify_retries };
+
+    let ver_second = verify_fill(
+        second_conn, http, keys, &ctx.pair, &oid_second,
+        fill_second, fee_second, second_phys_init, final_qty_second, ctx.dry_run,
+        VerifyConfig {
+            fast_retries: second_max_retries,
+            fast_delay_ms: ts.fill_verify_delay_ms as u64,
+            slow_retries: 8,
+            slow_delay_ms: 500,
+            position_fallback: true,
+            mult: second_mult,
+        },
+        "real",
+    ).await;
+
+    let total_exec_ms = t0_exec.elapsed().as_millis();
+
+    if total_exec_ms > 800 {
+        let mut strikes_a = e_ctx.high_latency_strikes.entry(ctx.exa.clone()).or_insert(0);
+        *strikes_a += 1;
+        if *strikes_a >= 3 {
+            e_ctx.exchange_cooldown.insert(ctx.exa.clone(), now + 60_000);
+            tracing::error!("[real] 🐢 LATENCY ALERT: {} RTT >800ms. Cooldown 1m.", ctx.exa);
+            *strikes_a = 0;
+        }
+
+        let mut strikes_b = e_ctx.high_latency_strikes.entry(ctx.exb.clone()).or_insert(0);
+        *strikes_b += 1;
+        if *strikes_b >= 3 {
+            e_ctx.exchange_cooldown.insert(ctx.exb.clone(), now + 60_000);
+            tracing::error!("[real] 🐢 LATENCY ALERT: {} RTT >800ms. Cooldown 1m.", ctx.exb);
+            *strikes_b = 0;
+        }
+    } else {
+        e_ctx.high_latency_strikes.insert(ctx.exa.clone(), 0);
+        e_ctx.high_latency_strikes.insert(ctx.exb.clone(), 0);
+    }
+
+    let (oid_a, oid_b);
+    let (mut fill_a, fee_a_val, actual_vol_phys_a);
+    let (mut fill_b, fee_b_val, actual_vol_phys_b);
+    if a_is_less_liquid {
+        oid_a = oid_first;
+        fill_a = ver_first.fill_price;
+        fee_a_val = ver_first.fee;
+        actual_vol_phys_a = ver_first.phys_volume;
+        oid_b = oid_second;
+        fill_b = ver_second.fill_price;
+        fee_b_val = ver_second.fee;
+        actual_vol_phys_b = ver_second.phys_volume;
+    } else {
+        oid_a = oid_second;
+        fill_a = ver_second.fill_price;
+        fee_a_val = ver_second.fee;
+        actual_vol_phys_a = ver_second.phys_volume;
+        oid_b = oid_first;
+        fill_b = ver_first.fill_price;
+        fee_b_val = ver_first.fee;
+        actual_vol_phys_b = ver_first.phys_volume;
+    }
+
+    let mut phys_a = actual_vol_phys_a.unwrap_or(0.0);
+    let mut phys_b = actual_vol_phys_b.unwrap_or(0.0);
+
+    if ctx.dry_run {
+        fill_a = ctx.sig_entry_a;
+        fill_b = ctx.sig_entry_b;
+    }
+
+    let a_filled = oid_a.is_some() && phys_a > 0.0;
+    let b_filled = oid_b.is_some() && phys_b > 0.0;
+
+    tracing::info!("[real] RESULT {} A={} B={} phys_a={:.6} phys_b={:.6} fill_a={:.6} fill_b={:.6} latency={}ms",
+        ctx.pair, a_filled, b_filled, phys_a, phys_b, fill_a, fill_b, total_exec_ms);
+
+    if !a_filled && !b_filled {
+        tracing::info!("[real] Both IOC unfilled {} — no exposure ({}ms)", ctx.pair, total_exec_ms);
+        e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + 10_000);
+        return true;
+    }
+
+    let mv = match_volumes(phys_a, phys_b, ctx.mult_a, ctx.mult_b);
+    let matched_phys = mv.matched_phys;
+    let delta_a = mv.delta_a;
+    let delta_b = mv.delta_b;
+
+    // ── DELTA TRIMMING (Phase 3) ──
+    let (trimming_fee, trimming_loss) = if !ctx.dry_run {
+        trim_asymmetric_legs(
+            http, keys, &ctx.pair, &ctx.exa, &ctx.exb, ctx.is_a_higher,
+            delta_a, delta_b, ctx.mult_a, ctx.mult_b, fill_a, fill_b, ts.api_timeout_ms, e_ctx
+        ).await
+    } else {
+        (0.0, 0.0)
+    };
+
+    // ── TRADE BOOKING (Phase 4) ──
+    let repo = TradeRepository::new(db.clone());
+    
+    if matched_phys < 1e-12 {
+        let trims = e_ctx.consecutive_trims.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if trims >= 3 {
+            e_ctx.is_killed.store(true, std::sync::atomic::Ordering::Relaxed);
+            tracing::error!("[real] 💀 KILL-SWITCH TRIGGERED: 3 consecutive FULL TRIMS (total asymmetry). Suspending new entries.");
+        }
+        let total_fee = fee_a_val + fee_b_val + trimming_fee;
+        tracing::error!("[real] ❌ FULL ASYMMETRY DUMPED {}. Trade canceled. Trimming Loss: {:.4}, Trimming Fee: {:.4}", ctx.pair, trimming_loss, trimming_fee);
+        e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.asymmetric_cooldown_ms);
+
+        let (ent_a, ent_b) = if a_filled { (fill_a, 0.0) } else { (0.0, fill_b) };
+        let fv_usd = if a_filled { delta_a * fill_a } else { delta_b * fill_b };
+        let gross_pnl = -trimming_loss;
+        let net_pnl = gross_pnl - total_fee;
+
+        let pnl_a_val = if a_filled { gross_pnl } else { 0.0 };
+        let pnl_b_val = if !a_filled { gross_pnl } else { 0.0 };
+
+        repo.append_asymmetric_close(
+            ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
+            fv_usd, ent_a, ent_b, ctx.sig_spread, crate::engine::utils::now_ms(),
+            pnl_a_val, pnl_b_val, ctx.profile_id.clone(),
+            total_fee, 0.0, net_pnl, gross_pnl, 0.0, 0.0,
+        ).await;
+        return true;
+    }
+
+    e_ctx.consecutive_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+    e_ctx.consecutive_trims.store(0, std::sync::atomic::Ordering::Relaxed);
+    
+    let final_vol_usd = matched_phys * fill_a;
+    crate::engine::risk_manager::deduct_cached_balance(&ctx.exa, final_vol_usd, ctx.leverage, e_ctx);
+    crate::engine::risk_manager::deduct_cached_balance(&ctx.exb, final_vol_usd, ctx.leverage, e_ctx);
+
+    e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.pair_cooldown_ms);
+
+    let actual_entry_spread = compute_entry_spread(fill_a, fill_b, ctx.is_a_higher, ctx.sig_spread);
+
+    let entry_comm = fee_a_val + fee_b_val + trimming_fee + trimming_loss;
+    let slip_a = if fill_a > 0.0 {
+        if ctx.is_a_higher { ((ctx.sig_entry_a - fill_a) * matched_phys).max(0.0) } else { ((fill_a - ctx.sig_entry_a) * matched_phys).max(0.0) }
+    } else { 0.0 };
+    let slip_b = if fill_b > 0.0 {
+        if !ctx.is_a_higher { ((ctx.sig_entry_b - fill_b) * matched_phys).max(0.0) } else { ((fill_b - ctx.sig_entry_b) * matched_phys).max(0.0) }
+    } else { 0.0 };
+
+    let entry_slip = slip_a + slip_b;
+    let contracts_a_db = matched_phys / ctx.mult_a;
+    let contracts_b_db = matched_phys / ctx.mult_b;
+
+    if fill_a > 0.0 && ctx.sig_entry_a > 0.0 {
+        let ratio_a = fill_a / ctx.sig_entry_a;
+        if ratio_a > 2.0 || ratio_a < 0.5 {
+            tracing::error!("[real] 🚨 PRICE SANITY FAIL {}/{}: fill_a={:.8} entry_a={:.8} ratio={:.2}. Using L1 fallback!",
+                ctx.pair, ctx.exa, fill_a, ctx.sig_entry_a, ratio_a);
+            fill_a = ctx.sig_entry_a;
+        }
+    }
+    if fill_b > 0.0 && ctx.sig_entry_b > 0.0 {
+        let ratio_b = fill_b / ctx.sig_entry_b;
+        if ratio_b > 2.0 || ratio_b < 0.5 {
+            tracing::error!("[real] 🚨 PRICE SANITY FAIL {}/{}: fill_b={:.8} entry_b={:.8} ratio={:.2}. Using L1 fallback!",
+                ctx.pair, ctx.exb, fill_b, ctx.sig_entry_b, ratio_b);
+            fill_b = ctx.sig_entry_b;
+        }
+    }
+
+    tracing::info!("[real] [EXCHANGE_VERIFIED] ✅ OPEN {} phys={:.6} (Trimming: -${:.4}) A_price={:.6} B_price={:.6} fees={:.4} slip={:.4} actual_sp={:.4}%",
+        ctx.pair, matched_phys, trimming_loss, fill_a, fill_b, entry_comm, entry_slip, actual_entry_spread);
+
+    repo.insert_new_entry(
+        ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
+        final_vol_usd, fill_a, fill_b, actual_entry_spread, crate::engine::utils::now_ms(),
+        ctx.profile_id.clone(), entry_comm, entry_slip,
+        oid_a.unwrap_or_default(), oid_b.unwrap_or_default(),
+        contracts_a_db, contracts_b_db, ctx.sig_structural_spread,
+    ).await;
+    
+    true
+}
+
+pub struct CloseTaskContext {
+    pub trade_id: i64,
+    pub pair: String,
+    pub exa: String,
+    pub exb: String,
+    pub is_a_higher: bool,
+    pub q_a: f64,
+    pub q_b: f64,
+    pub mult_a: f64,
+    pub mult_b: f64,
+    pub tick_a: f64,
+    pub tick_b: f64,
+    pub leverage: f64,
+    pub exit_price_a: f64,
+    pub exit_price_b: f64,
+    pub use_ioc: bool,
+    pub slippage_percent: f64,
+    pub entry_a: f64,
+    pub entry_b: f64,
+    pub trade_coins_a: f64,
+    pub trade_coins_b: f64,
+    pub close_verify_retries: u32,
+    pub close_verify_delay: u64,
+    pub api_timeout_ms: u64,
+    pub reason: String,
+    pub fund_cost: f64,
+    pub exit_spread: f64,
+}
+
+pub fn spawn_close_task(
+    ctx: CloseTaskContext,
+    http: Client,
+    keys: Arc<ExchangeKeys>,
+    db: Connection,
+    e_ctx: Arc<EngineContext>,
+) {
+    let closing_guard = Arc::clone(&e_ctx.closing_in_flight);
+    let trade_id_for_guard = ctx.trade_id;
+
+    tokio::spawn(async move {
+        let conn_a = crate::engine::exchanges::get_connector(&ctx.exa).unwrap();
+        let conn_b = crate::engine::exchanges::get_connector(&ctx.exb).unwrap();
+
+        let cr = execute_close(
+            &conn_a, &conn_b, &http, &keys, &ctx.pair,
+            ctx.is_a_higher, ctx.q_a, ctx.q_b, ctx.leverage,
+            ctx.exit_price_a, ctx.exit_price_b,
+            ctx.use_ioc, ctx.slippage_percent, ctx.mult_a, ctx.mult_b, ctx.tick_a, ctx.tick_b,
+            ctx.close_verify_retries, ctx.close_verify_delay, ctx.api_timeout_ms,
+            ctx.entry_a, ctx.entry_b, ctx.trade_coins_a, ctx.trade_coins_b,
+        ).await;
+
+        let repo_close = TradeRepository::new(db.clone());
+
+        if cr.real_exit_a <= 0.0 || cr.real_exit_b <= 0.0 {
+            tracing::error!("[real] ⚠️ CLOSE FAILED OR UNVERIFIED id={} {}. Error: {}", ctx.trade_id, ctx.pair, cr.error_msg);
+            let keep_closing = cr.leg_a_external || cr.leg_b_external || ctx.reason == "MANUAL";
+            repo_close.record_close_failure(ctx.trade_id, &cr.error_msg, keep_closing).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            closing_guard.remove(&trade_id_for_guard);
+            return;
+        }
+
+        let close_reason_db = if cr.leg_a_external && cr.leg_b_external {
+            "EXTERNAL_CLOSE".to_string()
+        } else if cr.leg_a_external || cr.leg_b_external {
+            "EXTERNAL_PARTIAL_CLOSE".to_string()
+        } else {
+            ctx.reason.clone()
+        };
+
+        let real_gp = cr.pnl_a + cr.pnl_b;
+
+        let slip_cost_exit_a = if cr.real_exit_a > 0.0 {
+            if ctx.is_a_higher { ((cr.real_exit_a - ctx.exit_price_a) * ctx.trade_coins_a).max(0.0) } else { ((ctx.exit_price_a - cr.real_exit_a) * ctx.trade_coins_a).max(0.0) }
+        } else { 0.0 };
+        let slip_cost_exit_b = if cr.real_exit_b > 0.0 {
+            if !ctx.is_a_higher { ((cr.real_exit_b - ctx.exit_price_b) * ctx.trade_coins_b).max(0.0) } else { ((ctx.exit_price_b - cr.real_exit_b) * ctx.trade_coins_b).max(0.0) }
+        } else { 0.0 };
+        let exit_slip = slip_cost_exit_a + slip_cost_exit_b;
+
+        tracing::info!("[real] [EXCHANGE_VERIFIED] PnL id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", 
+            ctx.trade_id, cr.pnl_a, cr.pnl_b, real_gp, cr.exit_fee, exit_slip);
+
+        let pos_check_a = conn_a.fetch_positions(&http, &keys).await;
+        let pos_check_b = conn_b.fetch_positions(&http, &keys).await;
+        let still_a = pos_check_a.as_ref().ok().map(|ps| ps.iter().any(|p| crate::engine::utils::symbols_match(&p.symbol, &ctx.pair) && p.size.abs() > 1e-12)).unwrap_or(true);
+        let still_b = pos_check_b.as_ref().ok().map(|ps| ps.iter().any(|p| crate::engine::utils::symbols_match(&p.symbol, &ctx.pair) && p.size.abs() > 1e-12)).unwrap_or(true);
+        if still_a || still_b {
+            tracing::error!("[real] ⚠️ POSITION STILL EXISTS after close id={} {} still_a={} still_b={} — keeping trade OPEN for retry/recovery",
+                ctx.trade_id, ctx.pair, still_a, still_b);
+            repo_close.record_close_failure(ctx.trade_id, &format!("post-close verification failed still_a={} still_b={}", still_a, still_b), true).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            closing_guard.remove(&trade_id_for_guard);
+            return;
+        }
+
+        repo_close.mark_trade_closed_confirmed(
+            ctx.trade_id, cr.real_exit_a, cr.real_exit_b, ctx.exit_spread, real_gp,
+            cr.pnl_a, cr.pnl_b, &close_reason_db, ctx.fund_cost, cr.exit_fee, exit_slip,
+        ).await;
+        closing_guard.remove(&trade_id_for_guard);
+    });
 }

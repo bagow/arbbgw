@@ -55,101 +55,41 @@ pub async fn process_closes(
             continue;
         }
 
-        let key_a = format!("{}:{}", trade.exchange_a, trade.pair);
-        let key_b = format!("{}:{}", trade.exchange_b, trade.pair);
+        let live_state = crate::engine::pnl::calculate_live_pnl_state(
+            &trade, prices, e_ctx, manual_close, closing_retry,
+        );
 
-        let data_a = prices
-            .get(&trade.exchange_a)
-            .and_then(|m| m.get(&trade.pair).cloned());
-        let data_b = prices
-            .get(&trade.exchange_b)
-            .and_then(|m| m.get(&trade.pair).cloned());
-
-        if (data_a.is_none() || data_b.is_none()) && !manual_close && !closing_retry {
+        if !live_state.is_valid {
             continue;
         }
 
-        // Fallback prices in case of missing WebSocket data during a manual close
-        let mut exit_price_a = trade.entry_price_a.max(1e-12);
-        let mut exit_price_b = trade.entry_price_b.max(1e-12);
-        let mut c_price_a = exit_price_a;
-        let mut c_price_b = exit_price_b;
-        let mut current_spread = 0.0;
-        let mut exit_spread = 0.0;
+        let key_a = format!("{}:{}", trade.exchange_a, trade.pair);
+        let key_b = format!("{}:{}", trade.exchange_b, trade.pair);
 
-        if let (Some(da), Some(db)) = (&data_a, &data_b) {
-            if da.bid <= 0.0 || da.ask <= 0.0 || db.bid <= 0.0 || db.ask <= 0.0 {
-                // If orderbook is completely empty or just preloaded (0 prices), fallback to entry prices for limit projection
-                c_price_a = if da.price > 0.0 {
-                    da.price
-                } else {
-                    trade.entry_price_a
-                };
-                c_price_b = if db.price > 0.0 {
-                    db.price
-                } else {
-                    trade.entry_price_b
-                };
-                exit_price_a = c_price_a;
-                exit_price_b = c_price_b;
-                if !manual_close {
-                    continue;
-                }
-            } else {
-                c_price_a = da.price;
-                c_price_b = db.price;
-                exit_price_a = if is_a_higher { da.ask } else { da.bid };
-                exit_price_b = if is_a_higher { db.bid } else { db.ask };
-
-                // Use absolute worst-case bid/ask for current spread so trailing stops trigger correctly
-                current_spread = calculate_current_spread(
-                    is_a_higher, da.bid, da.ask, db.bid, db.ask,
-                );
-                exit_spread = calculate_exit_spread(
-                    is_a_higher, da.bid, da.ask, db.bid, db.ask,
-                );
-            }
-        }
-
-        // BUG-2 FIX: Use actual physical coins per leg (contracts × multiplier)
-        // instead of approximating via volume/price_a which diverges when
-        // signal price ≠ fill price or after asymmetric trimming.
         let mult_a_live = e_ctx.multipliers.get(&key_a).map(|v| *v).unwrap_or(1.0);
         let mult_b_live = e_ctx.multipliers.get(&key_b).map(|v| *v).unwrap_or(1.0);
-        let coins_a = trade.contracts_a * mult_a_live;
-        let coins_b = trade.contracts_b * mult_b_live;
+        let coins_a = live_state.coins_a;
+        let coins_b = live_state.coins_b;
 
-        // PnL for DISPLAY (using mark/mid prices — matches exchange PnL)
-        let live_pnl = calculate_gross_pnl(
-            is_a_higher, trade.entry_price_a, trade.entry_price_b,
-            c_price_a, c_price_b, coins_a, coins_b,
-        );
-        let live_pnl_a = live_pnl.pnl_a;
-        let live_pnl_b = live_pnl.pnl_b;
-        let live_gross_pnl = live_pnl.gross_pnl;
-
-        // Use the accumulated real funding cost from DB
         let fund_cost = trade.funding_cost;
-        let _live_net_pnl = calculate_net_pnl(live_gross_pnl, trade.commission_cost, 0.0, fund_cost);
-
-        // PnL for CLOSE TRIGGERS (using bid/ask — pessimistic, for safe execution)
-        let exec_pnl = calculate_gross_pnl(
-            is_a_higher, trade.entry_price_a, trade.entry_price_b,
-            exit_price_a, exit_price_b, coins_a, coins_b,
-        );
-        let exec_gross_pnl = exec_pnl.gross_pnl;
-        let exec_net_pnl = calculate_net_pnl(exec_gross_pnl, trade.commission_cost, trade.slippage_cost, fund_cost);
+        let exec_net_pnl = crate::engine::pnl::calculate_net_pnl(live_state.exec_gross_pnl, trade.commission_cost, trade.slippage_cost, fund_cost);
         let exec_net_pct = exec_net_pnl / trade.volume * 100.0;
+
+        let top_spread = trade.highest_spread.max(live_state.current_spread);
+        let stop_limit = top_spread - settings.trailing_stop_percent;
+
+        let mut exit_price_a = live_state.exit_price_a;
+        let mut exit_price_b = live_state.exit_price_b;
 
         let top_spread = trade.highest_spread.max(current_spread);
         let stop_limit = top_spread - settings.trailing_stop_percent;
 
         let triggered_tp = exec_net_pct >= settings.take_profit_percent;
-        let triggered_stop = top_spread > 0.0 && current_spread < stop_limit;
+        let triggered_stop = top_spread > 0.0 && live_state.current_spread < stop_limit;
         // Structural-aware exit: for pairs with structural spread > 0, the spread
         // will converge to structural_spread, not 0.0. Use it as the effective zero.
         let structural_target = trade.structural_spread.max(0.0);
-        let zero_spread = exit_spread <= structural_target && exec_net_pnl >= 0.0;
+        let zero_spread = live_state.exit_spread <= structural_target && exec_net_pnl >= 0.0;
 
         let mut reason_str = "";
         if manual_close { reason_str = "MANUAL"; }
@@ -234,7 +174,7 @@ pub async fn process_closes(
 
                     if !still_tp && !still_zero {
                         tracing::warn!("[real] ⚠️ VWAP MIRAGE ({}): L1 spread={:.2}%, VWAP spread={:.2}%. Closing anyway to prevent getting stuck.", 
-                            reason_str, exit_spread, vwap_exit_spread);
+                            reason_str, live_state.exit_spread, vwap_exit_spread);
                         exit_price_a = px_a;
                         exit_price_b = px_b;
                     } else {
@@ -264,157 +204,40 @@ pub async fn process_closes(
                 continue;
             }
             e_ctx.closing_in_flight.insert(trade.id, true);
-            info!("[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4}", trade.id, pair, reason, exec_net_pct, exit_spread);
+            info!("[real] Closing {} {} reason={} pct={:.3}% exit_sp={:.4}", trade.id, pair, reason, exec_net_pct, live_state.exit_spread);
 
-            let c_a = trade.contracts_a;
-            let c_b = trade.contracts_b;
-            let id = trade.id;
-            let _vol = trade.volume;
-            let entry_a = trade.entry_price_a;
-            let entry_b = trade.entry_price_b;
-            let ca_coins = coins_a;
-            let cb_coins = coins_b;
-            let h = http.clone();
-            let k = Arc::clone(&keys);
-            let db_c = db.clone();
-            let r = reason.to_string();
-            let lev = settings.leverage;
-            let _exit_sanity = ts.exit_sanity_pct;
-            let close_verify_delay = ts.close_verify_delay_ms as u64;
-            let close_verify_retries = ts.close_verify_retries;
-            let api_timeout_ms = ts.api_timeout_ms;
+            let ctx_close = crate::engine::execution::CloseTaskContext {
+                trade_id: trade.id,
+                pair: pair.clone(),
+                exa: exa.clone(),
+                exb: exb.clone(),
+                is_a_higher,
+                q_a: coins_a,
+                q_b: coins_b,
+                mult_a: mult_a_live,
+                mult_b: mult_b_live,
+                tick_a: e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001),
+                tick_b: e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001),
+                leverage: settings.leverage as f64,
+                exit_price_a: exit_price_a,
+                exit_price_b: exit_price_b,
+                use_ioc: ts.entry_order_type == "ioc" && !manual_close,
+                slippage_percent: settings.slippage_percent,
+                entry_a: trade.entry_price_a,
+                entry_b: trade.entry_price_b,
+                trade_coins_a: coins_a,
+                trade_coins_b: coins_b,
+                close_verify_retries: ts.close_verify_retries as u32,
+                close_verify_delay: ts.close_verify_delay_ms as u64,
+                api_timeout_ms: ts.api_timeout_ms,
+                reason: reason.to_string(),
+                fund_cost: trade.funding_cost,
+                exit_spread: live_state.exit_spread,
+            };
 
-            let use_ioc = ts.entry_order_type == "ioc" && !manual_close;
-            let tick_a = e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001);
-            let tick_b = e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001);
-            let mult_a = e_ctx.multipliers.get(&key_a).map(|v| *v).unwrap_or(1.0);
-            let mult_b = e_ctx.multipliers.get(&key_b).map(|v| *v).unwrap_or(1.0);
-
-            let q_a = c_a as f64 * mult_a;
-            let q_b = c_b as f64 * mult_b;
-            let slippage_percent = settings.slippage_percent;
-
-            let _e_ctx_c = Arc::clone(&e_ctx);
-            let closing_guard = Arc::clone(&e_ctx.closing_in_flight);
-            let trade_id_for_guard = trade.id;
-            tokio::spawn(async move {
-                let conn_a = crate::engine::exchanges::get_connector(&exa).unwrap();
-                let conn_b = crate::engine::exchanges::get_connector(&exb).unwrap();
-
-                let cr = crate::engine::execution::execute_close(
-                    &conn_a, &conn_b, &h, &k, &pair,
-                    is_a_higher, q_a, q_b, lev as f64,
-                    exit_price_a, exit_price_b,
-                    use_ioc, slippage_percent, mult_a, mult_b, tick_a, tick_b,
-                    close_verify_retries as u32, close_verify_delay, api_timeout_ms,
-                    entry_a, entry_b, ca_coins, cb_coins,
-                ).await;
-
-                let repo_close = TradeRepository::new(db_c.clone());
-
-                if cr.real_exit_a <= 0.0 || cr.real_exit_b <= 0.0 {
-                    tracing::error!(
-                        "[real] ⚠️ CLOSE FAILED OR UNVERIFIED id={} {}. Error: {}",
-                        id, pair, cr.error_msg
-                    );
-                    let keep_closing = cr.leg_a_external || cr.leg_b_external || r == "MANUAL";
-                    repo_close
-                        .record_close_failure(id, &cr.error_msg, keep_closing)
-                        .await;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    closing_guard.remove(&trade_id_for_guard);
-                    return;
-                }
-
-                let close_reason_db = if cr.leg_a_external && cr.leg_b_external {
-                    "EXTERNAL_CLOSE".to_string()
-                } else if cr.leg_a_external || cr.leg_b_external {
-                    "EXTERNAL_PARTIAL_CLOSE".to_string()
-                } else {
-                    r.clone()
-                };
-
-                let real_gp = cr.pnl_a + cr.pnl_b;
-
-                let slip_cost_exit_a = if cr.real_exit_a > 0.0 {
-                    if is_a_higher {
-                        ((cr.real_exit_a - exit_price_a) * ca_coins).max(0.0)
-                    } else {
-                        ((exit_price_a - cr.real_exit_a) * ca_coins).max(0.0)
-                    }
-                } else {
-                    0.0
-                };
-                let slip_cost_exit_b = if cr.real_exit_b > 0.0 {
-                    if !is_a_higher {
-                        ((cr.real_exit_b - exit_price_b) * cb_coins).max(0.0)
-                    } else {
-                        ((exit_price_b - cr.real_exit_b) * cb_coins).max(0.0)
-                    }
-                } else {
-                    0.0
-                };
-                let exit_slip = slip_cost_exit_a + slip_cost_exit_b;
-
-                info!("[real] [EXCHANGE_VERIFIED] PnL id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", id, cr.pnl_a, cr.pnl_b, real_gp, cr.exit_fee, exit_slip);
-
-                // Verify positions are actually gone from both exchanges
-                let pos_check_a = conn_a.fetch_positions(&h, &k).await;
-                let pos_check_b = conn_b.fetch_positions(&h, &k).await;
-                let still_a = pos_check_a
-                    .as_ref()
-                    .ok()
-                    .map(|ps| {
-                        ps.iter().any(|p| {
-                            symbols_match(&p.symbol, &pair)
-                                && p.size.abs() > 1e-12
-                        })
-                    })
-                    .unwrap_or(true);
-                let still_b = pos_check_b
-                    .as_ref()
-                    .ok()
-                    .map(|ps| {
-                        ps.iter().any(|p| {
-                            symbols_match(&p.symbol, &pair)
-                                && p.size.abs() > 1e-12
-                        })
-                    })
-                    .unwrap_or(true);
-                if still_a || still_b {
-                    error!(
-                        "[real] ⚠️ POSITION STILL EXISTS after close id={} {} still_a={} still_b={} — keeping trade OPEN for retry/recovery",
-                        id, pair, still_a, still_b
-                    );
-                    repo_close
-                        .record_close_failure(
-                            id,
-                            &format!("post-close verification failed still_a={} still_b={}", still_a, still_b),
-                            true,
-                        )
-                        .await;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                    closing_guard.remove(&trade_id_for_guard);
-                    return;
-                }
-
-                repo_close
-                    .mark_trade_closed_confirmed(
-                        id,
-                        cr.real_exit_a,
-                        cr.real_exit_b,
-                        exit_spread,
-                        real_gp,
-                        cr.pnl_a,
-                        cr.pnl_b,
-                        &close_reason_db,
-                        fund_cost,
-                        cr.exit_fee,
-                        exit_slip,
-                    )
-                    .await;
-                closing_guard.remove(&trade_id_for_guard);
-            });
+            crate::engine::execution::spawn_close_task(
+                ctx_close, http.clone(), Arc::clone(&keys), db.clone(), Arc::clone(&e_ctx)
+            );
         } else {
             // Fetch real funding rates from local cache to avoid blocking event loop
             let (fr_a, next_a) = e_ctx.funding_rates.get(&key_a).map(|f| (f.rate, f.next_ts)).unwrap_or((0.0, 0_i64));
@@ -432,21 +255,21 @@ pub async fn process_closes(
 
             // Net PnL with incrementally accumulated funding cost.
             let real_live_net_pnl = calculate_net_pnl(
-                live_gross_pnl, trade.commission_cost, 0.0, acc_fund_cost,
+                live_state.live_gross_pnl, trade.commission_cost, 0.0, acc_fund_cost,
             );
 
             live_updates.push((
                 trade.id,
-                c_price_a,
-                c_price_b,
-                current_spread,
+                live_state.c_price_a,
+                live_state.c_price_b,
+                live_state.current_spread,
                 real_live_net_pnl,
                 fr_a,
                 fr_b,
                 fund_next,
                 acc_fund_cost,
-                live_pnl_a,
-                live_pnl_b,
+                live_state.live_pnl_a,
+                live_state.live_pnl_b,
             ));
             if top_spread > trade.highest_spread {
                 let id = trade.id;
