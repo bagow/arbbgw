@@ -931,17 +931,22 @@ pub fn spawn_close_task(
         tracing::info!("[real] [EXCHANGE_VERIFIED] PnL id={} pna={:.4} pnb={:.4} gross={:.4} exit_fee={:.4} exit_slip={:.4}", 
             ctx.trade_id, cr.pnl_a, cr.pnl_b, real_gp, cr.exit_fee, exit_slip);
 
+        let both_external = cr.leg_a_external && cr.leg_b_external;
         let pos_check_a = conn_a.fetch_positions(&http, &keys).await;
         let pos_check_b = conn_b.fetch_positions(&http, &keys).await;
         let still_a = pos_check_a.as_ref().ok().map(|ps| ps.iter().any(|p| crate::engine::utils::symbols_match(&p.symbol, &ctx.pair) && p.size.abs() > 1e-12)).unwrap_or(true);
         let still_b = pos_check_b.as_ref().ok().map(|ps| ps.iter().any(|p| crate::engine::utils::symbols_match(&p.symbol, &ctx.pair) && p.size.abs() > 1e-12)).unwrap_or(true);
-        if still_a || still_b {
+        if (still_a || still_b) && !both_external {
             tracing::error!("[real] ⚠️ POSITION STILL EXISTS after close id={} {} still_a={} still_b={} — keeping trade OPEN for retry/recovery",
                 ctx.trade_id, ctx.pair, still_a, still_b);
             repo_close.record_close_failure(ctx.trade_id, &format!("post-close verification failed still_a={} still_b={}", still_a, still_b), true).await;
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             closing_guard.remove(&trade_id_for_guard);
             return;
+        }
+        if both_external && (still_a || still_b) {
+            tracing::warn!("[real] ⚠️ EXTERNAL_CLOSE id={} {} — both legs reported 'no position' but still_a={} still_b={}. Finalizing anyway (dust/phantom).",
+                ctx.trade_id, ctx.pair, still_a, still_b);
         }
 
         repo_close.mark_trade_closed_confirmed(
