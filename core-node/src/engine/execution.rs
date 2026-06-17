@@ -122,10 +122,15 @@ pub async fn verify_fill(
             if let Some(pos) = positions.iter().find(|p| {
                 crate::engine::real::symbols_match(&p.symbol, pair) && p.size.abs() > 1e-12
             }) {
-                tracing::warn!("[{}] 🚨 {}: Position FOUND despite verify failure!", label, pair);
+                tracing::warn!("[{}] 🚨 {}: Position FOUND despite verify failure! size={:.6} entry_price={:.6}",
+                    label, pair, pos.size.abs(), pos.entry_price);
                 phys = Some(pos.size.abs());
                 got = true;
-                if pos.entry_price > 0.0 { fill_price = pos.entry_price; }
+                // IMPORTANT: Do NOT use pos.entry_price as fill_price!
+                // entry_price from exchange position is the AVERAGE price of the ENTIRE position
+                // (including old fills from previous trades), not the fill price of this specific order.
+                // Leaving fill_price=0 lets compute_entry_spread use fallback signal spread,
+                // which is much more accurate than a stale average position price.
             }
         }
     }
