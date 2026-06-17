@@ -57,10 +57,10 @@ pub fn start_position_sync(
             }).await.unwrap_or_default();
 
             if open_trades.is_empty() {
-                // Clear ALL cached positions — no open trades means no positions to track.
-                // Without this, phantom positions stay in the UI forever after trades close.
-                e_ctx.positions.clear();
-                // Also clear position_missing_counter since there are no trades to track
+                // No open trades — clear missing counter but DON'T clear positions cache.
+                // Positions cache reflects what's actually on exchanges (managed by fetcher),
+                // not what we track internally. Clearing it here causes flickering in UI
+                // for positions that exist on the exchange but have no matching trade in DB.
                 e_ctx.position_missing_counter.clear();
                 continue;
             }
