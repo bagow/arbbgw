@@ -394,18 +394,30 @@ pub async fn trim_asymmetric_legs(
     if delta_a > 1e-12 {
         let phys_to_dump = delta_a;
         if phys_to_dump >= mult_a.min(1e-8) {
-            let is_buy = is_a_higher;
-            tracing::error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys", pair, phys_to_dump);
-            let tick_for_close = e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001);
-            match crate::engine::exchanges::get_connector(exa).unwrap()
-                .trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_a, tick_for_close, fill_a, api_timeout_ms).await {
-                Ok(rc) => {
-                    trimming_fee += rc.total_fee;
-                    let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_a };
-                    let gross_loss = if is_buy { (fill_a - close_price) * delta_a } else { (close_price - fill_a) * delta_a };
-                    trimming_loss += gross_loss.min(0.0).abs();
+            // Verify position actually exists before attempting trim (guards against phantom WS fills)
+            let conn_a = crate::engine::exchanges::get_connector(exa).unwrap();
+            let pos_exists = match conn_a.fetch_positions(&hc, &kc).await {
+                Ok(positions) => positions.iter().any(|p| {
+                    crate::engine::real::symbols_match(&p.symbol, pair) && p.size.abs() > 1e-12
+                }),
+                Err(_) => true, // On error, assume position exists and try to trim
+            };
+            if !pos_exists {
+                tracing::warn!("[real] ⚠️ TRIM {} LEG A skipped — no position found on {} (phantom fill from WS cache)", pair, exa);
+            } else {
+                let is_buy = is_a_higher;
+                tracing::error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys", pair, phys_to_dump);
+                let tick_for_close = e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001);
+                match conn_a
+                    .trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_a, tick_for_close, fill_a, api_timeout_ms).await {
+                    Ok(rc) => {
+                        trimming_fee += rc.total_fee;
+                        let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_a };
+                        let gross_loss = if is_buy { (fill_a - close_price) * delta_a } else { (close_price - fill_a) * delta_a };
+                        trimming_loss += gross_loss.min(0.0).abs();
+                    }
+                    Err(e) => { tracing::error!("[real] Failed to trim DELTA A: {}", e); }
                 }
-                Err(e) => { tracing::error!("[real] Failed to trim DELTA A: {}", e); }
             }
         }
     }
@@ -413,23 +425,36 @@ pub async fn trim_asymmetric_legs(
     if delta_b > 1e-12 {
         let phys_to_dump = delta_b;
         if phys_to_dump >= mult_b.min(1e-8) {
-            let is_buy = !is_a_higher;
-            tracing::error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys", pair, phys_to_dump);
-            let tick_for_close = e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001);
-            match crate::engine::exchanges::get_connector(exb).unwrap()
-                .trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_b, tick_for_close, fill_b, api_timeout_ms).await {
-                Ok(rc) => {
-                    trimming_fee += rc.total_fee;
-                    let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_b };
-                    let gross_loss = if is_buy { (fill_b - close_price) * delta_b } else { (close_price - fill_b) * delta_b };
-                    trimming_loss += gross_loss.min(0.0).abs();
+            // Verify position actually exists before attempting trim (guards against phantom WS fills)
+            let conn_b = crate::engine::exchanges::get_connector(exb).unwrap();
+            let pos_exists = match conn_b.fetch_positions(&hc, &kc).await {
+                Ok(positions) => positions.iter().any(|p| {
+                    crate::engine::real::symbols_match(&p.symbol, pair) && p.size.abs() > 1e-12
+                }),
+                Err(_) => true,
+            };
+            if !pos_exists {
+                tracing::warn!("[real] ⚠️ TRIM {} LEG B skipped — no position found on {} (phantom fill from WS cache)", pair, exb);
+            } else {
+                let is_buy = !is_a_higher;
+                tracing::error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys", pair, phys_to_dump);
+                let tick_for_close = e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001);
+                match conn_b
+                    .trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_b, tick_for_close, fill_b, api_timeout_ms).await {
+                    Ok(rc) => {
+                        trimming_fee += rc.total_fee;
+                        let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_b };
+                        let gross_loss = if is_buy { (fill_b - close_price) * delta_b } else { (close_price - fill_b) * delta_b };
+                        trimming_loss += gross_loss.min(0.0).abs();
+                    }
+                    Err(e) => { tracing::error!("[real] Failed to trim DELTA B: {}", e); }
                 }
-                Err(e) => { tracing::error!("[real] Failed to trim DELTA B: {}", e); }
             }
         }
     }
     (trimming_fee, trimming_loss)
 }
+
 
 pub struct SequentialEntryContext {
     pub pair: String,
@@ -531,13 +556,26 @@ pub async fn execute_sequential_entry(
             fast_delay_ms: ts.fill_verify_delay_ms as u64,
             slow_retries: 8,
             slow_delay_ms: 500,
-            position_fallback: true,
+            // CRITICAL: Do NOT use position_fallback for IOC entry orders!
+            // fetch_positions can find stale positions from previous trades
+            // (e.g. failed trims) and falsely confirm a phantom fill.
+            position_fallback: false,
             mult: first_mult,
         },
         "real",
     ).await;
 
     let first_phys = ver_first.phys_volume.unwrap_or(0.0);
+
+    // Guard: if phys > 0 but fill_price = 0, this is a phantom fill (position_fallback found stale position)
+    if first_phys > 1e-12 && ver_first.fill_price <= 0.0 {
+        tracing::error!(
+            "[real] 🚨 PHANTOM FILL {} on {}: phys={:.6} but fill_price=0 — treating as unfilled",
+            ctx.pair, first_label, first_phys
+        );
+        e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + 30_000);
+        return true;
+    }
 
     if first_phys <= 1e-12 {
         tracing::info!(
@@ -620,7 +658,8 @@ pub async fn execute_sequential_entry(
             fast_delay_ms: ts.fill_verify_delay_ms as u64,
             slow_retries: 8,
             slow_delay_ms: 500,
-            position_fallback: true,
+            // CRITICAL: same as first leg — no position_fallback for IOC entry
+            position_fallback: false,
             mult: second_mult,
         },
         "real",
