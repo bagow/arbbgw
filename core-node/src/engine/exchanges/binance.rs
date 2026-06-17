@@ -255,8 +255,10 @@ async fn execute_binance_order(
             tracing::warn!("[binance_ws] WS order failed ({}). Trying REST fallback...", e);
 
             // ── REST FALLBACK ──
-            // Build query string for REST API (no apiKey in params for REST, it goes in header-less HMAC)
-            let rest_params = params.clone();
+            // CRITICAL: Generate fresh timestamp! The original params timestamp may be
+            // seconds old after a WS timeout, causing Binance -1021 "recvWindow" errors.
+            let mut rest_params = params.clone();
+            rest_params.insert("timestamp".to_string(), serde_json::json!(now_ms()));
             let mut sorted_keys: Vec<&String> = rest_params.keys().collect();
             sorted_keys.sort();
             let qs: String = sorted_keys.iter()
