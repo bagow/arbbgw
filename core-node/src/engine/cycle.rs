@@ -51,6 +51,6 @@ pub async fn run_cycle(
     }
 
     crate::engine::entry_manager::process_entries(
-        signals, &prices, &settings, &http, &db, &keys, ts, &e_ctx, &open_pairs
+        signals, &prices, &settings, &http, &db, &keys, ts, &e_ctx, &open_pairs, num_active
     ).await;
 }

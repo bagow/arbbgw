@@ -155,7 +155,6 @@ pub fn spawn_exchange_maps_publisher(
             .to_string();
             let n = exchanges_list.len();
             let _ = cache_db.call(move |conn| {
-                let _ = conn.execute_batch("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);");
                 conn.execute(
                     "INSERT INTO server_cache(key,value,expires_at) VALUES('exchange_maps',?,?) \
                      ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",

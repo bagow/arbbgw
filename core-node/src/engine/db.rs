@@ -1,7 +1,7 @@
 use tokio_rusqlite::{params, Connection};
 use tracing::info;
 
-use crate::engine::real::now_ms;
+use crate::engine::utils::now_ms;
 use crate::engine::real::Trade;
 
 #[derive(Clone)]
@@ -35,51 +35,7 @@ impl TradeRepository {
         crate::engine::real::load_open_trades(&self.db, profile_id).await
     }
 
-    #[allow(dead_code)]
-    pub async fn mark_trade_closed(
-        &self,
-        id: i64,
-        exit_price_a: f64,
-        exit_price_b: f64,
-        exit_spread: f64,
-        exec_net_pnl: f64,
-        exec_gross_pnl: f64,
-        exec_pnl_a: f64,
-        exec_pnl_b: f64,
-        reason: &str,
-        fund_cost: f64,
-    ) {
-        let r = reason.to_string();
-        let current_ms = now_ms();
-        let _ = self.db.call(move |conn| {
-            conn.execute(
-                "UPDATE trades SET status='CLOSED',exit_price_a=?,exit_price_b=?,exit_spread=?,exit_time=?,pnl=?,gross_pnl=?,pnl_a=?,pnl_b=?,curr_gross_pnl=?,close_reason=?,funding_cost=? WHERE id=?",
-                params![exit_price_a, exit_price_b, exit_spread, current_ms, exec_net_pnl, exec_gross_pnl, exec_pnl_a, exec_pnl_b, exec_gross_pnl, r, fund_cost, id]
-            )?;
-            Ok(())
-        }).await;
-    }
 
-    #[allow(dead_code)]
-    pub async fn update_trade_real_exit(
-        &self,
-        id: i64,
-        real_exit_a: f64,
-        real_exit_b: f64,
-        real_pna: f64,
-        real_pnb: f64,
-        real_gp: f64,
-        exit_fee: f64,
-        exit_slip: f64,
-    ) {
-        let _ = self.db.call(move |conn| {
-            conn.execute(
-                "UPDATE trades SET exit_price_a=?,exit_price_b=?,pnl_a=?,pnl_b=?,gross_pnl=?,commission_cost=commission_cost+?,slippage_cost=slippage_cost+?,curr_gross_pnl=?, pnl=(?-funding_cost-(commission_cost+?)) WHERE id=?",
-                params![real_exit_a, real_exit_b, real_pna, real_pnb, real_gp, exit_fee, exit_slip, real_gp, real_gp, exit_fee, id]
-            )?;
-            Ok(())
-        }).await;
-    }
 
     pub async fn insert_new_entry(
         &self,

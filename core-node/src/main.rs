@@ -88,10 +88,11 @@ async fn main() -> Result<()> {
                 "ALTER TABLE trading_profiles ADD COLUMN disabled_exchanges TEXT DEFAULT '[]'",
                 [],
             );
+            let _ = conn.execute_batch("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);");
             Ok(())
         })
         .await;
-    info!("Profiles DB: {}", profiles_db_path);
+
 
     // ── Price map and signal ─────────────────────────────────────────────────
     let prices: PriceMap = Arc::new(dashmap::DashMap::new());
@@ -255,45 +256,6 @@ async fn main() -> Result<()> {
                     .fold(f64::MAX, f64::min);
                 let min_vol = if min_vol == f64::MAX { 1.0 } else { min_vol };
 
-                // Log settings only when they actually change
-                static LAST_SETTINGS_HASH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let settings_hash = {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    for p in real_profiles.iter() {
-                        p.id.hash(&mut h);
-                        p.is_active.hash(&mut h);
-                        p.trade_volume.to_bits().hash(&mut h);
-                        p.take_profit_percent.to_bits().hash(&mut h);
-                        p.min_entry_spread.to_bits().hash(&mut h);
-                        p.max_entry_spread.to_bits().hash(&mut h);
-                        p.max_active_trades.hash(&mut h);
-                        p.leverage.hash(&mut h);
-                    }
-                    ts.spread_threshold.to_bits().hash(&mut h);
-                    ts.stale_secs.hash(&mut h);
-                    h.finish()
-                };
-                let prev = LAST_SETTINGS_HASH.load(std::sync::atomic::Ordering::Relaxed);
-                if prev != settings_hash {
-                    LAST_SETTINGS_HASH.store(settings_hash, std::sync::atomic::Ordering::Relaxed);
-                    for p in real_profiles.iter() {
-                        info!(
-                            "[settings] ⚙️ ОБНОВЛЕНО: id={} active={} vol={} tp={}% min_spread={} max_spread={} lev={}x | tech: spread_thr={:.2} stale={}s min_vol={:.1}M",
-                            p.id,
-                            p.is_active,
-                            p.trade_volume,
-                            p.take_profit_percent,
-                            p.min_entry_spread,
-                            p.max_entry_spread,
-                            p.leverage,
-                            ts.spread_threshold,
-                            ts.stale_secs,
-                            min_vol
-                        );
-                    }
-                }
-
                 let spreads = compute_spreads(&prices, min_vol, &ts);
 
                 // Writes to profiles_db since vps-api reads from it
@@ -314,7 +276,6 @@ async fn main() -> Result<()> {
                     let cache_db = profiles_db_engine.clone();
                     tokio::spawn(async move {
                         let _ = cache_db.call(move |conn| {
-                            let _ = conn.execute("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);", []);
                             if let Err(e) = conn.execute(
                                 "INSERT INTO server_cache(key,value,expires_at) VALUES('snapshot',?,?) \
                                  ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
@@ -339,60 +300,22 @@ async fn main() -> Result<()> {
                     keys.clone(),
                 );
 
-                // ── EVALUATE SMART SIGNALS ──
-                // Split profiles by strategy type for isolated dispatch
-                let ema_profiles: Vec<_> = real_profiles.iter().filter(|p| p.strategy_type != "hft").cloned().collect();
-                let hft_profiles: Vec<_> = real_profiles.iter().filter(|p| p.strategy_type == "hft").cloned().collect();
+                // ── EVALUATE SMART SIGNALS & RUN ENGINE ──
+                let signals = crate::engine::scanner::generate_signals(
+                    &spreads,
+                    &prices,
+                    &real_profiles,
+                    &keys,
+                    &e_ctx,
+                    &ts,
+                );
 
-                // ── EMA REVERSION ENGINE (existing, untouched logic) ──
-                let signals = if !ema_profiles.is_empty() {
-                    crate::engine::scanner::generate_signals(
-                        &spreads,
-                        &prices,
-                        &ema_profiles,
-                        &keys,
-                        &e_ctx,
-                        &ts,
-                    )
-                } else {
-                    vec![]
-                };
-
-                for ema_s in &ema_profiles {
+                for profile in &real_profiles {
                     engine::cycle::run_cycle(
                         signals.clone(),
                         spreads.clone(),
                         prices.clone(),
-                        ema_s.clone(),
-                        http.clone(),
-                        real_db.clone(),
-                        keys.clone(),
-                        &ts,
-                        e_ctx.clone(),
-                    )
-                    .await;
-                }
-
-                // ── HFT LATENCY ARBITRAGE ENGINE (isolated module) ──
-                let hft_signals = if !hft_profiles.is_empty() {
-                    crate::engine::hft_scanner::generate_hft_signals(
-                        &spreads,
-                        &prices,
-                        &hft_profiles,
-                        &keys,
-                        &e_ctx,
-                        &ts,
-                    )
-                } else {
-                    vec![]
-                };
-
-                for hft_s in &hft_profiles {
-                    engine::hft_cycle::run_hft_cycle(
-                        hft_signals.clone(),
-                        spreads.clone(),
-                        prices.clone(),
-                        hft_s.clone(),
+                        profile.clone(),
                         http.clone(),
                         real_db.clone(),
                         keys.clone(),

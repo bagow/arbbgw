@@ -11,23 +11,7 @@ use crate::engine::real::*;
 use crate::engine::risk_manager::*;
 use crate::engine::cycle::cooldown_active;
 
-/// Static liquidity ranking for exchanges.
-/// Lower = more liquid. Used to determine entry order (less liquid first).
-fn liquidity_rank(exchange: &str) -> u8 {
-    match exchange {
-        "binance" => 1,
-        "bybit" => 2,
-        "gate" => 3,
-        "bitget" => 4,
-        "bingx" => 5,
-        "kucoin" => 6,
-        "bitmex" => 7,
-        "ascendex" => 8,
-        "toobit" => 9,
-        "xt" => 10,
-        _ => 50,
-    }
-}
+
 
 pub async fn process_entries(
     signals: Vec<TradeSignal>,
@@ -39,11 +23,10 @@ pub async fn process_entries(
     ts: &TechnicalSettings,
     e_ctx: &Arc<EngineContext>,
     open_pairs: &std::collections::HashSet<String>,
+    num_active: i64,
 ) {
-    let dry_run = false;
     let repo = TradeRepository::new(db.clone());
     let current_ms = now_ms() as u64;
-    let num_active = repo.load_open_trades(&settings.id).await.len() as i64;
     // ── Open new real trades ──────────────────────────────────────────────────
     // KEY PRINCIPLE: We do NOT write to DB until BOTH legs are confirmed filled.
     // This eliminates phantom trades, $0 PnL records, and immediate open/close chaos.
@@ -369,7 +352,7 @@ pub async fn process_entries(
             tick_b,
             ioc_slippage_pct,
             leverage: settings.leverage as f64,
-            dry_run,
+            dry_run: false,
             sig_spread: sig.spread,
             sig_structural_spread: sig.structural_spread,
             sig_direction: sig.direction.clone(),

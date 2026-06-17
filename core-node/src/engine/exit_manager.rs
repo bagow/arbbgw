@@ -20,7 +20,7 @@ pub async fn process_closes(
     ts: &TechnicalSettings,
     e_ctx: &Arc<EngineContext>,
 ) -> Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)> {
-    let _dry_run = false;
+
     let repo = TradeRepository::new(db.clone());
     // Tuple: (trade_id, price_a, price_b, spread, net_pnl, funding_rate_a, funding_rate_b, funding_next_ts, accumulated_funding_cost)
     let mut live_updates: Vec<(i64, f64, f64, f64, f64, f64, f64, i64, f64, f64, f64)> = Vec::new();
@@ -81,8 +81,7 @@ pub async fn process_closes(
         let mut exit_price_a = live_state.exit_price_a;
         let mut exit_price_b = live_state.exit_price_b;
 
-        let top_spread = trade.highest_spread.max(current_spread);
-        let stop_limit = top_spread - settings.trailing_stop_percent;
+
 
         let triggered_tp = exec_net_pct >= settings.take_profit_percent;
         let triggered_stop = top_spread > 0.0 && live_state.current_spread < stop_limit;

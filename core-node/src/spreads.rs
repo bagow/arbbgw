@@ -7,8 +7,21 @@ use shared::{SpreadRow, TechnicalSettings};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// (ema_ab, ema_ba, max_ab, min_ab, max_ba, min_ba, last_cross_ab, last_cross_ba, last_ts_secs)
-static STRUCTURAL_EMA: OnceLock<DashMap<String, (f64, f64, f64, f64, f64, f64, f64, f64, f64)>> =
+/// Named struct replacing the previous 9-element tuple for safety and readability.
+#[derive(Clone, Copy)]
+struct EmaEntry {
+    ema_12: f64,
+    ema_21: f64,
+    max_12: f64,
+    min_12: f64,
+    max_21: f64,
+    min_21: f64,
+    last_cross_12: f64,
+    last_cross_21: f64,
+    last_ts: f64,
+}
+
+static STRUCTURAL_EMA: OnceLock<DashMap<String, EmaEntry>> =
     OnceLock::new();
 
 /// Set of EMA keys that have been verified from 24h historical warmup data.
@@ -179,50 +192,36 @@ pub fn compute_spreads(
 
                 let (ema_12, ema_21, max_12, min_12, max_21, min_21, cross_12, cross_21) =
                     if let Some(mut entry) = ema_map.get_mut(&ema_key) {
-                        let (
-                            old_12,
-                            old_21,
-                            old_max_12,
-                            old_min_12,
-                            old_max_21,
-                            old_min_21,
-                            mut old_cross_12,
-                            mut old_cross_21,
-                            last_updated,
-                        ) = *entry;
-                        let dt = (now_f64 - last_updated).max(0.0);
+                        let e = *entry;
+                        let dt = (now_f64 - e.last_ts).max(0.0);
                         let alpha = if dt > 0.0 {
                             1.0 - (-dt / ts.ema_tau_secs).exp()
                         } else {
                             0.0
                         };
 
-                        let new_12 = old_12 + alpha * (premium_1_over_2 - old_12);
-                        let new_21 = old_21 + alpha * (premium_2_over_1 - old_21);
+                        let new_12 = e.ema_12 + alpha * (premium_1_over_2 - e.ema_12);
+                        let new_21 = e.ema_21 + alpha * (premium_2_over_1 - e.ema_21);
 
-                        let new_max_12 = old_max_12.max(premium_1_over_2);
-                        let new_min_12 = old_min_12.min(premium_1_over_2);
-                        let new_max_21 = old_max_21.max(premium_2_over_1);
-                        let new_min_21 = old_min_21.min(premium_2_over_1);
+                        let new_max_12 = e.max_12.max(premium_1_over_2);
+                        let new_min_12 = e.min_12.min(premium_1_over_2);
+                        let new_max_21 = e.max_21.max(premium_2_over_1);
+                        let new_min_21 = e.min_21.min(premium_2_over_1);
 
-                        if premium_1_over_2 <= 0.0 {
-                            old_cross_12 = now_f64;
-                        }
-                        if premium_2_over_1 <= 0.0 {
-                            old_cross_21 = now_f64;
-                        }
+                        let new_cross_12 = if premium_1_over_2 <= 0.0 { now_f64 } else { e.last_cross_12 };
+                        let new_cross_21 = if premium_2_over_1 <= 0.0 { now_f64 } else { e.last_cross_21 };
 
-                        *entry = (
-                            new_12,
-                            new_21,
-                            new_max_12,
-                            new_min_12,
-                            new_max_21,
-                            new_min_21,
-                            old_cross_12,
-                            old_cross_21,
-                            now_f64,
-                        );
+                        *entry = EmaEntry {
+                            ema_12: new_12,
+                            ema_21: new_21,
+                            max_12: new_max_12,
+                            min_12: new_min_12,
+                            max_21: new_max_21,
+                            min_21: new_min_21,
+                            last_cross_12: new_cross_12,
+                            last_cross_21: new_cross_21,
+                            last_ts: now_f64,
+                        };
                         (
                             new_12,
                             new_21,
@@ -230,8 +229,8 @@ pub fn compute_spreads(
                             new_min_12,
                             new_max_21,
                             new_min_21,
-                            old_cross_12,
-                            old_cross_21,
+                            new_cross_12,
+                            new_cross_21,
                         )
                     } else {
                         // Default cross to NOW — conservative: assume NO structural spread
@@ -240,17 +239,17 @@ pub fn compute_spreads(
                         let cross_21 = now_f64;
                         ema_map.insert(
                             ema_key.clone(),
-                            (
-                                premium_1_over_2,
-                                premium_2_over_1,
-                                premium_1_over_2,
-                                premium_1_over_2,
-                                premium_2_over_1,
-                                premium_2_over_1,
-                                cross_12,
-                                cross_21,
-                                now_f64,
-                            ),
+                            EmaEntry {
+                                ema_12: premium_1_over_2,
+                                ema_21: premium_2_over_1,
+                                max_12: premium_1_over_2,
+                                min_12: premium_1_over_2,
+                                max_21: premium_2_over_1,
+                                min_21: premium_2_over_1,
+                                last_cross_12: cross_12,
+                                last_cross_21: cross_21,
+                                last_ts: now_f64,
+                            },
                         );
                         (
                             premium_1_over_2,
@@ -403,61 +402,47 @@ pub fn warmup_ema_from_premiums(
     for (ts_val, premium_12, premium_21, pair, name1, name2) in &sorted {
         let key = format!("{}|{}|{}", pair, name1, name2);
         // Default cross to first candle ts (not 0.0) — prevents false has_structural_spread
-        let mut entry = ema_map.entry(key.clone()).or_insert((
-            *premium_12,
-            *premium_21,
-            *premium_12,
-            *premium_12,
-            *premium_21,
-            *premium_21,
-            *ts_val,
-            *ts_val,
-            *ts_val,
-        ));
-        let (
-            old_12,
-            old_21,
-            old_max_12,
-            old_min_12,
-            old_max_21,
-            old_min_21,
-            mut old_cross_12,
-            mut old_cross_21,
-            last_ts,
-        ) = *entry;
-        let dt = (ts_val - last_ts).max(0.0);
+        let mut entry = ema_map.entry(key.clone()).or_insert(EmaEntry {
+            ema_12: *premium_12,
+            ema_21: *premium_21,
+            max_12: *premium_12,
+            min_12: *premium_12,
+            max_21: *premium_21,
+            min_21: *premium_21,
+            last_cross_12: *ts_val,
+            last_cross_21: *ts_val,
+            last_ts: *ts_val,
+        });
+        let e = *entry;
+        let dt = (ts_val - e.last_ts).max(0.0);
         let alpha = if dt > 0.0 {
             1.0 - (-dt / tau).exp()
         } else {
             0.0
         };
 
-        let new_12 = old_12 + alpha * (premium_12 - old_12);
-        let new_21 = old_21 + alpha * (premium_21 - old_21);
+        let new_12 = e.ema_12 + alpha * (premium_12 - e.ema_12);
+        let new_21 = e.ema_21 + alpha * (premium_21 - e.ema_21);
 
-        let new_max_12 = old_max_12.max(*premium_12);
-        let new_min_12 = old_min_12.min(*premium_12);
-        let new_max_21 = old_max_21.max(*premium_21);
-        let new_min_21 = old_min_21.min(*premium_21);
+        let new_max_12 = e.max_12.max(*premium_12);
+        let new_min_12 = e.min_12.min(*premium_12);
+        let new_max_21 = e.max_21.max(*premium_21);
+        let new_min_21 = e.min_21.min(*premium_21);
 
-        if *premium_12 <= 0.0 {
-            old_cross_12 = *ts_val;
-        }
-        if *premium_21 <= 0.0 {
-            old_cross_21 = *ts_val;
-        }
+        let new_cross_12 = if *premium_12 <= 0.0 { *ts_val } else { e.last_cross_12 };
+        let new_cross_21 = if *premium_21 <= 0.0 { *ts_val } else { e.last_cross_21 };
 
-        *entry = (
-            new_12,
-            new_21,
-            new_max_12,
-            new_min_12,
-            new_max_21,
-            new_min_21,
-            old_cross_12,
-            old_cross_21,
-            *ts_val,
-        );
+        *entry = EmaEntry {
+            ema_12: new_12,
+            ema_21: new_21,
+            max_12: new_max_12,
+            min_12: new_min_12,
+            max_21: new_max_21,
+            min_21: new_min_21,
+            last_cross_12: new_cross_12,
+            last_cross_21: new_cross_21,
+            last_ts: *ts_val,
+        };
 
         // Mark this pair as VERIFIED — it has real historical data
         verified.insert(key);

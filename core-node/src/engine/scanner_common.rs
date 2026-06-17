@@ -1,6 +1,6 @@
 //! Common scanner helpers — shared between EMA scanner and HFT scanner.
 //!
-//! Extracted to eliminate exact copy-paste between scanner.rs and hft_scanner.rs.
+//! Common scanner helpers used by the EMA scanner.
 
 /// Compute the optimal physical quantity that is an exact integer multiple
 /// of BOTH exchange multipliers (so contracts_a * mult_a == contracts_b * mult_b == phys_qty).

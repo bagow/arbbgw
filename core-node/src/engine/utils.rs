@@ -1,6 +1,6 @@
 //! Engine utilities — single source of truth for common helpers.
 //!
-//! Previously duplicated across real.rs, risk_manager.rs, scanner.rs, hft_scanner.rs, hft_cycle.rs.
+//! Previously duplicated across real.rs, risk_manager.rs, and scanner.rs.
 
 /// Current time in milliseconds since UNIX epoch.
 pub fn now_ms() -> i64 {
@@ -93,4 +93,11 @@ pub fn liquidity_rank(exchange: &str) -> u8 {
         "xt" => 10,
         _ => 50,
     }
+}
+
+/// Build the canonical \"exchange:PAIR\" key used across all DashMaps.
+/// Eliminates 15+ `format!("{}:{}", exchange, pair)` duplications.
+#[inline]
+pub fn exchange_pair_key(exchange: &str, pair: &str) -> String {
+    format!("{}:{}", exchange, pair)
 }

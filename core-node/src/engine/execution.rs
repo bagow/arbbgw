@@ -1,4 +1,4 @@
-//! Shared execution helpers — extracted from entry_manager.rs, exit_manager.rs, and hft_cycle.rs.
+//! Shared execution helpers — extracted from entry_manager.rs and exit_manager.rs.
 //!
 //! Contains the low-level subroutines that are identical between EMA and HFT strategies:
 //! - Fill verification (fast loop, slow loop, position fallback)
@@ -50,7 +50,7 @@ pub struct VerifyResult {
 
 /// Verify that an order was filled. Tries fast loop → slow loop → position fallback.
 ///
-/// This is the exact same algorithm used by both EMA (entry_manager.rs) and HFT (hft_cycle.rs).
+/// This is the exact same algorithm used by entry_manager.rs.
 pub async fn verify_fill(
     connector: &Arc<dyn ExchangeConnector>,
     http: &Client,
@@ -208,7 +208,7 @@ pub struct CloseResult {
 
 /// Execute close orders on both legs in parallel, handle errors and compute PnL.
 ///
-/// This is the exact same algorithm used by both EMA (exit_manager.rs) and HFT (hft_cycle.rs).
+/// This is the exact same algorithm used by exit_manager.rs.
 pub async fn execute_close(
     conn_a: &Arc<dyn ExchangeConnector>,
     conn_b: &Arc<dyn ExchangeConnector>,

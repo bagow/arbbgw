@@ -74,8 +74,7 @@ pub fn generate_signals(
         let data_b = prices
             .get(&row.exchange_b)
             .and_then(|m| m.get(&row.pair).cloned());
-        let _depth_sell: f64;
-        let _depth_buy: f64;
+
 
         // Check if this spread is worth diagnosing (exceeds any active profile's min)
         let worth_diag = log_diag
@@ -84,16 +83,6 @@ pub fn generate_signals(
             });
 
         if let (Some(ref da), Some(ref db)) = (&data_a, &data_b) {
-            _depth_sell = if is_a_higher {
-                da.bid_size
-            } else {
-                db.bid_size
-            };
-            _depth_buy = if is_a_higher {
-                db.ask_size
-            } else {
-                da.ask_size
-            };
 
             let intra_a = (da.ask - da.bid) / da.bid.max(1e-12) * 100.0;
             let intra_b = (db.ask - db.bid) / db.bid.max(1e-12) * 100.0;
@@ -376,15 +365,7 @@ pub fn generate_signals(
             let target_qty_a = phys_qty;
             let target_qty_b = phys_qty;
 
-            // ABSOLUTE SANITY CHECK:
-            // In cases of WebSocket flash crashes (where entry_a flashes to 0.1 instead of 1.0)
-            // the engine could miscalculate a 10x target_phys. This block explicitly prevents it.
-            // Enforcing a strict limit above the requested trade volume using `vol_tolerance_pct`.
-            let max_vol = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
-            if actual_vol_a > max_vol || actual_vol_b > max_vol {
-                tracing::error!("[scanner] ❌ VOLUME BLOCK: Vol A ${:.2} Vol B ${:.2} exceeds Profile Vol ${:.2} by >{}%. Skipping due to market data anomaly.", actual_vol_a, actual_vol_b, profile.trade_volume, ts.vol_tolerance_pct);
-                continue;
-            }
+
 
             signals.push(TradeSignal {
                 profile_id: profile.id.clone(),
