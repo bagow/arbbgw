@@ -221,19 +221,13 @@ pub fn generate_signals(
             }
 
             let structural_deviation = row.spread - row.structural_spread;
-            let mut dev_threshold = if profile.min_structural_deviation > 0.0 {
+            let dev_threshold = if profile.min_structural_deviation > 0.0 {
                 profile.min_structural_deviation
             } else {
-                0.0 // CHANGED: 0.0 means filter disabled. Do not inherit min_entry_spread
+                0.0 // 0.0 means filter disabled
             };
 
-            // If the pairs' legs changed places within the last 24h, the spread is highly volatile.
-            // Disable structural spread filter entirely so we only mathematically enter by min_entry_spread
-            if !row.has_structural_spread {
-                dev_threshold = -1000.0;
-            }
-
-            // Only enforce deviation if explicitly set (>0.0)
+            // Enforce deviation filter if explicitly configured (> 0.0)
             if profile.min_structural_deviation > 0.0 && structural_deviation < dev_threshold {
                 if let Some(p) = &diag_prefix {
                     tracing::info!(
@@ -254,11 +248,13 @@ pub fn generate_signals(
             // estimates unnecessary and error-prone.
             let break_even_pct = 2.0 * (fee_a + fee_b) * 100.0;
 
-            // ── ABSOLUTE STRUCTURAL GUARD ──
-            // Active ONLY when structural spread is reliable (legs did NOT swap in 24h+).
-            // If has_structural_spread=false (premium crossed 0 within 24h) — this is a
-            // normal volatile pair, guard is disabled, evaluation is purely by raw spread.
-            if row.has_structural_spread {
+            // ── ABSOLUTE STRUCTURAL GUARD (ALWAYS ACTIVE) ──
+            // Blocks entry when spread - structural_spread < break_even (fees).
+            // structural_spread is the EMA baseline — what the spread will converge TO.
+            // If structural_spread ≈ 0 (no premium), this simply checks spread > BE.
+            // If structural_spread is high (persistent premium), this blocks entry
+            // because the spread will never converge enough to cover fees.
+            {
                 let profit_potential = row.spread - row.structural_spread - break_even_pct;
                 if profit_potential <= 0.0 {
                     if let Some(p) = &diag_prefix {
