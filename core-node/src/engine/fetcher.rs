@@ -79,7 +79,10 @@ pub fn start_balance_fetcher(
                 // Clear positions for disabled exchanges to prevent stale ghost positions
                 for ex in &all_exchanges {
                     if !active_exchanges.contains(ex) {
-                        e_ctx.positions.remove(*ex);
+                        let had = e_ctx.positions.remove(*ex);
+                        if had.is_some() {
+                            warn!("[fetcher] cleared positions for disabled exchange '{}' (active: {:?})", ex, active_exchanges);
+                        }
                     }
                 }
 
