@@ -79,7 +79,7 @@ pub fn spawn_exchange_maps_publisher(
     tokio::spawn(async move {
         // Wait just 5s for collectors to connect, then publish immediately
         let mut first = true;
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
             if first {
                 tokio::time::sleep(Duration::from_secs(5)).await;
