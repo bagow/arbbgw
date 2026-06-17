@@ -103,4 +103,19 @@ pub fn deduct_cached_balance(
     }
 }
 
+/// A centralized check that verifies the health of both exchanges before attempting a trade.
+/// It checks global bans and low balances. Does NOT check specific margins (done JIT in managers).
+/// Returns true if both exchanges are healthy and ready for trading.
+pub fn verify_trade_health(exa: &str, exb: &str, e_ctx: &EngineContext) -> bool {
+    if is_exchange_banned(exa) || is_exchange_banned(exb) {
+        return false;
+    }
 
+    let a_low = e_ctx.balance_low.get(exa).map(|v| *v).unwrap_or(false);
+    let b_low = e_ctx.balance_low.get(exb).map(|v| *v).unwrap_or(false);
+    if a_low || b_low {
+        return false;
+    }
+
+    true
+}

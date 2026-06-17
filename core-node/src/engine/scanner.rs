@@ -54,28 +54,14 @@ pub fn generate_signals(
             continue;
         }
 
-        // ── BALANCE LOW GUARD (zero-latency) ──
-        if e_ctx
-            .balance_low
-            .get(&row.exchange_a)
-            .map(|v| *v)
-            .unwrap_or(false)
-            || e_ctx
-                .balance_low
-                .get(&row.exchange_b)
-                .map(|v| *v)
-                .unwrap_or(false)
-        {
+        // ── HEALTH & RISK GUARD ──
+        if !crate::engine::risk_manager::verify_trade_health(&row.exchange_a, &row.exchange_b, e_ctx) {
             continue;
         }
 
-        // ── EXCHANGE BAN GUARD ──
-        // Skip if either exchange is globally banned (IP ban, rate limit detected by connector)
-        if crate::engine::risk_manager::is_exchange_banned(&row.exchange_a)
-            || crate::engine::risk_manager::is_exchange_banned(&row.exchange_b)
-        {
-            continue;
-        }
+        // ── PRE-FORMAT CACHE KEYS (Optimization) ──
+        let key_a = format!("{}:{}", row.exchange_a, row.pair);
+        let key_b = format!("{}:{}", row.exchange_b, row.pair);
 
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
         let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
@@ -132,43 +118,37 @@ pub fn generate_signals(
 
         // ── BASE MODIFIERS ──
         let map = &e_ctx.multipliers;
-        let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) {
+        let mult_a = match map.get(&key_a) {
             Some(v) => *v,
             None => {
                 if worth_diag {
                     tracing::debug!(
-                        "[scanner] REJECT {} spread={:.4}% -> no multiplier for {}:{}",
+                        "[scanner] REJECT {} spread={:.4}% -> no multiplier for {}",
                         row.pair,
                         row.spread,
-                        row.exchange_a,
-                        row.pair
+                        key_a
                     );
                 }
                 continue;
             }
         };
-        let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) {
+        let mult_b = match map.get(&key_b) {
             Some(v) => *v,
             None => {
                 if worth_diag {
                     tracing::debug!(
-                        "[scanner] REJECT {} spread={:.4}% -> no multiplier for {}:{}",
+                        "[scanner] REJECT {} spread={:.4}% -> no multiplier for {}",
                         row.pair,
                         row.spread,
-                        row.exchange_b,
-                        row.pair
+                        key_b
                     );
                 }
                 continue;
             }
         };
 
-        let has_tick_a = e_ctx
-            .tick_sizes
-            .contains_key(&format!("{}:{}", row.exchange_a, row.pair));
-        let has_tick_b = e_ctx
-            .tick_sizes
-            .contains_key(&format!("{}:{}", row.exchange_b, row.pair));
+        let has_tick_a = e_ctx.tick_sizes.contains_key(&key_a);
+        let has_tick_b = e_ctx.tick_sizes.contains_key(&key_b);
         if !has_tick_a || !has_tick_b {
             if worth_diag {
                 tracing::debug!(
@@ -182,16 +162,8 @@ pub fn generate_signals(
             continue;
         }
 
-        let tick_a = e_ctx
-            .tick_sizes
-            .get(&format!("{}:{}", row.exchange_a, row.pair))
-            .map(|v| *v)
-            .unwrap_or(0.000001);
-        let tick_b = e_ctx
-            .tick_sizes
-            .get(&format!("{}:{}", row.exchange_b, row.pair))
-            .map(|v| *v)
-            .unwrap_or(0.000001);
+        let tick_a = e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001);
+        let tick_b = e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001);
 
         let min_age_secs = ts.min_listing_age_days * 24 * 3600;
         let final_oldest_elapsed = crate::engine::scanner_common::check_listing_age(

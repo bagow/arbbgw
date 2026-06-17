@@ -132,9 +132,12 @@ pub async fn run_hft_cycle(
             let exa = trade.exchange_a.clone();
             let exb = trade.exchange_b.clone();
             let pair = trade.pair.clone();
+            
+            let key_a = format!("{}:{}", exa, pair);
+            let key_b = format!("{}:{}", exb, pair);
 
-            let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
-            let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
+            let mult_a = e_ctx.multipliers.get(&key_a).map(|v| *v).unwrap_or(1.0);
+            let mult_b = e_ctx.multipliers.get(&key_b).map(|v| *v).unwrap_or(1.0);
 
             let reason = if reason_str.is_empty() {
                 trade.close_reason.as_deref().unwrap_or("HFT_RETRY")
@@ -162,8 +165,8 @@ pub async fn run_hft_cycle(
             let api_timeout_ms = ts.api_timeout_ms;
             let fund_cost = trade.funding_cost;
             let use_ioc = true; // HFT always IOC
-            let tick_a = e_ctx.tick_sizes.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(0.000001);
-            let tick_b = e_ctx.tick_sizes.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(0.000001);
+            let tick_a = e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001);
+            let tick_b = e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001);
             let q_a = trade.contracts_a as f64 * mult_a;
             let q_b = trade.contracts_b as f64 * mult_b;
             let closing_guard = Arc::clone(&e_ctx.closing_in_flight);
@@ -249,10 +252,8 @@ pub async fn run_hft_cycle(
         let pair = sig.pair.clone();
         let now = now_ms();
 
-        // Exchange ban check (prevents asymmetric failures on banned exchanges)
-        if crate::engine::risk_manager::is_exchange_banned(&exa)
-            || crate::engine::risk_manager::is_exchange_banned(&exb)
-        {
+        // Exchange ban check & balance guard
+        if !crate::engine::risk_manager::verify_trade_health(&exa, &exb, &e_ctx) {
             continue;
         }
 

@@ -315,3 +315,43 @@ pub async fn execute_close(
         pnl_b,
     }
 }
+
+// ─── VWAP L2 VERIFICATION ────────────────────────────────────────────────────
+
+/// Simulates executing a market order against the L2 orderbook to find the VWAP
+/// (Volume Weighted Average Price) of the fill.
+/// Returns Some(vwap_price) if the orderbook has enough depth to fill `required_coins`.
+/// Returns None if the orderbook is too thin.
+pub fn verify_l2_vwap(
+    book_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>,
+    is_buy: bool,
+    required_coins: f64,
+    multiplier: f64,
+) -> Option<f64> {
+    if let Ok((bids, asks)) = book_res {
+        let levels = if is_buy { asks } else { bids };
+        let mut cum_vol = 0.0;
+        let mut cum_cost = 0.0;
+        
+        for (px, sz) in levels {
+            // Some connectors might need multiplier adjustment here, depending on how they store L2 cache.
+            // In the current codebase, we pass multiplier to handle cases where sizes aren't in coins.
+            let base_sz = if multiplier > 0.0 && multiplier != 1.0 { sz * multiplier } else { sz };
+            let remaining = required_coins - cum_vol;
+            if remaining <= 0.0 { break; }
+            
+            let take = if base_sz > remaining { remaining } else { base_sz };
+            cum_vol += take;
+            cum_cost += take * px;
+        }
+        
+        // We tolerate a tiny floating point gap (1%) for full fill check
+        if cum_vol >= required_coins * 0.99 { 
+            Some(cum_cost / cum_vol)
+        } else {
+            None 
+        }
+    } else {
+        None
+    }
+}

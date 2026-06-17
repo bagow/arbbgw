@@ -55,6 +55,9 @@ pub async fn process_closes(
             continue;
         }
 
+        let key_a = format!("{}:{}", trade.exchange_a, trade.pair);
+        let key_b = format!("{}:{}", trade.exchange_b, trade.pair);
+
         let data_a = prices
             .get(&trade.exchange_a)
             .and_then(|m| m.get(&trade.pair).cloned());
@@ -111,8 +114,8 @@ pub async fn process_closes(
         // BUG-2 FIX: Use actual physical coins per leg (contracts × multiplier)
         // instead of approximating via volume/price_a which diverges when
         // signal price ≠ fill price or after asymmetric trimming.
-        let mult_a_live = e_ctx.multipliers.get(&format!("{}:{}", trade.exchange_a, trade.pair)).map(|v| *v).unwrap_or(1.0);
-        let mult_b_live = e_ctx.multipliers.get(&format!("{}:{}", trade.exchange_b, trade.pair)).map(|v| *v).unwrap_or(1.0);
+        let mult_a_live = e_ctx.multipliers.get(&key_a).map(|v| *v).unwrap_or(1.0);
+        let mult_b_live = e_ctx.multipliers.get(&key_b).map(|v| *v).unwrap_or(1.0);
         let coins_a = trade.contracts_a * mult_a_live;
         let coins_b = trade.contracts_b * mult_b_live;
 
@@ -165,8 +168,8 @@ pub async fn process_closes(
             let pair = trade.pair.clone();
             let vol = trade.volume;
 
-            let mult_a = e_ctx.multipliers.get(&format!("{}:{}", exa, pair)).map(|v| *v).unwrap_or(1.0);
-            let mult_b = e_ctx.multipliers.get(&format!("{}:{}", exb, pair)).map(|v| *v).unwrap_or(1.0);
+            let mult_a = e_ctx.multipliers.get(&key_a).map(|v| *v).unwrap_or(1.0);
+            let mult_b = e_ctx.multipliers.get(&key_b).map(|v| *v).unwrap_or(1.0);
 
             // 🛡️ JIT L2 VERIFICATION FOR EXITS (TP / ZERO_SPREAD) ───────────────────
             // Force close after 5 minutes of MIRAGE to avoid holding positions forever
@@ -183,10 +186,8 @@ pub async fn process_closes(
                 }
 
                 // L2 WS cache only — zero REST calls
-                let l2_key_a = format!("{}:{}", exa, pair);
-                let l2_key_b = format!("{}:{}", exb, pair);
-                let cached_a = e_ctx.l2_books.get(&l2_key_a).map(|v| v.clone());
-                let cached_b = e_ctx.l2_books.get(&l2_key_b).map(|v| v.clone());
+                let cached_a = e_ctx.l2_books.get(&key_a).map(|v| v.clone());
+                let cached_b = e_ctx.l2_books.get(&key_b).map(|v| v.clone());
                 let now_l2 = now_ms();
 
                 let (ob_a_res, ob_b_res) = match (&cached_a, &cached_b) {
@@ -200,37 +201,11 @@ pub async fn process_closes(
                     }
                 };
 
-                let analyze_vwap = |ob_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>, is_buy: bool, required_vol: f64, m: f64| -> Option<f64> {
-                    if let Ok((bids, asks)) = ob_res {
-                        let levels = if is_buy { asks } else { bids };
-                        let mut cum_vol = 0.0;
-                        let mut cum_cost = 0.0;
-                        
-                        for (px, sz) in levels {
-                            let base_sz = if m > 0.0 && m != 1.0 { sz * m } else { sz };
-                            let remaining = required_vol - cum_vol;
-                            if remaining <= 0.0 { break; }
-                            
-                            let take = if base_sz > remaining { remaining } else { base_sz };
-                            cum_vol += take;
-                            cum_cost += take * px;
-                        }
-                        // We tolerate tiny floating point gap for full fill check
-                        if cum_vol >= required_vol * 0.99 { 
-                            Some(cum_cost / cum_vol)
-                        } else {
-                            None 
-                        }
-                    } else {
-                        None
-                    }
-                };
-
                 // Exit A requires us to do the OPPOSITE of entry. 
                 // If Entry A was Short (is_a_higher = true), we must BUY.
-                let vwap_a = analyze_vwap(ob_a_res, is_a_higher, coins_a, mult_a);
+                let vwap_a = crate::engine::execution::verify_l2_vwap(ob_a_res, is_a_higher, coins_a, mult_a);
                 // If Entry B was Long (is_a_higher = true), we must SELL (is_buy = false).
-                let vwap_b = analyze_vwap(ob_b_res, !is_a_higher, coins_b, mult_b);
+                let vwap_b = crate::engine::execution::verify_l2_vwap(ob_b_res, !is_a_higher, coins_b, mult_b);
 
                 if let (Some(px_a), Some(px_b)) = (vwap_a, vwap_b) {
                     let vwap_exec_pnl_a = if is_a_higher {
@@ -310,26 +285,10 @@ pub async fn process_closes(
             let api_timeout_ms = ts.api_timeout_ms;
 
             let use_ioc = ts.entry_order_type == "ioc" && !manual_close;
-            let tick_a = e_ctx
-                .tick_sizes
-                .get(&format!("{}:{}", exa, pair))
-                .map(|v| *v)
-                .unwrap_or(0.000001);
-            let tick_b = e_ctx
-                .tick_sizes
-                .get(&format!("{}:{}", exb, pair))
-                .map(|v| *v)
-                .unwrap_or(0.000001);
-            let mult_a = e_ctx
-                .multipliers
-                .get(&format!("{}:{}", exa, pair))
-                .map(|v| *v)
-                .unwrap_or(1.0);
-            let mult_b = e_ctx
-                .multipliers
-                .get(&format!("{}:{}", exb, pair))
-                .map(|v| *v)
-                .unwrap_or(1.0);
+            let tick_a = e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001);
+            let tick_b = e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001);
+            let mult_a = e_ctx.multipliers.get(&key_a).map(|v| *v).unwrap_or(1.0);
+            let mult_b = e_ctx.multipliers.get(&key_b).map(|v| *v).unwrap_or(1.0);
 
             let q_a = c_a as f64 * mult_a;
             let q_b = c_b as f64 * mult_b;
@@ -458,10 +417,8 @@ pub async fn process_closes(
             });
         } else {
             // Fetch real funding rates from local cache to avoid blocking event loop
-            let key_a = format!("{}:{}", trade.exchange_a, trade.pair);
             let (fr_a, next_a) = e_ctx.funding_rates.get(&key_a).map(|f| (f.rate, f.next_ts)).unwrap_or((0.0, 0_i64));
             
-            let key_b = format!("{}:{}", trade.exchange_b, trade.pair);
             let (fr_b, next_b) = e_ctx.funding_rates.get(&key_b).map(|f| (f.rate, f.next_ts)).unwrap_or((0.0, 0_i64));
             let fund_next = next_a.min(next_b); // nearest funding event
 

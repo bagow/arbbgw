@@ -104,33 +104,17 @@ pub fn generate_hft_signals(
             continue;
         }
 
-        // ── EXCHANGE BAN GUARD ──
-        // (was missing in HFT scanner — bug found during audit)
-        if crate::engine::risk_manager::is_exchange_banned(&row.exchange_a)
-            || crate::engine::risk_manager::is_exchange_banned(&row.exchange_b)
-        {
-            continue;
-        }
-
         // Only 1 signal per pair per cycle
         if emitted_pairs.contains(&row.pair) {
             continue;
         }
 
-        // Balance guard
-        if e_ctx
-            .balance_low
-            .get(&row.exchange_a)
-            .map(|v| *v)
-            .unwrap_or(false)
-            || e_ctx
-                .balance_low
-                .get(&row.exchange_b)
-                .map(|v| *v)
-                .unwrap_or(false)
-        {
+        if !crate::engine::risk_manager::verify_trade_health(&row.exchange_a, &row.exchange_b, e_ctx) {
             continue;
         }
+
+        let key_a = format!("{}:{}", row.exchange_a, row.pair);
+        let key_b = format!("{}:{}", row.exchange_b, row.pair);
 
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
         let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
@@ -156,35 +140,23 @@ pub fn generate_hft_signals(
 
         // Multipliers
         let map = &e_ctx.multipliers;
-        let mult_a = match map.get(&format!("{}:{}", row.exchange_a, row.pair)) {
+        let mult_a = match map.get(&key_a) {
             Some(v) => *v,
             None => continue,
         };
-        let mult_b = match map.get(&format!("{}:{}", row.exchange_b, row.pair)) {
+        let mult_b = match map.get(&key_b) {
             Some(v) => *v,
             None => continue,
         };
 
         // Tick sizes
-        let has_tick_a = e_ctx
-            .tick_sizes
-            .contains_key(&format!("{}:{}", row.exchange_a, row.pair));
-        let has_tick_b = e_ctx
-            .tick_sizes
-            .contains_key(&format!("{}:{}", row.exchange_b, row.pair));
+        let has_tick_a = e_ctx.tick_sizes.contains_key(&key_a);
+        let has_tick_b = e_ctx.tick_sizes.contains_key(&key_b);
         if !has_tick_a || !has_tick_b {
             continue;
         }
-        let tick_a = e_ctx
-            .tick_sizes
-            .get(&format!("{}:{}", row.exchange_a, row.pair))
-            .map(|v| *v)
-            .unwrap_or(0.000001);
-        let tick_b = e_ctx
-            .tick_sizes
-            .get(&format!("{}:{}", row.exchange_b, row.pair))
-            .map(|v| *v)
-            .unwrap_or(0.000001);
+        let tick_a = e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001);
+        let tick_b = e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001);
 
         // Listing age check
         let min_age_secs = ts.min_listing_age_days * 24 * 3600;
@@ -240,8 +212,7 @@ pub fn generate_hft_signals(
         update_exchange_price_snapshot(e_ctx, &row.exchange_b, &row.pair, price_b_now, now);
 
         // Compute velocity for each exchange independently
-        let key_a = format!("{}:{}", row.exchange_a, row.pair);
-        let key_b = format!("{}:{}", row.exchange_b, row.pair);
+        // We can reuse key_a and key_b defined above.
 
         let vel_a_pct = e_ctx.price_history.get(&key_a).and_then(|r| {
             let (old_p, old_ts) = *r;

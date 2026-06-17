@@ -137,10 +137,8 @@ pub async fn process_entries(
 
         let now = now_ms();
 
-        // ── EXCHANGE BAN GUARD ──
-        if is_exchange_banned(&exa)
-            || is_exchange_banned(&exb)
-        {
+        // ── EXCHANGE BAN & HEALTH GUARD ──
+        if !crate::engine::risk_manager::verify_trade_health(&exa, &exb, e_ctx) {
             continue;
         }
 
@@ -195,28 +193,16 @@ pub async fn process_entries(
             .min(0.5);
         // NOTE: FIRE log moved to after L2/depth checks to avoid false-positive log entries
 
-        // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
-        let mult_a = e_ctx
-            .multipliers
-            .get(&format!("{}:{}", exa, pair))
-            .map(|v| *v)
-            .unwrap_or(1.0);
-        let mult_b = e_ctx
-            .multipliers
-            .get(&format!("{}:{}", exb, pair))
-            .map(|v| *v)
-            .unwrap_or(1.0);
+        // ── PRE-FORMAT CACHE KEYS ──
+        let key_a = format!("{}:{}", exa, pair);
+        let key_b = format!("{}:{}", exb, pair);
 
-        let tick_a = e_ctx
-            .tick_sizes
-            .get(&format!("{}:{}", exa, pair))
-            .map(|v| *v)
-            .unwrap_or(0.000001);
-        let tick_b = e_ctx
-            .tick_sizes
-            .get(&format!("{}:{}", exb, pair))
-            .map(|v| *v)
-            .unwrap_or(0.000001);
+        // ── BOTH LEGS SIMULTANEOUSLY ─────────────────────────────────────────
+        let mult_a = e_ctx.multipliers.get(&key_a).map(|v| *v).unwrap_or(1.0);
+        let mult_b = e_ctx.multipliers.get(&key_b).map(|v| *v).unwrap_or(1.0);
+
+        let tick_a = e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001);
+        let tick_b = e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001);
 
         // ── L1 PRE-FILTER (skip REST fetch if WS L1 already shows insufficient depth) ──
         {
@@ -239,10 +225,8 @@ pub async fn process_entries(
         }
 
         // ── L2 ORDERBOOK VERIFICATION (WS cache only, zero REST) ─────────────
-        let l2_key_a = format!("{}:{}", exa, pair);
-        let l2_key_b = format!("{}:{}", exb, pair);
-        let cached_a = e_ctx.l2_books.get(&l2_key_a).map(|v| v.clone());
-        let cached_b = e_ctx.l2_books.get(&l2_key_b).map(|v| v.clone());
+        let cached_a = e_ctx.l2_books.get(&key_a).map(|v| v.clone());
+        let cached_b = e_ctx.l2_books.get(&key_b).map(|v| v.clone());
         let now_cache = now_ms();
 
         // L2 cache must exist AND be fresh (< 5s). No REST fallback.
@@ -315,28 +299,13 @@ pub async fn process_entries(
         {
             // NOTE: L2 books already store sizes in coins (collectors apply
             // multiplier at parse time for Gate/KuCoin). Do NOT re-apply mult here.
-            let compute_vwap = |book: &crate::state::L2Snapshot, is_buy: bool, required_coins: f64| -> Option<f64> {
-                let levels = if is_buy { &book.asks } else { &book.bids };
-                let mut cum_vol = 0.0;
-                let mut cum_cost = 0.0;
-                for &(px, sz) in levels {
-                    let remaining = required_coins - cum_vol;
-                    if remaining <= 0.0 { break; }
-                    let take = if sz > remaining { remaining } else { sz };
-                    cum_vol += take;
-                    cum_cost += take * px;
-                }
-                if cum_vol >= required_coins * 0.99 {
-                    Some(cum_cost / cum_vol)
-                } else {
-                    None
-                }
-            };
-
             if let (Some(ref ca), Some(ref cb)) = (&cached_a, &cached_b) {
                 // Entry: A = short (sell) if is_a_higher, B = long (buy) if is_a_higher
-                let vwap_a = compute_vwap(ca, !is_a_higher, qty_a);
-                let vwap_b = compute_vwap(cb, is_a_higher, qty_b);
+                let ob_a_res = Ok((ca.bids.clone(), ca.asks.clone()));
+                let ob_b_res = Ok((cb.bids.clone(), cb.asks.clone()));
+                
+                let vwap_a = crate::engine::execution::verify_l2_vwap(ob_a_res, !is_a_higher, qty_a, 1.0);
+                let vwap_b = crate::engine::execution::verify_l2_vwap(ob_b_res, is_a_higher, qty_b, 1.0);
 
                 if let (Some(pa), Some(pb)) = (vwap_a, vwap_b) {
                     let vwap_spread = if is_a_higher {
@@ -634,11 +603,7 @@ pub async fn process_entries(
                     pair, phys_to_dump
                 );
 
-                let tick_for_close = e_ctx
-                    .tick_sizes
-                    .get(&format!("{}:{}", exa, pair))
-                    .map(|v| *v)
-                    .unwrap_or(0.000001);
+                let tick_for_close = e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001);
                 match crate::engine::exchanges::get_connector(&exa)
                     .unwrap()
                     .trim_position(
@@ -683,11 +648,7 @@ pub async fn process_entries(
                     pair, phys_to_dump
                 );
 
-                let tick_for_close = e_ctx
-                    .tick_sizes
-                    .get(&format!("{}:{}", exb, pair))
-                    .map(|v| *v)
-                    .unwrap_or(0.000001);
+                let tick_for_close = e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001);
                 match crate::engine::exchanges::get_connector(&exb)
                     .unwrap()
                     .trim_position(
