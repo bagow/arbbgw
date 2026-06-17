@@ -314,10 +314,12 @@ impl ExchangeConnector for BybitConnector {
         );
         let mut fb_price_str = "0".to_string();
         if target_price > 0.0 {
+            // Use the same slippage_percent as the first attempt — do NOT widen to 2%.
+            // Wider tolerance == higher slippage cost == guaranteed loss on small-spread trades.
             let p = if is_buy {
-                target_price * 1.02
+                target_price * (1.0 + slippage_percent / 100.0)
             } else {
-                target_price * 0.98
+                target_price * (1.0 - slippage_percent / 100.0)
             };
             let rp = if is_buy {
                 (p / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)

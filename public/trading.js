@@ -768,6 +768,10 @@ function renderSettingsForm(profile) {
                     <label>L1 Depth (% of vol)</label>
                     <input type="number" id="sf-depth-${p.id}" step="1" title="Minimum L1 volume required as % of Trade Volume" value="${p.min_depth_percent??100}" />
                 </div>
+                <div class="form-group">
+                    <label>Slippage IOC (%)</label>
+                    <input type="number" id="sf-slip-${p.id}" step="0.01" min="0.01" max="5" title="Max price tolerance for IOC limit orders (entry & close). Also used as fallback close tolerance. Set = (spread/4) to avoid killing your own PnL." value="${p.slippage_percent??0.5}" />
+                </div>
                 <div class="form-actions" style="grid-column:1/-1;display:flex;gap:16px;margin-top:24px;border-top:1px solid var(--border-dim);padding-top:24px;align-items:center;">
                     <button type="button" id="sf-power-${p.id}"
                         onclick="toggleBotPower('${p.id}')"
@@ -1729,6 +1733,7 @@ window.saveSettings = async function (profileId) {
         leverage:              parseInt(g(`sf-leverage-${profileId}`)) || 10,
         min_volume_millions:   parseFloat(g(`sf-minvol-${profileId}`)),
         min_depth_percent:     parseFloat(g(`sf-depth-${profileId}`)),
+        slippage_percent:      parseFloat(g(`sf-slip-${profileId}`)) || 0.5,
     };
     const btn = document.getElementById(`sf-save-${profileId}`);
     try {

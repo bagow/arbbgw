@@ -315,7 +315,8 @@ impl ExchangeConnector for KucoinConnector {
         );
         let mut fb_price_str = "".to_string();
         if final_price > 0.0 {
-            let p = if is_buy { final_price * 1.02 } else { final_price * 0.98 };
+            // Use the same slippage_percent as the first attempt — do NOT widen to 2%.
+            let p = if is_buy { final_price * (1.0 + slippage_percent / 100.0) } else { final_price * (1.0 - slippage_percent / 100.0) };
             let rp = if is_buy {
                 (p / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
             } else {

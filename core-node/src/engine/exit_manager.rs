@@ -172,11 +172,15 @@ pub async fn process_closes(
                     let still_zero = reason_str == "ZERO_SPREAD" && vwap_exit_spread <= 0.0 && vwap_net_pnl >= 0.0;
 
                     if !still_tp && !still_zero {
-                        tracing::warn!("[real] ⚠️ VWAP MIRAGE ({}): L1 spread={:.2}%, VWAP spread={:.2}%. Closing anyway to prevent getting stuck.", 
+                        // 🛡️ MIRAGE detected: L1 says close, but VWAP says spread hasn't converged.
+                        // Set cooldown so we don't spam logs, then SKIP this close attempt.
+                        // We will re-check next poll cycle (in ~1s).
+                        e_ctx.mirage_cooldown.insert(trade.id, now_cd);
+                        tracing::warn!("[real] 🪄 MIRAGE ({}): L1 spread={:.2}%, VWAP spread={:.2}% — skipping close this cycle (cooldown 10s)", 
                             reason_str, live_state.exit_spread, vwap_exit_spread);
-                        exit_price_a = px_a;
-                        exit_price_b = px_b;
+                        continue;
                     } else {
+                        // ✅ VWAP confirmed: spread is truly zero, proceed to close
                         tracing::info!("[real] ✅ VWAP Confirmed: VWAP spread={:.2}%, VWAP PnL={:.2}%", vwap_exit_spread, vwap_net_pct);
                         exit_price_a = px_a;
                         exit_price_b = px_b;

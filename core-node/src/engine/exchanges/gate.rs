@@ -250,7 +250,8 @@ impl ExchangeConnector for GateConnector {
         tracing::error!("[gate] fallback close for {} (qty {})", pair, phys_amount);
         let mut fb_price_str = "0".to_string();
         if target_price > 0.0 {
-            let p = if is_buy { target_price * 1.02 } else { target_price * 0.98 };
+            // Use the same slippage_percent as the first attempt — do NOT widen to 2%.
+            let p = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
             let rp = if is_buy { (p / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8) } else { (p / tick_size.max(1e-8)).floor() * tick_size.max(1e-8) };
             fb_price_str = format!("{:.8}", rp).trim_end_matches('0').to_string();
             if fb_price_str.ends_with('.') { fb_price_str.pop(); }
