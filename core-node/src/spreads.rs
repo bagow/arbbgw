@@ -274,10 +274,12 @@ pub fn compute_spreads(
                     (max_21, min_21, cross_21)
                 };
 
-                // structural_spread = EMA of the executable spread in the trade direction.
-                // This IS the level the spread converges to — directly measured, always correct.
-                // For HUSDT with persistent 3% premium: structural ≈ 3% → guard blocks marginal entries.
-                let structural_spread = if is_dir_1_over_2 { ema_12 } else { ema_21 };
+                // structural_spread = the persistent price gap between exchanges.
+                // Non-directional: always max(ema_12, ema_21) = the real baseline gap.
+                // If HUSDT has 2.5% persistent premium (bingx > bitget):
+                //   ema_12 = +2.5%, ema_21 = -3.5% → structural = 2.5%
+                // For pairs with no premium: both EMA ≈ -0.1% → structural = 0 (after clamp)
+                let structural_spread = ema_12.max(ema_21);
 
                 let has_structural_spread = (now_f64 - last_cross) > 86000.0;
 
