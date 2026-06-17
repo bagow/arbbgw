@@ -567,6 +567,17 @@ pub async fn execute_sequential_entry(
             if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
                 crate::engine::risk_manager::mark_balance_low(second_label, e_ctx);
             }
+            // Hard cooldown on exchange (5 min) — prevents repeated one-legged failures.
+            // balance_low gets cleared by fetcher after 5s if balance is fine,
+            // but exchange_cooldown is time-based and can't be reset early.
+            let cooldown_ms = 300_000_i64; // 5 minutes
+            e_ctx.exchange_cooldown.insert(second_label.to_string(), now + cooldown_ms);
+            tracing::error!(
+                "[real] 🚫 {} exchange cooldown {}s after LEG_SECOND reject ({})",
+                second_label, cooldown_ms / 1000, ctx.pair
+            );
+            // Also cooldown this specific pair
+            e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + cooldown_ms);
             (None, 0.0, 0.0)
         }
     };
