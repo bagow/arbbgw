@@ -596,7 +596,7 @@ impl ExchangeConnector for KucoinConnector {
                     );
                     fills_found = true;
                 }
-            }
+            };
         }
 
         if !fills_found || fills_price <= 0.0 {
