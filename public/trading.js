@@ -1443,6 +1443,7 @@ function renderHistoryTable(profileId, history) {
                             <div class="td-line"><span style="color:var(--text-sub)">Closed:</span> <strong style="font-size:.75rem">${time}</strong></div>
                         </div>
                         <div class="td-col td-total">
+                            <div class="td-line"><span>Gross PnL:</span> <strong style="color:${((t.pnl_a??0)+(t.pnl_b??0))>=0?'var(--green)':'var(--red)'}">${fmtPnL((t.pnl_a??0)+(t.pnl_b??0))}</strong></div>
                             <div class="td-line"><span>Comm. Paid:</span> <strong style="color:var(--red)">${fmtCost(t.commission_cost)}</strong></div>
                             <div class="td-line"><span>Entry Slip:</span> <strong style="color:var(--red)">${fmtCost(t.slippage_cost)}</strong></div>
                             <div class="td-line"><span>Exit Slip:</span> <strong style="color:var(--red)">${fmtCost(t.exit_slippage_cost??0)}</strong></div>
