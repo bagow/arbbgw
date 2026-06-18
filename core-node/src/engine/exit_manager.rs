@@ -117,9 +117,10 @@ pub async fn process_closes(
             let mult_b = e_ctx.multipliers.get(&key_b).map(|v| *v).unwrap_or(1.0);
 
             // 🛡️ JIT L2 VERIFICATION FOR EXITS (TP / ZERO_SPREAD) ───────────────────
-            // ALWAYS verify via VWAP before closing. Never bypass this check.
-            // Previous bug: trade_age > 5min bypassed VWAP entirely, causing L1 flash
-            // closes at terrible fill prices (EVERY losing trade was a force-close).
+            // Strategy:
+            //   1. If L2 WS data available → VWAP verification (best accuracy)
+            //   2. If L2 WS data NOT available → require 3 consecutive L1 zero-spread
+            //      confirmations (~30s) before allowing close. Prevents L1 tick flashes.
 
             if !closing_retry && !manual_close && !triggered_stop && (reason_str == "TP" || reason_str == "ZERO_SPREAD") {
                 // MIRAGE cooldown: skip this check if we already logged MIRAGE for this trade recently (10s)
@@ -129,75 +130,103 @@ pub async fn process_closes(
                     // Still in MIRAGE cooldown — skip silently (no log spam)
                     continue;
                 }
-
                 // L2 WS cache only — zero REST calls
                 let cached_a = e_ctx.l2_books.get(&key_a).map(|v| v.clone());
                 let cached_b = e_ctx.l2_books.get(&key_b).map(|v| v.clone());
                 let now_l2 = now_ms();
 
-                let (ob_a_res, ob_b_res) = match (&cached_a, &cached_b) {
-                    (Some(a), Some(b)) if (now_l2 - a.updated_ms) < 2_000 && (now_l2 - b.updated_ms) < 2_000 => {
-                        (Ok((a.bids.clone(), a.asks.clone())), Ok((b.bids.clone(), b.asks.clone())))
-                    },
-                    _ => {
-                        // No fresh L2 WS data — CANNOT verify, block the close.
-                        // Without L2, we can't distinguish real spread convergence from L1 noise.
-                        e_ctx.mirage_cooldown.insert(trade.id, now_cd);
-                        tracing::warn!("[real] 🪄 MIRAGE ({}): No L2 WS data for {}/{} — blocking close (L1 may be noise)", reason_str, exa, exb);
-                        continue;
-                    }
+                let has_l2 = match (&cached_a, &cached_b) {
+                    (Some(a), Some(b)) if (now_l2 - a.updated_ms) < 2_000 && (now_l2 - b.updated_ms) < 2_000 => true,
+                    _ => false,
                 };
 
-                // Exit A requires us to do the OPPOSITE of entry. 
-                // If Entry A was Short (is_a_higher = true), we must BUY.
-                let vwap_a = crate::engine::execution::verify_l2_vwap(ob_a_res, is_a_higher, coins_a, mult_a);
-                // If Entry B was Long (is_a_higher = true), we must SELL (is_buy = false).
-                let vwap_b = crate::engine::execution::verify_l2_vwap(ob_b_res, !is_a_higher, coins_b, mult_b);
+                if has_l2 {
+                    // ═══ PATH A: L2 available → VWAP verification ═══
+                    let ca = cached_a.unwrap();
+                    let cb = cached_b.unwrap();
+                    let ob_a_res = Ok((ca.bids.clone(), ca.asks.clone()));
+                    let ob_b_res = Ok((cb.bids.clone(), cb.asks.clone()));
 
-                if let (Some(px_a), Some(px_b)) = (vwap_a, vwap_b) {
-                    let vwap_exec_pnl_a = if is_a_higher {
-                        (trade.entry_price_a - px_a) * coins_a
-                    } else {
-                        (px_a - trade.entry_price_a) * coins_a
-                    };
-                    let vwap_exec_pnl_b = if is_a_higher {
-                        (px_b - trade.entry_price_b) * coins_b
-                    } else {
-                        (trade.entry_price_b - px_b) * coins_b
-                    };
-                    let vwap_gross_pnl = vwap_exec_pnl_a + vwap_exec_pnl_b;
-                    let vwap_net_pnl =
-                        vwap_gross_pnl - trade.commission_cost - trade.slippage_cost - trade.funding_cost;
-                    let vwap_net_pct = vwap_net_pnl / vol * 100.0;
+                    let vwap_a = crate::engine::execution::verify_l2_vwap(ob_a_res, is_a_higher, coins_a, mult_a);
+                    let vwap_b = crate::engine::execution::verify_l2_vwap(ob_b_res, !is_a_higher, coins_b, mult_b);
 
-                    let vwap_exit_spread = if is_a_higher {
-                        (px_a - px_b) / px_b.max(1e-12) * 100.0
-                    } else {
-                        (px_b - px_a) / px_a.max(1e-12) * 100.0
-                    };
+                    if let (Some(px_a), Some(px_b)) = (vwap_a, vwap_b) {
+                        let vwap_exec_pnl_a = if is_a_higher {
+                            (trade.entry_price_a - px_a) * coins_a
+                        } else {
+                            (px_a - trade.entry_price_a) * coins_a
+                        };
+                        let vwap_exec_pnl_b = if is_a_higher {
+                            (px_b - trade.entry_price_b) * coins_b
+                        } else {
+                            (trade.entry_price_b - px_b) * coins_b
+                        };
+                        let vwap_gross_pnl = vwap_exec_pnl_a + vwap_exec_pnl_b;
+                        let vwap_net_pnl =
+                            vwap_gross_pnl - trade.commission_cost - trade.slippage_cost - trade.funding_cost;
+                        let vwap_net_pct = vwap_net_pnl / vol * 100.0;
 
-                    let still_tp = reason_str == "TP" && vwap_net_pct >= settings.take_profit_percent;
-                    let still_zero = reason_str == "ZERO_SPREAD" && vwap_exit_spread <= 0.0 && vwap_net_pnl >= 0.0;
+                        let vwap_exit_spread = if is_a_higher {
+                            (px_a - px_b) / px_b.max(1e-12) * 100.0
+                        } else {
+                            (px_b - px_a) / px_a.max(1e-12) * 100.0
+                        };
 
-                    if !still_tp && !still_zero {
-                        // 🛡️ MIRAGE detected: L1 says close, but VWAP says spread hasn't converged.
-                        // Set cooldown so we don't spam logs, then SKIP this close attempt.
-                        // We will re-check next poll cycle (in ~1s).
-                        e_ctx.mirage_cooldown.insert(trade.id, now_cd);
-                        tracing::warn!("[real] 🪄 MIRAGE ({}): L1 spread={:.2}%, VWAP spread={:.2}% — skipping close this cycle (cooldown 10s)", 
-                            reason_str, live_state.exit_spread, vwap_exit_spread);
-                        continue;
+                        let still_tp = reason_str == "TP" && vwap_net_pct >= settings.take_profit_percent;
+                        let still_zero = reason_str == "ZERO_SPREAD" && vwap_exit_spread <= 0.0 && vwap_net_pnl >= 0.0;
+
+                        if !still_tp && !still_zero {
+                            e_ctx.mirage_cooldown.insert(trade.id, now_cd);
+                            e_ctx.zero_spread_confirms.remove(&trade.id); // reset L1 counter on VWAP fail
+                            tracing::warn!("[real] 🪄 MIRAGE ({}): L1 spread={:.2}%, VWAP spread={:.2}% — skipping close this cycle (cooldown 10s)", 
+                                reason_str, live_state.exit_spread, vwap_exit_spread);
+                            continue;
+                        } else {
+                            tracing::info!("[real] ✅ VWAP Confirmed: VWAP spread={:.2}%, VWAP PnL={:.2}%", vwap_exit_spread, vwap_net_pct);
+                            exit_price_a = px_a;
+                            exit_price_b = px_b;
+                            e_ctx.zero_spread_confirms.remove(&trade.id);
+                        }
                     } else {
-                        // ✅ VWAP confirmed: spread is truly zero, proceed to close
-                        tracing::info!("[real] ✅ VWAP Confirmed: VWAP spread={:.2}%, VWAP PnL={:.2}%", vwap_exit_spread, vwap_net_pct);
-                        exit_price_a = px_a;
-                        exit_price_b = px_b;
+                        // L2 exists but not enough depth for VWAP — fall through to L1 multi-check
+                        tracing::debug!("[real] L2 depth insufficient for VWAP on {}/{}, using L1 multi-check", exa, exb);
+                        // fall through to PATH B below
+                        let (prev_count, prev_ts) = e_ctx.zero_spread_confirms.get(&trade.id).map(|v| *v).unwrap_or((0, 0));
+                        let gap_ok = (now_cd - prev_ts) < 15_000; // checks must be within 15s of each other
+                        let new_count = if gap_ok { prev_count + 1 } else { 1 };
+                        e_ctx.zero_spread_confirms.insert(trade.id, (new_count, now_cd));
+                        let required = 3u32;
+                        if new_count < required || exec_net_pnl <= 0.0 {
+                            e_ctx.mirage_cooldown.insert(trade.id, now_cd);
+                            tracing::info!("[real] 📊 L1 confirm {}/{} for {} (no L2 depth) net_pnl={:.4} — waiting for {} consecutive checks", 
+                                new_count, required, pair, exec_net_pnl, required);
+                            continue;
+                        }
+                        tracing::info!("[real] ✅ L1 Multi-Check CONFIRMED: {}/{} checks, net_pnl={:.4}% — proceeding to close {}", 
+                            new_count, required, exec_net_pnl / vol * 100.0, pair);
+                        e_ctx.zero_spread_confirms.remove(&trade.id);
                     }
                 } else {
-                    // L2 exists but not enough depth for VWAP — treat as MIRAGE
-                    e_ctx.mirage_cooldown.insert(trade.id, now_cd);
-                    tracing::warn!("[real] 🪄 MIRAGE ({}): Insufficient L2 depth for {:.4}/{:.4} coins on {}/{} — blocking close", reason_str, coins_a, coins_b, exa, exb);
-                    continue;
+                    // ═══ PATH B: No L2 data → L1 consecutive zero-spread confirmation ═══
+                    // Require 3 consecutive L1 polls showing zero_spread = true AND net_pnl > 0.
+                    // Each poll is ~10s apart (due to mirage_cooldown), so 3 checks ≈ 30s of sustained convergence.
+                    let (prev_count, prev_ts) = e_ctx.zero_spread_confirms.get(&trade.id).map(|v| *v).unwrap_or((0, 0));
+                    // Gap must be within 15s — if longer, spread likely fluctuated and counter resets.
+                    let gap_ok = (now_cd - prev_ts) < 15_000;
+                    let new_count = if gap_ok { prev_count + 1 } else { 1 };
+                    e_ctx.zero_spread_confirms.insert(trade.id, (new_count, now_cd));
+
+                    let required = 3u32;
+                    if new_count < required || exec_net_pnl <= 0.0 {
+                        e_ctx.mirage_cooldown.insert(trade.id, now_cd);
+                        tracing::info!("[real] 📊 L1 confirm {}/{} for {} (no L2 WS) exit_sp={:.2}% net_pnl={:.4} — waiting for {} consecutive checks", 
+                            new_count, required, pair, live_state.exit_spread, exec_net_pnl, required);
+                        continue;
+                    }
+                    // 3 consecutive L1 confirmations + positive PnL — safe to close
+                    tracing::info!("[real] ✅ L1 Multi-Check CONFIRMED: {}/{} checks, exit_sp={:.2}%, net_pnl={:.4}% — proceeding to close {}", 
+                        new_count, required, live_state.exit_spread, exec_net_pnl / vol * 100.0, pair);
+                    e_ctx.zero_spread_confirms.remove(&trade.id);
                 }
             }
 

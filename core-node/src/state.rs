@@ -95,6 +95,10 @@ pub struct EngineContext {
     /// Set to `now + TTL_ms` on WS timeout/failure. Auto-recovers when timestamp expires.
     /// Prevents firing trades on exchanges with recently broken WS order channels.
     pub ws_order_unhealthy_until: Arc<DashMap<String, i64>>,
+    /// Per-trade consecutive L1 zero-spread confirmation counter: trade_id → (count, last_check_ms).
+    /// When L2 WS data is unavailable, require N consecutive L1 zero-spread polls
+    /// before allowing close. Prevents single-tick L1 flash closes.
+    pub zero_spread_confirms: Arc<DashMap<i64, (u32, i64)>>,
 }
 
 impl Default for EngineContext {
@@ -125,6 +129,7 @@ impl Default for EngineContext {
             asymmetric_fail_counter: Arc::new(DashMap::new()),
             profiles_db: None,
             ws_order_unhealthy_until: Arc::new(DashMap::new()),
+            zero_spread_confirms: Arc::new(DashMap::new()),
         }
     }
 }
