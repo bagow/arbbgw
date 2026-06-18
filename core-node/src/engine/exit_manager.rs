@@ -117,11 +117,11 @@ pub async fn process_closes(
             let mult_b = e_ctx.multipliers.get(&key_b).map(|v| *v).unwrap_or(1.0);
 
             // 🛡️ JIT L2 VERIFICATION FOR EXITS (TP / ZERO_SPREAD) ───────────────────
-            // Force close after 5 minutes of MIRAGE to avoid holding positions forever
-            let trade_age_ms = now_ms() - trade.entry_time;
-            let force_close_after_mirage = trade_age_ms > 300_000; // 5 minutes
+            // ALWAYS verify via VWAP before closing. Never bypass this check.
+            // Previous bug: trade_age > 5min bypassed VWAP entirely, causing L1 flash
+            // closes at terrible fill prices (EVERY losing trade was a force-close).
 
-            if !closing_retry && !manual_close && !triggered_stop && (reason_str == "TP" || reason_str == "ZERO_SPREAD") && !force_close_after_mirage {
+            if !closing_retry && !manual_close && !triggered_stop && (reason_str == "TP" || reason_str == "ZERO_SPREAD") {
                 // MIRAGE cooldown: skip this check if we already logged MIRAGE for this trade recently (10s)
                 let last_mirage = e_ctx.mirage_cooldown.get(&trade.id).map(|v| *v).unwrap_or(0);
                 let now_cd = now_ms();
@@ -140,9 +140,11 @@ pub async fn process_closes(
                         (Ok((a.bids.clone(), a.asks.clone())), Ok((b.bids.clone(), b.asks.clone())))
                     },
                     _ => {
-                        // No fresh L2 WS data — skip VWAP verification, allow close to proceed
-                        tracing::info!("[real] ⏭️ No L2 WS data for {}/{} — skipping VWAP exit check", exa, exb);
-                        (Ok((vec![], vec![])), Ok((vec![], vec![])))
+                        // No fresh L2 WS data — CANNOT verify, block the close.
+                        // Without L2, we can't distinguish real spread convergence from L1 noise.
+                        e_ctx.mirage_cooldown.insert(trade.id, now_cd);
+                        tracing::warn!("[real] 🪄 MIRAGE ({}): No L2 WS data for {}/{} — blocking close (L1 may be noise)", reason_str, exa, exb);
+                        continue;
                     }
                 };
 
@@ -192,16 +194,11 @@ pub async fn process_closes(
                         exit_price_b = px_b;
                     }
                 } else {
-                    tracing::warn!("[real] ⚠️ MIRAGE ({}): Insufficient L2 depth for {:.4}/{:.4} phys coins on {}/{}. Using L1 fallback prices to force close.", reason_str, coins_a, coins_b, exa, exb);
-                    // exit_price_a and b remain at L1 prices
+                    // L2 exists but not enough depth for VWAP — treat as MIRAGE
+                    e_ctx.mirage_cooldown.insert(trade.id, now_cd);
+                    tracing::warn!("[real] 🪄 MIRAGE ({}): Insufficient L2 depth for {:.4}/{:.4} coins on {}/{} — blocking close", reason_str, coins_a, coins_b, exa, exb);
+                    continue;
                 }
-            }
-
-            // Force close after 5 minutes of MIRAGE — position is stuck, close at any price
-            if force_close_after_mirage && reason_str == "ZERO_SPREAD" && !closing_retry && !manual_close {
-                tracing::warn!("[real] ⏰ FORCE CLOSE {} after {}s of MIRAGE — accepting loss to avoid holding forever", pair, trade_age_ms / 1000);
-                // Clear mirage cooldown since we're forcing close
-                e_ctx.mirage_cooldown.remove(&trade.id);
             }
 
             let reason = if reason_str.is_empty() {
