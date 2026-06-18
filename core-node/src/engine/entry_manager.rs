@@ -419,6 +419,7 @@ pub async fn process_entries(
             sig_entry_a: sig.entry_a,
             sig_entry_b: sig.entry_b,
             profile_id: settings.id.clone(),
+            break_even_pct,
         };
 
         if crate::engine::execution::execute_sequential_entry(

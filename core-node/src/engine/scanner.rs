@@ -242,12 +242,12 @@ pub fn generate_signals(
                 continue;
             }
 
-            // Break-even = pure exchange fees on all 4 legs (entry + exit on both exchanges).
-            // fee_a/fee_b are REAL taker rates fetched from exchange APIs (not estimates).
-            // Slippage is NOT included here — the L2 VWAP verification in entry_manager
-            // checks actual orderbook impact before execution, making hardcoded slippage
-            // estimates unnecessary and error-prone.
-            let break_even_pct = 2.0 * (fee_a + fee_b) * 100.0;
+            // Break-even = exchange fees on all 4 legs (entry + exit on both exchanges)
+            // + expected slippage budget (~0.02% per leg × 4 legs = 0.08%).
+            // fee_a/fee_b are REAL taker rates fetched from exchange APIs.
+            // Including slippage in BE ensures only trades with real profit potential pass.
+            let expected_slippage_per_leg = 0.02; // ~0.02% per leg
+            let break_even_pct = 2.0 * (fee_a + fee_b) * 100.0 + 4.0 * expected_slippage_per_leg;
 
             // ── ABSOLUTE STRUCTURAL GUARD (ALWAYS ACTIVE) ──
             // Blocks entry when spread - structural_spread < break_even (fees).

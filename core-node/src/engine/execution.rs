@@ -478,6 +478,7 @@ pub struct SequentialEntryContext {
     pub sig_entry_a: f64,
     pub sig_entry_b: f64,
     pub profile_id: String,
+    pub break_even_pct: f64,
 }
 
 pub async fn execute_sequential_entry(
@@ -607,12 +608,18 @@ pub async fn execute_sequential_entry(
     };
 
     // After first leg is filled, we're already committed/exposed.
-    // Use more aggressive slippage on second leg to maximize fill probability
-    // and avoid costly ASYMMETRIC_CLOSE trim losses.
-    // Formula: 2x normal slippage, capped at spread/2 (never exceed half the profit).
-    let aggressive_slip = (ctx.ioc_slippage_pct * 2.0)
-        .min(ctx.sig_spread / 2.0)
-        .max(ctx.ioc_slippage_pct);
+    // Use aggressive slippage on second leg: 80% of (spread - BE).
+    // This keeps at least 20% of expected profit while maximizing fill probability.
+    // A failed second leg costs MORE than slippage (full trim loss + fees).
+    let profit_margin = (ctx.sig_spread - ctx.break_even_pct).max(0.0);
+    let aggressive_slip = (profit_margin * 0.80)
+        .max(ctx.ioc_slippage_pct)  // never less than base slippage
+        .min(1.5);                   // safety cap 1.5%
+
+    tracing::info!(
+        "[real] 🎯 Second leg {} slippage: base={:.3}% aggressive={:.3}% (spread={:.3}% BE={:.3}% profit_margin={:.3}%)",
+        second_label, ctx.ioc_slippage_pct, aggressive_slip, ctx.sig_spread, ctx.break_even_pct, profit_margin
+    );
 
     let res_second = second_conn.place_order(
         http, keys, &ctx.pair, second_is_buy, final_qty_second, ctx.dry_run,
@@ -620,9 +627,8 @@ pub async fn execute_sequential_entry(
         ctx.leverage, second_mult, aggressive_slip, second_tick, ts.api_timeout_ms
     ).await;
 
-    let (oid_second, fill_second, fee_second) = match res_second {
+    let (mut oid_second, mut fill_second, mut fee_second) = match res_second {
         Ok(t) => {
-            // Successful order — clear any unhealthy marker
             e_ctx.ws_order_unhealthy_until.remove(&second_label.to_string());
             (t.0, t.1, t.2)
         }
@@ -632,29 +638,26 @@ pub async fn execute_sequential_entry(
             if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
                 crate::engine::risk_manager::mark_balance_low(second_label, e_ctx);
             }
-            // Mark WS unhealthy for 60s on timeout/WS failures (auto-recovers via TTL)
             if esl.contains("timeout") || esl.contains("ws ") || esl.contains("websocket") || esl.contains("connect") {
                 let unhealthy_until = now + 60_000;
                 e_ctx.ws_order_unhealthy_until.insert(second_label.to_string(), unhealthy_until);
                 tracing::warn!("[real] 📡 {} WS marked UNHEALTHY for 60s (auto-recovery)", second_label);
             }
-            // Hard cooldown on exchange (5 min) — prevents repeated one-legged failures.
-            let cooldown_ms = 300_000_i64; // 5 minutes
-            e_ctx.exchange_cooldown.insert(second_label.to_string(), now + cooldown_ms);
+            // Cooldown the specific ticker on this exchange (not the whole exchange)
+            let ticker_key = format!("{}:{}", second_label, ctx.pair);
+            e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + 300_000);
             tracing::error!(
-                "[real] 🚫 {} exchange cooldown {}s after LEG_SECOND reject ({})",
-                second_label, cooldown_ms / 1000, ctx.pair
+                "[real] 🚫 {} pair cooldown 5min after LEG_SECOND reject ({})",
+                ticker_key, ctx.pair
             );
-            // Also cooldown this specific pair
-            e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + cooldown_ms);
             (None, 0.0, 0.0)
         }
     };
 
-    let second_phys_init = if fill_second > 0.0 { Some(final_qty_second) } else { None };
+    let mut second_phys_init = if fill_second > 0.0 { Some(final_qty_second) } else { None };
     let second_max_retries = if fill_second <= 0.0 { 5_i64 } else { ts.fill_verify_retries };
 
-    let ver_second = verify_fill(
+    let mut ver_second = verify_fill(
         second_conn, http, keys, &ctx.pair, &oid_second,
         fill_second, fee_second, second_phys_init, final_qty_second, ctx.dry_run,
         VerifyConfig {
@@ -662,12 +665,60 @@ pub async fn execute_sequential_entry(
             fast_delay_ms: ts.fill_verify_delay_ms as u64,
             slow_retries: 8,
             slow_delay_ms: 500,
-            // CRITICAL: same as first leg — no position_fallback for IOC entry
             position_fallback: false,
             mult: second_mult,
         },
         "real",
     ).await;
+
+    // ── RETRY SECOND LEG: If IOC didn't fill, retry once with maximum slippage ──
+    // A failed second leg means full ASYMMETRIC_CLOSE (trim loss), which is ALWAYS
+    // worse than any slippage. So on retry, use the full profit margin.
+    if ver_second.phys_volume.unwrap_or(0.0) <= 1e-12 && !ctx.dry_run && oid_second.is_some() {
+        let retry_slip = profit_margin.max(ctx.ioc_slippage_pct).min(2.0);
+        tracing::warn!(
+            "[real] 🔄 RETRY second leg {} for {} with max slippage {:.3}% (was {:.3}%)",
+            second_label, ctx.pair, retry_slip, aggressive_slip
+        );
+
+        let res_retry = second_conn.place_order(
+            http, keys, &ctx.pair, second_is_buy, final_qty_second, ctx.dry_run,
+            second_limit, second_limit > 0.0,
+            ctx.leverage, second_mult, retry_slip, second_tick, ts.api_timeout_ms
+        ).await;
+
+        match res_retry {
+            Ok(t) => {
+                oid_second = t.0;
+                fill_second = t.1;
+                fee_second = t.2;
+                second_phys_init = if fill_second > 0.0 { Some(final_qty_second) } else { None };
+
+                ver_second = verify_fill(
+                    second_conn, http, keys, &ctx.pair, &oid_second,
+                    fill_second, fee_second, second_phys_init, final_qty_second, ctx.dry_run,
+                    VerifyConfig {
+                        fast_retries: 5,
+                        fast_delay_ms: ts.fill_verify_delay_ms as u64,
+                        slow_retries: 5,
+                        slow_delay_ms: 500,
+                        position_fallback: false,
+                        mult: second_mult,
+                    },
+                    "real",
+                ).await;
+
+                if ver_second.phys_volume.unwrap_or(0.0) > 1e-12 {
+                    tracing::info!("[real] ✅ RETRY SUCCESS: second leg {} filled on retry!", second_label);
+                } else {
+                    tracing::error!("[real] ❌ RETRY FAILED: second leg {} still unfilled after retry", second_label);
+                }
+            }
+            Err(e) => {
+                tracing::error!("[real] ❌ RETRY second leg reject {}/{}: {}", second_label, ctx.pair, e);
+            }
+        }
+    }
 
     let total_exec_ms = t0_exec.elapsed().as_millis();
 
@@ -754,11 +805,39 @@ pub async fn execute_sequential_entry(
     let repo = TradeRepository::new(db.clone());
     
     if matched_phys < 1e-12 {
+        // ── PER-TICKER-PER-EXCHANGE COOLDOWN (replaces old global kill-switch) ──
+        // Instead of blocking the ENTIRE engine after 3 trims, we ban the specific
+        // ticker on the specific exchange that failed to fill.
+        // This allows other pairs and exchanges to keep trading.
+        let failed_exchange = if a_filled { second_label } else { first_label };
+        let ticker_ban_key = format!("{}:{}", failed_exchange, ctx.pair);
+        {
+            let now_ban = crate::engine::utils::now_ms();
+            let mut entry = e_ctx.asymmetric_fail_counter.entry(ticker_ban_key.clone()).or_insert((0, now_ban));
+            let (count, first_ts) = entry.value_mut();
+            // Reset counter if first failure was > 1 hour ago
+            if now_ban - *first_ts > 3_600_000 {
+                *count = 0;
+                *first_ts = now_ban;
+            }
+            *count += 1;
+            if *count >= 3 {
+                let ban_ms = 300_000_i64; // 5 minutes
+                e_ctx.pair_cooldown.insert(ctx.pair.clone(), now_ban + ban_ms);
+                tracing::error!(
+                    "[real] 🚫 TICKER BANNED {}: {} asymmetric failures in 1h on this exchange. Cooldown {}s.",
+                    ticker_ban_key, count, ban_ms / 1000
+                );
+                *count = 0;
+                *first_ts = now_ban;
+            }
+        }
+
+        // Also track global consecutive_trims for the safety-net kill-switch (raised to 10)
         let trims = e_ctx.consecutive_trims.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        if trims >= 3 {
+        if trims >= 10 {
             e_ctx.is_killed.store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::error!("[real] 💀 KILL-SWITCH TRIGGERED: {} consecutive FULL TRIMS (total asymmetry). Suspending new entries. Use Resume button on frontend to reset.", trims);
-            // Persist kill-switch state to server_cache so frontend can show status + Resume button
             if let Some(ref pdb) = e_ctx.profiles_db {
                 let pdb = pdb.clone();
                 tokio::spawn(async move {
@@ -774,33 +853,8 @@ pub async fn execute_sequential_entry(
             }
         }
         let total_fee = fee_a_val + fee_b_val + trimming_fee;
-        tracing::error!("[real] ❌ FULL ASYMMETRY DUMPED {}. Trade canceled. Trimming Loss: {:.4}, Trimming Fee: {:.4}", ctx.pair, trimming_loss, trimming_fee);
+        tracing::error!("[real] ❌ FULL ASYMMETRY DUMPED {} on {}. Trade canceled. Trimming Loss: {:.4}, Trimming Fee: {:.4}", ctx.pair, failed_exchange, trimming_loss, trimming_fee);
         e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.asymmetric_cooldown_ms);
-
-        // ── PAIR BAN: Track repeated asymmetric failures per pair ──
-        // After 3 failures within 1 hour, ban pair for 5 minutes to prevent
-        // repeated losses on consistently illiquid pairs.
-        {
-            let now_ban = crate::engine::utils::now_ms();
-            let mut entry = e_ctx.asymmetric_fail_counter.entry(ctx.pair.clone()).or_insert((0, now_ban));
-            let (count, first_ts) = entry.value_mut();
-            // Reset counter if first failure was > 1 hour ago
-            if now_ban - *first_ts > 3_600_000 {
-                *count = 0;
-                *first_ts = now_ban;
-            }
-            *count += 1;
-            if *count >= 3 {
-                let ban_ms = 300_000_i64; // 5 minutes
-                e_ctx.pair_cooldown.insert(ctx.pair.clone(), now_ban + ban_ms);
-                tracing::error!(
-                    "[real] 🚫 PAIR BANNED {}: {} asymmetric failures in 1h. Cooldown {}s.",
-                    ctx.pair, count, ban_ms / 1000
-                );
-                *count = 0; // Reset after ban
-                *first_ts = now_ban;
-            }
-        }
 
         let (ent_a, ent_b) = if a_filled { (fill_a, 0.0) } else { (0.0, fill_b) };
         let fv_usd = if a_filled { delta_a * fill_a } else { delta_b * fill_b };
