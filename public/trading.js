@@ -1361,15 +1361,15 @@ function renderActiveTable(profileId, active) {
                     <div class="trade-details-box">
                         <div class="td-col">
                             <div class="td-header">${t.exchange_a} <span class="badge ${isAHigher ? 'badge-short' : 'badge-long'}">${isAHigher ? 'SHORT' : 'LONG'}</span></div>
-                            <div class="td-line"><span>Entry:</span> <strong>${fmtPrice(t.entry_price_a)}</strong></div>
-                            <div class="td-line"><span>Current:</span> <strong>${t.current_price_a ? fmtPrice(t.current_price_a) : '—'}</strong></div>
+                            <div class="td-line"><span>Entry:</span> <strong>${fmtPx(t.entry_price_a)}</strong></div>
+                            <div class="td-line"><span>Current:</span> <strong>${t.current_price_a ? fmtPx(t.current_price_a) : '—'}</strong></div>
                             <div class="td-line"><span>Leg PnL:</span> <strong style="color:${(t.pnl_a??0)>0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl_a??0)}</strong></div>
                             <div class="td-line"><span>Funding Rate:</span> <strong style="color:${frA_color}">${frA_pct}%</strong> <span class="text-sub" style="font-size:.75rem">($${frA_cost}/8h)</span></div>
                         </div>
                         <div class="td-col">
                             <div class="td-header">${t.exchange_b} <span class="badge ${!isAHigher ? 'badge-short' : 'badge-long'}">${!isAHigher ? 'SHORT' : 'LONG'}</span></div>
-                            <div class="td-line"><span>Entry:</span> <strong>${fmtPrice(t.entry_price_b)}</strong></div>
-                            <div class="td-line"><span>Current:</span> <strong>${t.current_price_b ? fmtPrice(t.current_price_b) : '—'}</strong></div>
+                            <div class="td-line"><span>Entry:</span> <strong>${fmtPx(t.entry_price_b)}</strong></div>
+                            <div class="td-line"><span>Current:</span> <strong>${t.current_price_b ? fmtPx(t.current_price_b) : '—'}</strong></div>
                             <div class="td-line"><span>Leg PnL:</span> <strong style="color:${(t.pnl_b??0)>0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl_b??0)}</strong></div>
                             <div class="td-line"><span>Funding Rate:</span> <strong style="color:${frB_color}">${frB_pct}%</strong> <span class="text-sub" style="font-size:.75rem">($${frB_cost}/8h)</span></div>
                         </div>
@@ -1397,7 +1397,7 @@ function renderActiveTable(profileId, active) {
                 <td>${(t.entry_spread??0).toFixed(2)}%</td>
                 <td>${curSpread} / <span style="color:var(--green)">${bestStr}</span></td>
                 <td><span style="color:var(--text-sub)">${t.direction}</span></td>
-                <td>$${fmtPrice(t.volume)}</td>
+                <td>$${fmtPx(t.volume)}</td>
                 <td style="color:var(--text-sub)">${time}</td>
             </tr>${detailRow}`;
     }).join('');
@@ -1428,15 +1428,15 @@ function renderHistoryTable(profileId, history) {
                     <div class="trade-details-box">
                         <div class="td-col">
                             <div class="td-header">${t.exchange_a} <span class="badge ${isAHigher ? 'badge-short' : 'badge-long'}">${isAHigher ? 'SHORT' : 'LONG'}</span></div>
-                            <div class="td-line"><span>Entry:</span> <strong>${fmtPrice(t.entry_price_a)}</strong></div>
-                            <div class="td-line"><span>Exit:</span> <strong>${t.exit_price_a ? fmtPrice(t.exit_price_a) : '—'}</strong></div>
+                            <div class="td-line"><span>Entry:</span> <strong>${fmtPx(t.entry_price_a)}</strong></div>
+                            <div class="td-line"><span>Exit:</span> <strong>${t.exit_price_a ? fmtPx(t.exit_price_a) : '—'}</strong></div>
                             <div class="td-line"><span>Leg PnL:</span> <strong style="color:${(t.pnl_a??0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl_a??0)}</strong></div>
                             <div class="td-line"><span style="color:var(--text-sub)">Opened:</span> <strong style="font-size:.75rem">${openTimeStr}</strong></div>
                         </div>
                         <div class="td-col">
                             <div class="td-header">${t.exchange_b} <span class="badge ${!isAHigher ? 'badge-short' : 'badge-long'}">${!isAHigher ? 'SHORT' : 'LONG'}</span></div>
-                            <div class="td-line"><span>Entry:</span> <strong>${fmtPrice(t.entry_price_b)}</strong></div>
-                            <div class="td-line"><span>Exit:</span> <strong>${t.exit_price_b ? fmtPrice(t.exit_price_b) : '—'}</strong></div>
+                            <div class="td-line"><span>Entry:</span> <strong>${fmtPx(t.entry_price_b)}</strong></div>
+                            <div class="td-line"><span>Exit:</span> <strong>${t.exit_price_b ? fmtPx(t.exit_price_b) : '—'}</strong></div>
                             <div class="td-line"><span>Leg PnL:</span> <strong style="color:${(t.pnl_b??0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl_b??0)}</strong></div>
                             <div class="td-line"><span style="color:var(--text-sub)">Closed:</span> <strong style="font-size:.75rem">${time}</strong></div>
                         </div>
@@ -1462,7 +1462,7 @@ function renderHistoryTable(profileId, history) {
                 <td style="color:${pnlColor};font-weight:600">${pnlStr}</td>
                 <td>${(t.entry_spread??0).toFixed(2)}% &rarr; ${(t.exit_spread??0).toFixed(2)}%</td>
                 <td><span style="color:var(--text-sub)">${t.direction}</span></td>
-                <td>$${fmtPrice(t.volume)}</td>
+                <td>$${fmtPx(t.volume)}</td>
                 <td><span class="badge ${t.close_reason==='TP'||t.close_reason==='ZERO_SPREAD'?'badge-long':t.close_reason==='STOP'?'badge-short':'badge-neutral'}">${t.close_reason??'—'}</span></td>
                 <td style="color:var(--text-sub)">${time}</td>
             </tr>${detailRow}`;
@@ -2019,7 +2019,7 @@ const fmtCost = v => {
     return n>0 ? `-$${abs.toFixed(5)}` : `+$${abs.toFixed(5)}`; 
 };
 // Clean floating-point price display: removes artifacts like 0.063461999999999996
-const fmtPrice = v => {
+const fmtPx = v => {
     const n = Number(v);
     if (!n || !isFinite(n)) return '0';
     // Use parseFloat(toPrecision) to strip trailing noise
