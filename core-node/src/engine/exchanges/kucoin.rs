@@ -471,14 +471,12 @@ impl ExchangeConnector for KucoinConnector {
         // 1. First check order status via order API (to know if filled)
         let path = format!("/api/v1/orders/{}", order_id);
         let mut deal_size = 0.0_f64;
-        let mut order_done = false;
 
         for attempt in 0..6 {
             // Quick WS check first
             let cache = super::ws_kucoin_private::get_order_cache();
             if let Some(state) = cache.get(order_id) {
                 if state.status == "done" {
-                    order_done = true;
                     deal_size = state.filled_size;
                     break;
                 }
@@ -508,16 +506,15 @@ impl ExchangeConnector for KucoinConnector {
                         .or_else(|| v["data"]["dealSize"].as_str().and_then(|s| s.parse().ok()))
                         .or_else(|| v["data"]["filledSize"].as_str().and_then(|s| s.parse().ok()))
                         .unwrap_or(0.0);
-                    let status = v["data"]["status"].as_str().unwrap_or("");
+                    let is_done = v["data"]["status"].as_str() == Some("done");
                     if size > 0.0 {
                         deal_size = size;
                     }
-                    if status == "done" {
-                        order_done = true;
-                        break;
-                    }
-                    if size <= 0.0 && status == "done" {
+                    if is_done && size <= 0.0 {
                         return Ok((0.0, 0.0, 0.0));
+                    }
+                    if is_done {
+                        break;
                     }
                 }
                 Err(_) => {}

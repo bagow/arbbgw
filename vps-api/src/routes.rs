@@ -638,7 +638,6 @@ pub async fn handle_get_unified(
             let mut v = serde_json::to_value(&t).unwrap_or_default();
             let display_comm = t.commission_cost.unwrap_or(0.0);
             let display_slip = t.slippage_cost.unwrap_or(0.0);
-            let display_fund = t.funding_cost.unwrap_or(0.0);
 
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("commission_cost".into(), json!(display_comm));
