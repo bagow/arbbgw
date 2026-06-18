@@ -144,6 +144,7 @@ pub struct Trade {
     pub commission_cost: Option<f64>,
     pub funding_cost: Option<f64>,
     pub slippage_cost: Option<f64>,
+    pub exit_slippage_cost: Option<f64>,
     pub last_price_a: Option<f64>,
     pub last_price_b: Option<f64>,
     pub last_spread: Option<f64>,

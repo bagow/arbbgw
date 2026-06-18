@@ -587,15 +587,10 @@ pub async fn handle_get_unified(
                     json!(t.last_price_b.unwrap_or(t.entry_price_b)),
                 );
                 obj.insert("current_spread".into(), json!(t.last_spread.unwrap_or(0.0)));
-                // PnL: trust DB values computed by core-node from exchange API
                 let db_pnl_a = t.pnl_a.unwrap_or(0.0);
                 let db_pnl_b = t.pnl_b.unwrap_or(0.0);
                 let actual_gross = db_pnl_a + db_pnl_b;
-                let display_slip = t.slippage_cost.unwrap_or(0.0);
-                // Show gross as "ideal" PnL (actual + slippage) so slippage
-                // appears as a real cost: net = ideal - comm - slip - funding
-                let ideal_gross = actual_gross + display_slip;
-                obj.insert("gross_pnl".into(), json!(ideal_gross));
+                obj.insert("gross_pnl".into(), json!(actual_gross));
                 obj.insert("pnl_a".into(), json!(db_pnl_a));
                 obj.insert("pnl_b".into(), json!(db_pnl_b));
                 // Net PnL: trust curr_gross_pnl from DB
@@ -608,9 +603,15 @@ pub async fn handle_get_unified(
                     "commission_cost".into(),
                     json!(t.commission_cost.unwrap_or(0.0)),
                 );
+                // Entry slippage (IOC target vs fill)
                 obj.insert(
                     "slippage_cost".into(),
-                    json!(display_slip),
+                    json!(t.slippage_cost.unwrap_or(0.0)),
+                );
+                // Exit slippage (separate for display)
+                obj.insert(
+                    "exit_slippage_cost".into(),
+                    json!(t.exit_slippage_cost.unwrap_or(0.0)),
                 );
                 obj.insert("funding_cost".into(), json!(t.funding_cost.unwrap_or(0.0)));
             }
@@ -641,19 +642,16 @@ pub async fn handle_get_unified(
 
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("commission_cost".into(), json!(display_comm));
+                // Entry slippage (IOC target vs fill)
                 obj.insert("slippage_cost".into(), json!(display_slip));
+                // Exit slippage (separate for display)
+                obj.insert("exit_slippage_cost".into(), json!(t.exit_slippage_cost.unwrap_or(0.0)));
                 if t.funding_cost.is_none() {
                     obj.insert("funding_cost".into(), json!(0.0));
                 }
-                // Show gross_pnl as "ideal" PnL (what we'd earn at signal prices).
-                // Actual gross = fill-based PnL (slippage baked in).
-                // Ideal gross = actual gross + slippage.
-                // This way: net = ideal_gross - commission - slippage - funding
-                //                = actual_gross - commission - funding (same number)
-                // But the user sees slippage as a real cost line item.
+                // Gross PnL: actual fill-based PnL (slippage already baked in)
                 let actual_gross = t.gross_pnl.unwrap_or(0.0);
-                let ideal_gross = actual_gross + display_slip;
-                obj.insert("gross_pnl".into(), json!(ideal_gross));
+                obj.insert("gross_pnl".into(), json!(actual_gross));
             }
             v
         })

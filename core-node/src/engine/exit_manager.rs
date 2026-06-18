@@ -163,7 +163,7 @@ pub async fn process_closes(
                         };
                         let vwap_gross_pnl = vwap_exec_pnl_a + vwap_exec_pnl_b;
                         let vwap_net_pnl =
-                            vwap_gross_pnl - trade.commission_cost - trade.slippage_cost - trade.funding_cost;
+                            vwap_gross_pnl - trade.commission_cost - trade.funding_cost;
                         let vwap_net_pct = vwap_net_pnl / vol * 100.0;
 
                         let vwap_exit_spread = if is_a_higher {

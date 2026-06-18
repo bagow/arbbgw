@@ -268,6 +268,7 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN close_attempts INTEGER DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN last_close_attempt_at INTEGER", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN close_error TEXT", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN exit_slippage_cost REAL DEFAULT 0.0", []);
         Ok(())
     }).await?;
     Ok(())
@@ -359,6 +360,7 @@ pub fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
         contracts_a: row.get("contracts_a").unwrap_or(None),
         contracts_b: row.get("contracts_b").unwrap_or(None),
         slippage_cost: row.get("slippage_cost").unwrap_or(Some(0.0)),
+        exit_slippage_cost: row.get("exit_slippage_cost").unwrap_or(Some(0.0)),
         current_price_a: None,
         current_price_b: None,
         current_spread: None,

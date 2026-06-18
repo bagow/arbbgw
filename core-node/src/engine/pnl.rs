@@ -86,14 +86,17 @@ pub fn calculate_funding_increment(
     fund_incr_a + fund_incr_b
 }
 
-/// Net PnL = Gross PnL - Commission - Slippage - Funding
+/// Net PnL = Gross PnL - Commission - Funding
+/// NOTE: slippage is NOT subtracted because gross_pnl already uses actual fill
+/// prices (which reflect slippage). Subtracting slippage_cost would double-count it.
+/// slippage_cost is stored in DB for diagnostics only.
 pub fn calculate_net_pnl(
     gross_pnl: f64,
     commission_cost: f64,
-    slippage_cost: f64,
+    _slippage_cost: f64,
     funding_cost: f64,
 ) -> f64 {
-    gross_pnl - commission_cost - slippage_cost - funding_cost
+    gross_pnl - commission_cost - funding_cost
 }
 
 pub struct LivePnlState {
