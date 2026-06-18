@@ -380,12 +380,8 @@ impl ExchangeConnector for BybitConnector {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        tracing::warn!("[bybit] fallback close unverified for {} (oid {}). Assuming filled to prevent CLOSING trap.", pair, oid_fb);
-        Ok(CloseReceipt {
-            final_price: target_price,
-            total_fee: 0.0, // Assuming 0 fee if unverified to allow DB finalize
-            closed_volume: phys_amount,
-        })
+        tracing::error!("[bybit] fallback close UNVERIFIED for {} (oid {}). Position may still be open!", pair, oid_fb);
+        Err(format!("Bybit close unverified: order {} fill not confirmed after 5 polls", oid_fb))
     }
 
     async fn trim_position(
