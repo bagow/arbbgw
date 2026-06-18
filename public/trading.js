@@ -716,22 +716,23 @@ function renderCexTab(profile, exchangesData) {
 window.closeActivePosition = async function(exchange, symbol, size) {
     if (!confirm(`Are you sure you want to completely close ${symbol} on ${exchange} at market price?`)) return;
     try {
+        showToast(`Closing ${symbol} on ${exchange}…`, 'info');
         const res = await authFetch(`${API_BASE}/api/positions/close`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ exchange, symbol, size })
         });
         if (res.ok) {
-            flashMessage('Close order submitted!', 'success');
+            showToast(`✅ ${symbol} on ${exchange} — position closed!`, 'success');
         } else {
             let errText = `Failed to close ${symbol} on ${exchange}`;
             try { const body = await res.text(); if (body) errText += ': ' + body; } catch(e) {}
-            flashMessage(errText, 'error');
+            showToast(errText, 'error');
         }
         // Refresh data regardless of success/failure to update positions display
         setTimeout(window.fetchUnifiedData, 500);
     } catch (e) {
-        flashMessage('Error closing position: ' + e.message, 'error');
+        showToast(`Error closing ${symbol} on ${exchange}: ${e.message}`, 'error');
     }
 };
 
