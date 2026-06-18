@@ -134,10 +134,13 @@ impl ExchangeConnector for KucoinConnector {
             let mut inline_fee = 0.0;
             for _wait in 0..25 {  // 25 × 20ms = 500ms
                 if let Some(state) = cache.get(oid_str) {
-                    if state.status == "done" || state.filled_size > 0.0 {
-                        // Price = dealValue / dealSize = contract price (matches WS bestBidPrice).
-                        // Do NOT divide by multiplier — that gives per-unit price which
-                        // differs from WS prices and causes phantom 900%+ spreads.
+                    // BUG-FIX: Wait for status="done" before taking final VWAP.
+                    // Previously broke on first partial fill (filled_size > 0),
+                    // which gave incomplete VWAP when order had multiple fills.
+                    if state.status == "done" {
+                        // WS matchPrice = per-unit price, matchSize = contracts.
+                        // deal_value = Σ(matchPrice × matchSize), filled_size = Σ(matchSize).
+                        // VWAP = deal_value / filled_size = weighted avg per-unit price.
                         inline_price = if state.filled_size > 0.0 {
                             state.deal_value / state.filled_size
                         } else { 0.0 };
@@ -162,6 +165,20 @@ impl ExchangeConnector for KucoinConnector {
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            // If WS didn't report "done" in 500ms but we have partial fills, use them.
+            // This is a fallback — verify_fill will confirm via REST anyway.
+            if inline_price <= 0.0 {
+                if let Some(state) = cache.get(oid_str) {
+                    if state.filled_size > 0.0 {
+                        inline_price = state.deal_value / state.filled_size;
+                        inline_fee = state.fee.abs();
+                        tracing::warn!(
+                            "[kucoin] ⏳ Partial WS fill {} (no done): price={:.6} fee={:.6} size={:.1}",
+                            pair, inline_price, inline_fee, state.filled_size
+                        );
+                    }
+                }
             }
             Ok((order_id, inline_price, inline_fee))
         } else {
@@ -503,6 +520,15 @@ impl ExchangeConnector for KucoinConnector {
                         .and_then(|s| s.parse().ok())
                 })
                 .unwrap_or(0.0);
+
+            // BUG-FIX: Use dealAvgPrice directly from REST API.
+            // Previously computed dealValue/dealSize which gives per-CONTRACT value
+            // (includes multiplier), not per-UNIT price. This caused sanity check
+            // failures in execution.rs → fallback to limit price → wrong entry_price.
+            let deal_avg_price = v["data"]["dealAvgPrice"]
+                .as_f64()
+                .or_else(|| v["data"]["dealAvgPrice"].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0.0);
             
             let fee = v["data"]["fee"]
                 .as_f64()
@@ -527,9 +553,16 @@ impl ExchangeConnector for KucoinConnector {
             final_val = val;
             final_fee = fee;
 
+            // Prefer dealAvgPrice (per-unit) over computed dealValue/dealSize (per-contract)
+            if deal_avg_price > 0.0 {
+                // dealAvgPrice is the real per-unit fill price from the exchange
+                // Override final_val so price calculation below uses it
+                final_val = deal_avg_price * size;
+            }
+
             tracing::info!(
-                "[kucoin] 📊 fetch_order {} REST raw: dealSize={:.6} dealValue={:.8} fee={:.6} status={}",
-                order_id, size, val, fee, status
+                "[kucoin] 📊 fetch_order {} REST raw: dealSize={:.6} dealValue={:.8} dealAvgPrice={:.8} fee={:.6} status={}",
+                order_id, size, val, deal_avg_price, fee, status
             );
             break;
         }
