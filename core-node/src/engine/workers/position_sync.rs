@@ -22,41 +22,47 @@ pub fn start_position_sync(
             tokio::time::sleep(Duration::from_secs(10)).await;
 
             // 1. Load ALL open trades (across all profiles)
-            let open_trades: Vec<Trade> = db.call(|conn| {
+            // Load trades WITH last_close_attempt_at for BUG-3 race condition fix
+            let open_trades_with_close_ts: Vec<(Trade, i64)> = db.call(|conn| {
                 let mut stmt = conn.prepare(
                     "SELECT id, pair, status, exchange_a, exchange_b, direction, volume, \
                      entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, \
                      pnl_a, pnl_b, close_reason, contracts_a, contracts_b, commission_cost, slippage_cost, \
-                     COALESCE(funding_cost, 0.0), COALESCE(structural_spread, 0.0) \
+                     COALESCE(funding_cost, 0.0), COALESCE(structural_spread, 0.0), \
+                     COALESCE(last_close_attempt_at, 0) \
                      FROM trades WHERE status IN ('OPEN','CLOSING')"
                 )?;
-                let trades = stmt.query_map([], |row| Ok(Trade {
-                    id: row.get(0)?,
-                    pair: row.get(1)?,
-                    status: row.get(2)?,
-                    exchange_a: row.get(3)?,
-                    exchange_b: row.get(4)?,
-                    direction: row.get(5)?,
-                    volume: row.get(6)?,
-                    entry_price_a: row.get(7)?,
-                    entry_price_b: row.get(8)?,
-                    entry_spread: row.get(9)?,
-                    entry_time: row.get(10)?,
-                    highest_spread: row.get(11)?,
-                    pnl_a: row.get(12)?,
-                    pnl_b: row.get(13)?,
-                    close_reason: row.get(14)?,
-                    contracts_a: row.get::<_, Option<f64>>(15)?.unwrap_or(0.0),
-                    contracts_b: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
-                    commission_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
-                    slippage_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
-                    funding_cost: row.get::<_, Option<f64>>(19)?.unwrap_or(0.0),
-                    structural_spread: row.get::<_, Option<f64>>(20)?.unwrap_or(0.0),
-                }))?.filter_map(|t| t.ok()).collect::<Vec<_>>();
+                let trades = stmt.query_map([], |row| {
+                    let trade = Trade {
+                        id: row.get(0)?,
+                        pair: row.get(1)?,
+                        status: row.get(2)?,
+                        exchange_a: row.get(3)?,
+                        exchange_b: row.get(4)?,
+                        direction: row.get(5)?,
+                        volume: row.get(6)?,
+                        entry_price_a: row.get(7)?,
+                        entry_price_b: row.get(8)?,
+                        entry_spread: row.get(9)?,
+                        entry_time: row.get(10)?,
+                        highest_spread: row.get(11)?,
+                        pnl_a: row.get(12)?,
+                        pnl_b: row.get(13)?,
+                        close_reason: row.get(14)?,
+                        contracts_a: row.get::<_, Option<f64>>(15)?.unwrap_or(0.0),
+                        contracts_b: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+                        commission_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
+                        slippage_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
+                        funding_cost: row.get::<_, Option<f64>>(19)?.unwrap_or(0.0),
+                        structural_spread: row.get::<_, Option<f64>>(20)?.unwrap_or(0.0),
+                    };
+                    let last_close_at: i64 = row.get::<_, Option<i64>>(21)?.unwrap_or(0);
+                    Ok((trade, last_close_at))
+                })?.filter_map(|t| t.ok()).collect::<Vec<_>>();
                 Ok(trades)
             }).await.unwrap_or_default();
 
-            if open_trades.is_empty() {
+            if open_trades_with_close_ts.is_empty() {
                 // No open trades — clear missing counter but DON'T clear positions cache.
                 // Positions cache reflects what's actually on exchanges (managed by fetcher),
                 // not what we track internally. Clearing it here causes flickering in UI
@@ -67,7 +73,7 @@ pub fn start_position_sync(
 
             // 2. Collect which exchanges have open trades
             let mut exchanges_in_use = std::collections::HashSet::new();
-            for t in &open_trades {
+            for (t, _) in &open_trades_with_close_ts {
                 exchanges_in_use.insert(t.exchange_a.clone());
                 exchanges_in_use.insert(t.exchange_b.clone());
             }
@@ -105,12 +111,37 @@ pub fn start_position_sync(
             // Collect trade IDs that are still confirmed present (both positions alive)
             let mut confirmed_present: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
-            for trade in &open_trades {
+            for (trade, last_close_attempt_at) in &open_trades_with_close_ts {
+                let now = now_ms();
                 // Ignore newly opened trades because REST APIs on exchanges (like KuCoin/Binance) 
                 // can aggressively cache positions, leading to false "missing position" detects.
                 // 120s grace period accounts for worst-case REST API cache staleness.
-                let age_ms = now_ms() - trade.entry_time;
+                let age_ms = now - trade.entry_time;
                 if age_ms < 120_000 {
+                    continue;
+                }
+
+                // ── BUG-3 FIX: Check closing_in_flight BEFORE anything else ──
+                // If exit_manager is actively closing this trade right now, NEVER
+                // make any decisions — one leg may already be closed on the exchange
+                // while the other is still in progress.
+                if e_ctx.closing_in_flight.get(&trade.id).map(|v| *v).unwrap_or(false) {
+                    tracing::debug!(
+                        "[pos_sync] Skipping trade id={} {} — close is in-flight (exit_manager active)",
+                        trade.id, trade.pair
+                    );
+                    continue;
+                }
+
+                // ── BUG-3 FIX pt2: Check last_close_attempt_at ──
+                // Even if closing_in_flight was already cleared, if the last close attempt
+                // was < 5 min ago, the exchange may still be processing. Skip.
+                let close_attempt_age_ms = if *last_close_attempt_at > 0 { now - last_close_attempt_at } else { i64::MAX };
+                if close_attempt_age_ms < 300_000 {
+                    tracing::debug!(
+                        "[pos_sync] Skipping trade id={} {} — last close attempt was {}s ago (< 5 min)",
+                        trade.id, trade.pair, close_attempt_age_ms / 1000
+                    );
                     continue;
                 }
 
@@ -141,31 +172,25 @@ pub fn start_position_sync(
                     })
                     .unwrap_or(true); // conservative
 
-                // BUG-S3 FIX: Only skip fresh CLOSING trades (< 5 min). Stale CLOSING trades
-                // may be stuck (e.g., after panic in close spawn, or external liquidation).
-                // For stale ones, fall through to position check so we can detect and recover.
-                if trade.status == "CLOSING" && age_ms < 300_000 {
-                    continue;
-                }
-
-                // CLOSING RECOVERY: If trade is stuck in CLOSING > 10 min AND both positions
-                // still exist, re-trigger the close. This prevents trades hanging for hours.
-                if trade.status == "CLOSING" && age_ms > 600_000 && has_pos_a && has_pos_b {
-                    tracing::warn!(
-                        "[pos_sync] Trade id={} {} stuck in CLOSING for {}s with BOTH positions alive. Reverting to OPEN for retry.",
-                        trade.id, trade.pair, age_ms / 1000
-                    );
-                    let repo = crate::engine::db::TradeRepository::new(db.clone());
-                    repo.revert_to_open(trade.id).await;
-                    // Clear closing_in_flight so exit_manager can re-trigger the close
-                    e_ctx.closing_in_flight.remove(&trade.id);
-                    continue;
-                }
-
+                // CLOSING status handling — use last_close_attempt_at (NOT entry_time).
+                // Old code used age_ms (from entry_time) which doesn't protect old trades.
                 if trade.status == "CLOSING" {
-                    tracing::warn!(
-                        "[pos_sync] Trade id={} {} stuck in CLOSING for {}s, checking positions...",
-                        trade.id, trade.pair, age_ms / 1000
+                    // If close attempt is recent (< 5 min from DB), skip entirely.
+                    // Already handled above via last_close_attempt_at check.
+                    // This branch handles stuck CLOSING trades (> 10 min since close attempt).
+                    if close_attempt_age_ms > 600_000 && has_pos_a && has_pos_b {
+                        tracing::warn!(
+                            "[pos_sync] Trade id={} {} stuck in CLOSING for {}s with BOTH positions alive. Reverting to OPEN for retry.",
+                            trade.id, trade.pair, close_attempt_age_ms / 1000
+                        );
+                        let repo = crate::engine::db::TradeRepository::new(db.clone());
+                        repo.revert_to_open(trade.id).await;
+                        e_ctx.closing_in_flight.remove(&trade.id);
+                        continue;
+                    }
+                    tracing::debug!(
+                        "[pos_sync] Trade id={} {} in CLOSING state, close_attempt_age={}s, checking positions...",
+                        trade.id, trade.pair, close_attempt_age_ms / 1000
                     );
                 }
 
@@ -174,17 +199,43 @@ pub fn start_position_sync(
                     continue; // Both positions exist, all normal
                 }
 
-                // ── CONFIRMATION COUNTER: Require 3 consecutive "missing" detections ──
-                // This prevents false positives from API cache staleness or transient errors.
+                // ── BUG-4 FIX: Require 6 TRULY CONSECUTIVE "missing" detections ──
+                // Track timestamp of last miss. If gap > 30s, reset counter (not consecutive).
                 let miss_count = {
-                    let mut entry = e_ctx.position_missing_counter.entry(trade.id).or_insert(0);
-                    *entry += 1;
-                    *entry
+                    let mut entry = e_ctx.position_missing_counter.entry(trade.id).or_insert((0, now));
+                    let (count, last_miss_ts) = entry.value_mut();
+                    // Reset if previous miss was > 30s ago (not consecutive)
+                    if now - *last_miss_ts > 30_000 {
+                        *count = 0;
+                    }
+                    *count += 1;
+                    *last_miss_ts = now;
+                    *count
                 };
 
-                if miss_count < 3 {
+                // Log ALL positions from the exchange for debugging
+                if let Some(positions) = all_positions.get(&trade.exchange_a) {
+                    if !has_pos_a {
+                        let syms: Vec<String> = positions.iter().map(|p| format!("{}({:.4})", p.symbol, p.size)).collect();
+                        tracing::warn!(
+                            "[pos_sync] Trade id={} {} — {} has NO matching position! Exchange returned {} positions: [{}]",
+                            trade.id, trade.pair, trade.exchange_a, positions.len(), syms.join(", ")
+                        );
+                    }
+                }
+                if let Some(positions) = all_positions.get(&trade.exchange_b) {
+                    if !has_pos_b {
+                        let syms: Vec<String> = positions.iter().map(|p| format!("{}({:.4})", p.symbol, p.size)).collect();
+                        tracing::warn!(
+                            "[pos_sync] Trade id={} {} — {} has NO matching position! Exchange returned {} positions: [{}]",
+                            trade.id, trade.pair, trade.exchange_b, positions.len(), syms.join(", ")
+                        );
+                    }
+                }
+
+                if miss_count < 6 {
                     tracing::warn!(
-                        "[pos_sync] Trade id={} {} — position missing detected ({}/3 confirmations). has_a={} has_b={} Waiting for more confirmations...",
+                        "[pos_sync] Trade id={} {} — position missing detected ({}/6 confirmations). has_a={} has_b={} Waiting for more confirmations...",
                         trade.id, trade.pair, miss_count, has_pos_a, has_pos_b
                     );
                     continue;
@@ -199,7 +250,8 @@ pub fn start_position_sync(
                         "[pos_sync] Trade id={} {} — BOTH positions gone (confirmed {}x)! Marking EXTERNAL_CLOSE",
                         trade.id, trade.pair, miss_count
                     );
-                    let repo = crate::engine::db::TradeRepository::new(db.clone()); repo.emergency_close_trade(trade.id).await;
+                    let repo = crate::engine::db::TradeRepository::new(db.clone());
+                    repo.emergency_close_trade(trade.id).await;
                     continue;
                 }
 

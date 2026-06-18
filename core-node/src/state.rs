@@ -83,9 +83,9 @@ pub struct EngineContext {
     /// Per-trade MIRAGE cooldown: trade_id → last_mirage_log_ms.
     /// Prevents logging MIRAGE spam (was 10+ per second, now max 1 per 10s).
     pub mirage_cooldown: Arc<DashMap<i64, i64>>,
-    /// Position-sync confirmation counter: trade_id → consecutive "missing" detections.
-    /// Requires 3 consecutive confirmations before emergency close to avoid false positives.
-    pub position_missing_counter: Arc<DashMap<i64, u32>>,
+    /// Position-sync confirmation counter: trade_id → (consecutive_miss_count, last_miss_timestamp_ms).
+    /// Requires 6 consecutive confirmations (within 30s window) before emergency close to avoid false positives.
+    pub position_missing_counter: Arc<DashMap<i64, (u32, i64)>>,
     /// Asymmetric failure counter per pair: pair → (fail_count, first_fail_timestamp_ms).
     /// Bans pair for 5 min after 3+ failures within 1 hour.
     pub asymmetric_fail_counter: Arc<DashMap<String, (u32, i64)>>,
