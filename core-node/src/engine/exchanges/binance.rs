@@ -542,10 +542,12 @@ impl ExchangeConnector for BinanceConnector {
         let ts = now_ms();
         params.insert("timestamp".to_string(), serde_json::json!(ts));
 
-        let type_str = if use_ioc && target_price > 0.0 { "LIMIT" } else { "MARKET" };
+        // Exit always uses IOC limit when target_price is available.
+        // use_ioc controls entry order type, not exit — exit must never be a pure market order.
+        let type_str = if target_price > 0.0 { "LIMIT" } else { "MARKET" };
         params.insert("type".to_string(), serde_json::json!(type_str));
 
-        if use_ioc && target_price > 0.0 {
+        if target_price > 0.0 {
             params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
             params.insert("price".to_string(), serde_json::json!(price_str));
         }

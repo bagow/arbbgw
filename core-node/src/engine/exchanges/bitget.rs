@@ -250,7 +250,9 @@ impl ExchangeConnector for BitgetConnector {
             let qty_str = format_price(qty);
             let price_str = format_price(limit_price);
 
-            let body = if use_ioc {
+            // Exit always uses IOC limit when target_price is available.
+            // use_ioc controls entry order type, not exit — exit must never be a pure market order.
+            let body = if target_price > 0.0 {
                 serde_json::json!({
                     "symbol": pair,
                     "productType": "USDT-FUTURES",

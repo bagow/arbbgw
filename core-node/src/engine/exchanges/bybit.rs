@@ -244,7 +244,9 @@ impl ExchangeConnector for BybitConnector {
             price_str = "0".to_string();
         }
 
-        let body = if use_ioc && target_price > 0.0 {
+        // Exit always uses IOC limit when target_price is available.
+        // use_ioc controls entry order type, not exit — exit must never be a pure market order.
+        let body = if target_price > 0.0 {
             json!({
                 "category": "linear",
                 "symbol": pair,
