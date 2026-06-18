@@ -5,6 +5,66 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::time::Duration;
 
 use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
+
+// ── REST FALLBACK RATE LIMITER ──────────────────────────────────────────────
+// Prevents REST fallback spam when WS is dead.
+// Each method gets its own cooldown (last REST call timestamp).
+static REST_FALLBACK_BALANCE_MS: AtomicI64 = AtomicI64::new(0);
+static REST_FALLBACK_POSITIONS_MS: AtomicI64 = AtomicI64::new(0);
+static REST_FALLBACK_FEE_MS: AtomicI64 = AtomicI64::new(0);
+static WS_CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
+
+const REST_FALLBACK_COOLDOWN_MS: i64 = 60_000; // 1 REST fallback per minute per method
+const WS_DEAD_THRESHOLD: u32 = 3; // After 3 WS failures, assume WS is dead
+
+/// Check if REST fallback is allowed for a given method.
+/// Returns Ok(()) if allowed, Err if on cooldown.
+fn check_rest_fallback_allowed(last_call: &AtomicI64, method: &str) -> Result<(), String> {
+    // If WS has failed too many times, don't even try REST
+    let ws_fails = WS_CONSECUTIVE_FAILURES.load(Ordering::Relaxed);
+    if ws_fails >= WS_DEAD_THRESHOLD {
+        return Err(format!(
+            "Binance WS dead ({} consecutive failures) — skipping REST fallback for {}",
+            ws_fails, method
+        ));
+    }
+
+    let now = now_ms() as i64;
+    let last = last_call.load(Ordering::Relaxed);
+    if now - last < REST_FALLBACK_COOLDOWN_MS {
+        let remaining = (REST_FALLBACK_COOLDOWN_MS - (now - last)) / 1000;
+        return Err(format!(
+            "Binance REST fallback {} on cooldown ({}s remaining)",
+            method, remaining
+        ));
+    }
+    last_call.store(now, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Record a successful WS response (resets failure counter).
+fn record_ws_success() {
+    WS_CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
+}
+
+/// Record a WS failure.
+fn record_ws_failure() {
+    let prev = WS_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed);
+    if prev + 1 >= WS_DEAD_THRESHOLD {
+        tracing::warn!(
+            "[binance] WS declared DEAD after {} consecutive failures — REST fallbacks blocked to prevent weight exhaustion",
+            prev + 1
+        );
+    }
+}
+
+/// PUBLIC: Reset WS failure counter (called when WS successfully reconnects).
+pub fn reset_ws_failures() {
+    let prev = WS_CONSECUTIVE_FAILURES.swap(0, Ordering::Relaxed);
+    if prev >= WS_DEAD_THRESHOLD {
+        tracing::info!("[binance] WS failure counter reset (was {}) — REST fallbacks re-enabled", prev);
+    }
+}
 use crate::engine::real::{binance_sign, now_ms, ExchangeKeys};
 
 pub struct BinanceConnector;
@@ -837,6 +897,7 @@ impl ExchangeConnector for BinanceConnector {
         });
         let result_arr = match send_ws_request(ws_req).await {
             Ok(resp) => {
+                record_ws_success();
                 if let Some(err) = resp.get("error") {
                     detect_ban_from_response(err);
                     return Err(format!("Binance WS balance error: {}", err));
@@ -844,10 +905,15 @@ impl ExchangeConnector for BinanceConnector {
                 resp["result"].as_array().cloned().unwrap_or_default()
             },
             Err(e) => {
-                // Check ban before REST fallback — REST requests during ban extend the ban!
+                record_ws_failure();
+                // Check ban + REST fallback cooldown before making REST request
                 check_ip_ban()?;
+                check_rest_fallback_allowed(&REST_FALLBACK_BALANCE_MS, "balance")?;
                 tracing::warn!("[binance] WS balance fetch failed ({}). Trying REST fallback...", e);
-                let rest_qs = format!("timestamp={}", ts);
+                // CRITICAL: use fresh timestamp — the original `ts` may be 5+ seconds stale
+                // after WS timeout, causing Binance -1021 recvWindow errors
+                let fresh_ts = now_ms();
+                let rest_qs = format!("timestamp={}", fresh_ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
                 let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
                 let url = format!("https://fapi.binance.com/fapi/v2/balance?{}", full_qs);
@@ -858,7 +924,11 @@ impl ExchangeConnector for BinanceConnector {
                     .await
                     .map_err(|e| format!("Binance REST balance HTTP error: {}", e))?;
                 
+                // Track weight from REST response headers
+                let status = resp.status();
+                let headers = resp.headers().clone();
                 let body: Value = resp.json().await.map_err(|e| format!("Binance REST balance JSON error: {}", e))?;
+                record_binance_response(status.as_u16(), &headers);
                 detect_ban_from_response(&body);
                 if let Some(_code) = body.get("code") {
                     return Err(format!("Binance REST balance API error: {}", body));
@@ -907,6 +977,7 @@ impl ExchangeConnector for BinanceConnector {
         });
         match send_ws_request(ws_req).await {
             Ok(resp) => {
+                record_ws_success();
                 if let Some(err) = resp.get("error") {
                     detect_ban_from_response(err);
                     return Err(format!("Binance WS fee error: {}", err));
@@ -916,9 +987,12 @@ impl ExchangeConnector for BinanceConnector {
                     .ok_or_else(|| "Failed to parse Binance fee from WS".to_string())
             },
             Err(e) => {
+                record_ws_failure();
                 check_ip_ban()?;
+                check_rest_fallback_allowed(&REST_FALLBACK_FEE_MS, "fee")?;
                 tracing::warn!("[binance] WS fee fetch failed ({}). Trying REST fallback...", e);
-                let rest_qs = format!("symbol=BTCUSDT&timestamp={}", ts);
+                let fresh_ts = now_ms();
+                let rest_qs = format!("symbol=BTCUSDT&timestamp={}", fresh_ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
                 let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
                 let url = format!("https://fapi.binance.com/fapi/v1/commissionRate?{}", full_qs);
@@ -929,7 +1003,10 @@ impl ExchangeConnector for BinanceConnector {
                     .await
                     .map_err(|e| format!("Binance REST fee HTTP error: {}", e))?;
                 
+                let status = resp.status();
+                let headers = resp.headers().clone();
                 let body: Value = resp.json().await.map_err(|e| format!("Binance REST fee JSON error: {}", e))?;
+                record_binance_response(status.as_u16(), &headers);
                 detect_ban_from_response(&body);
                 body["takerCommissionRate"].as_str()
                     .and_then(|s| s.parse::<f64>().ok())
@@ -1007,6 +1084,7 @@ impl ExchangeConnector for BinanceConnector {
         });
         let result_arr = match send_ws_request(ws_req).await {
             Ok(resp) => {
+                record_ws_success();
                 if let Some(err) = resp.get("error") {
                     detect_ban_from_response(err);
                     return Err(format!("Binance WS position error: {}", err));
@@ -1014,10 +1092,14 @@ impl ExchangeConnector for BinanceConnector {
                 resp["result"].as_array().cloned().unwrap_or_default()
             },
             Err(e) => {
-                // Check ban before REST fallback — REST requests during ban extend the ban!
+                record_ws_failure();
+                // Check ban + REST fallback cooldown before making REST request
                 check_ip_ban()?;
+                check_rest_fallback_allowed(&REST_FALLBACK_POSITIONS_MS, "positions")?;
                 tracing::warn!("[binance] WS positions fetch failed ({}). Trying REST fallback...", e);
-                let rest_qs = format!("timestamp={}", ts);
+                // CRITICAL: use fresh timestamp to avoid -1021 recvWindow errors
+                let fresh_ts = now_ms();
+                let rest_qs = format!("timestamp={}", fresh_ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
                 let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
                 let url = format!("https://fapi.binance.com/fapi/v2/positionRisk?{}", full_qs);
@@ -1028,7 +1110,11 @@ impl ExchangeConnector for BinanceConnector {
                     .await
                     .map_err(|e| format!("Binance REST positions HTTP error: {}", e))?;
                 
+                // Track weight from REST response headers
+                let status = resp.status();
+                let headers = resp.headers().clone();
                 let body: Value = resp.json().await.map_err(|e| format!("Binance REST positions JSON error: {}", e))?;
+                record_binance_response(status.as_u16(), &headers);
                 detect_ban_from_response(&body);
                 if let Some(_code) = body.get("code") {
                     return Err(format!("Binance REST positions API error: {}", body));

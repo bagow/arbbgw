@@ -55,6 +55,8 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>) {
 
         tracing::info!("[binance_ws] connected to Futures WS Trading API");
         crate::engine::utils::record_ws_connected("binance");
+        // Reset WS failure counter — connection is alive again, REST fallbacks can resume
+        crate::engine::exchanges::binance::reset_ws_failures();
         let (mut write, mut read) = ws_stream.split();
         let pending: Arc<Mutex<HashMap<String, ResponseSender>>> = Arc::new(Mutex::new(HashMap::new()));
         
