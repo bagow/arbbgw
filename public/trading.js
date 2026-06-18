@@ -1432,12 +1432,14 @@ function renderHistoryTable(profileId, history) {
                             <div class="td-line"><span>Exit:</span> <strong>${t.exit_price_a ? fmtPx(t.exit_price_a) : '—'}</strong></div>
                             <div class="td-line"><span>Leg PnL:</span> <strong style="color:${(t.pnl_a??0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl_a??0)}</strong></div>
                             <div class="td-line"><span style="color:var(--text-sub)">Opened:</span> <strong style="font-size:.75rem">${openTimeStr}</strong></div>
+                            <div class="td-line"><span style="color:var(--text-sub)">Closed:</span> <strong style="font-size:.75rem">${time}</strong></div>
                         </div>
                         <div class="td-col">
                             <div class="td-header">${t.exchange_b} <span class="badge ${!isAHigher ? 'badge-short' : 'badge-long'}">${!isAHigher ? 'SHORT' : 'LONG'}</span></div>
                             <div class="td-line"><span>Entry:</span> <strong>${fmtPx(t.entry_price_b)}</strong></div>
                             <div class="td-line"><span>Exit:</span> <strong>${t.exit_price_b ? fmtPx(t.exit_price_b) : '—'}</strong></div>
                             <div class="td-line"><span>Leg PnL:</span> <strong style="color:${(t.pnl_b??0)>=0?'var(--green)':'var(--red)'}">${fmtPnL(t.pnl_b??0)}</strong></div>
+                            <div class="td-line"><span style="color:var(--text-sub)">Opened:</span> <strong style="font-size:.75rem">${openTimeStr}</strong></div>
                             <div class="td-line"><span style="color:var(--text-sub)">Closed:</span> <strong style="font-size:.75rem">${time}</strong></div>
                         </div>
                         <div class="td-col td-total">
