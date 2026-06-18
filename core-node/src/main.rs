@@ -251,95 +251,122 @@ async fn main() -> Result<()> {
                 }
                 last_run = std::time::Instant::now();
 
-                // Read cached settings (no SQL, just RwLock read)
-                let real_profiles = real_cache.read().await.clone();
-                let ts = ts_cache.read().await.clone();
+                // Wrap entire loop body in a spawned task so a panic
+                // in compute_spreads / run_cycle / etc. does NOT kill the engine loop.
+                let t_prices = prices.clone();
+                let t_real_cache = real_cache.clone();
+                let t_ts_cache = ts_cache.clone();
+                let t_http = http.clone();
+                let t_real_db = real_db.clone();
+                let t_keys = keys.clone();
+                let t_e_ctx = e_ctx.clone();
+                let t_profiles_db = profiles_db_engine.clone();
 
-                let min_vol = real_profiles
-                    .iter()
-                    .map(|p| p.min_volume_millions)
-                    .fold(f64::MAX, f64::min);
-                let min_vol = if min_vol == f64::MAX { 1.0 } else { min_vol };
+                let tick_result = tokio::task::spawn(async move {
+                    // Read cached settings (no SQL, just RwLock read)
+                    let real_profiles = t_real_cache.read().await.clone();
+                    let ts = t_ts_cache.read().await.clone();
 
-                let spreads = compute_spreads(&prices, min_vol, &ts);
+                    let min_vol = real_profiles
+                        .iter()
+                        .map(|p| p.min_volume_millions)
+                        .fold(f64::MAX, f64::min);
+                    let min_vol = if min_vol == f64::MAX { 1.0 } else { min_vol };
 
-                // Writes to profiles_db since vps-api reads from it
-                static LAST_SNAP: std::sync::atomic::AtomicU64 =
-                    std::sync::atomic::AtomicU64::new(0);
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                if now_ms.saturating_sub(LAST_SNAP.load(std::sync::atomic::Ordering::Relaxed))
-                    > 1000
-                {
-                    LAST_SNAP.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                    let snapshot_spreads: Vec<_> = spreads.iter().take(500).cloned().collect();
-                    let snapshot_val =
-                        serde_json::json!({ "ts": now_ms as i64, "data": snapshot_spreads })
-                            .to_string();
-                    let cache_db = profiles_db_engine.clone();
-                    tokio::spawn(async move {
-                        let _ = cache_db.call(move |conn| {
-                            if let Err(e) = conn.execute(
-                                "INSERT INTO server_cache(key,value,expires_at) VALUES('snapshot',?,?) \
-                                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
-                                rusqlite::params![snapshot_val, now_ms as i64 + 10_000],
-                            ) {
-                                tracing::error!("Failed to save snapshot to db: {}", e);
-                            }
-                            Ok(())
-                        }).await;
-                    });
-                }
+                    let spreads = compute_spreads(&t_prices, min_vol, &ts);
 
-                if spreads.is_empty() {
-                    continue;
-                }
-
-                // ── BACKGROUND LEVERAGE WARMUP ──
-                crate::engine::real::warmup_leverages(
-                    &spreads,
-                    &real_profiles,
-                    http.clone(),
-                    keys.clone(),
-                );
-
-                // ── UPDATE L2 WANTED SET (demand-driven subscriptions) ──
-                // Populate from spread rows so collectors know which pairs need L2.
-                // Using spread rows (not signals) avoids chicken-and-egg:
-                // signals require L2, but L2 needs subscription BEFORE signal generation.
-                {
-                    e_ctx.l2_wanted.clear();
-                    for row in spreads.iter().take(200) {
-                        e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_a, row.pair));
-                        e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_b, row.pair));
+                    // Writes to profiles_db since vps-api reads from it
+                    static LAST_SNAP: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    if now_ms.saturating_sub(LAST_SNAP.load(std::sync::atomic::Ordering::Relaxed))
+                        > 1000
+                    {
+                        LAST_SNAP.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                        let snapshot_spreads: Vec<_> = spreads.iter().take(500).cloned().collect();
+                        let snapshot_val =
+                            serde_json::json!({ "ts": now_ms as i64, "data": snapshot_spreads })
+                                .to_string();
+                        let cache_db = t_profiles_db.clone();
+                        tokio::spawn(async move {
+                            let _ = cache_db.call(move |conn| {
+                                if let Err(e) = conn.execute(
+                                    "INSERT INTO server_cache(key,value,expires_at) VALUES('snapshot',?,?) \
+                                     ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
+                                    rusqlite::params![snapshot_val, now_ms as i64 + 10_000],
+                                ) {
+                                    tracing::error!("Failed to save snapshot to db: {}", e);
+                                }
+                                Ok(())
+                            }).await;
+                        });
                     }
-                }
 
-                // ── EVALUATE SMART SIGNALS & RUN ENGINE ──
-                let signals = crate::engine::scanner::generate_signals(
-                    &spreads,
-                    &prices,
-                    &real_profiles,
-                    &keys,
-                    &e_ctx,
-                    &ts,
-                );
+                    if spreads.is_empty() {
+                        return;
+                    }
 
-                for profile in &real_profiles {
-                    engine::cycle::run_cycle(
-                        signals.clone(),
-                        spreads.clone(),
-                        prices.clone(),
-                        profile.clone(),
-                        http.clone(),
-                        real_db.clone(),
-                        keys.clone(),
+                    // ── BACKGROUND LEVERAGE WARMUP ──
+                    crate::engine::real::warmup_leverages(
+                        &spreads,
+                        &real_profiles,
+                        t_http.clone(),
+                        t_keys.clone(),
+                    );
+
+                    // ── UPDATE L2 WANTED SET (demand-driven subscriptions) ──
+                    {
+                        t_e_ctx.l2_wanted.clear();
+                        for row in spreads.iter().take(200) {
+                            t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_a, row.pair));
+                            t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_b, row.pair));
+                        }
+                    }
+
+                    // ── EVALUATE SMART SIGNALS & RUN ENGINE ──
+                    let signals = crate::engine::scanner::generate_signals(
+                        &spreads,
+                        &t_prices,
+                        &real_profiles,
+                        &t_keys,
+                        &t_e_ctx,
                         &ts,
-                        e_ctx.clone(),
-                    )
-                    .await;
+                    );
+
+                    for profile in &real_profiles {
+                        engine::cycle::run_cycle(
+                            signals.clone(),
+                            spreads.clone(),
+                            t_prices.clone(),
+                            profile.clone(),
+                            t_http.clone(),
+                            t_real_db.clone(),
+                            t_keys.clone(),
+                            &ts,
+                            t_e_ctx.clone(),
+                        )
+                        .await;
+                    }
+                }).await;
+
+                if let Err(e) = tick_result {
+                    let msg = if e.is_panic() {
+                        match e.into_panic().downcast::<String>() {
+                            Ok(s) => *s,
+                            Err(p) => match p.downcast::<&str>() {
+                                Ok(s) => s.to_string(),
+                                Err(_) => "unknown panic".to_string(),
+                            },
+                        }
+                    } else {
+                        format!("task cancelled: {}", e)
+                    };
+                    tracing::error!("🔥 ENGINE LOOP PANIC (recovered, continuing): {}", msg);
+                    // Small delay to avoid tight panic-loop
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         });
