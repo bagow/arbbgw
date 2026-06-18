@@ -304,48 +304,61 @@ impl ExchangeConnector for BitgetConnector {
                     // 22002 = No position to close with given params (marginMode/holdSide mismatch)
                     // Use Bitget Flash Close API which auto-detects all params
                     if e.contains("22002") || e.to_lowercase().contains("no position") {
-                        info!("[bitget] close {} — using flash-close-positions API", pair);
-                        let hold = if is_buy { "short" } else { "long" };
-                        let flash_body = serde_json::json!({
-                            "symbol": pair,
-                            "productType": "USDT-FUTURES",
-                            "holdSide": hold
-                        })
-                        .to_string();
-                        match bitget_request(http, keys, "POST", "/api/v2/mix/order/close-positions", &flash_body, api_timeout_ms).await {
+                        // 22002 = holdSide/marginMode mismatch.
+                        // Retry as one-way mode close: same IOC limit order but WITHOUT
+                        // tradeSide/holdSide params. This avoids flash-close (pure market)
+                        // which causes catastrophic slippage.
+                        info!("[bitget] close {} — retrying as one-way mode (no holdSide)", pair);
+                        let oneway_body = if target_price > 0.0 {
+                            serde_json::json!({
+                                "symbol": pair,
+                                "productType": "USDT-FUTURES",
+                                "marginMode": "crossed",
+                                "marginCoin": "USDT",
+                                "side": side,
+                                "orderType": "limit",
+                                "force": "ioc",
+                                "price": price_str,
+                                "size": qty_str,
+                                "reduceOnly": "YES"
+                            })
+                            .to_string()
+                        } else {
+                            serde_json::json!({
+                                "symbol": pair,
+                                "productType": "USDT-FUTURES",
+                                "marginMode": "crossed",
+                                "marginCoin": "USDT",
+                                "side": side,
+                                "orderType": "market",
+                                "size": qty_str,
+                                "reduceOnly": "YES"
+                            })
+                            .to_string()
+                        };
+                        match bitget_request(http, keys, "POST", "/api/v2/mix/order/place-order", &oneway_body, api_timeout_ms).await {
                             Ok(v) => {
-                                let success = v["data"]["successList"].as_array();
-                                let fail = v["data"]["failureList"].as_array();
-                                if let Some(arr) = success {
-                                    if !arr.is_empty() {
-                                        let oid = arr[0]["orderId"].as_str().unwrap_or("?");
-                                        info!("[bitget] flash-close {} → orderId={}", pair, oid);
-                                        tokio::time::sleep(Duration::from_millis(500)).await;
-                                        if let Ok((px, fee, filled)) = self.fetch_order(http, keys, pair, oid, multiplier).await {
-                                            if filled > 0.0 {
-                                                return Ok(CloseReceipt {
-                                                    final_price: px,
-                                                    total_fee: fee,
-                                                    closed_volume: filled,
-                                                });
-                                            }
-                                        }
-                                        // Even if fetch_order fails, the close was submitted
+                                let oid = v["data"]["orderId"].as_str().unwrap_or("?");
+                                info!("[bitget] one-way close {} → orderId={}", pair, oid);
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                if let Ok((px, fee, filled)) = self.fetch_order(http, keys, pair, oid, multiplier).await {
+                                    if filled > 0.0 {
                                         return Ok(CloseReceipt {
-                                            final_price: 0.0,
-                                            total_fee: 0.0,
-                                            closed_volume: phys_amount,
+                                            final_price: px,
+                                            total_fee: fee,
+                                            closed_volume: filled,
                                         });
                                     }
                                 }
-                                if let Some(arr) = fail {
-                                    for f in arr {
-                                        warn!("[bitget] flash-close {} failed entry: {:?}", pair, f);
-                                    }
-                                }
+                                // Order placed but no fill confirmed yet — return with target price
+                                return Ok(CloseReceipt {
+                                    final_price: target_price,
+                                    total_fee: 0.0,
+                                    closed_volume: phys_amount,
+                                });
                             }
                             Err(e2) => {
-                                warn!("[bitget] flash-close {} also failed: {}", pair, e2);
+                                warn!("[bitget] one-way close {} also failed: {}", pair, e2);
                             }
                         }
                         return Err(e);
