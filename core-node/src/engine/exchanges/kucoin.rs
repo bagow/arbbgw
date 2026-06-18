@@ -459,156 +459,162 @@ impl ExchangeConnector for KucoinConnector {
         order_id: &str,
         multiplier: f64,
     ) -> Result<(f64, f64, f64), String> {
-        let path = format!("/api/v1/orders/{}", order_id);
-        
-        let mut final_size = 0.0;
-        let mut final_val = 0.0;
-        let mut final_fee = 0.0;
-        let mut resolved_via_ws = false;
-
-        // 1. Fast path: Wait for WS execution report (up to 1000ms)
-        let cache = super::ws_kucoin_private::get_order_cache();
-        for _ in 0..50 { // 50 * 20ms = 1000ms
-            if let Some(state) = cache.get(order_id) {
-                if state.status == "done" || state.filled_size > 0.0 {
-                    final_size = state.filled_size;
-                    final_val = state.deal_value;
-                    final_fee = state.fee;
-                    resolved_via_ws = true;
-                    tracing::debug!("[kucoin] fetch_order {} resolved via WS in <1s!", order_id);
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        let mut retries = if resolved_via_ws { 0 } else { 5 };
-
-        while !resolved_via_ws {
-            let v = super::ws_kucoin::send_kucoin_request(
-                &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
-                "GET", &path, "", 10000,
-            ).await?;
-
-            if v["code"].as_str() != Some("200000") {
-                if retries > 0 {
-                    retries -= 1;
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    continue;
-                }
-                return Err(format!("Kucoin fetch_order error: {}", v));
-            }
-
-            let size = v["data"]["dealSize"]
-                .as_f64()
-                .or_else(|| v["data"]["filledSize"].as_f64())
-                .or_else(|| v["data"]["dealSize"].as_str().and_then(|s| s.parse().ok()))
-                .or_else(|| {
-                    v["data"]["filledSize"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok())
-                })
-                .unwrap_or(0.0);
-            
-            let val = v["data"]["dealValue"]
-                .as_f64()
-                .or_else(|| v["data"]["filledValue"].as_f64())
-                .or_else(|| v["data"]["dealValue"].as_str().and_then(|s| s.parse().ok()))
-                .or_else(|| {
-                    v["data"]["filledValue"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok())
-                })
-                .unwrap_or(0.0);
-
-            // BUG-FIX: Use dealAvgPrice directly from REST API.
-            // Previously computed dealValue/dealSize which gives per-CONTRACT value
-            // (includes multiplier), not per-UNIT price. This caused sanity check
-            // failures in execution.rs → fallback to limit price → wrong entry_price.
-            let deal_avg_price = v["data"]["dealAvgPrice"]
-                .as_f64()
-                .or_else(|| v["data"]["dealAvgPrice"].as_str().and_then(|s| s.parse().ok()))
-                .unwrap_or(0.0);
-            
-            let fee = v["data"]["fee"]
-                .as_f64()
-                .or_else(|| v["data"]["fee"].as_str().and_then(|s| s.parse().ok()))
-                .unwrap_or(0.0);
-
-            let status = v["data"]["status"].as_str().unwrap_or("");
-            
-            if size <= 0.0 {
-                if retries > 0 {
-                    retries -= 1;
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    continue;
-                }
-                if status == "done" {
-                    return Ok((0.0, 0.0, 0.0));
-                }
-                return Err("Not filled yet".to_string());
-            }
-
-            final_size = size;
-            final_val = val;
-            final_fee = fee;
-
-            // Prefer dealAvgPrice (per-unit) over computed dealValue/dealSize (per-contract)
-            if deal_avg_price > 0.0 {
-                // dealAvgPrice is the real per-unit fill price from the exchange
-                // Override final_val so price calculation below uses it
-                final_val = deal_avg_price * size;
-            }
-
-            tracing::info!(
-                "[kucoin] 📊 fetch_order {} REST raw: dealSize={:.6} dealValue={:.8} dealAvgPrice={:.8} fee={:.6} status={}",
-                order_id, size, val, deal_avg_price, fee, status
-            );
-            break;
-        }
-
         let mult = if multiplier > 0.0 { multiplier } else { 1.0 };
 
-        let price = if final_size > 0.0 {
-            final_val / final_size
-        } else {
-            0.0
-        };
+        // ═══════════════════════════════════════════════════════════════════
+        // STRATEGY: Always get price from /api/v1/fills (real fill prices).
+        // KuCoin order API returns dealAvgPrice=null for IOC orders,
+        // and dealValue/dealSize gives per-CONTRACT value (wrong units).
+        // Fills API returns actual matchPrice (per-unit) for each fill.
+        // ═══════════════════════════════════════════════════════════════════
 
-        tracing::info!(
-            "[kucoin] 📊 fetch_order {} COMPUTED: price={:.8} = dealVal({:.8}) / dealSz({:.4}), mult={}, resolved_via_ws={}",
-            order_id, price, final_val, final_size, mult, resolved_via_ws
-        );
+        // 1. First check order status via order API (to know if filled)
+        let path = format!("/api/v1/orders/{}", order_id);
+        let mut deal_size = 0.0_f64;
+        let mut order_done = false;
 
-        let fee = final_fee;
-        if price > 0.0 && !resolved_via_ws && fee <= 1e-9 {
-            let path_fills = format!("/api/v1/fills?orderId={}", order_id);
-            if let Ok(v2) = super::ws_kucoin::send_kucoin_request(
+        for attempt in 0..6 {
+            // Quick WS check first
+            let cache = super::ws_kucoin_private::get_order_cache();
+            if let Some(state) = cache.get(order_id) {
+                if state.status == "done" {
+                    order_done = true;
+                    deal_size = state.filled_size;
+                    break;
+                }
+                if state.filled_size > 0.0 {
+                    deal_size = state.filled_size;
+                }
+            }
+
+            if attempt < 3 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                continue;
+            }
+
+            // REST fallback after 450ms
+            match super::ws_kucoin::send_kucoin_request(
+                &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
+                "GET", &path, "", 10000,
+            ).await {
+                Ok(v) => {
+                    if v["code"].as_str() != Some("200000") {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
+                    let size = v["data"]["dealSize"]
+                        .as_f64()
+                        .or_else(|| v["data"]["filledSize"].as_f64())
+                        .or_else(|| v["data"]["dealSize"].as_str().and_then(|s| s.parse().ok()))
+                        .or_else(|| v["data"]["filledSize"].as_str().and_then(|s| s.parse().ok()))
+                        .unwrap_or(0.0);
+                    let status = v["data"]["status"].as_str().unwrap_or("");
+                    if size > 0.0 {
+                        deal_size = size;
+                    }
+                    if status == "done" {
+                        order_done = true;
+                        break;
+                    }
+                    if size <= 0.0 && status == "done" {
+                        return Ok((0.0, 0.0, 0.0));
+                    }
+                }
+                Err(_) => {}
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        if deal_size <= 0.0 {
+            return Err("Not filled yet".to_string());
+        }
+
+        // 2. Get REAL price and fee from fills API — this is the source of truth
+        let path_fills = format!("/api/v1/fills?orderId={}", order_id);
+        let mut fills_price = 0.0_f64;
+        let mut fills_fee = 0.0_f64;
+        let mut fills_found = false;
+
+        for fill_attempt in 0..3 {
+            match super::ws_kucoin::send_kucoin_request(
                 &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
                 "GET", &path_fills, "", 5000,
             ).await {
-                if let Some(items) = v2["data"]["data"].as_array().or_else(|| v2["data"]["items"].as_array()) {
-                    let mut sum_fee = 0.0;
-                    let mut fills_sum_value = 0.0;
-                    let mut fills_sum_size = 0.0;
-                    for item in items {
-                        sum_fee += item["fee"].as_f64().or_else(|| item["fee"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
-                        let fp = item["price"].as_f64().or_else(|| item["price"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
-                        let fs = item["size"].as_f64().or_else(|| item["size"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
-                        fills_sum_value += fp * fs;
-                        fills_sum_size += fs;
+                Ok(v2) => {
+                    if let Some(items) = v2["data"]["data"].as_array()
+                        .or_else(|| v2["data"]["items"].as_array())
+                    {
+                        if !items.is_empty() {
+                            let mut sum_fee = 0.0_f64;
+                            let mut sum_value = 0.0_f64;
+                            let mut sum_size = 0.0_f64;
+                            for item in items {
+                                let fp = item["price"].as_f64()
+                                    .or_else(|| item["price"].as_str().and_then(|s| s.parse().ok()))
+                                    .unwrap_or(0.0);
+                                let fs = item["size"].as_f64()
+                                    .or_else(|| item["size"].as_str().and_then(|s| s.parse().ok()))
+                                    .unwrap_or(0.0);
+                                let ff = item["fee"].as_f64()
+                                    .or_else(|| item["fee"].as_str().and_then(|s| s.parse().ok()))
+                                    .unwrap_or(0.0);
+                                sum_value += fp * fs;
+                                sum_size += fs;
+                                sum_fee += ff;
+                            }
+                            if sum_size > 0.0 {
+                                // VWAP from fills = Σ(matchPrice × matchSize) / Σ(matchSize)
+                                // matchPrice is per-unit price (e.g. 0.10474 per ESPORTS token)
+                                fills_price = sum_value / sum_size;
+                                fills_fee = sum_fee.abs();
+                                fills_found = true;
+                                tracing::info!(
+                                    "[kucoin] 📊 fetch_order {} FILLS: price={:.8} fee={:.6} fills={} sum_val={:.8} sum_sz={:.4}",
+                                    order_id, fills_price, fills_fee, items.len(), sum_value, sum_size
+                                );
+                            }
+                            break;
+                        }
                     }
-                    if sum_fee > 1e-9 { final_fee = sum_fee; }
-                    tracing::info!(
-                        "[kucoin] 📊 fetch_order {} FILLS: fills_sum_value={:.8} fills_sum_size={:.4} fills_price={:.8}",
-                        order_id, fills_sum_value, fills_sum_size,
-                        if fills_sum_size > 0.0 { fills_sum_value / fills_sum_size } else { 0.0 }
+                }
+                Err(e) => {
+                    tracing::warn!("[kucoin] fills API attempt {} failed for {}: {}", fill_attempt, order_id, e);
+                }
+            }
+            if fill_attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+
+        // 3. Fallback: WS inline price (matchPrice from WS is also per-unit)
+        if !fills_found {
+            let cache = super::ws_kucoin_private::get_order_cache();
+            if let Some(state) = cache.get(order_id) {
+                if state.filled_size > 0.0 && state.deal_value > 0.0 {
+                    fills_price = state.deal_value / state.filled_size;
+                    fills_fee = state.fee.abs();
+                    tracing::warn!(
+                        "[kucoin] 📊 fetch_order {} WS fallback: price={:.8} fee={:.6}",
+                        order_id, fills_price, fills_fee
                     );
+                    fills_found = true;
                 }
             }
         }
 
-        Ok((price, final_fee, final_size * mult))
+        if !fills_found || fills_price <= 0.0 {
+            tracing::error!("[kucoin] ❌ fetch_order {} NO PRICE from fills or WS. deal_size={}", order_id, deal_size);
+            return Err(format!("No fill price available for order {}", order_id));
+        }
+
+        let phys_volume = deal_size * mult;
+
+        tracing::info!(
+            "[kucoin] 📊 fetch_order {} FINAL: price={:.8} fee={:.6} phys={:.4} ({}×{}) fills_api={}",
+            order_id, fills_price, fills_fee, phys_volume, deal_size, mult, fills_found
+        );
+
+        Ok((fills_price, fills_fee, phys_volume))
     }
 
     async fn fetch_balances(&self, __http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
