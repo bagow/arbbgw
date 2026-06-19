@@ -526,7 +526,7 @@ impl ExchangeConnector for GateConnector {
                 let url = format!("https://api.gateio.ws{}", path);
                 let resp = _http.get(&url)
                     .headers(headers)
-                    .timeout(Duration::from_secs(5))
+                    .timeout(Duration::from_secs(15))
                     .send()
                     .await
                     .map_err(|e| format!("Gate REST positions HTTP error: {}", e))?;

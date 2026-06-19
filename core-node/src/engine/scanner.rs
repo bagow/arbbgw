@@ -40,7 +40,17 @@ pub fn generate_signals(
     }
 
     for row in spreads.iter().take(ts.max_spreads_per_cycle as usize) {
+        if log_diag {
+            tracing::info!(
+                "[scanner] TRACE {} ({} vs {}) spread={:.4}% verified={} dir={}",
+                row.pair, row.exchange_a, row.exchange_b, row.spread,
+                row.structural_verified, row.direction
+            );
+        }
         if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) {
+            if log_diag {
+                tracing::info!("[scanner] TRACE {} → SKIP: keys not supported ({} or {})", row.pair, row.exchange_a, row.exchange_b);
+            }
             continue;
         }
 
@@ -49,21 +59,33 @@ pub fn generate_signals(
         if cooldown_active(cd_a, now, ts.exchange_cooldown_ms)
             || cooldown_active(cd_b, now, ts.exchange_cooldown_ms)
         {
+            if log_diag {
+                tracing::info!("[scanner] TRACE {} → SKIP: exchange cooldown", row.pair);
+            }
             continue;
         }
 
         let cd_pair = pair_cd.get(&row.pair).map(|v| *v).unwrap_or(0);
         if cooldown_active(cd_pair, now, ts.pair_cooldown_ms) {
+            if log_diag {
+                tracing::info!("[scanner] TRACE {} → SKIP: pair cooldown", row.pair);
+            }
             continue;
         }
 
         // Only 1 signal per pair per scan cycle (prevents duplicate exchange combos)
         if emitted_pairs.contains(&row.pair) {
+            if log_diag {
+                tracing::info!("[scanner] TRACE {} → SKIP: already emitted", row.pair);
+            }
             continue;
         }
 
         // ── HEALTH & RISK GUARD ──
         if !crate::engine::risk_manager::verify_trade_health(&row.exchange_a, &row.exchange_b, e_ctx) {
+            if log_diag {
+                tracing::info!("[scanner] TRACE {} → SKIP: health check failed ({} or {})", row.pair, row.exchange_a, row.exchange_b);
+            }
             continue;
         }
 
