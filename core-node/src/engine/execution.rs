@@ -893,8 +893,8 @@ pub async fn execute_sequential_entry(
             // The orphan position will be caught by position_sync's exchange scan.
             let filled_ex = if a_filled { &ctx.exa } else { &ctx.exb };
             tracing::error!(
-                "[real] 💀 CRITICAL: TRIM FAILED for {} after {} retries — orphan position on {}! Recording ASYMMETRIC_CLOSE.",
-                ctx.pair, MAX_TRIM_RETRIES, filled_ex
+                "[real] 💀 CRITICAL: TRIM FAILED for {} after 10 retries — orphan position on {}! Recording ASYMMETRIC_CLOSE.",
+                ctx.pair, filled_ex
             );
             // Fall through to ASYMMETRIC_CLOSE below
         }
