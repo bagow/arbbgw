@@ -646,7 +646,7 @@ pub async fn execute_sequential_entry(
     let profit_margin = (ctx.sig_spread - ctx.break_even_pct).max(0.0);
     let aggressive_slip = (profit_margin * 0.80)
         .max(ctx.ioc_slippage_pct)  // never less than base slippage
-        .min(1.5);                   // safety cap 1.5%
+        .min(2.5);                   // safety cap 2.5% (trim loss is always worse)
 
     tracing::info!(
         "[real] 🎯 Second leg {} slippage: base={:.3}% aggressive={:.3}% (spread={:.3}% BE={:.3}% profit_margin={:.3}%)",
@@ -707,7 +707,7 @@ pub async fn execute_sequential_entry(
     // A failed second leg means full ASYMMETRIC_CLOSE (trim loss), which is ALWAYS
     // worse than any slippage. So on retry, use the full profit margin.
     if ver_second.phys_volume.unwrap_or(0.0) <= 1e-12 && !ctx.dry_run && oid_second.is_some() {
-        let retry_slip = profit_margin.max(ctx.ioc_slippage_pct).min(2.0);
+        let retry_slip = profit_margin.max(ctx.ioc_slippage_pct).min(3.0);
         tracing::warn!(
             "[real] 🔄 RETRY second leg {} for {} with max slippage {:.3}% (was {:.3}%)",
             second_label, ctx.pair, retry_slip, aggressive_slip
