@@ -46,8 +46,44 @@ async fn bitmex_request(
     timeout_ms: u64,
 ) -> Result<Value, String> {
     let expires = (now_ms() / 1000) + 60;
-    let sig = bitmex_sign(&keys.bitmex_secret, method, path, expires, body);
-    let url = format!("https://www.bitmex.com{}", path);
+
+    // Split path into endpoint and query string, then URL-encode the query values.
+    // reqwest will send the encoded URL, so we must sign the ENCODED path.
+    let encoded_path = if let Some(idx) = path.find('?') {
+        let base = &path[..idx];
+        let qs = &path[idx + 1..];
+        // Encode each key=value pair's VALUE
+        let encoded_qs: String = qs.split('&')
+            .map(|pair| {
+                if let Some(eq_idx) = pair.find('=') {
+                    let key = &pair[..eq_idx];
+                    let val = &pair[eq_idx + 1..];
+                    // Simple percent-encoding for JSON filter values
+                    let encoded_val: String = val.chars().map(|c| match c {
+                        '{' => "%7B".to_string(),
+                        '}' => "%7D".to_string(),
+                        '"' => "%22".to_string(),
+                        ':' => "%3A".to_string(),
+                        ' ' => "%20".to_string(),
+                        '[' => "%5B".to_string(),
+                        ']' => "%5D".to_string(),
+                        ',' => "%2C".to_string(),
+                        _ => c.to_string(),
+                    }).collect();
+                    format!("{}={}", key, encoded_val)
+                } else {
+                    pair.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        format!("{}?{}", base, encoded_qs)
+    } else {
+        path.to_string()
+    };
+
+    let sig = bitmex_sign(&keys.bitmex_secret, method, &encoded_path, expires, body);
+    let url = format!("https://www.bitmex.com{}", encoded_path);
 
     let builder = match method {
         "GET" => http.get(&url),

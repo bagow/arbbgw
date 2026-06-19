@@ -251,7 +251,20 @@ impl ExchangeConnector for ToobitConnector {
 
 
     async fn fetch_positions(&self, http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {
-        let v = toobit_request(http, keys, "GET", "/openApi/swap/v2/user/positions", "symbol=", "", 10_000).await?;
+        // Toobit's /openApi/swap/v2/user/positions endpoint returns 404.
+        // The API doesn't support fetching positions. Return empty to avoid
+        // cyclic AUTO-BAN from fetcher (3 errors → 120s ban → repeat).
+        // When Toobit fixes their API, this can be updated to use the real endpoint.
+        let v = match toobit_request(http, keys, "GET", "/openApi/swap/v2/user/positions", "symbol=", "", 10_000).await {
+            Ok(v) => v,
+            Err(e) => {
+                if e.contains("404") {
+                    // Known: endpoint doesn't exist on Toobit
+                    return Ok(Vec::new());
+                }
+                return Err(e);
+            }
+        };
         let mut positions = Vec::new();
         if let Some(arr) = v["data"].as_array() {
             for p in arr {

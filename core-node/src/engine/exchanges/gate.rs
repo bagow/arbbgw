@@ -513,24 +513,44 @@ impl ExchangeConnector for GateConnector {
             "event": "api",
             "payload": []
         });
-        let resp = send_gate_ws_request(ws_req).await?;
-        let mut positions = Vec::new();
-        if let Some(arr) = resp["data"]["result"].as_array() {
-            for p in arr {
-                let size: f64 = p["size"].as_i64().unwrap_or(0) as f64;
-                if size.abs() < 1e-12 { continue; }
-                let contract = p["contract"].as_str().unwrap_or("").replace("_", "");
-                let realized = p["realised_pnl"].as_str().and_then(|s| s.parse().ok()).or_else(|| p["realised_pnl"].as_f64()).unwrap_or(0.0);
-                positions.push(PositionInfo {
-                    symbol: contract,
-                    size,
-                    entry_price: p["entry_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| p["entry_price"].as_f64()).unwrap_or(0.0),
-                    unrealized_pnl: p["unrealised_pnl"].as_str().and_then(|s| s.parse().ok()).or_else(|| p["unrealised_pnl"].as_f64()).unwrap_or(0.0),
-                    realized_pnl: realized,
-                    accumulated_fee: 0.0,
-                    accumulated_funding: 0.0,
-                });
+
+        // Try WS first, fall back to REST on timeout/error
+        let result_arr = match send_gate_ws_request(ws_req).await {
+            Ok(resp) => {
+                resp["data"]["result"].as_array().cloned().unwrap_or_default()
             }
+            Err(_e) => {
+                // REST fallback — Gate WS is unreliable for position queries
+                let path = "/api/v4/futures/usdt/positions";
+                let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, "");
+                let url = format!("https://api.gateio.ws{}", path);
+                let resp = _http.get(&url)
+                    .headers(headers)
+                    .timeout(Duration::from_secs(5))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Gate REST positions HTTP error: {}", e))?;
+                let body: Value = resp.json().await
+                    .map_err(|e| format!("Gate REST positions JSON error: {}", e))?;
+                body.as_array().cloned().unwrap_or_default()
+            }
+        };
+
+        let mut positions = Vec::new();
+        for p in result_arr {
+            let size: f64 = p["size"].as_i64().unwrap_or(0) as f64;
+            if size.abs() < 1e-12 { continue; }
+            let contract = p["contract"].as_str().unwrap_or("").replace("_", "");
+            let realized = p["realised_pnl"].as_str().and_then(|s| s.parse().ok()).or_else(|| p["realised_pnl"].as_f64()).unwrap_or(0.0);
+            positions.push(PositionInfo {
+                symbol: contract,
+                size,
+                entry_price: p["entry_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| p["entry_price"].as_f64()).unwrap_or(0.0),
+                unrealized_pnl: p["unrealised_pnl"].as_str().and_then(|s| s.parse().ok()).or_else(|| p["unrealised_pnl"].as_f64()).unwrap_or(0.0),
+                realized_pnl: realized,
+                accumulated_fee: 0.0,
+                accumulated_funding: 0.0,
+            });
         }
         Ok(positions)
     }
