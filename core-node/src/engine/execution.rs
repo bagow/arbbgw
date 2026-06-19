@@ -956,8 +956,18 @@ pub async fn execute_sequential_entry(
     } else { 0.0 };
 
     let entry_slip = slip_a + slip_b;
-    let contracts_a_db = matched_phys / ctx.mult_a;
-    let contracts_b_db = matched_phys / ctx.mult_b;
+    // If trim failed (partial asymmetry), store ACTUAL exchange-side quantities
+    // instead of matched_phys. This ensures DB always reflects what's on the exchange.
+    // Exit_manager/position_sync will then close the correct quantity.
+    let (contracts_a_db, contracts_b_db) = if !all_trimmed && !ctx.dry_run {
+        tracing::warn!(
+            "[real] ⚠️ PARTIAL TRIM FAILED for {} — storing actual exchange quantities (a={:.6} b={:.6}) instead of matched ({:.6})",
+            ctx.pair, phys_a, phys_b, matched_phys
+        );
+        (phys_a / ctx.mult_a, phys_b / ctx.mult_b)
+    } else {
+        (matched_phys / ctx.mult_a, matched_phys / ctx.mult_b)
+    };
 
     if fill_a > 0.0 && ctx.sig_entry_a > 0.0 {
         let ratio_a = fill_a / ctx.sig_entry_a;
