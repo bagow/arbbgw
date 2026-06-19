@@ -391,8 +391,8 @@ pub async fn trim_asymmetric_legs(
     let fp = pair.to_string();
     let key_a = format!("{}:{}", exa, pair);
     let key_b = format!("{}:{}", exb, pair);
-    const MAX_TRIM_RETRIES: u32 = 3;
-    const TRIM_RETRY_DELAY_MS: u64 = 2000;
+    const MAX_TRIM_RETRIES: u32 = 10;
+    const TRIM_RETRY_DELAY_MS: u64 = 3000;
 
     if delta_a > 1e-12 {
         let phys_to_dump = delta_a;
@@ -886,32 +886,17 @@ pub async fn execute_sequential_entry(
         }
 
         if !all_trimmed && !ctx.dry_run {
-            // ── TRIM FAILED: Position still exists on exchange ──
-            // Insert as OPEN trade (NOT ASYMMETRIC_CLOSE) so position_sync
-            // sees the one-legged position and closes it when network recovers.
-            // This prevents ghost positions at the source.
+            // ── TRIM FAILED after 10 retries (30s) ──
+            // Record as ASYMMETRIC_CLOSE anyway. Position is an orphan on exchange,
+            // but a broken one-legged OPEN trade in DB is worse (exit_manager can't
+            // close it, it spams logs and blocks UI).
+            // The orphan position will be caught by position_sync's exchange scan.
             let filled_ex = if a_filled { &ctx.exa } else { &ctx.exb };
-            let filled_contracts = if a_filled { phys_a / ctx.mult_a } else { phys_b / ctx.mult_b };
             tracing::error!(
-                "[real] 🚨 TRIM FAILED for {} — inserting as OPEN trade so position_sync can close {} leg on {}",
-                ctx.pair, ctx.pair, filled_ex
+                "[real] 💀 CRITICAL: TRIM FAILED for {} after {} retries — orphan position on {}! Recording ASYMMETRIC_CLOSE.",
+                ctx.pair, MAX_TRIM_RETRIES, filled_ex
             );
-            let total_fee = fee_a_val + fee_b_val + trimming_fee;
-            let (ent_a, ent_b) = if a_filled { (fill_a, 0.0) } else { (0.0, fill_b) };
-            let (c_a, c_b) = if a_filled { (filled_contracts, 0.0) } else { (0.0, filled_contracts) };
-            repo.insert_new_entry(
-                ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
-                if a_filled { delta_a * fill_a } else { delta_b * fill_b },
-                ent_a, ent_b, ctx.sig_spread,
-                crate::engine::utils::now_ms(),
-                ctx.profile_id.clone(),
-                total_fee, 0.0,
-                String::new(), String::new(),
-                c_a, c_b,
-                ctx.sig_structural_spread,
-            ).await;
-            e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.asymmetric_cooldown_ms);
-            return true;
+            // Fall through to ASYMMETRIC_CLOSE below
         }
 
         // Trim succeeded — record as ASYMMETRIC_CLOSE (position is already closed)
