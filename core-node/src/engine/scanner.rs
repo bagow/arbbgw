@@ -327,16 +327,29 @@ pub fn generate_signals(
             let actual_vol_b = phys_qty * entry_b;
             let max_v = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
 
+            // mult_trap: if actual volume exceeds tolerance, check if it's at minimum lot.
+            // When min contract lot (big_step * price) > max_v, there's no way to trade
+            // smaller — allow it with a warning instead of blocking all trades.
             if actual_vol_a > max_v {
+                let big_step = mult_a.max(mult_b);
+                let min_lot_vol = big_step * entry_a;
+                if actual_vol_a > min_lot_vol * 1.01 {
+                    // Genuinely oversized (not at minimum) — reject
+                    if let Some(p) = &diag_prefix {
+                        tracing::info!(
+                            "{} -> actual_vol exceeds max_v (${:.2} > ${:.2}) (mult_trap)",
+                            p, actual_vol_a, max_v
+                        );
+                    }
+                    continue;
+                }
+                // At minimum lot — allow with warning
                 if let Some(p) = &diag_prefix {
-                    tracing::info!(
-                        "{} -> actual_vol exceeds max_v (${:.2} > ${:.2}) (mult_trap)",
-                        p,
-                        actual_vol_a,
-                        max_v
+                    tracing::debug!(
+                        "{} -> min lot ${:.2} > max_v ${:.2} but accepting (min_lot_override)",
+                        p, actual_vol_a, max_v
                     );
                 }
-                continue;
             }
 
             // Universal minimum notional check — all major CEXes reject orders below ~$5
