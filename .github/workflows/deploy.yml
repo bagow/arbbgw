@@ -146,7 +146,7 @@ jobs:
       - name: Build core-node
         run: cargo build --release -p core-node
       - name: Copy to VPS
-        timeout-minutes: 10
+        timeout-minutes: 20
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
@@ -154,7 +154,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           source: "target/release/core-node"
           target: "/tmp/deploy/"
-          command_timeout: 10m
+          command_timeout: 20m
           strip_components: 2
       - name: Install and Restart
         uses: appleboy/ssh-action@v1.0.3
