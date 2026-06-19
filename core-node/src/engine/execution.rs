@@ -1002,6 +1002,327 @@ pub async fn execute_sequential_entry(
     true
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// PARALLEL ENTRY — both legs fire simultaneously via tokio::join!
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub async fn execute_parallel_entry(
+    ctx: SequentialEntryContext,
+    http: &Client,
+    keys: &Arc<ExchangeKeys>,
+    db: &Connection,
+    e_ctx: &Arc<EngineContext>,
+    ts: &TechnicalSettings,
+) -> bool {
+    let now = crate::engine::utils::now_ms();
+    let conn_a = crate::engine::exchanges::get_connector(&ctx.exa).unwrap();
+    let conn_b = crate::engine::exchanges::get_connector(&ctx.exb).unwrap();
+
+    let t0_exec = std::time::Instant::now();
+
+    // A is higher → sell A (hit bid), buy B (hit ask)
+    let is_buy_a = !ctx.is_a_higher;
+    let is_buy_b = ctx.is_a_higher;
+
+    tracing::info!(
+        "[real] ⚡ PARALLEL execution: {} + {} for {} (qty_a={:.6} qty_b={:.6})...",
+        ctx.exa, ctx.exb, ctx.pair, ctx.qty_a, ctx.qty_b
+    );
+
+    // ── PHASE 1: Fire BOTH legs simultaneously ──────────────────────────────
+    let (res_a, res_b) = tokio::join!(
+        conn_a.place_order(
+            http, keys, &ctx.pair, is_buy_a, ctx.qty_a, ctx.dry_run,
+            ctx.limit_price_a, ctx.limit_price_a > 0.0,
+            ctx.leverage, ctx.mult_a, ctx.ioc_slippage_pct, ctx.tick_a, ts.api_timeout_ms
+        ),
+        conn_b.place_order(
+            http, keys, &ctx.pair, is_buy_b, ctx.qty_b, ctx.dry_run,
+            ctx.limit_price_b, ctx.limit_price_b > 0.0,
+            ctx.leverage, ctx.mult_b, ctx.ioc_slippage_pct, ctx.tick_b, ts.api_timeout_ms
+        )
+    );
+
+    let fire_ms = t0_exec.elapsed().as_millis();
+    tracing::info!("[real] ⚡ PARALLEL orders sent in {}ms", fire_ms);
+
+    // Parse results
+    let (oid_a, fill_a_inline, fee_a_inline) = match res_a {
+        Ok(t) => {
+            e_ctx.ws_order_unhealthy_until.remove(&ctx.exa);
+            t
+        }
+        Err(e) => {
+            tracing::error!("[real] LEG_A reject {}/{}: {}", ctx.exa, ctx.pair, e);
+            let esl = e.to_string().to_lowercase();
+            if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
+                crate::engine::risk_manager::mark_balance_low(&ctx.exa, e_ctx);
+            }
+            if esl.contains("timeout") || esl.contains("ws ") || esl.contains("websocket") || esl.contains("connect") {
+                e_ctx.ws_order_unhealthy_until.insert(ctx.exa.clone(), now + 60_000);
+                tracing::warn!("[real] 📡 {} WS marked UNHEALTHY for 60s", ctx.exa);
+            }
+            (None, 0.0, 0.0)
+        }
+    };
+
+    let (oid_b, fill_b_inline, fee_b_inline) = match res_b {
+        Ok(t) => {
+            e_ctx.ws_order_unhealthy_until.remove(&ctx.exb);
+            t
+        }
+        Err(e) => {
+            tracing::error!("[real] LEG_B reject {}/{}: {}", ctx.exb, ctx.pair, e);
+            let esl = e.to_string().to_lowercase();
+            if esl.contains("insufficient") || esl.contains("balance") || esl.contains("margin") || esl.contains("exceed") {
+                crate::engine::risk_manager::mark_balance_low(&ctx.exb, e_ctx);
+            }
+            if esl.contains("timeout") || esl.contains("ws ") || esl.contains("websocket") || esl.contains("connect") {
+                e_ctx.ws_order_unhealthy_until.insert(ctx.exb.clone(), now + 60_000);
+                tracing::warn!("[real] 📡 {} WS marked UNHEALTHY for 60s", ctx.exb);
+            }
+            (None, 0.0, 0.0)
+        }
+    };
+
+    // ── PHASE 2: Verify fills (in parallel too) ─────────────────────────────
+    let phys_a_init = if fill_a_inline > 0.0 { Some(ctx.qty_a) } else { None };
+    let phys_b_init = if fill_b_inline > 0.0 { Some(ctx.qty_b) } else { None };
+    let retries_a = if fill_a_inline <= 0.0 { 5_i64 } else { ts.fill_verify_retries };
+    let retries_b = if fill_b_inline <= 0.0 { 5_i64 } else { ts.fill_verify_retries };
+
+    let (ver_a, ver_b) = tokio::join!(
+        verify_fill(
+            &conn_a, http, keys, &ctx.pair, &oid_a,
+            fill_a_inline, fee_a_inline, phys_a_init, ctx.qty_a, ctx.dry_run,
+            VerifyConfig {
+                fast_retries: retries_a,
+                fast_delay_ms: ts.fill_verify_delay_ms as u64,
+                slow_retries: 8,
+                slow_delay_ms: 500,
+                position_fallback: false,
+                mult: ctx.mult_a,
+            },
+            "real",
+        ),
+        verify_fill(
+            &conn_b, http, keys, &ctx.pair, &oid_b,
+            fill_b_inline, fee_b_inline, phys_b_init, ctx.qty_b, ctx.dry_run,
+            VerifyConfig {
+                fast_retries: retries_b,
+                fast_delay_ms: ts.fill_verify_delay_ms as u64,
+                slow_retries: 8,
+                slow_delay_ms: 500,
+                position_fallback: false,
+                mult: ctx.mult_b,
+            },
+            "real",
+        )
+    );
+
+    let mut phys_a = ver_a.phys_volume.unwrap_or(0.0);
+    let mut phys_b = ver_b.phys_volume.unwrap_or(0.0);
+    let mut fill_a = ver_a.fill_price;
+    let mut fill_b = ver_b.fill_price;
+    let fee_a_val = ver_a.fee;
+    let fee_b_val = ver_b.fee;
+
+    // Guard phantom fills
+    if phys_a > 1e-12 && fill_a <= 0.0 {
+        tracing::error!("[real] 🚨 PHANTOM FILL {} on {}: phys={:.6} but fill_price=0", ctx.pair, ctx.exa, phys_a);
+        phys_a = 0.0;
+    }
+    if phys_b > 1e-12 && fill_b <= 0.0 {
+        tracing::error!("[real] 🚨 PHANTOM FILL {} on {}: phys={:.6} but fill_price=0", ctx.pair, ctx.exb, phys_b);
+        phys_b = 0.0;
+    }
+
+    if ctx.dry_run {
+        fill_a = ctx.sig_entry_a;
+        fill_b = ctx.sig_entry_b;
+    }
+
+    let total_exec_ms = t0_exec.elapsed().as_millis();
+
+    let a_filled = oid_a.is_some() && phys_a > 0.0;
+    let b_filled = oid_b.is_some() && phys_b > 0.0;
+
+    tracing::info!("[real] RESULT {} A={} B={} phys_a={:.6} phys_b={:.6} fill_a={:.6} fill_b={:.6} latency={}ms",
+        ctx.pair, a_filled, b_filled, phys_a, phys_b, fill_a, fill_b, total_exec_ms);
+
+    // ── From here: identical to sequential_entry post-fill logic ────────────
+
+    if !a_filled && !b_filled {
+        tracing::info!("[real] Both IOC unfilled {} — no exposure ({}ms)", ctx.pair, total_exec_ms);
+        e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + 10_000);
+        return true;
+    }
+
+    let mv = match_volumes(phys_a, phys_b, ctx.mult_a, ctx.mult_b);
+    let matched_phys = mv.matched_phys;
+    let delta_a = mv.delta_a;
+    let delta_b = mv.delta_b;
+
+    // ── DELTA TRIMMING (Phase 3) ──
+    let (trimming_fee, trimming_loss, all_trimmed) = if !ctx.dry_run {
+        trim_asymmetric_legs(
+            http, keys, &ctx.pair, &ctx.exa, &ctx.exb, ctx.is_a_higher,
+            delta_a, delta_b, ctx.mult_a, ctx.mult_b, fill_a, fill_b, ts.api_timeout_ms, e_ctx
+        ).await
+    } else {
+        (0.0, 0.0, true)
+    };
+
+    // ── TRADE BOOKING (Phase 4) ──
+    let repo = TradeRepository::new(db.clone());
+
+    if matched_phys < 1e-12 {
+        let failed_exchange = if a_filled { ctx.exb.as_str() } else { ctx.exa.as_str() };
+        let ticker_ban_key = format!("{}:{}", failed_exchange, ctx.pair);
+        {
+            let now_ban = crate::engine::utils::now_ms();
+            let mut entry = e_ctx.asymmetric_fail_counter.entry(ticker_ban_key.clone()).or_insert((0, now_ban));
+            let (count, first_ts) = entry.value_mut();
+            if now_ban - *first_ts > 3_600_000 {
+                *count = 0;
+                *first_ts = now_ban;
+            }
+            *count += 1;
+            if *count >= 3 {
+                let ban_ms = 300_000_i64;
+                e_ctx.pair_cooldown.insert(ctx.pair.clone(), now_ban + ban_ms);
+                tracing::error!(
+                    "[real] 🚫 TICKER BANNED {}: {} asymmetric failures in 1h. Cooldown {}s.",
+                    ticker_ban_key, count, ban_ms / 1000
+                );
+                *count = 0;
+                *first_ts = now_ban;
+            }
+        }
+
+        let trims = e_ctx.consecutive_trims.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if trims >= 10 {
+            e_ctx.is_killed.store(true, std::sync::atomic::Ordering::Relaxed);
+            tracing::error!("[real] 💀 KILL-SWITCH TRIGGERED: {} consecutive FULL TRIMS. Suspending new entries.", trims);
+            if let Some(ref pdb) = e_ctx.profiles_db {
+                let pdb = pdb.clone();
+                tokio::spawn(async move {
+                    let _ = pdb.call(move |conn| {
+                        conn.execute(
+                            "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','1',0) \
+                             ON CONFLICT(key) DO UPDATE SET value='1'",
+                            [],
+                        )?;
+                        Ok(())
+                    }).await;
+                });
+            }
+        }
+
+        if !all_trimmed && !ctx.dry_run {
+            let filled_ex = if a_filled { &ctx.exa } else { &ctx.exb };
+            tracing::error!(
+                "[real] 💀 CRITICAL: TRIM FAILED for {} — orphan position on {}! Recording ASYMMETRIC_CLOSE.",
+                ctx.pair, filled_ex
+            );
+        }
+
+        let total_fee = fee_a_val + fee_b_val + trimming_fee;
+        tracing::error!("[real] ❌ FULL ASYMMETRY DUMPED {} on {}. Trade canceled. Trimming Loss: {:.4}, Trimming Fee: {:.4}", ctx.pair, failed_exchange, trimming_loss, trimming_fee);
+        e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.asymmetric_cooldown_ms);
+
+        let (ent_a, ent_b) = if a_filled { (fill_a, 0.0) } else { (0.0, fill_b) };
+        let fv_usd = if a_filled { delta_a * fill_a } else { delta_b * fill_b };
+        let gross_pnl = -trimming_loss;
+        let net_pnl = gross_pnl - total_fee;
+
+        let pnl_a_val = if a_filled { gross_pnl } else { 0.0 };
+        let pnl_b_val = if !a_filled { gross_pnl } else { 0.0 };
+
+        repo.append_asymmetric_close(
+            ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
+            fv_usd, ent_a, ent_b, ctx.sig_spread, crate::engine::utils::now_ms(),
+            pnl_a_val, pnl_b_val, ctx.profile_id.clone(),
+            total_fee, 0.0, net_pnl, gross_pnl, 0.0, 0.0,
+        ).await;
+        return true;
+    }
+
+    e_ctx.consecutive_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+    e_ctx.consecutive_trims.store(0, std::sync::atomic::Ordering::Relaxed);
+
+    let final_vol_usd = matched_phys * fill_a;
+    crate::engine::risk_manager::deduct_cached_balance(&ctx.exa, final_vol_usd, ctx.leverage, e_ctx);
+    crate::engine::risk_manager::deduct_cached_balance(&ctx.exb, final_vol_usd, ctx.leverage, e_ctx);
+
+    e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.pair_cooldown_ms);
+
+    let actual_entry_spread = compute_entry_spread(fill_a, fill_b, ctx.is_a_higher, ctx.sig_spread);
+
+    let entry_comm = fee_a_val + fee_b_val + trimming_fee + trimming_loss;
+    let slip_a = if fill_a > 0.0 {
+        if ctx.is_a_higher { ((ctx.sig_entry_a - fill_a) * matched_phys).max(0.0) } else { ((fill_a - ctx.sig_entry_a) * matched_phys).max(0.0) }
+    } else { 0.0 };
+    let slip_b = if fill_b > 0.0 {
+        if !ctx.is_a_higher { ((ctx.sig_entry_b - fill_b) * matched_phys).max(0.0) } else { ((fill_b - ctx.sig_entry_b) * matched_phys).max(0.0) }
+    } else { 0.0 };
+
+    let entry_slip = slip_a + slip_b;
+    let (contracts_a_db, contracts_b_db) = if !all_trimmed && !ctx.dry_run {
+        tracing::warn!(
+            "[real] ⚠️ PARTIAL TRIM FAILED for {} — storing actual quantities (a={:.6} b={:.6}) instead of matched ({:.6})",
+            ctx.pair, phys_a, phys_b, matched_phys
+        );
+        (phys_a / ctx.mult_a, phys_b / ctx.mult_b)
+    } else {
+        (matched_phys / ctx.mult_a, matched_phys / ctx.mult_b)
+    };
+
+    if fill_a > 0.0 && ctx.sig_entry_a > 0.0 {
+        let ratio_a = fill_a / ctx.sig_entry_a;
+        if ratio_a > 2.0 || ratio_a < 0.5 {
+            tracing::error!("[real] 🚨 PRICE SANITY FAIL {}/{}: fill_a={:.8} entry_a={:.8} ratio={:.2}. Using L1 fallback!",
+                ctx.pair, ctx.exa, fill_a, ctx.sig_entry_a, ratio_a);
+            fill_a = ctx.sig_entry_a;
+        }
+    }
+    if fill_b > 0.0 && ctx.sig_entry_b > 0.0 {
+        let ratio_b = fill_b / ctx.sig_entry_b;
+        if ratio_b > 2.0 || ratio_b < 0.5 {
+            tracing::error!("[real] 🚨 PRICE SANITY FAIL {}/{}: fill_b={:.8} entry_b={:.8} ratio={:.2}. Using L1 fallback!",
+                ctx.pair, ctx.exb, fill_b, ctx.sig_entry_b, ratio_b);
+            fill_b = ctx.sig_entry_b;
+        }
+    }
+
+    if fill_a > 0.0 && fill_b > 0.0 && ctx.sig_entry_a > 0.0 && ctx.sig_entry_b > 0.0 {
+        let fill_ratio = fill_a / fill_b;
+        let sig_ratio = ctx.sig_entry_a / ctx.sig_entry_b;
+        let cross_ratio = fill_ratio / sig_ratio;
+        if cross_ratio > 5.0 || cross_ratio < 0.2 {
+            tracing::error!(
+                "[real] 🚨 CROSS-LEG SANITY FAIL {}: fill_a/fill_b={:.6} sig_a/sig_b={:.6} cross_ratio={:.2}. Aborting trade + trimming.",
+                ctx.pair, fill_ratio, sig_ratio, cross_ratio
+            );
+            phys_a = 0.0;
+            phys_b = 0.0;
+        }
+    }
+
+    tracing::info!("[real] [EXCHANGE_VERIFIED] ✅ OPEN {} phys={:.6} (Trimming: -${:.4}) A_price={:.6} B_price={:.6} fees={:.4} slip={:.4} actual_sp={:.4}%",
+        ctx.pair, matched_phys, trimming_loss, fill_a, fill_b, entry_comm, entry_slip, actual_entry_spread);
+
+    repo.insert_new_entry(
+        ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
+        final_vol_usd, fill_a, fill_b, actual_entry_spread, crate::engine::utils::now_ms(),
+        ctx.profile_id.clone(), entry_comm, entry_slip,
+        oid_a.unwrap_or_default(), oid_b.unwrap_or_default(),
+        contracts_a_db, contracts_b_db, ctx.sig_structural_spread,
+    ).await;
+
+    true
+}
+
 pub struct CloseTaskContext {
     pub trade_id: i64,
     pub pair: String,
