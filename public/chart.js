@@ -415,7 +415,8 @@ function renderTable() {
             const av = a[scannerState.sortKey] ?? 0, bv = b[scannerState.sortKey] ?? 0;
             return typeof av === 'string' ? av.localeCompare(bv) * scannerState.sortDir : (av - bv) * scannerState.sortDir;
         });
-    pairCount && (pairCount.textContent = `${sorted.length} pairs`);
+    const verifiedCount = sorted.filter(r => r.structural_verified !== false).length;
+    pairCount && (pairCount.textContent = verifiedCount < sorted.length ? `${verifiedCount} tradeable / ${sorted.length} pairs` : `${sorted.length} pairs`);
     refs.tableBody.innerHTML = '';
     if (!sorted.length) {
     refs.tableBody.innerHTML = `<tr class="placeholder-row"><td colspan="9">No pairs above threshold</td></tr>`;
@@ -425,6 +426,8 @@ function renderTable() {
         const key = rowKey(row);
         const tr = document.createElement('tr');
         if (key === scannerState.activeRowKey) tr.classList.add('active-row');
+        const isVerified = row.structural_verified !== false; // default true if missing
+        if (!isVerified) tr.style.opacity = '0.5';
         const sc = row.spread >= 0.5 ? 'spread--high' : row.spread >= 0.2 ? 'spread--medium' : 'spread--low';
         
         let scStruc = '';
@@ -439,8 +442,10 @@ function renderTable() {
         const profitClass = profitPct >= 0.5 ? 'spread--high' : profitPct >= 0.2 ? 'spread--medium' : 'spread--low';
         const profitStyle = profitPct < 0 ? 'color:var(--red);opacity:0.6' : '';
 
+        const verifiedBadge = isVerified ? '' : '<span title="EMA warming up — not tradeable yet" style="cursor:help;margin-left:4px;">⏳</span>';
+
         tr.innerHTML = `
-          <td>${row.pair}</td><td>${row.exchangeA}</td><td>${row.exchangeB}</td>
+          <td>${row.pair}${verifiedBadge}</td><td>${row.exchangeA}</td><td>${row.exchangeB}</td>
           <td>${fmtPrice(row.priceA)}</td><td>${fmtPrice(row.priceB)}</td>
           <td class="spread-cell ${sc}">${fmtSpread(row.spread)}</td>
           <td class="spread-cell ${scStruc}" title="${strucTooltip}">${row.has_structural_spread ? fmtSpread(row.structural_spread) : '<span style="color:var(--text-sub);">~' + fmtSpread(row.structural_spread) + '</span>'}</td>
