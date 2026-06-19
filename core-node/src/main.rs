@@ -246,8 +246,8 @@ async fn main() -> Result<()> {
             loop {
                 signal.notified().await;
                 let elapsed = last_run.elapsed();
-                if elapsed < Duration::from_millis(10) {
-                    tokio::time::sleep(Duration::from_millis(10) - elapsed).await;
+                if elapsed < Duration::from_millis(100) {
+                    tokio::time::sleep(Duration::from_millis(100) - elapsed).await;
                 }
                 last_run = std::time::Instant::now();
 

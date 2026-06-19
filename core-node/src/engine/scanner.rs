@@ -4,6 +4,14 @@ use crate::state::{EngineContext, PriceMap};
 use shared::{SpreadRow, TechnicalSettings, TradeSignal, TradingSettings};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::OnceLock;
+use dashmap::DashMap;
+
+/// Throttle map for SIGNAL log messages: key = "pair:exa:exb" → last_log_ms
+static SIGNAL_LOG_THROTTLE: OnceLock<DashMap<String, i64>> = OnceLock::new();
+fn signal_throttle() -> &'static DashMap<String, i64> {
+    SIGNAL_LOG_THROTTLE.get_or_init(|| DashMap::new())
+}
 
 static LAST_DIAG_LOG: AtomicI64 = AtomicI64::new(0);
 
@@ -390,11 +398,19 @@ pub fn generate_signals(
                 mult_a,
                 mult_b,
             });
-            tracing::info!(
-                "[scanner] SIGNAL {}: {} vs {} spread={:.4}% BE={:.4}% (fee_a={:.6} fee_b={:.6})",
-                row.pair, row.exchange_a, row.exchange_b, row.spread, break_even_pct,
-                fee_a, fee_b
-            );
+            {
+                let sig_key = format!("{}:{}:{}", row.pair, row.exchange_a, row.exchange_b);
+                let throttle = signal_throttle();
+                let last = throttle.get(&sig_key).map(|v| *v).unwrap_or(0);
+                if now - last > 5_000 {
+                    throttle.insert(sig_key, now);
+                    tracing::info!(
+                        "[scanner] SIGNAL {}: {} vs {} spread={:.4}% BE={:.4}% (fee_a={:.6} fee_b={:.6})",
+                        row.pair, row.exchange_a, row.exchange_b, row.spread, break_even_pct,
+                        fee_a, fee_b
+                    );
+                }
+            }
             emitted_pairs.insert(row.pair.clone());
         }
     }

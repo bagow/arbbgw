@@ -153,6 +153,33 @@ pub async fn process_entries(
             }
         }
 
+        // ── PRICE DATA STALENESS GUARD ──
+        // Skip entry if WS price data hasn't been updated in >10s — data may be frozen
+        // due to WS disconnect. Prevents trading on stale/phantom orderbooks.
+        {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let stale_threshold_secs = 10u64;
+            let age_a = prices.get(&exa)
+                .and_then(|m| m.get(&pair).map(|d| d.last_updated))
+                .map(|lu| if lu > 0 { now_secs.saturating_sub(lu) } else { 0 });
+            let age_b = prices.get(&exb)
+                .and_then(|m| m.get(&pair).map(|d| d.last_updated))
+                .map(|lu| if lu > 0 { now_secs.saturating_sub(lu) } else { 0 });
+
+            let stale_a = age_a.map(|a| a > stale_threshold_secs).unwrap_or(false);
+            let stale_b = age_b.map(|a| a > stale_threshold_secs).unwrap_or(false);
+            if stale_a || stale_b {
+                let stale_ex = if stale_a { &exa } else { &exb };
+                let age = if stale_a { age_a.unwrap_or(0) } else { age_b.unwrap_or(0) };
+                tracing::warn!("[real] ⏭️ SKIP {}: {} price data stale ({}s old) — WS may be disconnected", pair, stale_ex, age);
+                e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 5_000);
+                continue;
+            }
+        }
+
         // ── BALANCE LOW GUARD (zero-latency) ─────────────────────────────────
         if !has_sufficient_margin(&exa, actual_vol_a, settings.leverage as f64, &e_ctx) {
             let now_m = now_ms() as i64;
