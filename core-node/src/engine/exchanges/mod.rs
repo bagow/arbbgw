@@ -37,3 +37,4 @@ pub mod ws_kucoin_private;
 pub mod ws_bitget_private;
 pub mod ws_bitmex_private;
 pub mod ws_bingx_private;
+pub mod ws_gate_private;

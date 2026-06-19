@@ -198,6 +198,10 @@ pub fn start_balance_fetcher(
                     if let Ok(fee) = conn.fetch_taker_fee(&http, &keys).await {
                         e_ctx.fee_rates.insert(ex.to_string(), fee);
                     }
+                    // Fetch maker fee rate (for maker mode break-even calculation)
+                    if let Ok(maker_fee) = conn.fetch_maker_fee(&http, &keys).await {
+                        e_ctx.maker_fee_rates.insert(ex.to_string(), maker_fee);
+                    }
                 }
                 // Diagnostic: log current fee_rates and balances
                 {

@@ -50,13 +50,22 @@ pub async fn run_cycle(
             rep.flush_live_updates(live_updates).await;
         });
     }
+    // ── Process pending maker orders (check fills, cancel stale) ─────────────
+    if ts.entry_order_type == "maker" {
+        crate::engine::maker_manager::process_pending_makers(
+            &prices, &settings, &http, &db, &keys, ts, &e_ctx
+        ).await;
+    }
 
     // ── Open new real trades ──────────────────────────────────────────────────
-    if !settings.is_active || num_active >= settings.max_active_trades {
+    // Count pending makers as quasi-active (they represent committed capital)
+    let pending_maker_count = e_ctx.pending_makers.len() as i64;
+    let effective_active = num_active + pending_maker_count;
+    if !settings.is_active || effective_active >= settings.max_active_trades {
         return;
     }
 
     crate::engine::entry_manager::process_entries(
-        signals, &prices, &settings, &http, &db, &keys, ts, &e_ctx, &open_pairs, num_active
+        signals, &prices, &settings, &http, &db, &keys, ts, &e_ctx, &open_pairs, effective_active
     ).await;
 }

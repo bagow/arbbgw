@@ -555,5 +555,177 @@ impl ExchangeConnector for GateConnector {
         Ok(positions)
     }
 
+    // ── Maker mode methods ──────────────────────────────────────────────────
+
+    async fn place_maker_order(
+        &self,
+        _http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+        is_buy: bool,
+        phys_amount: f64,
+        limit_price: f64,
+        _leverage: f64,
+        multiplier: f64,
+        tick_size: f64,
+        _api_timeout_ms: u64,
+    ) -> Result<(String, f64), String> {
+        use super::ws_gate::send_gate_ws_request;
+        let _ = super::ws_gate::get_or_init_gate_ws(
+            keys.gate_key.clone(),
+            keys.gate_secret.clone(),
+        );
+
+        let contract = pair.replace("USDT", "_USDT");
+        let size = if is_buy {
+            (phys_amount / multiplier.max(1e-12)).round() as i64
+        } else {
+            -((phys_amount / multiplier.max(1e-12)).round() as i64)
+        };
+        if size == 0 {
+            return Err(format!("Computed maker order size is 0 for amt={} mult={}", phys_amount, multiplier));
+        }
+
+        // Round price to tick_size
+        let rounded_price = if is_buy {
+            (limit_price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+        } else {
+            (limit_price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+        };
+
+        let mut price_str = format!("{:.8}", rounded_price)
+            .trim_end_matches('0')
+            .to_string();
+        if price_str.ends_with('.') { price_str.pop(); }
+        if price_str.is_empty() { price_str = "0".to_string(); }
+
+        let req_id = uuid::Uuid::new_v4().to_string();
+
+        // TIF = "poc" → Post-Only Cancel: Gate rejects if order would cross spread
+        let ws_req = serde_json::json!({
+            "request_id": req_id,
+            "channel": "futures.order_place",
+            "event": "api",
+            "payload": [{
+                "contract": contract,
+                "size": size,
+                "price": price_str,
+                "tif": "poc",
+                "reduce_only": false,
+                "close": false,
+                "text": "t-corenode-maker"
+            }]
+        });
+
+        let resp = send_gate_ws_request(ws_req).await?;
+
+        let status = resp["header"]["status"].as_str().unwrap_or("0");
+        if status == "200" || status == "201" {
+            let result = resp["data"]["result"].as_object()
+                .cloned()
+                .or_else(|| resp["data"]["result"].as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_object())
+                    .cloned());
+
+            if let Some(r) = result {
+                if let Some(id) = r.get("id") {
+                    let oid = id.as_i64().map(|i| i.to_string())
+                        .or_else(|| id.as_str().map(|s| s.to_string()));
+                    if let Some(oid) = oid {
+                        let order_status = r.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                        let finish_as = r.get("finish_as").and_then(|v| v.as_str()).unwrap_or("");
+
+                        tracing::info!(
+                            "[gate] ✅ MAKER order placed: pair={} oid={} price={} status={} finish_as={}",
+                            pair, oid, price_str, order_status, finish_as
+                        );
+
+                        // Check if immediately cancelled by Gate (poc rejection = would be taker)
+                        if order_status == "finished" && finish_as == "cancelled" {
+                            return Err("Post-Only rejected: would cross spread (poc cancelled)".to_string());
+                        }
+
+                        return Ok((oid, rounded_price));
+                    }
+                }
+            }
+        }
+
+        let errs = resp["data"]["errs"].as_object()
+            .map(|e| format!("{:?}", e))
+            .unwrap_or_else(|| format!("status={} body={}", status, resp));
+        Err(format!("Gate WS maker order failed: {}", errs))
+    }
+
+    async fn cancel_order(
+        &self,
+        _http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+        order_id: &str,
+    ) -> Result<bool, String> {
+        use super::ws_gate::send_gate_ws_request;
+        let _ = super::ws_gate::get_or_init_gate_ws(
+            keys.gate_key.clone(),
+            keys.gate_secret.clone(),
+        );
+
+        let contract = pair.replace("USDT", "_USDT");
+        let req_id = uuid::Uuid::new_v4().to_string();
+
+        let ws_req = serde_json::json!({
+            "request_id": req_id,
+            "channel": "futures.order_cancel",
+            "event": "api",
+            "payload": [contract, order_id]
+        });
+
+        let resp = send_gate_ws_request(ws_req).await?;
+        let status = resp["header"]["status"].as_str().unwrap_or("0");
+
+        if status == "200" {
+            let finish_as = resp["data"]["result"]["finish_as"].as_str().unwrap_or("");
+            if finish_as == "filled" {
+                tracing::info!("[gate] cancel_order {}: already filled", order_id);
+                return Ok(false); // Already filled, not cancelled
+            }
+            tracing::info!("[gate] cancel_order {}: cancelled successfully", order_id);
+            return Ok(true);
+        }
+
+        // Check if already cancelled/filled (not an error)
+        let err_msg = resp["data"]["errs"].as_object()
+            .map(|e| format!("{:?}", e))
+            .unwrap_or_else(|| format!("status={}", status));
+
+        let err_lower = err_msg.to_lowercase();
+        if err_lower.contains("not found") || err_lower.contains("finished") {
+            tracing::info!("[gate] cancel_order {}: already gone ({})", order_id, err_msg);
+            return Ok(false);
+        }
+
+        Err(format!("Gate cancel_order failed: {}", err_msg))
+    }
+
+    async fn fetch_maker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+        use super::ws_gate::send_gate_ws_request;
+        let _ = super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let ws_req = serde_json::json!({
+            "request_id": req_id,
+            "channel": "futures.fee_rate",
+            "event": "api",
+            "payload": []
+        });
+        match send_gate_ws_request(ws_req).await {
+            Ok(resp) => {
+                resp["data"]["result"]["maker_fee"].as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .ok_or_else(|| "Failed to parse Gate maker_fee from WS".to_string())
+            }
+            Err(_) => Ok(0.00015) // Default maker fee if WS fails
+        }
+    }
 
 }

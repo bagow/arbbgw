@@ -215,13 +215,12 @@ pub async fn process_entries(
             }
         }
 
-        let (conn_ensure_a, conn_ensure_b) = (
+        let (_conn_ensure_a, _conn_ensure_b) = (
             crate::engine::exchanges::get_connector(&exa).unwrap(),
             crate::engine::exchanges::get_connector(&exb).unwrap(),
         );
-        let t0 = std::time::Instant::now();
+        let _t0 = std::time::Instant::now();
         let use_ioc = ts.entry_order_type == "ioc";
-        let order_type_label = if use_ioc { "IOC" } else { "MKT" };
         // Dynamic IOC slippage: (signal_spread - break_even) / 2
         // This guarantees profitability: even if BOTH legs get worst-case fill,
         // total slippage = 2 * per_leg ≤ (spread - BE) → net PnL ≥ 0
@@ -401,11 +400,44 @@ pub async fn process_entries(
             }
         }
 
-
         // ── ALL CHECKS PASSED — log FIRE and execute ─────────────────────────
+
+        // ── MAKER MODE: submit Post-Only and return ─────────────────────────
+        if ts.entry_order_type == "maker" {
+            // Skip if pending maker already exists for this pair
+            if e_ctx.pending_makers.contains_key(&pair) {
+                continue;
+            }
+
+            info!(
+                "[real] FIRE {} [MAKER] A={} c={} | B={} c={} spread={:.4}% be={:.4}%",
+                pair, exa, contracts_a, exb, contracts_b, sig.spread, break_even_pct
+            );
+
+            let snapshot = serde_json::json!({
+                "bid_a": sig.entry_a, "bid_b": sig.entry_b,
+                "ask_a": sig.entry_a, "ask_b": sig.entry_b,
+                "spread": sig.spread, "latency": 0, "mode": "maker"
+            }).to_string();
+            tokio::spawn({
+                let snap_repo = TradeRepository::new(db.clone());
+                let sp_pair = pair.clone(); let sp_exa = exa.clone(); let sp_exb = exb.clone();
+                let ts_ms = current_ms as i64;
+                async move { snap_repo.insert_snapshot(sp_pair, sp_exa, sp_exb, snapshot, ts_ms).await; }
+            });
+
+            crate::engine::maker_manager::submit_maker_entry(
+                &sig, prices, settings, http, keys, ts, e_ctx,
+            ).await;
+            opened_this_cycle = true;
+            continue;
+        }
+
+        // ── IOC / MARKET MODE: existing parallel entry ──────────────────────
+        let order_type_label_fire = if use_ioc { "IOC" } else { "MKT" };
         info!(
             "[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}% slip={:.3}%",
-            pair, order_type_label, exa, contracts_a, limit_price_a,
+            pair, order_type_label_fire, exa, contracts_a, limit_price_a,
             exb, contracts_b, limit_price_b, sig.spread, break_even_pct, ioc_slippage_pct
         );
         let snapshot = serde_json::json!({

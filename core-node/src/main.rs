@@ -214,6 +214,20 @@ async fn main() -> Result<()> {
         info!("[startup] KuCoin Private WS ready.");
     }
 
+    // ── Pre-init Gate Private WS for maker order fill detection ──────────────
+    if exchange_keys.supports("gate") {
+        info!("[startup] Pre-initializing Gate Private WS for order fills...");
+        // Wire up pending_makers and notify references so WS loop can trigger maker_manager
+        engine::exchanges::ws_gate_private::set_pending_makers_ref(engine_ctx.pending_makers.clone());
+        engine::exchanges::ws_gate_private::set_maker_notify(engine_ctx.maker_fill_notify.clone());
+        engine::exchanges::ws_gate_private::ensure_private_ws(
+            &exchange_keys.gate_key,
+            &exchange_keys.gate_secret,
+        ).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        info!("[startup] Gate Private WS ready.");
+    }
+
     // ── Spawn collectors ─────────────────────────────────────────────────────
     engine::startup::spawn_collectors(&prices, &signal, &engine_ctx, &real_settings_cache);
 

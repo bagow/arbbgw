@@ -252,7 +252,12 @@ pub struct TechnicalSettings {
     pub live_update_throttle_ms: i64,
 
     // ── Order type ──
-    pub entry_order_type: String, // "market" or "ioc"
+    pub entry_order_type: String, // "market", "ioc", or "maker"
+
+    // ── Maker mode ──
+    /// How far inside the spread to place the Post-Only order (% of price).
+    /// E.g. 0.01 = 0.01% offset from best bid/ask towards mid-price.
+    pub maker_price_offset_pct: f64,
 }
 
 impl Default for TechnicalSettings {
@@ -293,6 +298,7 @@ impl Default for TechnicalSettings {
             live_update_throttle_ms: 1000,
 
             entry_order_type: "market".to_string(),
+            maker_price_offset_pct: 0.01,
         }
     }
 }
@@ -453,6 +459,11 @@ impl TechnicalSettings {
                 }
                 "entry_order_type" => {
                     ts.entry_order_type = v.clone();
+                }
+                "maker_price_offset_pct" => {
+                    if let Ok(x) = v.parse() {
+                        ts.maker_price_offset_pct = x;
+                    }
                 }
                 _ => {}
             }

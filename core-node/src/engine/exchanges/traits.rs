@@ -129,5 +129,44 @@ pub trait ExchangeConnector: Send + Sync {
         http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<Vec<PositionInfo>, String>;
-}
 
+    // ── Maker mode methods (default: not supported) ─────────────────────────
+
+    /// Place a Post-Only (Maker) limit order inside the spread.
+    /// The exchange MUST reject this order if it would execute as taker.
+    /// Returns (order_id, placed_price) on success.
+    /// Default: not supported — returns Err.
+    async fn place_maker_order(
+        &self,
+        _http: &Client,
+        _keys: &ExchangeKeys,
+        _pair: &str,
+        _is_buy: bool,
+        _phys_amount: f64,
+        _limit_price: f64,
+        _leverage: f64,
+        _multiplier: f64,
+        _tick_size: f64,
+        _api_timeout_ms: u64,
+    ) -> Result<(String, f64), String> {
+        Err(format!("{} does not support maker orders", self.name()))
+    }
+
+    /// Cancel an outstanding order by ID.
+    /// Returns Ok(true) if cancelled, Ok(false) if already filled/gone, Err on failure.
+    async fn cancel_order(
+        &self,
+        _http: &Client,
+        _keys: &ExchangeKeys,
+        _pair: &str,
+        _order_id: &str,
+    ) -> Result<bool, String> {
+        Err(format!("{} does not support cancel_order", self.name()))
+    }
+
+    /// Fetch maker fee rate (e.g. 0.0002 = 0.02%).
+    /// Default: falls back to taker fee.
+    async fn fetch_maker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+        self.fetch_taker_fee(http, keys).await
+    }
+}

@@ -99,6 +99,13 @@ pub struct EngineContext {
     /// When L2 WS data is unavailable, require N consecutive L1 zero-spread polls
     /// before allowing close. Prevents single-tick L1 flash closes.
     pub zero_spread_confirms: Arc<DashMap<i64, (u32, i64)>>,
+    /// Pending maker orders: key = pair (e.g. "BTCUSDT") → PendingMakerOrder.
+    /// Managed by maker_manager. WS private streams check this for fill detection.
+    pub pending_makers: Arc<DashMap<String, crate::engine::maker_manager::PendingMakerOrder>>,
+    /// Notify signal fired by WS private streams when a pending maker order fills.
+    pub maker_fill_notify: Arc<Notify>,
+    /// Per-exchange maker fee rates (e.g. "gate" → 0.00015).
+    pub maker_fee_rates: Arc<DashMap<String, f64>>,
 }
 
 impl Default for EngineContext {
@@ -130,6 +137,9 @@ impl Default for EngineContext {
             profiles_db: None,
             ws_order_unhealthy_until: Arc::new(DashMap::new()),
             zero_spread_confirms: Arc::new(DashMap::new()),
+            pending_makers: Arc::new(DashMap::new()),
+            maker_fill_notify: Arc::new(Notify::new()),
+            maker_fee_rates: Arc::new(DashMap::new()),
         }
     }
 }
