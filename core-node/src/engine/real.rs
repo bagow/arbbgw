@@ -242,6 +242,7 @@ pub fn warmup_leverages(
     keys: Arc<ExchangeKeys>,
 ) {
     let mut pairs_to_warm = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
     // Find pairs that are close to breaking entry threshold
     for profile in profiles {
@@ -251,13 +252,23 @@ pub fn warmup_leverages(
         for row in spreads.iter().take(50) {
             // A heuristic: if spread is at least 80% of config min_entry_spread we warm it up
             if row.spread >= profile.min_entry_spread * 0.8 {
-                pairs_to_warm.push((
-                    row.exchange_a.clone(),
-                    row.exchange_b.clone(),
-                    row.pair.clone(),
-                    profile.leverage as f64,
-                    profile.margin_mode.clone(),
-                ));
+                // Dedup: don't warm same exchange+pair twice in one cycle
+                let key_a = format!("{}:{}", row.exchange_a, row.pair);
+                let key_b = format!("{}:{}", row.exchange_b, row.pair);
+                if seen.insert(key_a) {
+                    pairs_to_warm.push((
+                        row.exchange_a.clone(),
+                        row.pair.clone(),
+                        profile.leverage as f64,
+                    ));
+                }
+                if seen.insert(key_b) {
+                    pairs_to_warm.push((
+                        row.exchange_b.clone(),
+                        row.pair.clone(),
+                        profile.leverage as f64,
+                    ));
+                }
             }
         }
     }
@@ -267,14 +278,12 @@ pub fn warmup_leverages(
     }
 
     tokio::spawn(async move {
-        for (exa, exb, pair, lev, _margin) in pairs_to_warm {
-            if let Some(conn_a) = crate::engine::exchanges::get_connector(&exa) {
-                let _ = conn_a.ensure_leverage(&http, &keys, &pair, lev).await; // Ignore result
-            }
-            if let Some(conn_b) = crate::engine::exchanges::get_connector(&exb) {
-                let _ = conn_b.ensure_leverage(&http, &keys, &pair, lev).await; // Ignore result
+        for (exchange, pair, lev) in pairs_to_warm {
+            if let Some(conn) = crate::engine::exchanges::get_connector(&exchange) {
+                let _ = conn.ensure_leverage(&http, &keys, &pair, lev).await; // Ignore result
             }
         }
     });
 }
+
 

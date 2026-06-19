@@ -3,8 +3,19 @@ use reqwest::Client;
 use serde_json::Value;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::time::Duration;
+use std::sync::OnceLock;
+use dashmap::DashSet;
 
 use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
+
+// ── LEVERAGE CACHE ─────────────────────────────────────────────────────────
+// Prevents re-setting leverage on every tick (was ~100 WS reqs per 100ms!).
+// Key = "SYMBOL:LEV" e.g. "BEATUSDT:10".
+// Once set successfully, never retry until process restart.
+static LEVERAGE_CACHE: OnceLock<DashSet<String>> = OnceLock::new();
+fn leverage_cache() -> &'static DashSet<String> {
+    LEVERAGE_CACHE.get_or_init(|| DashSet::new())
+}
 
 // ── REST FALLBACK RATE LIMITER ──────────────────────────────────────────────
 // Prevents REST fallback spam when WS is dead.
@@ -12,6 +23,7 @@ use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
 static REST_FALLBACK_BALANCE_MS: AtomicI64 = AtomicI64::new(0);
 static REST_FALLBACK_POSITIONS_MS: AtomicI64 = AtomicI64::new(0);
 static REST_FALLBACK_FEE_MS: AtomicI64 = AtomicI64::new(0);
+static REST_FALLBACK_LEVERAGE_MS: AtomicI64 = AtomicI64::new(0);
 static WS_CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
 
 const REST_FALLBACK_COOLDOWN_MS: i64 = 60_000; // 1 REST fallback per minute per method
@@ -1022,11 +1034,18 @@ impl ExchangeConnector for BinanceConnector {
         pair: &str,
         leverage: f64,
     ) -> Result<(), String> {
-        // Early return if banned — prevents 1000s of REST requests when WS is dead
+        let lev = leverage as i64;
+        let cache_key = format!("{}:{}", pair, lev);
+
+        // Skip if already set this session — prevents 100s of duplicate requests per second
+        if leverage_cache().contains(&cache_key) {
+            return Ok(());
+        }
+
+        // Early return if banned
         if check_ip_ban().is_err() { return Ok(()); }
         use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
-        let lev = leverage as i64;
         let qs = format!("apiKey={}&leverage={}&symbol={}&timestamp={}", keys.binance_key, lev, pair, ts);
         let sig = binance_sign(&keys.binance_secret, &qs);
         let req_id = uuid::Uuid::new_v4().to_string();
@@ -1042,20 +1061,39 @@ impl ExchangeConnector for BinanceConnector {
             }
         });
         match send_ws_request(ws_req).await {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                leverage_cache().insert(cache_key);
+                Ok(())
+            },
             Err(e) => {
-                // Use trace! not warn! — when Binance WS is dead this fires 1000s of times
                 tracing::trace!("[binance] WS setLeverage failed ({}). Trying REST...", e);
                 if check_ip_ban().is_err() { return Ok(()); }
-                let rest_qs = format!("leverage={}&symbol={}&timestamp={}", lev, pair, ts);
+                // Rate-limit REST fallback — same pattern as balance/positions
+                if let Err(reason) = check_rest_fallback_allowed(&REST_FALLBACK_LEVERAGE_MS, "leverage") {
+                    tracing::trace!("[binance] {}", reason);
+                    return Ok(());
+                }
+                let fresh_ts = now_ms();
+                let rest_qs = format!("leverage={}&symbol={}&timestamp={}", lev, pair, fresh_ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
                 let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
                 let url = format!("https://fapi.binance.com/fapi/v1/leverage?{}", full_qs);
-                let _ = _http.post(&url)
+                match _http.post(&url)
                     .header("X-MBX-APIKEY", &keys.binance_key)
                     .timeout(std::time::Duration::from_millis(5000))
                     .send()
-                    .await;
+                    .await
+                {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let headers = resp.headers().clone();
+                        record_binance_response(status.as_u16(), &headers);
+                        if status.is_success() {
+                            leverage_cache().insert(cache_key);
+                        }
+                    },
+                    Err(_) => {},
+                }
                 Ok(())
             }
         }
