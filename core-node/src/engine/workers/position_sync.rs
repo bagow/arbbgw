@@ -7,15 +7,6 @@ use crate::engine::real::Trade;
 use crate::engine::real::ExchangeKeys;
 use crate::engine::real::now_ms;
 use crate::engine::real::symbols_match;
-use dashmap::DashMap;
-use std::sync::OnceLock;
-
-/// Tracks orphan position confirmations: key = "exchange:symbol" → (consecutive_count, last_seen_ms)
-static ORPHAN_COUNTER: OnceLock<DashMap<String, (u32, i64)>> = OnceLock::new();
-fn orphan_counter() -> &'static DashMap<String, (u32, i64)> {
-    ORPHAN_COUNTER.get_or_init(|| DashMap::new())
-}
-const ORPHAN_CONFIRM_REQUIRED: u32 = 6; // 6 × 10s = 60s of sustained orphan
 
 pub fn start_position_sync(
     http: Client,
@@ -26,11 +17,6 @@ pub fn start_position_sync(
     tokio::spawn(async move {
         // Wait for initial startup to settle
         tokio::time::sleep(Duration::from_secs(30)).await;
-
-        let all_exchanges = [
-            "binance", "gate", "kucoin", "bybit", "bitget",
-            "bingx", "bitmex", "ascendex", "xt", "toobit",
-        ];
 
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -82,7 +68,7 @@ pub fn start_position_sync(
                 // not what we track internally. Clearing it here causes flickering in UI
                 // for positions that exist on the exchange but have no matching trade in DB.
                 e_ctx.position_missing_counter.clear();
-                // Still run orphan detection below (there may be orphans with zero open trades)
+                continue;
             }
 
             // 2. Collect which exchanges have open trades
@@ -94,26 +80,12 @@ pub fn start_position_sync(
 
             // 3. Fetch positions from each exchange (1 API call per exchange)
             // Track which exchanges had fetch errors vs successful empty results
-            // For orphan detection: fetch ALL exchanges, not just ones in use
             let mut all_positions: std::collections::HashMap<
                 String,
                 Vec<crate::engine::exchanges::traits::PositionInfo>,
             > = std::collections::HashMap::new();
             let mut fetch_errors: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-            // Fetch from exchanges that have open trades (for trade-sync)
-            // AND from all supported exchanges (for orphan detection)
-            let exchanges_to_fetch: std::collections::HashSet<String> = {
-                let mut set = exchanges_in_use.clone();
-                for ex in &all_exchanges {
-                    if keys.supports(ex) {
-                        set.insert(ex.to_string());
-                    }
-                }
-                set
-            };
-
-            for ex in &exchanges_to_fetch {
+            for ex in &exchanges_in_use {
                 if !keys.supports(ex) {
                     continue;
                 }
@@ -139,7 +111,6 @@ pub fn start_position_sync(
             // Collect trade IDs that are still confirmed present (both positions alive)
             let mut confirmed_present: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
-            if !open_trades_with_close_ts.is_empty() {
             for (trade, last_close_attempt_at) in &open_trades_with_close_ts {
                 let now = now_ms();
                 // Ignore newly opened trades because REST APIs on exchanges (like KuCoin/Binance) 
@@ -367,137 +338,6 @@ pub fn start_position_sync(
             for id in &confirmed_present {
                 e_ctx.position_missing_counter.remove(id);
             }
-            } // end if !open_trades_with_close_ts.is_empty()
-
-            // ═══════════════════════════════════════════════════════════════════
-            // 5. ORPHAN POSITION DETECTOR
-            // ═══════════════════════════════════════════════════════════════════
-            // Compare ALL exchange positions against ALL open trades.
-            // Any position that doesn't match ANY open trade is an orphan (ghost).
-            // This catches positions left behind by failed trim_position calls
-            // during network outages, or by ASYMMETRIC_CLOSE with failed cleanup.
-            //
-            // Safety: require 6 consecutive confirmations (60s) before closing.
-            // This avoids race conditions with trades being opened/closed.
-
-            // Build set of (exchange, normalized_symbol) pairs that ARE expected
-            let mut expected_positions: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-            for (trade, _) in &open_trades_with_close_ts {
-                expected_positions.insert((trade.exchange_a.clone(), trade.pair.to_uppercase()));
-                expected_positions.insert((trade.exchange_b.clone(), trade.pair.to_uppercase()));
-            }
-
-            let now = now_ms();
-            let counter = orphan_counter();
-            let mut seen_orphan_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-            for (ex, positions) in &all_positions {
-                // Skip exchanges with fetch errors — can't trust the data
-                if fetch_errors.contains(ex) {
-                    continue;
-                }
-
-                for pos in positions {
-                    if pos.size.abs() < 1e-12 {
-                        continue;
-                    }
-
-                    // Normalize symbol for matching
-                    let sym_upper = pos.symbol.to_uppercase();
-
-                    // Check if this position matches any open trade
-                    let is_expected = expected_positions.iter().any(|(exp_ex, exp_sym)| {
-                        exp_ex == ex && symbols_match(&sym_upper, exp_sym)
-                    });
-
-                    if is_expected {
-                        // Position belongs to an open trade — not orphan
-                        let key = format!("{}:{}", ex, sym_upper);
-                        counter.remove(&key);
-                        continue;
-                    }
-
-                    // This position has NO matching open trade — potential orphan
-                    let key = format!("{}:{}", ex, sym_upper);
-                    seen_orphan_keys.insert(key.clone());
-
-                    let mut entry = counter.entry(key.clone()).or_insert((0, now));
-                    let (count, last_ts) = entry.value_mut();
-                    // Reset if last detection was >30s ago (not consecutive)
-                    if now - *last_ts > 30_000 {
-                        *count = 0;
-                    }
-                    *count += 1;
-                    *last_ts = now;
-                    let current_count = *count;
-                    drop(entry);
-
-                    if current_count < ORPHAN_CONFIRM_REQUIRED {
-                        tracing::warn!(
-                            "[pos_sync] 👻 ORPHAN DETECTED: {} on {} size={:.6} ({}/{} confirmations)",
-                            pos.symbol, ex, pos.size, current_count, ORPHAN_CONFIRM_REQUIRED
-                        );
-                        continue;
-                    }
-
-                    // Confirmed orphan — close it
-                    counter.remove(&key);
-                    error!(
-                        "[pos_sync] 👻 ORPHAN CONFIRMED ({}x): {} on {} size={:.6} — AUTO-CLOSING",
-                        current_count, pos.symbol, ex, pos.size
-                    );
-
-                    // Determine close direction: if size > 0 (long), sell to close; if < 0 (short), buy to close
-                    let close_is_buy = pos.size < 0.0;
-                    let phys_qty = pos.size.abs();
-                    let mult = e_ctx
-                        .multipliers
-                        .get(&format!("{}:{}", ex, sym_upper))
-                        .map(|v| *v)
-                        .unwrap_or(1.0);
-                    let tick = e_ctx
-                        .tick_sizes
-                        .get(&format!("{}:{}", ex, sym_upper))
-                        .map(|v| *v)
-                        .unwrap_or(0.000001);
-
-                    if let Some(conn) = crate::engine::exchanges::get_connector(ex) {
-                        match conn
-                            .close_position(
-                                &http, &keys, &pos.symbol,
-                                close_is_buy, phys_qty, false,
-                                10.0, 0.0, false, 0.0,
-                                mult, tick, 5, 25, 5000,
-                            )
-                            .await
-                        {
-                            Ok(rc) => {
-                                error!(
-                                    "[pos_sync] 👻 ORPHAN CLOSED: {} on {} fill={:.6} fee={:.4}",
-                                    pos.symbol, ex, rc.final_price, rc.total_fee
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    "[pos_sync] 👻 ORPHAN CLOSE FAILED: {} on {}: {}",
-                                    pos.symbol, ex, e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Clean up stale orphan counter entries (not seen this cycle)
-            let keys_to_remove: Vec<String> = counter
-                .iter()
-                .filter(|e| !seen_orphan_keys.contains(e.key()))
-                .map(|e| e.key().clone())
-                .collect();
-            for k in keys_to_remove {
-                counter.remove(&k);
-            }
         }
     });
 }
-

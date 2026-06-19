@@ -382,14 +382,17 @@ pub async fn trim_asymmetric_legs(
     fill_b: f64,
     api_timeout_ms: u64,
     e_ctx: &EngineContext,
-) -> (f64, f64) {
+) -> (f64, f64, bool) {
     let mut trimming_loss = 0.0;
     let mut trimming_fee = 0.0;
+    let mut all_trimmed = true;
     let hc = http.clone();
     let kc = Arc::clone(keys);
     let fp = pair.to_string();
     let key_a = format!("{}:{}", exa, pair);
     let key_b = format!("{}:{}", exb, pair);
+    const MAX_TRIM_RETRIES: u32 = 3;
+    const TRIM_RETRY_DELAY_MS: u64 = 2000;
 
     if delta_a > 1e-12 {
         let phys_to_dump = delta_a;
@@ -408,15 +411,29 @@ pub async fn trim_asymmetric_legs(
                 let is_buy = is_a_higher;
                 tracing::error!("[real] ⚠️ TRIMMING {} LEG A — Selling excess {:.6} phys", pair, phys_to_dump);
                 let tick_for_close = e_ctx.tick_sizes.get(&key_a).map(|v| *v).unwrap_or(0.000001);
-                match conn_a
-                    .trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_a, tick_for_close, fill_a, api_timeout_ms).await {
-                    Ok(rc) => {
-                        trimming_fee += rc.total_fee;
-                        let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_a };
-                        let gross_loss = if is_buy { (fill_a - close_price) * delta_a } else { (close_price - fill_a) * delta_a };
-                        trimming_loss += gross_loss.min(0.0).abs();
+                let mut trimmed = false;
+                for attempt in 0..MAX_TRIM_RETRIES {
+                    match conn_a
+                        .trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_a, tick_for_close, fill_a, api_timeout_ms).await {
+                        Ok(rc) => {
+                            trimming_fee += rc.total_fee;
+                            let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_a };
+                            let gross_loss = if is_buy { (fill_a - close_price) * delta_a } else { (close_price - fill_a) * delta_a };
+                            trimming_loss += gross_loss.min(0.0).abs();
+                            trimmed = true;
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::error!("[real] Failed to trim DELTA A (attempt {}/{}): {}", attempt + 1, MAX_TRIM_RETRIES, e);
+                            if attempt + 1 < MAX_TRIM_RETRIES {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(TRIM_RETRY_DELAY_MS)).await;
+                            }
+                        }
                     }
-                    Err(e) => { tracing::error!("[real] Failed to trim DELTA A: {}", e); }
+                }
+                if !trimmed {
+                    tracing::error!("[real] 🚨 TRIM {} LEG A FAILED after {} retries — position still open on {}", pair, MAX_TRIM_RETRIES, exa);
+                    all_trimmed = false;
                 }
             }
         }
@@ -439,20 +456,35 @@ pub async fn trim_asymmetric_legs(
                 let is_buy = !is_a_higher;
                 tracing::error!("[real] ⚠️ TRIMMING {} LEG B — Selling excess {:.6} phys", pair, phys_to_dump);
                 let tick_for_close = e_ctx.tick_sizes.get(&key_b).map(|v| *v).unwrap_or(0.000001);
-                match conn_b
-                    .trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_b, tick_for_close, fill_b, api_timeout_ms).await {
-                    Ok(rc) => {
-                        trimming_fee += rc.total_fee;
-                        let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_b };
-                        let gross_loss = if is_buy { (fill_b - close_price) * delta_b } else { (close_price - fill_b) * delta_b };
-                        trimming_loss += gross_loss.min(0.0).abs();
+                let mut trimmed = false;
+                for attempt in 0..MAX_TRIM_RETRIES {
+                    match conn_b
+                        .trim_position(&hc, &kc, &fp, is_buy, phys_to_dump, false, mult_b, tick_for_close, fill_b, api_timeout_ms).await {
+                        Ok(rc) => {
+                            trimming_fee += rc.total_fee;
+                            let close_price = if rc.final_price > 1e-12 { rc.final_price } else { fill_b };
+                            let gross_loss = if is_buy { (fill_b - close_price) * delta_b } else { (close_price - fill_b) * delta_b };
+                            trimming_loss += gross_loss.min(0.0).abs();
+                            trimmed = true;
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::error!("[real] Failed to trim DELTA B (attempt {}/{}): {}", attempt + 1, MAX_TRIM_RETRIES, e);
+                            if attempt + 1 < MAX_TRIM_RETRIES {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(TRIM_RETRY_DELAY_MS)).await;
+                            }
+                        }
                     }
-                    Err(e) => { tracing::error!("[real] Failed to trim DELTA B: {}", e); }
+                }
+                if !trimmed {
+                    tracing::error!("[real] 🚨 TRIM {} LEG B FAILED after {} retries — position still open on {}", pair, MAX_TRIM_RETRIES, exb);
+                    all_trimmed = false;
                 }
             }
         }
     }
-    (trimming_fee, trimming_loss)
+    (trimming_fee, trimming_loss, all_trimmed)
+
 }
 
 
@@ -792,13 +824,13 @@ pub async fn execute_sequential_entry(
     let delta_b = mv.delta_b;
 
     // ── DELTA TRIMMING (Phase 3) ──
-    let (trimming_fee, trimming_loss) = if !ctx.dry_run {
+    let (trimming_fee, trimming_loss, all_trimmed) = if !ctx.dry_run {
         trim_asymmetric_legs(
             http, keys, &ctx.pair, &ctx.exa, &ctx.exb, ctx.is_a_higher,
             delta_a, delta_b, ctx.mult_a, ctx.mult_b, fill_a, fill_b, ts.api_timeout_ms, e_ctx
         ).await
     } else {
-        (0.0, 0.0)
+        (0.0, 0.0, true)
     };
 
     // ── TRADE BOOKING (Phase 4) ──
@@ -852,6 +884,37 @@ pub async fn execute_sequential_entry(
                 });
             }
         }
+
+        if !all_trimmed && !ctx.dry_run {
+            // ── TRIM FAILED: Position still exists on exchange ──
+            // Insert as OPEN trade (NOT ASYMMETRIC_CLOSE) so position_sync
+            // sees the one-legged position and closes it when network recovers.
+            // This prevents ghost positions at the source.
+            let filled_ex = if a_filled { &ctx.exa } else { &ctx.exb };
+            let filled_contracts = if a_filled { phys_a / ctx.mult_a } else { phys_b / ctx.mult_b };
+            tracing::error!(
+                "[real] 🚨 TRIM FAILED for {} — inserting as OPEN trade so position_sync can close {} leg on {}",
+                ctx.pair, ctx.pair, filled_ex
+            );
+            let total_fee = fee_a_val + fee_b_val + trimming_fee;
+            let (ent_a, ent_b) = if a_filled { (fill_a, 0.0) } else { (0.0, fill_b) };
+            let (c_a, c_b) = if a_filled { (filled_contracts, 0.0) } else { (0.0, filled_contracts) };
+            repo.insert_new_entry(
+                ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
+                if a_filled { delta_a * fill_a } else { delta_b * fill_b },
+                ent_a, ent_b, ctx.sig_spread,
+                crate::engine::utils::now_ms(),
+                ctx.profile_id.clone(),
+                total_fee, 0.0,
+                String::new(), String::new(),
+                c_a, c_b,
+                ctx.sig_structural_spread,
+            ).await;
+            e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.asymmetric_cooldown_ms);
+            return true;
+        }
+
+        // Trim succeeded — record as ASYMMETRIC_CLOSE (position is already closed)
         let total_fee = fee_a_val + fee_b_val + trimming_fee;
         tracing::error!("[real] ❌ FULL ASYMMETRY DUMPED {} on {}. Trade canceled. Trimming Loss: {:.4}, Trimming Fee: {:.4}", ctx.pair, failed_exchange, trimming_loss, trimming_fee);
         e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.asymmetric_cooldown_ms);
