@@ -132,7 +132,7 @@ impl ExchangeConnector for KucoinConnector {
             let cache = super::ws_kucoin_private::get_order_cache();
             let mut inline_price = 0.0;
             let mut inline_fee = 0.0;
-            for _wait in 0..25 {  // 25 × 20ms = 500ms
+            for _wait in 0..5 {  // 5 × 20ms = 100ms max (verify_fill handles the rest)
                 if let Some(state) = cache.get(oid_str) {
                     // BUG-FIX: Wait for status="done" before taking final VWAP.
                     // Previously broke on first partial fill (filled_size > 0),

@@ -158,7 +158,7 @@ impl ExchangeConnector for BybitConnector {
                 let mut inline_price = 0.0;
                 let mut inline_fee = 0.0;
                     let mut _inline_qty = 0.0;
-                for _wait in 0..10 {
+                for _wait in 0..2 {  // 2 × 50ms = 100ms max (verify_fill handles the rest)
                     if let Some((p, f, q)) = super::ws_bybit::get_cached_fill(&oid) {
                         inline_price = p;
                         inline_fee = f;

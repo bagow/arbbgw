@@ -1,0 +1,135 @@
+GATE IO
+Следующий API-ключ позволит вам запрашивать информацию о счете и вести торговлю.
+Не раскрывайте его другим лицам.
+Key
+ae7d8937e6b6a14482ece62991bfe7cb
+Secret
+ca80162d1e0908e10ef64e764b9c2ca99bf45a6e7d6f37d8c2cb574451175753
+Это единственная возможность получить к нему доступ. Запишите его и храните в надежном месте.
+Имя замечания
+arb.bagov
+Тип API-ключа
+API v4 Key
+Вид аккаунта
+Торговый счет
+Разрешения
+Чтение и запись
+Бессрочные фьючерсы, Запуск, Account
+Истекает через 90 дней
+
+
+HTX
+Внимание!
+•	Ключ будет показан только один раз и не может быть восстановлен после потери. Пожалуйста, держите его должным образом.
+•	Чтобы избежать потери активов, пожалуйста, не сообщайте свой Access Key или Secret Key другим.
+•	Если Вы забыли свой Secret Key, удалите его и подайте заявку на новую пару секретных ключей.
+Access Key
+21bce128-997e8b61-vftwcr5tnh-3f065
+Копировать
+Secret Key
+010cf63c-9eb2c7b7-aef327fc-1a56b
+Копировать
+Настройки разрешений
+Читать, Торговать
+
+
+Kucoin
+Пароль API (попросили установить при создании): 8X.s2fVZ[Ch4Uek
+API Создан!
+Название API
+arb.bagov
+Key
+69c43b3a7c503d000146b852
+Secret
+API Secret не может быть восстановлен и будет показан ТОЛЬКО один раз. Пожалуйста, сохраните его.
+c3df0848-6a3c-4674-a792-1bd881655668
+Использование
+Торговля через API
+Ограничения API
+Общий,Фьючерсная торговля,Единый аккаунт
+Ограничения по IP
+Без ограничений
+
+
+BINANCE
+Ключ API
+ktolZxeXkqtr6svQCJm0IoJImQSX9LwKE1yUB23AiffwdJTfdx6OItZT1t1nMvrA
+Секретный ключ:
+yEHhBTRYkGEHR4lm7ubu5m7nEGh10VDx1QS2sbbvzF6iengF7wqlAIrBUjpUdPsA
+
+
+BYBIT
+Name 
+arb bagov 
+API Key
+aANKhbnhCfuKRkTkeo
+Copy
+API Secret
+huMkPNgDFWS7coPTDfDkBCxiESXlurxLO4qQ
+Copy
+Permission
+ 
+
+BITGET
+Кодовая фраза: nhbyflwfnbcfynbvtnhjdsq
+Доступ к ключу APIКопировать
+bg_8697395e4dc980811ec22f533b2a6145
+Секретный КлючКопировать
+4ad1b352b5470f9dc14f27f602f426755772f81ca123f8c2967af32108a76abc
+Привязать IP-адрес
+Нет данных
+Привилегия
+Фьючерсы|Ордера
+Фьючерсы|Средства
+Кошелек|Перевод
+
+
+BING X
+Arb Bagov
+Цель:
+API торговля
+Время создания:
+2026-04-18 22:10:13
+API Key
+LR66e7R2ZrqRoYKupaWFTXJNJOMeKZgaMEXEn4mJvD6Kvc2JHDg103osAiJi6IQEB89q5pfAONUr7tA
+Secret Key
+9uNtFPzAOfvZylvtbai9AMQGnfzACkyZPZFUuSwdb93v7nv5dAMvj5OmkBjF33pkQLyuYMZemGcGoi60nlXIPQ
+Секретный ключ отображается только один раз и будет скрыт после обновления или закрытия страницы. Пожалуйста, храните его аккуратно
+Разрешения API
+Чтение
+Бессрочная фьючерсная торговля
+Ограничения доступа по IP-адресу
+Неограниченный (хуже безопасность)
+Данный ключ API позволяет получить доступ с любого IP адреса (не рекомендуется).
+
+
+BITMEX
+Пожалуйста, запишите секретный ключ.
+Запишите его в безопасном месте! Секретный ключ не будет доступен после того, как вы покинете эту страницу.
+ID:	
+3HbuwfzxXTlOLltdSjDVcnOH
+Секрет:	
+PmNsxMPYDj_LP8cyqxG20Hv5DgWVmWQxuK1X76LauAAwWkA6
+
+
+ASCENDEX
+ID
+tu3SgXzdE4TzrBLRpjRuMvGgfQaTuhbG
+Secret
+PWwYtWJH4ahIVzXdVwFmAA9C337pPq7EeTULiPR3pagoPcotW9xSJshfXjPtPQXb
+
+
+XT.COM
+APIAcquire Success
+Public Key（AccessKey）
+72872e72-c5ea-4451-83e4-26bca32feb6d
+
+Private Key（SecretKey）
+a490d4e17be5cc3cb542f16d599442e2b5b16ecf
+
+
+TOOBIT
+Ключ доступа
+dzHqjz7KcnsVPp4DfFbdViENpIIOWth33ThN8BhwcQXHhVSCMrV9QoxXWLVM9iQk
+Секретный ключ
+MgHKabUExsXZMGXpeAeUEZf6LJHH3Q8LqnVDGVIgTvxSJyvRbXF0eLDY7aAlSBGv
