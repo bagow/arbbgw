@@ -226,7 +226,7 @@ pub async fn process_entries(
         // total slippage = 2 * per_leg ≤ (spread - BE) → net PnL ≥ 0
         // Clamped: min 0.05% (tick rounding), max 0.5% (safety cap)
         let ioc_slippage_pct = ((sig.spread - break_even_pct) / 2.0)
-            .max(0.05)
+            .max(0.10)
             .min(0.5);
         // NOTE: FIRE log moved to after L2/depth checks to avoid false-positive log entries
 

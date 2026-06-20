@@ -90,7 +90,7 @@ pub async fn process_closes(
         // ZERO_SPREAD = spread truly converged to zero (price parity).
         // Does NOT use structural_spread — that caused premature exits at 1.4% spread
         // when structural was 1.6%, leaving almost no profit.
-        let min_exit_profit_pct = 0.05;
+        let min_exit_profit_pct = 0.20;
         let zero_spread = live_state.exit_spread <= 0.0 && exec_net_pct >= min_exit_profit_pct;
 
         let mut reason_str = "";

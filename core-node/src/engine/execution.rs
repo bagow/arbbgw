@@ -1144,11 +1144,79 @@ pub async fn execute_parallel_entry(
 
     let total_exec_ms = t0_exec.elapsed().as_millis();
 
-    let a_filled = oid_a.is_some() && phys_a > 0.0;
-    let b_filled = oid_b.is_some() && phys_b > 0.0;
+    let mut a_filled = oid_a.is_some() && phys_a > 0.0;
+    let mut b_filled = oid_b.is_some() && phys_b > 0.0;
 
     tracing::info!("[real] RESULT {} A={} B={} phys_a={:.6} phys_b={:.6} fill_a={:.6} fill_b={:.6} latency={}ms",
         ctx.pair, a_filled, b_filled, phys_a, phys_b, fill_a, fill_b, total_exec_ms);
+
+    // ── RETRY UNFILLED LEG (parallel entry recovery) ────────────────────────
+    // If one leg filled and the other didn't, retry the failed leg with
+    // aggressive slippage before falling through to expensive ASYMMETRIC_CLOSE.
+    // This mirrors sequential entry's retry logic (L706-753).
+    if (a_filled && !b_filled) || (!a_filled && b_filled) {
+        if !ctx.dry_run {
+            let profit_margin = (ctx.sig_spread - ctx.break_even_pct).max(0.0);
+            let retry_slip = profit_margin.max(ctx.ioc_slippage_pct).min(3.0);
+
+            let (retry_conn, retry_is_buy, retry_qty, retry_limit, retry_mult, retry_tick, retry_label) =
+                if a_filled && !b_filled {
+                    (&conn_b, is_buy_b, ctx.qty_b, ctx.limit_price_b, ctx.mult_b, ctx.tick_b, ctx.exb.as_str())
+                } else {
+                    (&conn_a, is_buy_a, ctx.qty_a, ctx.limit_price_a, ctx.mult_a, ctx.tick_a, ctx.exa.as_str())
+                };
+
+            tracing::warn!(
+                "[real] 🔄 PARALLEL RETRY {} leg {} for {} with aggressive slippage {:.3}% (was {:.3}%)",
+                if a_filled { "B" } else { "A" }, retry_label, ctx.pair, retry_slip, ctx.ioc_slippage_pct
+            );
+
+            let res_retry = retry_conn.place_order(
+                http, keys, &ctx.pair, retry_is_buy, retry_qty, false,
+                retry_limit, retry_limit > 0.0,
+                ctx.leverage, retry_mult, retry_slip, retry_tick, ts.api_timeout_ms
+            ).await;
+
+            match res_retry {
+                Ok((retry_oid, retry_fill, retry_fee)) => {
+                    let retry_phys_init = if retry_fill > 0.0 { Some(retry_qty) } else { None };
+                    let ver_retry = verify_fill(
+                        retry_conn, http, keys, &ctx.pair, &retry_oid,
+                        retry_fill, retry_fee, retry_phys_init, retry_qty, false,
+                        VerifyConfig {
+                            fast_retries: 5,
+                            fast_delay_ms: ts.fill_verify_delay_ms as u64,
+                            slow_retries: 5,
+                            slow_delay_ms: 500,
+                            position_fallback: false,
+                            mult: retry_mult,
+                        },
+                        "real",
+                    ).await;
+
+                    let retry_phys = ver_retry.phys_volume.unwrap_or(0.0);
+                    if retry_phys > 1e-12 && ver_retry.fill_price > 0.0 {
+                        tracing::info!("[real] ✅ PARALLEL RETRY SUCCESS: {} filled on retry! price={:.6} qty={:.6}",
+                            retry_label, ver_retry.fill_price, retry_phys);
+                        if a_filled && !b_filled {
+                            phys_b = retry_phys;
+                            fill_b = ver_retry.fill_price;
+                            b_filled = true;
+                        } else {
+                            phys_a = retry_phys;
+                            fill_a = ver_retry.fill_price;
+                            a_filled = true;
+                        }
+                    } else {
+                        tracing::error!("[real] ❌ PARALLEL RETRY FAILED: {} still unfilled after retry", retry_label);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("[real] ❌ PARALLEL RETRY reject {}/{}: {}", retry_label, ctx.pair, e);
+                }
+            }
+        }
+    }
 
     // ── From here: identical to sequential_entry post-fill logic ────────────
 
