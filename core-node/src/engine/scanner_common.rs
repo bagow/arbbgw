@@ -148,3 +148,53 @@ pub fn check_listing_age(
         oldest_elapsed
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equal_multipliers_produce_exact_target_volume() {
+        let lot = compute_lot_size(1000.0, 100.0, 1.0, 1.0, 15.0).expect("лот должен найтись");
+        assert!((lot.phys_qty - 10.0).abs() < 1e-9);
+        assert!((lot.contracts_a - 10.0).abs() < 1e-9);
+        assert!((lot.contracts_b - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn different_multipliers_keep_both_legs_identical() {
+        // Главный инвариант: физический объем обеих ног обязан совпадать,
+        // иначе связка не дельта-нейтральна.
+        let lot = compute_lot_size(1000.0, 100.0, 1.0, 0.1, 15.0).expect("лот должен найтись");
+        assert!((lot.contracts_a * 1.0 - lot.phys_qty).abs() < 1e-8);
+        assert!((lot.contracts_b * 0.1 - lot.phys_qty).abs() < 1e-8);
+    }
+
+    #[test]
+    fn volume_never_exceeds_tolerance_ceiling() {
+        // mult 4.0 -> ближайший лот 12 монет = $1200 > потолка +15% ($1150),
+        // поэтому объем скейлится вниз до 8 монет = $800.
+        let lot = compute_lot_size(1000.0, 100.0, 4.0, 4.0, 15.0).expect("лот должен найтись");
+        assert!(lot.phys_qty * 100.0 <= 1000.0 * 1.15 + 1e-9);
+        assert!((lot.phys_qty - 8.0).abs() < 1e-9);
+        assert!((lot.contracts_a - 2.0).abs() < 1e-9);
+        assert!((lot.contracts_b - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn returns_none_when_multipliers_have_no_common_lot() {
+        // Общий лот для mult 1.0 и 0.13 существует только на кратных 13,
+        // а окно поиска (+/- 5 шагов вокруг 20) их не содержит.
+        assert!(compute_lot_size(2000.0, 100.0, 1.0, 0.13, 15.0).is_none());
+    }
+
+    #[test]
+    fn tiny_volume_falls_back_to_one_minimal_step() {
+        // Объем меньше одного контракта: движок обязан вернуть минимальный лот,
+        // а не ноль контрактов (иначе получим односторонний вход).
+        let lot = compute_lot_size(1.0, 100.0, 1.0, 1.0, 15.0).expect("лот должен найтись");
+        assert!(lot.phys_qty >= 1.0);
+        assert!(lot.contracts_a >= 1.0);
+        assert!(lot.contracts_b >= 1.0);
+    }
+}
