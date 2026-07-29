@@ -36,6 +36,31 @@ jobs:
           workspaces: "."
       - name: Workspace check
         run: cargo check --workspace
+      - name: Unit tests (PnL, lot sizing, utils)
+        run: cargo test --workspace
+
+  # --- 0.1 Lint и аудит зависимостей (НЕ блокирует деплой) ---
+  lint:
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit dependencies (RUSTSEC)
+        run: cargo audit
 
   # --- 1. Проверка изменений ---
   changes:

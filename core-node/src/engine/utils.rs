@@ -133,3 +133,89 @@ pub fn is_ws_too_fresh(exchange: &str, freshness_ms: i64) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_symbol_strips_separators_and_case() {
+        assert_eq!(normalize_symbol("btc-usdt"), "BTCUSDT");
+        assert_eq!(normalize_symbol("BTC_USDT"), "BTCUSDT");
+        assert_eq!(normalize_symbol("BTC/USDT"), "BTCUSDT");
+        assert_eq!(normalize_symbol("BTCUSDT"), "BTCUSDT");
+    }
+
+    #[test]
+    fn normalize_symbol_maps_exchange_aliases() {
+        assert_eq!(normalize_symbol("XBTUSDTM"), "BTCUSDT");
+        assert_eq!(normalize_symbol("XBTUSDT"), "BTCUSDT");
+        assert_eq!(normalize_symbol("ETHUSDTM"), "ETHUSDT");
+    }
+
+    #[test]
+    fn symbols_match_across_exchange_formats() {
+        assert!(symbols_match("BTC_USDT", "btc-usdt"));
+        assert!(symbols_match("XBTUSDTM", "BTCUSDT"));
+        assert!(!symbols_match("BTCUSDT", "ETHUSDT"));
+    }
+
+    #[test]
+    fn cooldown_inactive_when_marker_unset() {
+        assert!(!cooldown_active(0, 1_000_000, 5_000));
+        assert!(!cooldown_active(-1, 1_000_000, 5_000));
+    }
+
+    #[test]
+    fn cooldown_active_for_blocked_until_marker() {
+        let now = 1_000_000;
+        assert!(cooldown_active(now + 1, now, 0));
+    }
+
+    #[test]
+    fn cooldown_expires_exactly_at_window_edge() {
+        let now = 1_000_000;
+        assert!(cooldown_active(now - 4_999, now, 5_000));
+        assert!(!cooldown_active(now - 5_000, now, 5_000));
+        assert!(!cooldown_active(now - 10_000, now, 5_000));
+    }
+
+    #[test]
+    fn liquidity_rank_orders_thin_exchanges_last() {
+        assert!(liquidity_rank("binance") < liquidity_rank("kucoin"));
+        assert!(liquidity_rank("kucoin") < liquidity_rank("xt"));
+        assert_eq!(liquidity_rank("unknown-exchange"), 50);
+    }
+
+    #[test]
+    fn detects_missing_position_errors_case_insensitively() {
+        assert!(is_position_missing_or_liquidated_error("Position not found"));
+        assert!(is_position_missing_or_liquidated_error("ORDER LIQUIDATED"));
+        assert!(is_position_missing_or_liquidated_error("bitget error 22002"));
+        assert!(is_position_missing_or_liquidated_error("code 300009 kucoin"));
+        // Не должно глотать ошибки, требующие реальной реакции.
+        assert!(!is_position_missing_or_liquidated_error("insufficient balance"));
+        assert!(!is_position_missing_or_liquidated_error("rate limit exceeded"));
+        assert!(!is_position_missing_or_liquidated_error("timeout"));
+    }
+
+    #[test]
+    fn exchange_pair_key_is_stable() {
+        assert_eq!(exchange_pair_key("gate", "BTCUSDT"), "gate:BTCUSDT");
+    }
+
+    #[test]
+    fn ws_freshness_tracks_reconnects() {
+        record_ws_connected("test-freshness-ex");
+        assert!(is_ws_too_fresh("test-freshness-ex", 60_000));
+        assert!(!is_ws_too_fresh("test-freshness-ex", 0));
+        assert!(!is_ws_too_fresh("never-connected-ex", 60_000));
+    }
+
+    #[test]
+    fn now_ms_and_now_secs_agree() {
+        let ms = now_ms();
+        let secs = now_secs();
+        assert!((ms / 1000 - secs).abs() <= 1);
+    }
+}

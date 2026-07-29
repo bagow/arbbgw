@@ -199,3 +199,102 @@ pub fn calculate_live_pnl_state(
         is_valid,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn gross_pnl_converging_spread_is_profitable() {
+        // is_a_higher = true -> шорт A, лонг B. Спред 101/100 схлопывается в 100.5/100.5.
+        let r = calculate_gross_pnl(true, 101.0, 100.0, 100.5, 100.5, 1.0, 1.0);
+        approx(r.pnl_a, 0.5);
+        approx(r.pnl_b, 0.5);
+        approx(r.gross_pnl, 1.0);
+    }
+
+    #[test]
+    fn gross_pnl_widening_spread_is_a_loss() {
+        let r = calculate_gross_pnl(true, 101.0, 100.0, 102.0, 99.0, 1.0, 1.0);
+        approx(r.pnl_a, -1.0);
+        approx(r.pnl_b, -1.0);
+        approx(r.gross_pnl, -2.0);
+    }
+
+    #[test]
+    fn gross_pnl_is_direction_symmetric() {
+        let a_high = calculate_gross_pnl(true, 101.0, 100.0, 100.5, 100.5, 2.0, 2.0);
+        let b_high = calculate_gross_pnl(false, 100.0, 101.0, 100.5, 100.5, 2.0, 2.0);
+        approx(a_high.gross_pnl, b_high.gross_pnl);
+    }
+
+    #[test]
+    fn gross_pnl_scales_linearly_with_coin_size() {
+        let one = calculate_gross_pnl(true, 101.0, 100.0, 100.5, 100.5, 1.0, 1.0);
+        let ten = calculate_gross_pnl(true, 101.0, 100.0, 100.5, 100.5, 10.0, 10.0);
+        approx(ten.gross_pnl, one.gross_pnl * 10.0);
+    }
+
+    #[test]
+    fn current_spread_uses_optimistic_quotes() {
+        approx(calculate_current_spread(true, 101.0, 101.2, 99.8, 100.0), 1.0);
+        approx(calculate_current_spread(false, 99.8, 100.0, 101.0, 101.2), 1.0);
+    }
+
+    #[test]
+    fn exit_spread_is_pessimistic_vs_current_spread() {
+        let cur = calculate_current_spread(true, 101.0, 101.2, 99.8, 100.0);
+        let exit = calculate_exit_spread(true, 101.0, 101.2, 99.8, 100.0);
+        assert!(
+            exit > cur,
+            "exit spread {exit} должен быть хуже текущего {cur}"
+        );
+    }
+
+    #[test]
+    fn spread_helpers_never_return_inf_or_nan() {
+        assert!(calculate_current_spread(true, 0.0, 0.0, 0.0, 0.0).is_finite());
+        assert!(calculate_current_spread(false, 0.0, 0.0, 0.0, 0.0).is_finite());
+        assert!(calculate_exit_spread(true, 0.0, 0.0, 0.0, 0.0).is_finite());
+        assert!(calculate_exit_spread(false, 0.0, 0.0, 0.0, 0.0).is_finite());
+    }
+
+    #[test]
+    fn funding_cancels_out_when_both_rates_are_equal() {
+        // Дельта-нейтральная связка при одинаковых ставках не должна стоить ничего.
+        let f = calculate_funding_increment(true, 100.0, 100.0, 1.0, 1.0, 0.0001, 0.0001, 1.0);
+        approx(f, 0.0);
+    }
+
+    #[test]
+    fn funding_sign_follows_leg_direction() {
+        // is_a_higher = true -> шорт A (получает funding), лонг B (платит).
+        let long_leg_pays = calculate_funding_increment(true, 100.0, 100.0, 1.0, 1.0, 0.0, 0.0001, 1.0);
+        assert!(long_leg_pays > 0.0, "лонг при положительном FR = расход");
+
+        let short_leg_receives = calculate_funding_increment(true, 100.0, 100.0, 1.0, 1.0, 0.0001, 0.0, 1.0);
+        assert!(short_leg_receives < 0.0, "шорт при положительном FR = доход");
+    }
+
+    #[test]
+    fn funding_scales_linearly_with_time() {
+        let full = calculate_funding_increment(true, 100.0, 100.0, 1.0, 1.0, 0.0, 0.0001, 1.0);
+        let half = calculate_funding_increment(true, 100.0, 100.0, 1.0, 1.0, 0.0, 0.0001, 0.5);
+        approx(half * 2.0, full);
+    }
+
+    #[test]
+    fn net_pnl_ignores_slippage_to_avoid_double_counting() {
+        let with_slippage = calculate_net_pnl(10.0, 1.0, 5.0, 2.0);
+        let without_slippage = calculate_net_pnl(10.0, 1.0, 0.0, 2.0);
+        approx(with_slippage, 7.0);
+        approx(with_slippage, without_slippage);
+    }
+}
