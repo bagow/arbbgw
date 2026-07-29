@@ -68,6 +68,9 @@ REST/Websocket сервер на фреймворке Axum.
 
 ## 🖥️ Серверы и Деплоймент
 
-- **ЗАПРЕЩЕНО** компилировать (`cargo build`, `cargo check`) на VPS и на локальной машине. Только через **GitHub CI/CD** — просто `git push`.
+- **ЗАПРЕЩЕНО** компилировать (`cargo build`, `cargo check`) на VPS и на локальной машине. Только через **CI/CD** — просто `git push`.
+- **Цепочка деплоя**: `git push` в **GitLab** (`gitlab.com/bagow/arbbgw`, источник правды) → **push mirror** автоматически зеркалит `main` в **GitHub** → **GitHub Actions** (`.github/workflows/deploy.yml`) собирает и деплоит на VPS. Задержка зеркалирования — до 5 минут, принудительно — кнопка **Update now** в `Settings > Repository > Mirroring repositories`.
+- **Коммитить напрямую в GitHub ЗАПРЕЩЕНО** — ветки разойдутся, и при следующем зеркалировании такие коммиты будут перетёрты.
+- **Токен зеркала** (GitHub PAT) обязан иметь скоупы `repo` **и** `workflow`. Без `workflow` GitHub отклоняет целиком любой пуш, затрагивающий `.github/workflows/` — типовая причина «коммит есть в GitLab, но нет в GitHub».
 - **Production Server**: Oracle Cloud VPS (IP: `140.238.217.190`, юзер `opc`). SSH: `ssh opc@140.238.217.190`.
 - **Сеть**: Cloudflare tunnel проксирует трафик (Cloudflare front) без открытия портов.
