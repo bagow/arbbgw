@@ -52,9 +52,9 @@ pub async fn run(
         };
 
         tokio::select! {
-            res = handler(&prices, &signal, &l2_books) => {
+            res = run_sharded(&prices, &signal, &l2_books) => {
                 match res {
-                    Ok(_)  => { warn!("[bitget] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
+                    Ok(_)  => { warn!("[bitget] All shards exited, restarting..."); backoff = Duration::from_secs(1); }
                     Err(e) => error!("[bitget] Error: {}. Reconnecting in {:?}", e, backoff),
                 }
                 tokio::time::sleep(backoff).await;
@@ -68,14 +68,76 @@ pub async fn run(
     }
 }
 
-async fn handler(
+/// Sharded WS collector: spawns N parallel connections with ~100 symbols each.
+/// Bitget WS limit is ~240 subscriptions per connection; we use 100 for safety margin.
+async fn run_sharded(
     price_map: &PriceMap,
     signal: &UpdateSignal,
     l2_books: &L2OrderbookMap,
 ) -> Result<()> {
-    let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
-    let mut sym_map = std::collections::HashMap::new();
+    // REST seed (once for all shards)
+    rest_seed(price_map).await?;
 
+    // Collect symbols
+    let symbols: Vec<String> = {
+        let map = price_map.get("bitget");
+        match map {
+            Some(m) => m.keys().cloned().collect(),
+            None => vec![],
+        }
+    };
+    if symbols.is_empty() {
+        return Err(anyhow::anyhow!("No Bitget symbols loaded"));
+    }
+
+    const SHARD_SIZE: usize = 100;
+    let shards: Vec<Vec<String>> = symbols.chunks(SHARD_SIZE).map(|c| c.to_vec()).collect();
+    let num_shards = shards.len();
+    info!("[bitget] Spawning {} parallel WS connections (~{} symbols each)", num_shards, SHARD_SIZE);
+
+    let mut handles = Vec::new();
+    for (i, shard_syms) in shards.into_iter().enumerate() {
+        let pm = price_map.clone();
+        let sig = signal.clone();
+        let l2 = l2_books.clone();
+        handles.push(tokio::spawn(async move {
+            shard_loop(i, shard_syms, &pm, &sig, &l2).await;
+        }));
+    }
+
+    // Wait for any shard to finish (they shouldn't under normal conditions)
+    futures_util::future::select_all(handles).await.0.ok();
+    Ok(())
+}
+
+async fn shard_loop(
+    shard_id: usize,
+    symbols: Vec<String>,
+    price_map: &PriceMap,
+    signal: &UpdateSignal,
+    l2_books: &L2OrderbookMap,
+) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match shard_handler(shard_id, &symbols, price_map, signal, l2_books).await {
+            Ok(_) => {
+                warn!("[bitget] Shard {} WS closed. Reconnecting in 1s", shard_id);
+                backoff = Duration::from_secs(1);
+            }
+            Err(e) => {
+                error!("[bitget] Shard {} error: {}. Reconnecting in {:?}", shard_id, e, backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(5));
+            }
+        }
+        tokio::time::sleep(backoff).await;
+    }
+}
+
+/// Build multiplier map and seed prices from REST (called once before sharding)
+async fn rest_seed(price_map: &PriceMap) -> Result<()> {
+    let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
+
+    // Fetch contracts for multipliers — store in global cache
     if let Ok(resp) = http
         .get("https://api.bitget.com/api/v2/mix/market/contracts?productType=USDT-FUTURES")
         .timeout(Duration::from_secs(15))
@@ -84,11 +146,12 @@ async fn handler(
     {
         if let Ok(body) = resp.json::<Value>().await {
             if let Some(list) = body["data"].as_array() {
+                let mut map = SYM_MULTIPLIERS.lock().unwrap();
                 for t in list {
                     let sym = t["symbol"].as_str().unwrap_or("");
                     if sym.ends_with("USDT") {
                         let mult = t["sizeMultiplier"].as_str().and_then(|s| s.parse().ok()).unwrap_or(1.0);
-                        sym_map.insert(sym.to_string(), mult);
+                        map.insert(sym.to_string(), mult);
                     }
                 }
             }
@@ -159,20 +222,27 @@ async fn handler(
             }
         }
     }
+    // Ensure bitget map exists
+    price_map.entry("bitget".to_string()).or_default();
+    Ok(())
+}
 
-    // Collect all USDT-FUTURES symbols for subscription
-    let symbols: Vec<String> = {
-        let map = price_map.get("bitget");
-        match map {
-            Some(m) => m.keys().cloned().collect(),
-            None => vec![],
-        }
-    };
-    if symbols.is_empty() {
-        return Err(anyhow::anyhow!("No Bitget symbols loaded"));
-    }
+/// Global multiplier cache shared across shards
+static SYM_MULTIPLIERS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, f64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-    // Connect WS
+fn get_multiplier(sym: &str) -> f64 {
+    SYM_MULTIPLIERS.lock().unwrap().get(sym).copied().unwrap_or(1.0)
+}
+
+/// Single-shard WS handler: connects, subscribes to its symbols, and processes messages
+async fn shard_handler(
+    shard_id: usize,
+    symbols: &[String],
+    price_map: &PriceMap,
+    signal: &UpdateSignal,
+    l2_books: &L2OrderbookMap,
+) -> Result<()> {
     let (mut ws, _) = connect_async_tls_with_config(
         "wss://ws.bitget.com/v2/ws/public",
         None,
@@ -180,10 +250,10 @@ async fn handler(
         None,
     )
     .await
-    .context("Bitget WS connect failed")?;
-    info!("[bitget] Connected, subscribing to {} symbols...", symbols.len());
+    .context(format!("Bitget Shard {} WS connect failed", shard_id))?;
+    info!("[bitget] Shard {} connected, subscribing to {} symbols", shard_id, symbols.len());
 
-    // Subscribe to ticker (L1) for all symbols in chunks
+    // Subscribe to ticker (L1) for shard symbols
     for chunk in symbols.chunks(50) {
         let args: Vec<Value> = chunk
             .iter()
@@ -202,8 +272,9 @@ async fn handler(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // Subscribe to books5 (L2 depth, top 5 levels) for top symbols
-    let l2_syms: Vec<&String> = symbols.iter().take(60).collect();
+    // Subscribe to books5 (L2 depth) for first 60 symbols of this shard
+    let l2_count = symbols.len().min(60);
+    let l2_syms: Vec<&String> = symbols.iter().take(l2_count).collect();
     for chunk in l2_syms.chunks(50) {
         let args: Vec<Value> = chunk
             .iter()
@@ -221,30 +292,14 @@ async fn handler(
         .await?;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    info!("[bitget] Subscribed L2 depth for {} symbols", l2_syms.len());
-
-    // Ensure bitget map exists
-    price_map.entry("bitget".to_string()).or_default();
 
     let mut ping = tokio::time::interval(Duration::from_secs(25));
-    let mut msg_count: u64 = 0;
-    let mut tick_count: u64 = 0;
-    let mut first_msg_logged = false;
 
     loop {
         tokio::select! {
             msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
                 Some(Ok(Message::Text(text))) => {
-                    // Bitget sends "pong" as plain text
                     if text.as_str() == "pong" { continue; }
-                    msg_count += 1;
-                    if msg_count <= 3 {
-                        tracing::debug!("[bitget] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(300)]);
-                    }
-                    // Also log when we get first non-ack message
-                    if msg_count == 315 || msg_count == 500 || msg_count == 1000 {
-                        tracing::debug!("[bitget] MSG #{} (len={}): {}", msg_count, text.len(), &text[..text.len().min(300)]);
-                    }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         let action = v["action"].as_str().unwrap_or("");
                         let channel = v["arg"]["channel"].as_str().unwrap_or("");
@@ -253,7 +308,6 @@ async fn handler(
                         if inst_id.is_empty() || !inst_id.ends_with("USDT") { continue; }
 
                         if channel == "ticker" {
-                            // L1 ticker update
                             if let Some(data_arr) = v["data"].as_array() {
                                 for d in data_arr {
                                     let bid: f64 = d["bidPr"].as_str().and_then(|s| s.parse().ok())
@@ -270,7 +324,7 @@ async fn handler(
                                         .unwrap_or(0.0);
                                     let last: f64 = d["lastPr"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     if bid <= 0.0 || ask <= 0.0 { continue; }
-                                    let mult = sym_map.get(inst_id).copied().unwrap_or(1.0);
+                                    let mult = get_multiplier(inst_id);
                                     let mid = (bid + ask) / 2.0;
                                     let ts = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
@@ -294,14 +348,12 @@ async fn handler(
                                         }
                                     }
                                     signal.notify_one();
-                                    tick_count += 1;
                                 }
                             }
                         } else if channel == "books5" && (action == "snapshot" || action == "update" || action.is_empty()) {
-                            // L2 depth update (top 5 levels)
                             if let Some(data_arr) = v["data"].as_array() {
                                 for d in data_arr {
-                                    let mult = sym_map.get(inst_id).copied().unwrap_or(1.0);
+                                    let mult = get_multiplier(inst_id);
                                     let bids = parse_levels(&d["bids"], mult);
                                     let asks = parse_levels(&d["asks"], mult);
                                     if !bids.is_empty() || !asks.is_empty() {
@@ -325,17 +377,6 @@ async fn handler(
             },
             _ = ping.tick() => {
                 ws.send(Message::Text("ping".into())).await?;
-                tracing::debug!("[bitget] DIAG: msgs={} ticks={}", msg_count, tick_count);
-                let now_ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default().as_secs();
-                if let Some(mut ex_map) = price_map.get_mut("bitget") {
-                    for (_, entry) in ex_map.iter_mut() {
-                        if entry.bid > 0.0 && entry.ask > 0.0 {
-                            entry.last_updated = now_ts;
-                        }
-                    }
-                }
             }
         }
     }
