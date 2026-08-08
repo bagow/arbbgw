@@ -425,6 +425,15 @@ pub async fn trim_asymmetric_legs(
                         }
                         Err(e) => {
                             tracing::error!("[real] Failed to trim DELTA A (attempt {}/{}): {}", attempt + 1, MAX_TRIM_RETRIES, e);
+                            // Re-verify position exists — if exchange confirms no position, stop retrying (phantom fill)
+                            if let Ok(positions) = conn_a.fetch_positions(&hc, &kc).await {
+                                if !positions.iter().any(|p| {
+                                    crate::engine::real::symbols_match(&p.symbol, pair) && p.size.abs() > 1e-12
+                                }) {
+                                    tracing::warn!("[real] ⚠️ TRIM {} LEG A — position vanished on {} after attempt {}. Stopping retries (phantom fill).", pair, exa, attempt + 1);
+                                    break;
+                                }
+                            }
                             if attempt + 1 < MAX_TRIM_RETRIES {
                                 tokio::time::sleep(tokio::time::Duration::from_millis(TRIM_RETRY_DELAY_MS)).await;
                             }
@@ -470,6 +479,15 @@ pub async fn trim_asymmetric_legs(
                         }
                         Err(e) => {
                             tracing::error!("[real] Failed to trim DELTA B (attempt {}/{}): {}", attempt + 1, MAX_TRIM_RETRIES, e);
+                            // Re-verify position exists — if exchange confirms no position, stop retrying (phantom fill)
+                            if let Ok(positions) = conn_b.fetch_positions(&hc, &kc).await {
+                                if !positions.iter().any(|p| {
+                                    crate::engine::real::symbols_match(&p.symbol, pair) && p.size.abs() > 1e-12
+                                }) {
+                                    tracing::warn!("[real] ⚠️ TRIM {} LEG B — position vanished on {} after attempt {}. Stopping retries (phantom fill).", pair, exb, attempt + 1);
+                                    break;
+                                }
+                            }
                             if attempt + 1 < MAX_TRIM_RETRIES {
                                 tokio::time::sleep(tokio::time::Duration::from_millis(TRIM_RETRY_DELAY_MS)).await;
                             }
