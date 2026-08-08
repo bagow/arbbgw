@@ -951,7 +951,7 @@ pub async fn execute_sequential_entry(
     let actual_entry_spread = compute_entry_spread(fill_a, fill_b, ctx.is_a_higher, ctx.sig_spread);
 
     // ── POST-FILL SPREAD GUARD (sequential) ──
-    let min_acceptable = ctx.break_even_pct.max(ctx.sig_spread * 0.5);
+    let min_acceptable = ctx.break_even_pct.max(ctx.sig_spread * 0.7);
     if a_filled && b_filled && actual_entry_spread < min_acceptable && !ctx.dry_run {
         tracing::warn!(
             "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < min {:.4}% (signal was {:.4}%). Closing BOTH positions.",
@@ -961,11 +961,11 @@ pub async fn execute_sequential_entry(
         let conn_b_trim = crate::engine::exchanges::get_connector(&ctx.exb).unwrap();
         let (tr_a, tr_b) = tokio::join!(
             conn_a_trim.trim_position(
-                http, keys, &ctx.pair, !ctx.is_a_higher, phys_a, false,
+                http, keys, &ctx.pair, ctx.is_a_higher, phys_a, false,
                 ctx.mult_a, ctx.tick_a, fill_a, ts.api_timeout_ms,
             ),
             conn_b_trim.trim_position(
-                http, keys, &ctx.pair, ctx.is_a_higher, phys_b, false,
+                http, keys, &ctx.pair, !ctx.is_a_higher, phys_b, false,
                 ctx.mult_b, ctx.tick_b, fill_b, ts.api_timeout_ms,
             )
         );
@@ -1413,25 +1413,26 @@ pub async fn execute_parallel_entry(
     let actual_entry_spread = compute_entry_spread(fill_a, fill_b, ctx.is_a_higher, ctx.sig_spread);
 
     // ── POST-FILL SPREAD GUARD: reject if slippage ate the profit margin ──
-    // Minimum acceptable = max(break_even, half of signal spread)
+    // Minimum acceptable = max(break_even, 70% of signal spread)
     // If scanner saw 1.5% but realized is 0.38%, that's 75% degradation — not worth entering
-    let min_acceptable = ctx.break_even_pct.max(ctx.sig_spread * 0.5);
+    let min_acceptable = ctx.break_even_pct.max(ctx.sig_spread * 0.7);
     if a_filled && b_filled && actual_entry_spread < min_acceptable && !ctx.dry_run {
         tracing::warn!(
-            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < break_even {:.4}% (signal was {:.4}%). Closing BOTH positions.",
-            ctx.pair, actual_entry_spread, ctx.break_even_pct, ctx.sig_spread
+            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < min {:.4}% (signal was {:.4}%). Closing BOTH positions.",
+            ctx.pair, actual_entry_spread, min_acceptable, ctx.sig_spread
         );
 
         // Close both legs immediately
+        // Note: is_buy_to_close is opposite of entry: Leg A entry was !is_a_higher so close is is_a_higher. Leg B entry was is_a_higher so close is !is_a_higher.
         let conn_a_trim = crate::engine::exchanges::get_connector(&ctx.exa).unwrap();
         let conn_b_trim = crate::engine::exchanges::get_connector(&ctx.exb).unwrap();
         let (tr_a, tr_b) = tokio::join!(
             conn_a_trim.trim_position(
-                http, keys, &ctx.pair, !ctx.is_a_higher, phys_a, false,
+                http, keys, &ctx.pair, ctx.is_a_higher, phys_a, false,
                 ctx.mult_a, ctx.tick_a, fill_a, ts.api_timeout_ms,
             ),
             conn_b_trim.trim_position(
-                http, keys, &ctx.pair, ctx.is_a_higher, phys_b, false,
+                http, keys, &ctx.pair, !ctx.is_a_higher, phys_b, false,
                 ctx.mult_b, ctx.tick_b, fill_b, ts.api_timeout_ms,
             )
         );

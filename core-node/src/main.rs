@@ -89,6 +89,7 @@ async fn main() -> Result<()> {
                 [],
             );
             let _ = conn.execute_batch("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);");
+            let _ = conn.execute("UPDATE server_cache SET value = '0' WHERE key = 'kill_switch_active'", []);
             Ok(())
         })
         .await;
