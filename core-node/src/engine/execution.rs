@@ -77,6 +77,7 @@ pub async fn verify_fill(
     }
 
     // ── Fast verify loop ──
+    let mut order_definitively_unfilled = false;
     for attempt in 0..config.fast_retries {
         if got && phys.is_some() { break; }
         if attempt > 0 {
@@ -86,13 +87,21 @@ pub async fn verify_fill(
             if let Ok((p, f, ev)) = connector.fetch_order(http, keys, pair, oid, config.mult).await {
                 if p > 0.0 { fill_price = p; }
                 if f > 1e-9 { fee = f; }
-                if ev > 1e-12 { phys = Some(ev); got = true; }
+                if ev > 1e-12 {
+                    phys = Some(ev);
+                    got = true;
+                    break;
+                } else if attempt > 0 || (p == 0.0 && f == 0.0) {
+                    // fetch_order returned Ok with 0 volume — order is confirmed EXPIRED/UNFILLED
+                    order_definitively_unfilled = true;
+                    break;
+                }
             }
         }
     }
 
-    // ── Slow verify loop ──
-    if !got && order_id.is_some() && !dry_run && config.slow_retries > 0 {
+    // ── Slow verify loop (skipped if order confirmed EXPIRED/UNFILLED) ──
+    if !got && !order_definitively_unfilled && order_id.is_some() && !dry_run && config.slow_retries > 0 {
         tracing::warn!("[{}] ⏳ {}: orderId={} fill not confirmed. Extended wait...",
             label, pair, order_id.as_deref().unwrap_or("?"));
         for slow_attempt in 0..config.slow_retries {
@@ -1150,8 +1159,8 @@ pub async fn execute_parallel_entry(
             VerifyConfig {
                 fast_retries: retries_a,
                 fast_delay_ms: ts.fill_verify_delay_ms as u64,
-                slow_retries: 8,
-                slow_delay_ms: 500,
+                slow_retries: 2,
+                slow_delay_ms: 200,
                 position_fallback: false,
                 mult: ctx.mult_a,
             },
@@ -1163,8 +1172,8 @@ pub async fn execute_parallel_entry(
             VerifyConfig {
                 fast_retries: retries_b,
                 fast_delay_ms: ts.fill_verify_delay_ms as u64,
-                slow_retries: 8,
-                slow_delay_ms: 500,
+                slow_retries: 2,
+                slow_delay_ms: 200,
                 position_fallback: false,
                 mult: ctx.mult_b,
             },
