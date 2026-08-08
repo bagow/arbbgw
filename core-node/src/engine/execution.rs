@@ -950,6 +950,40 @@ pub async fn execute_sequential_entry(
 
     let actual_entry_spread = compute_entry_spread(fill_a, fill_b, ctx.is_a_higher, ctx.sig_spread);
 
+    // ── POST-FILL SPREAD GUARD (sequential) ──
+    let min_acceptable = ctx.break_even_pct.max(ctx.sig_spread * 0.5);
+    if a_filled && b_filled && actual_entry_spread < min_acceptable && !ctx.dry_run {
+        tracing::warn!(
+            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < min {:.4}% (signal was {:.4}%). Closing BOTH positions.",
+            ctx.pair, actual_entry_spread, min_acceptable, ctx.sig_spread
+        );
+        let conn_a_trim = crate::engine::exchanges::get_connector(&ctx.exa).unwrap();
+        let conn_b_trim = crate::engine::exchanges::get_connector(&ctx.exb).unwrap();
+        let (tr_a, tr_b) = tokio::join!(
+            conn_a_trim.trim_position(
+                http, keys, &ctx.pair, !ctx.is_a_higher, phys_a, false,
+                ctx.mult_a, ctx.tick_a, fill_a, ts.api_timeout_ms,
+            ),
+            conn_b_trim.trim_position(
+                http, keys, &ctx.pair, ctx.is_a_higher, phys_b, false,
+                ctx.mult_b, ctx.tick_b, fill_b, ts.api_timeout_ms,
+            )
+        );
+        if let Err(e) = tr_a { tracing::error!("[real] Failed to close spread-guard leg A {}: {}", ctx.exa, e); }
+        if let Err(e) = tr_b { tracing::error!("[real] Failed to close spread-guard leg B {}: {}", ctx.exb, e); }
+
+        let total_fee = fee_a_val + fee_b_val;
+        e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.asymmetric_cooldown_ms);
+        let repo = TradeRepository::new(db.clone());
+        repo.append_asymmetric_close(
+            ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
+            matched_phys * fill_a, fill_a, fill_b, ctx.sig_spread, crate::engine::utils::now_ms(),
+            0.0, 0.0, ctx.profile_id.clone(),
+            total_fee, 0.0, -total_fee, 0.0, 0.0, 0.0,
+        ).await;
+        return true;
+    }
+
     let entry_comm = fee_a_val + fee_b_val + trimming_fee + trimming_loss;
     let slip_a = if fill_a > 0.0 {
         if ctx.is_a_higher { ((ctx.sig_entry_a - fill_a) * matched_phys).max(0.0) } else { ((fill_a - ctx.sig_entry_a) * matched_phys).max(0.0) }
@@ -1377,6 +1411,45 @@ pub async fn execute_parallel_entry(
     e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.pair_cooldown_ms);
 
     let actual_entry_spread = compute_entry_spread(fill_a, fill_b, ctx.is_a_higher, ctx.sig_spread);
+
+    // ── POST-FILL SPREAD GUARD: reject if slippage ate the profit margin ──
+    // Minimum acceptable = max(break_even, half of signal spread)
+    // If scanner saw 1.5% but realized is 0.38%, that's 75% degradation — not worth entering
+    let min_acceptable = ctx.break_even_pct.max(ctx.sig_spread * 0.5);
+    if a_filled && b_filled && actual_entry_spread < min_acceptable && !ctx.dry_run {
+        tracing::warn!(
+            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < break_even {:.4}% (signal was {:.4}%). Closing BOTH positions.",
+            ctx.pair, actual_entry_spread, ctx.break_even_pct, ctx.sig_spread
+        );
+
+        // Close both legs immediately
+        let conn_a_trim = crate::engine::exchanges::get_connector(&ctx.exa).unwrap();
+        let conn_b_trim = crate::engine::exchanges::get_connector(&ctx.exb).unwrap();
+        let (tr_a, tr_b) = tokio::join!(
+            conn_a_trim.trim_position(
+                http, keys, &ctx.pair, !ctx.is_a_higher, phys_a, false,
+                ctx.mult_a, ctx.tick_a, fill_a, ts.api_timeout_ms,
+            ),
+            conn_b_trim.trim_position(
+                http, keys, &ctx.pair, ctx.is_a_higher, phys_b, false,
+                ctx.mult_b, ctx.tick_b, fill_b, ts.api_timeout_ms,
+            )
+        );
+        if let Err(e) = tr_a { tracing::error!("[real] Failed to close spread-guard leg A {}: {}", ctx.exa, e); }
+        if let Err(e) = tr_b { tracing::error!("[real] Failed to close spread-guard leg B {}: {}", ctx.exb, e); }
+
+        let total_fee = fee_a_val + fee_b_val;
+        e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + ts.asymmetric_cooldown_ms);
+
+        repo.append_asymmetric_close(
+            ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
+            matched_phys * fill_a, fill_a, fill_b, ctx.sig_spread, crate::engine::utils::now_ms(),
+            0.0, 0.0, ctx.profile_id.clone(),
+            total_fee, 0.0, -total_fee, 0.0, 0.0, 0.0,
+        ).await;
+        tracing::info!("[real] ⛔ Both legs closed, trade rejected. Slippage cost: fees only ({:.4})", total_fee);
+        return true;
+    }
 
     let entry_comm = fee_a_val + fee_b_val + trimming_fee + trimming_loss;
     let slip_a = if fill_a > 0.0 {
