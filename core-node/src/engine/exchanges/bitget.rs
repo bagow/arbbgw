@@ -304,11 +304,10 @@ impl ExchangeConnector for BitgetConnector {
                     // 22002 = No position to close with given params (marginMode/holdSide mismatch)
                     // Use Bitget Flash Close API which auto-detects all params
                     if e.contains("22002") || e.to_lowercase().contains("no position") {
-                        // 22002 = holdSide/marginMode mismatch.
-                        // Retry as one-way mode close: same IOC limit order but WITHOUT
-                        // tradeSide/holdSide params. This avoids flash-close (pure market)
-                        // which causes catastrophic slippage.
-                        info!("[bitget] close {} — retrying as one-way mode (no holdSide)", pair);
+                        // 22002 = holdSide/marginMode mismatch (hedge params on one-way account).
+                        // Retry as one-way mode close: use tradeSide="close" + reduceOnly
+                        // WITHOUT holdSide. Bitget API v2 requires tradeSide for one-way mode.
+                        info!("[bitget] close {} — retrying as one-way mode (tradeSide=close, no holdSide)", pair);
                         let oneway_body = if target_price > 0.0 {
                             serde_json::json!({
                                 "symbol": pair,
@@ -316,6 +315,7 @@ impl ExchangeConnector for BitgetConnector {
                                 "marginMode": "crossed",
                                 "marginCoin": "USDT",
                                 "side": side,
+                                "tradeSide": "close",
                                 "orderType": "limit",
                                 "force": "ioc",
                                 "price": price_str,
@@ -330,6 +330,7 @@ impl ExchangeConnector for BitgetConnector {
                                 "marginMode": "crossed",
                                 "marginCoin": "USDT",
                                 "side": side,
+                                "tradeSide": "close",
                                 "orderType": "market",
                                 "size": qty_str,
                                 "reduceOnly": "YES"
@@ -371,13 +372,16 @@ impl ExchangeConnector for BitgetConnector {
             }
         }
 
-        // Final fallback: market order
+        // Final fallback: market order (try hedge mode first, then one-way)
         let qty = if multiplier > 0.0 && multiplier != 1.0 {
             (phys_amount / multiplier).round() * multiplier
         } else {
             phys_amount
         };
-        let body = serde_json::json!({
+        let qty_formatted = format_price(qty);
+
+        // Attempt 1: hedge mode
+        let hedge_body = serde_json::json!({
             "symbol": pair,
             "productType": "USDT-FUTURES",
             "marginMode": "crossed",
@@ -386,13 +390,42 @@ impl ExchangeConnector for BitgetConnector {
             "tradeSide": "close",
             "holdSide": hold_side,
             "orderType": "market",
-            "size": format_price(qty)
+            "size": qty_formatted
         })
         .to_string();
 
-        let v = bitget_request(http, keys, "POST", "/api/v2/mix/order/place-order", &body, api_timeout_ms)
+        match bitget_request(http, keys, "POST", "/api/v2/mix/order/place-order", &hedge_body, api_timeout_ms).await {
+            Ok(v) => {
+                let oid = v["data"]["orderId"].as_str().unwrap_or("?");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let (px, fee, filled) = self.fetch_order(http, keys, pair, oid, multiplier).await.unwrap_or((target_price, 0.0, phys_amount));
+                return Ok(CloseReceipt { final_price: px, total_fee: fee, closed_volume: filled });
+            }
+            Err(e) if e.contains("22002") || e.to_lowercase().contains("no position") => {
+                warn!("[bitget] fallback hedge close {} failed ({}), retrying as one-way market", pair, e);
+            }
+            Err(e) => {
+                return Err(format!("Bitget fallback close failed: {}", e));
+            }
+        }
+
+        // Attempt 2: one-way mode (no holdSide, tradeSide=close + reduceOnly)
+        let oneway_body = serde_json::json!({
+            "symbol": pair,
+            "productType": "USDT-FUTURES",
+            "marginMode": "crossed",
+            "marginCoin": "USDT",
+            "side": side,
+            "tradeSide": "close",
+            "orderType": "market",
+            "size": qty_formatted,
+            "reduceOnly": "YES"
+        })
+        .to_string();
+
+        let v = bitget_request(http, keys, "POST", "/api/v2/mix/order/place-order", &oneway_body, api_timeout_ms)
             .await
-            .map_err(|e| format!("Bitget fallback close failed: {}", e))?;
+            .map_err(|e| format!("Bitget fallback one-way close failed: {}", e))?;
 
         let oid = v["data"]["orderId"].as_str().unwrap_or("?");
         tokio::time::sleep(Duration::from_millis(500)).await;
