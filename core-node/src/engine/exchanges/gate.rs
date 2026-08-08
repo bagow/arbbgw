@@ -161,13 +161,13 @@ impl ExchangeConnector for GateConnector {
             "close": false,
             "text": "t-corenode"
         });
-        let _body_str = body.to_string();
+        let path = "/api/v4/futures/usdt/orders";
+        let body_str = body.to_string();
 
         if dry_run {
             return Ok((Some(format!("dry_{}", Uuid::new_v4())), target_price, 0.0));
         }
 
-        // ── WS ONLY (no REST fallback) ──
         let _ = super::ws_gate::get_or_init_gate_ws(
             keys.gate_key.clone(),
             keys.gate_secret.clone(),
@@ -179,8 +179,28 @@ impl ExchangeConnector for GateConnector {
                 Ok((Some(oid), fill_price, fee))
             }
             Err(e) => {
-                tracing::error!("[gate] place_order {} WS failed: {}", pair, e);
-                Err(format!("Gate WS order failed: {}", e))
+                tracing::warn!("[gate] place_order {} WS failed ({}). Trying REST fallback...", pair, e);
+                let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &body_str);
+                let url = format!("https://api.gateio.ws{}", path);
+                let resp = _http.post(&url)
+                    .headers(headers)
+                    .header("Content-Type", "application/json")
+                    .body(body_str)
+                    .timeout(Duration::from_millis(3000))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Gate REST place_order HTTP error: {}", e))?;
+                let v = resp.json::<Value>().await
+                    .map_err(|e| format!("Gate REST place_order JSON error: {}", e))?;
+                if let Some(oid) = v["id"].as_i64().map(|i| i.to_string()).or_else(|| v["id"].as_str().map(|s| s.to_string())) {
+                    let fill_price: f64 = v["fill_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);
+                    let fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
+                    tracing::info!("[gate] ✅ place_order {} orderId={} fill_price={:.6} fee={:.6} (REST)", pair, oid, fill_price, fee);
+                    Ok((Some(oid), fill_price, fee.abs()))
+                } else {
+                    let err = v["label"].as_str().or_else(|| v["message"].as_str()).unwrap_or("Unknown Gate REST error");
+                    Err(format!("Gate REST error: {}", err))
+                }
             }
         }
     }
