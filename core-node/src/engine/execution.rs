@@ -1229,10 +1229,11 @@ pub async fn execute_parallel_entry(
                             (candidate_fill_b - candidate_fill_a) / candidate_fill_a
                         };
 
-                        if realized_spread < 0.0 {
+                        let min_acceptable_spread = ctx.break_even_pct / 100.0;
+                        if realized_spread < min_acceptable_spread {
                             tracing::warn!(
-                                "[real] ⛔ PARALLEL RETRY REJECTED: {} filled but realized spread {:.4}% is NEGATIVE (fill_a={:.6} fill_b={:.6}). Closing retry position and proceeding to trim.",
-                                retry_label, realized_spread * 100.0, candidate_fill_a, candidate_fill_b
+                                "[real] ⛔ PARALLEL RETRY REJECTED: {} filled but realized spread {:.4}% < break_even {:.4}% (fill_a={:.6} fill_b={:.6}). Closing retry position and proceeding to trim.",
+                                retry_label, realized_spread * 100.0, ctx.break_even_pct, candidate_fill_a, candidate_fill_b
                             );
                             // Close the retry position immediately to avoid orphan
                             let close_is_buy = !retry_is_buy; // reverse direction to close
