@@ -1214,16 +1214,48 @@ pub async fn execute_parallel_entry(
 
                     let retry_phys = ver_retry.phys_volume.unwrap_or(0.0);
                     if retry_phys > 1e-12 && ver_retry.fill_price > 0.0 {
-                        tracing::info!("[real] ✅ PARALLEL RETRY SUCCESS: {} filled on retry! price={:.6} qty={:.6}",
-                            retry_label, ver_retry.fill_price, retry_phys);
-                        if a_filled && !b_filled {
-                            phys_b = retry_phys;
-                            fill_b = ver_retry.fill_price;
-                            b_filled = true;
+                        // ── SPREAD GUARD: verify retry fill doesn't create a losing entry ──
+                        let (candidate_fill_a, candidate_fill_b) = if a_filled && !b_filled {
+                            (fill_a, ver_retry.fill_price)
                         } else {
-                            phys_a = retry_phys;
-                            fill_a = ver_retry.fill_price;
-                            a_filled = true;
+                            (ver_retry.fill_price, fill_b)
+                        };
+
+                        // A is the higher-priced exchange (SELL side), B is lower (BUY side)
+                        // For profit: sell_price > buy_price, i.e. spread > 0
+                        let realized_spread = if ctx.is_a_higher {
+                            (candidate_fill_a - candidate_fill_b) / candidate_fill_b
+                        } else {
+                            (candidate_fill_b - candidate_fill_a) / candidate_fill_a
+                        };
+
+                        if realized_spread < 0.0 {
+                            tracing::warn!(
+                                "[real] ⛔ PARALLEL RETRY REJECTED: {} filled but realized spread {:.4}% is NEGATIVE (fill_a={:.6} fill_b={:.6}). Closing retry position and proceeding to trim.",
+                                retry_label, realized_spread * 100.0, candidate_fill_a, candidate_fill_b
+                            );
+                            // Close the retry position immediately to avoid orphan
+                            let close_is_buy = !retry_is_buy; // reverse direction to close
+                            if let Err(ce) = retry_conn.trim_position(
+                                http, keys, &ctx.pair, close_is_buy, retry_phys, false,
+                                retry_mult, retry_tick, ver_retry.fill_price, ts.api_timeout_ms,
+                            ).await {
+                                tracing::error!("[real] ⚠️ Failed to close rejected retry position on {}: {}", retry_label, ce);
+                            } else {
+                                tracing::info!("[real] ✅ Rejected retry position on {} closed successfully", retry_label);
+                            }
+                        } else {
+                            tracing::info!("[real] ✅ PARALLEL RETRY SUCCESS: {} filled on retry! price={:.6} qty={:.6} realized_spread={:.4}%",
+                                retry_label, ver_retry.fill_price, retry_phys, realized_spread * 100.0);
+                            if a_filled && !b_filled {
+                                phys_b = retry_phys;
+                                fill_b = ver_retry.fill_price;
+                                b_filled = true;
+                            } else {
+                                phys_a = retry_phys;
+                                fill_a = ver_retry.fill_price;
+                                a_filled = true;
+                            }
                         }
                     } else {
                         tracing::error!("[real] ❌ PARALLEL RETRY FAILED: {} still unfilled after retry", retry_label);
