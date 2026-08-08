@@ -1077,8 +1077,8 @@ pub async fn execute_parallel_entry(
     let is_buy_b = ctx.is_a_higher;
 
     tracing::info!(
-        "[real] ⚡ PARALLEL execution: {} + {} for {} (qty_a={:.6} qty_b={:.6})...",
-        ctx.exa, ctx.exb, ctx.pair, ctx.qty_a, ctx.qty_b
+        "[real] ⚡ PARALLEL execution: {} + {} for {} (qty_a={:.6} qty_b={:.6}) is_a_higher={} buy_a={} buy_b={}",
+        ctx.exa, ctx.exb, ctx.pair, ctx.qty_a, ctx.qty_b, ctx.is_a_higher, is_buy_a, is_buy_b
     );
 
     // ── PHASE 1: Fire BOTH legs simultaneously ──────────────────────────────

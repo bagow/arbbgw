@@ -436,9 +436,10 @@ pub async fn process_entries(
         // ── IOC / MARKET MODE: existing parallel entry ──────────────────────
         let order_type_label_fire = if use_ioc { "IOC" } else { "MKT" };
         info!(
-            "[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}% slip={:.3}%",
+            "[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}% slip={:.3}% dir={} is_a_hi={}",
             pair, order_type_label_fire, exa, contracts_a, limit_price_a,
-            exb, contracts_b, limit_price_b, sig.spread, break_even_pct, ioc_slippage_pct
+            exb, contracts_b, limit_price_b, sig.spread, break_even_pct, ioc_slippage_pct,
+            sig.direction, is_a_higher
         );
         let snapshot = serde_json::json!({
             "bid_a": sig.entry_a, "bid_b": sig.entry_b,
