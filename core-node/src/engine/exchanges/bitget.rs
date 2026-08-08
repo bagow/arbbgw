@@ -360,6 +360,26 @@ impl ExchangeConnector for BitgetConnector {
                             }
                             Err(e2) => {
                                 warn!("[bitget] one-way close {} also failed: {}", pair, e2);
+                                // Try flash close-positions API as ultimate fallback
+                                if e2.contains("22002") || e2.to_lowercase().contains("no position") {
+                                    let flash_body = serde_json::json!({
+                                        "symbol": pair,
+                                        "productType": "USDT-FUTURES",
+                                        "holdSide": hold_side
+                                    }).to_string();
+                                    info!("[bitget] flash close-positions {} holdSide={}", pair, hold_side);
+                                    if let Ok(fv) = bitget_request(http, keys, "POST", "/api/v2/mix/order/close-positions", &flash_body, api_timeout_ms).await {
+                                        if let Some(arr) = fv["data"]["successList"].as_array() {
+                                            if let Some(first) = arr.first() {
+                                                let oid = first["orderId"].as_str().unwrap_or("?");
+                                                info!("[bitget] flash close {} → orderId={}", pair, oid);
+                                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                                let (px, fee, filled) = self.fetch_order(http, keys, pair, oid, multiplier).await.unwrap_or((target_price, 0.0, phys_amount));
+                                                return Ok(CloseReceipt { final_price: px, total_fee: fee, closed_volume: filled });
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         return Err(e);
@@ -423,19 +443,51 @@ impl ExchangeConnector for BitgetConnector {
         })
         .to_string();
 
-        let v = bitget_request(http, keys, "POST", "/api/v2/mix/order/place-order", &oneway_body, api_timeout_ms)
-            .await
-            .map_err(|e| format!("Bitget fallback one-way close failed: {}", e))?;
+        match bitget_request(http, keys, "POST", "/api/v2/mix/order/place-order", &oneway_body, api_timeout_ms).await {
+            Ok(v) => {
+                let oid = v["data"]["orderId"].as_str().unwrap_or("?");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let (px, fee, filled) = self.fetch_order(http, keys, pair, oid, multiplier).await.unwrap_or((target_price, 0.0, phys_amount));
+                return Ok(CloseReceipt { final_price: px, total_fee: fee, closed_volume: filled });
+            }
+            Err(e) if e.contains("22002") || e.to_lowercase().contains("no position") => {
+                warn!("[bitget] one-way fallback close {} also 22002 — using flash close-positions API", pair);
+            }
+            Err(e) => {
+                return Err(format!("Bitget fallback one-way close failed: {}", e));
+            }
+        }
 
-        let oid = v["data"]["orderId"].as_str().unwrap_or("?");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let (px, fee, filled) = self.fetch_order(http, keys, pair, oid, multiplier).await.unwrap_or((target_price, 0.0, phys_amount));
-
-        Ok(CloseReceipt {
-            final_price: px,
-            total_fee: fee,
-            closed_volume: filled,
+        // Ultimate fallback: Bitget close-positions API (flash close)
+        // This auto-detects posMode/holdSide/marginMode and always works
+        let flash_body = serde_json::json!({
+            "symbol": pair,
+            "productType": "USDT-FUTURES",
+            "holdSide": hold_side
         })
+        .to_string();
+
+        info!("[bitget] flash close-positions {} holdSide={}", pair, hold_side);
+        match bitget_request(http, keys, "POST", "/api/v2/mix/order/close-positions", &flash_body, api_timeout_ms).await {
+            Ok(v) => {
+                // close-positions returns successList with orderId
+                if let Some(arr) = v["data"]["successList"].as_array() {
+                    if let Some(first) = arr.first() {
+                        let oid = first["orderId"].as_str().unwrap_or("?");
+                        info!("[bitget] flash close {} → orderId={}", pair, oid);
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let (px, fee, filled) = self.fetch_order(http, keys, pair, oid, multiplier).await.unwrap_or((target_price, 0.0, phys_amount));
+                        return Ok(CloseReceipt { final_price: px, total_fee: fee, closed_volume: filled });
+                    }
+                }
+                // If successList is empty but no error, still return OK with target price
+                warn!("[bitget] flash close {} succeeded but no orderId in response", pair);
+                Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount })
+            }
+            Err(e) => {
+                Err(format!("Bitget flash close-positions also failed: {}", e))
+            }
+        }
     }
 
     async fn trim_position(
