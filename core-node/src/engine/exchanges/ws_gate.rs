@@ -69,10 +69,21 @@ async fn gate_ws_loop(
                 match msg {
                     Ok(Message::Text(t)) => {
                         if let Ok(val) = serde_json::from_str::<Value>(&t) {
-                            // Gate uses "request_id" for correlation
-                            if let Some(id) = val["request_id"].as_str() {
-                                if let Some(sender) = pending_clone.lock().await.remove(id) {
+                            // Gate uses "request_id" for correlation — can be string OR integer
+                            let id_opt = val["request_id"].as_str().map(|s| s.to_string())
+                                .or_else(|| val["request_id"].as_i64().map(|n| n.to_string()))
+                                .or_else(|| val["request_id"].as_u64().map(|n| n.to_string()));
+                            if let Some(id) = id_opt {
+                                if let Some(sender) = pending_clone.lock().await.remove(&id) {
                                     let _ = sender.send(val);
+                                } else {
+                                    tracing::debug!("[gate_ws] unmatched response id={}: {}", id, &t[..t.len().min(200)]);
+                                }
+                            } else {
+                                // Log non-correlated messages (ping/pong responses, errors, etc.)
+                                let channel = val["channel"].as_str().unwrap_or("?");
+                                if channel != "futures.pong" && channel != "futures.ping" {
+                                    tracing::debug!("[gate_ws] non-order msg channel={}: {}", channel, &t[..t.len().min(200)]);
                                 }
                             }
                         }
