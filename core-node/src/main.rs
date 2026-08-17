@@ -282,13 +282,8 @@ async fn main() -> Result<()> {
                     let real_profiles = t_real_cache.read().await.clone();
                     let ts = t_ts_cache.read().await.clone();
 
-                    let min_vol = real_profiles
-                        .iter()
-                        .map(|p| p.min_volume_millions)
-                        .fold(f64::MAX, f64::min);
-                    let min_vol = if min_vol == f64::MAX { 1.0 } else { min_vol };
-
-                    let spreads = compute_spreads(&t_prices, min_vol, &ts);
+                    // Compute spreads for all active pairs (per-profile min_volume is applied in engine::scanner)
+                    let spreads = compute_spreads(&t_prices, 0.0, &ts);
 
                     // Writes to profiles_db since vps-api reads from it
                     static LAST_SNAP: std::sync::atomic::AtomicU64 =
