@@ -396,19 +396,49 @@ function renderPanel(profile, active, history, stats, exchanges) {
         </div>
 
         <!-- Logs sub-panel -->
-        <div class="mt-content" id="mt-sub-logs" style="display:${activeSubTabId==='logs'?'block':'none'}; padding: 24px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-                <h2 style="margin:0;">System Logs (core-node)</h2>
-                <div style="display:flex; align-items:center; gap:16px;">
-                    <span style="color:var(--text-sub); font-size:0.85rem;" id="logs-status">Auto-updating...</span>
-                    <div style="background:var(--bg-row); padding:4px; border-radius:6px; display:flex; gap:4px;">
-                        <button class="mt-nav-btn ${window.logViewMode==='trade'?'mt-nav-btn--active':''}" id="btn-log-trade" onclick="setLogView('trade')" style="padding:6px 16px; margin:0; font-size:13px;">Trades</button>
-                        <button class="mt-nav-btn ${window.logViewMode==='tech'?'mt-nav-btn--active':''}" id="btn-log-tech" onclick="setLogView('tech')" style="padding:6px 16px; margin:0; font-size:13px;">Technical</button>
+        <div class="mt-content" id="mt-sub-logs" style="display:${activeSubTabId==='logs'?'block':'none'};">
+            <div class="logs-wrapper">
+                <div class="logs-toolbar">
+                    <div class="logs-filters">
+                        <div style="background:var(--bg-ctrl); padding:3px; border-radius:6px; display:flex; gap:3px; border:1px solid var(--border-dim);">
+                            <button class="mt-nav-btn ${window.logViewMode==='trade'?'mt-nav-btn--active':''}" id="btn-log-trade" onclick="setLogView('trade')" style="padding:6px 14px; margin:0; font-size:12px; border-radius:4px;">🎯 Trades & Signals</button>
+                            <button class="mt-nav-btn ${window.logViewMode==='error'?'mt-nav-btn--active':''}" id="btn-log-error" onclick="setLogView('error')" style="padding:6px 14px; margin:0; font-size:12px; border-radius:4px;">⚠️ Warnings & Errors</button>
+                            <button class="mt-nav-btn ${window.logViewMode==='exec'?'mt-nav-btn--active':''}" id="btn-log-exec" onclick="setLogView('exec')" style="padding:6px 14px; margin:0; font-size:12px; border-radius:4px;">⚡ Execution</button>
+                            <button class="mt-nav-btn ${window.logViewMode==='all'?'mt-nav-btn--active':''}" id="btn-log-all" onclick="setLogView('all')" style="padding:6px 14px; margin:0; font-size:12px; border-radius:4px;">📜 All Logs</button>
+                        </div>
+                        <div class="logs-search-wrap">
+                            <span class="logs-search-icon">🔍</span>
+                            <input type="text" id="logs-search" class="logs-search-input" placeholder="Filter logs (e.g. BTC, RETRY, PnL)..." oninput="filterLogsRealtime()" />
+                        </div>
                     </div>
-                    <button class="trading-save-btn outline-btn" onclick="window.fetchLogs(false)" style="padding:8px 16px; width:auto; margin:0;">Force Refresh</button>
+                    
+                    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                        <button id="btn-log-autoscroll" onclick="toggleLogAutoScroll()" class="trading-save-btn outline-btn" style="padding:6px 12px; font-size:12px; border:1px solid var(--border-dim); background:var(--bg-ctrl); color:var(--text);">
+                            📌 Auto-scroll: <span id="autoscroll-status" style="color:var(--green);font-weight:700;">ON</span>
+                        </button>
+                        <button onclick="copyVisibleLogs()" class="trading-save-btn outline-btn" style="padding:6px 12px; font-size:12px; border:1px solid var(--border-dim); background:var(--bg-ctrl); color:var(--text);">
+                            📋 Copy
+                        </button>
+                        <button onclick="window.fetchLogs(false)" class="trading-save-btn" style="padding:6px 16px; font-size:12px; background:var(--accent); color:#fff; border:none;">
+                            🔄 Refresh
+                        </button>
+                        <span style="color:var(--text-sub); font-size:0.75rem; font-family:var(--font-mono);" id="logs-status">Syncing…</span>
+                    </div>
+                </div>
+
+                <div class="logs-terminal-frame">
+                    <div class="logs-terminal-header">
+                        <div class="logs-terminal-dots">
+                            <div class="logs-terminal-dot red"></div>
+                            <div class="logs-terminal-dot yellow"></div>
+                            <div class="logs-terminal-dot green"></div>
+                        </div>
+                        <span class="logs-terminal-title">core-node.service • Live Arb Stream</span>
+                        <span style="font-size:0.72rem;color:var(--text-sub);font-family:var(--font-mono);" id="logs-count-badge">0 lines</span>
+                    </div>
+                    <div id="logs-container" class="logs-terminal-body"></div>
                 </div>
             </div>
-            <div id="logs-container" style="background:var(--bg-row-alt); color:var(--text); padding:16px; border:1px solid var(--border-dim); border-radius:8px; height:65vh; overflow-y:auto; font-family:var(--font-mono); font-size: 1.1rem; line-height: 1.6; white-space:pre-wrap;"></div>
         </div>
     `;
 
@@ -932,15 +962,21 @@ function renderSettingsForm(profile) {
 
         <!-- Technical Settings (global engine params) -->
         <section id="stab-technical" style="display:none;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:16px;flex-wrap:wrap;">
                 <div>
-                    <h3 style="margin:0 0 4px 0;font-size:1.1rem;">Engine Technical Settings</h3>
-                    <span style="color:var(--text-sub);font-size:.8rem;">Global parameters — affect all profiles</span>
+                    <h3 style="margin:0 0 4px 0;font-size:1.15rem;font-weight:700;">Engine Technical Settings</h3>
+                    <span style="color:var(--text-sub);font-size:.82rem;">Global low-level parameters — applied to core-node engine runtime</span>
                 </div>
-                <button class="trading-save-btn" id="tech-save-btn" onclick="saveTechnicalSettings()"
-                    style="margin:0;width:auto;padding:10px 28px;font-size:.9rem;">Save Technical</button>
+                <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+                    <div class="logs-search-wrap" style="min-width:220px;">
+                        <span class="logs-search-icon">🔍</span>
+                        <input type="text" id="tech-search" class="logs-search-input" placeholder="Search parameters..." oninput="filterTechSettingsRealtime()" />
+                    </div>
+                    <button class="trading-save-btn" id="tech-save-btn" onclick="saveTechnicalSettings()"
+                        style="margin:0;width:auto;padding:10px 28px;font-size:.9rem;background:var(--accent);color:#fff;border:none;">💾 Save Technical</button>
+                </div>
             </div>
-            <div id="tech-settings-table" style="color:var(--text-sub);text-align:center;padding:32px;">Loading...</div>
+            <div id="tech-settings-table">Loading...</div>
         </section>
     `;
 }
@@ -976,101 +1012,146 @@ async function loadTechnicalSettings() {
         _techSettingsData = await apiFetch('/api/technical-settings');
         renderTechSettingsTable(wrap, _techSettingsData);
     } catch (e) {
-        wrap.innerHTML = '<div style="color:var(--red);padding:24px;">Failed to load: ' + e.message + '</div>';
+        wrap.innerHTML = '<div style="color:var(--red);padding:24px;text-align:center;">Failed to load: ' + e.message + '</div>';
     }
 }
 
-// ── Blacklist load/save ──────────────────────────────────────────────────────
-
-let _blacklistOriginal = '';
-
-async function loadBlacklistIntoTextarea() {
-    const ta = document.getElementById('sf-blacklist');
-    if (!ta) return;
-    try {
-        const data = await apiFetch('/api/technical-settings');
-        const bl = data.find(d => d.key === 'blacklist');
-        if (bl && bl.value) {
-            // Convert comma-separated to newline-separated for textarea
-            const lines = bl.value.split(',').map(s => s.trim()).filter(s => s.length > 0);
-            ta.value = lines.join('\n');
-            _blacklistOriginal = bl.value;
-        }
-    } catch (e) {
-        console.warn('Failed to load blacklist:', e);
+window.filterTechSettingsRealtime = function() {
+    const wrap = document.getElementById('tech-settings-table');
+    if (wrap && _techSettingsData) {
+        renderTechSettingsTable(wrap, _techSettingsData);
     }
-}
+};
 
 function renderTechSettingsTable(wrap, data) {
-    const CATEGORY_LABELS = {
-        spreads: '📊 Spread Computation',
-        entry: '🎯 Entry Filters',
-        cooldowns: '⏱️ Cooldowns',
-        execution: '⚡ Order Execution',
-        intervals: '🔄 Refresh Intervals',
-        general: '⚙️ General',
+    const CATEGORY_META = {
+        execution: { title: 'Order Execution & Latency', icon: '⚡', desc: 'Order placement type, verification polling and network timeouts' },
+        cooldowns: { title: 'Cooldowns & Balance Guards', icon: '⏱️', desc: 'Temporary pauses after failed fills or margin lock errors' },
+        spreads:   { title: 'Spread Math & Stale Data', icon: '📊', desc: 'Ticker freshness thresholds and long-term EMA time constants' },
+        entry:     { title: 'Volatility & Depth Guards', icon: '🛡️', desc: 'Bid-ask width limits, volume discrepancy and listing age checks' },
+        intervals: { title: 'Engine Cycles & Intervals', icon: '🔄', desc: 'Background polling frequencies and database write throttle' },
+        general:   { title: 'General Parameters', icon: '⚙️', desc: 'Miscellaneous engine runtime parameters' },
     };
+
+    const FRIENDLY_NAMES = {
+        entry_order_type: 'Order Placement Mode',
+        api_timeout_ms: 'API Network Timeout (ms)',
+        fill_verify_retries: 'Fill Verification Retries',
+        fill_verify_delay_ms: 'Fill Verify Interval (ms)',
+        close_verify_retries: 'Close Verification Retries',
+        close_verify_delay_ms: 'Close Verify Interval (ms)',
+        emergency_close_retries: 'Emergency Close Retries',
+        exit_sanity_pct: 'Max Price Sanity Deviation',
+        pair_cooldown_ms: 'Unfilled Pair Cooldown (ms)',
+        exchange_cooldown_ms: 'Exchange Margin Cooldown (ms)',
+        asymmetric_cooldown_ms: 'Asymmetric Leg Cooldown (ms)',
+        margin_check_multiplier: 'Margin Buffer Multiplier',
+        stale_secs: 'Max Ticker Stale Time (s)',
+        intra_spread_max_pct: 'Max Internal Bid-Ask Spread (%)',
+        intra_spread_limit: 'Max Ask/Bid Ratio Limit',
+        ema_tau_secs: 'Structural Spread EMA Tau (s)',
+        vol_diff_max_pct: 'Max Volume Leg Mismatch (%)',
+        vol_tolerance_pct: 'Trade Volume Tolerance (±%)',
+        min_listing_age_days: 'Min Coin Listing Age (days)',
+        binance_min_notional: 'Binance Min Notional ($)',
+        default_fee_rate: 'Fallback Taker Fee Fraction',
+        max_spreads_per_cycle: 'Max Spreads Evaluated / Tick',
+        balance_refresh_secs: 'Balance Refresh Interval (s)',
+        live_update_throttle_ms: 'Trade PnL DB Update Throttle (ms)',
+        diag_log_interval: 'Diagnostic Log Frequency (cycles)',
+        multiplier_refresh_secs: 'Contract Specs Refresh (s)',
+    };
+
     // Keys that exist in DB but have zero effect in engine code or are managed elsewhere — hide from UI
     const HIDDEN_KEYS = new Set([
         'safety_margin', 'deviation_safety', 'max_price_ratio',
         'max_funding_diff', 'min_ioc_tolerance_pct', 'funding_cache_secs',
         'depth_multiplier', 'blacklist',
     ]);
+
+    const searchQuery = (document.getElementById('tech-search')?.value || '').trim().toLowerCase();
+
     // Group by category
     const groups = {};
     for (const item of data) {
         if (HIDDEN_KEYS.has(item.key)) continue;
+        if (searchQuery) {
+            const matchKey = item.key.toLowerCase().includes(searchQuery);
+            const matchName = (FRIENDLY_NAMES[item.key] || '').toLowerCase().includes(searchQuery);
+            const matchDesc = (item.description || '').toLowerCase().includes(searchQuery);
+            if (!matchKey && !matchName && !matchDesc) continue;
+        }
         const cat = item.category || 'general';
         if (!groups[cat]) groups[cat] = [];
         groups[cat].push(item);
     }
-    const catOrder = ['spreads', 'entry', 'cooldowns', 'execution', 'intervals', 'general'];
-    let html = '';
+
+    const catOrder = ['execution', 'cooldowns', 'spreads', 'entry', 'intervals', 'general'];
+    let html = '<div class="settings-sections-grid">';
+    let renderedCards = 0;
+
     for (const cat of catOrder) {
         const items = groups[cat];
         if (!items || items.length === 0) continue;
-        html += `<div style="margin-bottom:24px;">
-            <div style="font-weight:600;font-size:1rem;color:var(--text);padding:10px 0 8px;border-bottom:2px solid var(--border-dim);margin-bottom:2px;">
-                ${CATEGORY_LABELS[cat] || cat}
-            </div>
-            <table style="width:100%;border-collapse:collapse;table-layout:fixed;">
-                <colgroup>
-                    <col style="width:200px;" />
-                    <col style="width:180px;" />
-                    <col />
-                </colgroup>
-                <thead><tr>
-                    <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);">Parameter</th>
-                    <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);">Value</th>
-                    <th style="text-align:left;padding:8px 12px;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-sub);border-bottom:1px solid var(--border-dim);">Description</th>
-                </tr></thead>
-                <tbody>`;
+        renderedCards++;
+        const meta = CATEGORY_META[cat] || { title: cat, icon: '⚙️', desc: '' };
+
+        html += `
+            <div class="settings-card" style="grid-column: 1 / -1;">
+                <div class="settings-card-header">
+                    <div class="settings-card-icon">${meta.icon}</div>
+                    <div>
+                        <div class="settings-card-title">${meta.title}</div>
+                        <div class="settings-card-desc">${meta.desc}</div>
+                    </div>
+                </div>
+                <div class="settings-card-fields" style="grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));">
+        `;
+
         for (const item of items) {
-            // Enum-type settings get a dropdown instead of text input
             const ENUMS = {
                 entry_order_type: [
                     { value: 'market', label: 'Market — guaranteed fill, no asymmetric risk' },
                     { value: 'ioc', label: 'IOC — limit with slippage protection, risk of partial fill' },
                 ],
             };
-            const inputStyle = 'width:100%;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-family:var(--font-mono);font-size:.85rem;box-sizing:border-box;';
-            let valueCell;
+
+            const inputStyle = 'width:100%;height:38px;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 12px;font-family:var(--font-mono);font-size:.88rem;box-sizing:border-box;outline:none;';
+            let valueInput;
             if (ENUMS[item.key]) {
                 const opts = ENUMS[item.key].map(o =>
                     `<option value="${o.value}" ${item.value === o.value ? 'selected' : ''}>${o.label}</option>`
                 ).join('');
-                valueCell = `<select id="ts-${item.key}" style="${inputStyle}">${opts}</select>`;
+                valueInput = `<select id="ts-${item.key}" style="${inputStyle}">${opts}</select>`;
             } else {
-                valueCell = `<input type="text" id="ts-${item.key}" value="${escHtml(item.value)}" style="${inputStyle}" />`;
+                valueInput = `<input type="text" id="ts-${item.key}" value="${escHtml(item.value)}" style="${inputStyle}" />`;
             }
-            html += `<tr style="border-bottom:1px solid var(--border-dim);">
-                <td style="padding:8px 12px;font-family:var(--font-mono);font-size:.85rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${item.key}</td>
-                <td style="padding:8px 12px;">${valueCell}</td>
-                <td style="padding:8px 12px;font-size:.78rem;color:var(--text-sub);line-height:1.5;word-wrap:break-word;overflow-wrap:break-word;white-space:normal;">${item.description || ''}</td>
-            </tr>`;
+
+            const friendlyName = FRIENDLY_NAMES[item.key] || item.key;
+
+            html += `
+                <div class="field-item" style="background:var(--bg-ctrl);padding:14px;border-radius:8px;border:1px solid var(--border-dim);gap:8px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <span style="font-weight:600;font-size:0.84rem;color:var(--text);">${friendlyName}</span>
+                        <code style="font-size:0.7rem;color:var(--text-sub);background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:4px;">${item.key}</code>
+                    </div>
+                    <div class="field-input-wrap">
+                        ${valueInput}
+                    </div>
+                    <div class="field-hint" style="font-size:0.73rem;color:var(--text-sub);line-height:1.4;">${item.description || ''}</div>
+                </div>
+            `;
         }
-        html += '</tbody></table></div>';
+
+        html += `</div></div>`;
     }
+
+    html += '</div>';
+
+    if (renderedCards === 0) {
+        html = `<div style="text-align:center;padding:48px;color:var(--text-sub);">✨ No technical settings match "${escHtml(searchQuery)}"</div>`;
+    }
+
     wrap.innerHTML = html;
 }
 
@@ -1631,232 +1712,220 @@ window.showSubTab = function (btn, tab) {
 window.logViewMode = window.logViewMode || 'trade';
 window.lastFetchedLogs = window.lastFetchedLogs || '';
 
+window.logViewMode = window.logViewMode || 'trade';
+window.lastFetchedLogs = window.lastFetchedLogs || '';
+window._logAutoScroll = true;
+
 window.setLogView = function(mode) {
     window.logViewMode = mode;
-    document.getElementById('btn-log-trade').classList.toggle('mt-nav-btn--active', mode === 'trade');
-    document.getElementById('btn-log-tech').classList.toggle('mt-nav-btn--active', mode === 'tech');
-    // Re-fetch from server since mode affects server-side filtering
-    window.fetchLogs(false);
+    ['trade', 'error', 'exec', 'all'].forEach(m => {
+        const btn = document.getElementById(`btn-log-${m}`);
+        if (btn) btn.classList.toggle('mt-nav-btn--active', mode === m);
+    });
+    window.renderLogsHTML(window.lastFetchedLogs);
+};
+
+window.toggleLogAutoScroll = function() {
+    window._logAutoScroll = !window._logAutoScroll;
+    const statusEl = document.getElementById('autoscroll-status');
+    if (statusEl) {
+        statusEl.textContent = window._logAutoScroll ? 'ON' : 'PAUSED';
+        statusEl.style.color = window._logAutoScroll ? 'var(--green)' : 'var(--amber)';
+    }
+};
+
+window.copyVisibleLogs = function() {
+    const el = document.getElementById('logs-container');
+    if (!el) return;
+    const text = el.innerText || el.textContent;
+    if (!text || text.trim() === '') {
+        showToast('No logs to copy', 'info');
+        return;
+    }
+    navigator.clipboard.writeText(text).then(() => {
+        showToast('📋 Logs copied to clipboard!', 'success');
+    }).catch(() => {
+        showToast('Failed to copy logs', 'error');
+    });
+};
+
+window.filterLogsRealtime = function() {
+    window.renderLogsHTML(window.lastFetchedLogs);
 };
 
 window.renderLogsHTML = function(text) {
     const el = document.getElementById('logs-container');
+    const countBadge = document.getElementById('logs-count-badge');
     if (!el) return;
-    const isScrolled = el.scrollTop > 10;
-        
+
+    const rawLines = text.split('\n').filter(l => l.trim().length > 0);
+    const searchQuery = (document.getElementById('logs-search')?.value || '').trim().toLowerCase();
+    const mode = window.logViewMode || 'trade';
+
     const translateLog = (line) => {
-        // ── ENTRY FLOW ──
         let m;
+        // ── ENTRY FLOW ──
         if ((m = line.match(/FIRE (\S+) \[(\w+)\] A=(\S+) c=(\d+) lim=([\d.]+) \| B=(\S+) c=(\d+) lim=([\d.]+) spread=([\d.]+)% be=([\d.]+)%/))) {
-            return `🚀 ОТКРЫТИЕ ${m[1]}: ${m[3]}↔${m[6]} | кол-во: ${m[4]}×${m[7]} шт | спред ${m[9]}% > безубыток ${m[10]}% | тип: ${m[2]}`;
+            return `🚀 ВХОД ${m[1]}: ${m[3]} ↔ ${m[6]} | объём ${m[4]}×${m[7]} шт | спред ${m[9]}% > BE ${m[10]}% (${m[2]})`;
         }
         if ((m = line.match(/VWAP entry OK (\S+): VWAP spread=([\d.]+)% > BE=([\d.]+)%/))) {
-            return `✅ ${m[1]}: проверка ордербука пройдена — реальный спред ${m[2]}% > безубыток ${m[3]}%`;
+            return `✅ ${m[1]}: VWAP проверка пройдена — спред стакана ${m[2]}% > BE ${m[3]}%`;
         }
         if ((m = line.match(/Executing Leg A \((\S+)\) then Leg B \((\S+)\) SEQUENTIALLY for (\S+)/))) {
-            return `⚡ ${m[3]}: отправка ордеров последовательно — сначала ${m[1]}, потом ${m[2]}`;
+            return `⚡ ${m[3]}: исполнение ног — сначала ${m[1]}, затем ${m[2]}`;
         }
         if ((m = line.match(/RESULT (\S+) A=(\S+) B=(\S+) phys_a=([\d.]+) phys_b=([\d.]+) fill_a=([\d.]+) fill_b=([\d.]+) latency=(\d+)ms/))) {
             const aOk = m[2] === 'true', bOk = m[3] === 'true';
-            if (aOk && bOk) return `✅ ${m[1]}: ОБЕ НОГИ ИСПОЛНЕНЫ — A: ${m[6]} по ${m[4]} | B: ${m[7]} по ${m[5]} | ${m[8]}мс`;
-            if (!aOk && !bOk) return `⛔ ${m[1]}: ОБЕ НОГИ НЕ ИСПОЛНЕНЫ — ордера не прошли (${m[8]}мс)`;
-            return `⚠️ ${m[1]}: ЧАСТИЧНОЕ ИСПОЛНЕНИЕ — A=${m[2]} B=${m[3]} (${m[8]}мс)`;
+            if (aOk && bOk) return `✅ ${m[1]}: ОБЕ НОГИ ЗАЛИТЫ — A: ${m[6]} ($${m[4]}) | B: ${m[7]} ($${m[5]}) [${m[8]}мс]`;
+            if (!aOk && !bOk) return `⛔ ${m[1]}: ОБЕ НОГИ ОТКЛОНЕНЫ — ордера не исполнились [${m[8]}мс]`;
+            return `⚠️ ${m[1]}: ЧАСТИЧНЫЙ ФИЛЛ — A=${m[2]} B=${m[3]} [${m[8]}мс]`;
+        }
+        if ((m = line.match(/RETRY second leg (\S+) for (\S+) with max slippage ([\d.]+)%/))) {
+            return `🔄 ${m[2]}: ПОВТОР второй ноги на ${m[1]} со slippage ${m[3]}%`;
         }
         if ((m = line.match(/Both IOC unfilled (\S+) — no exposure \((\d+)ms\)/))) {
-            return `⏹ ${m[1]}: оба IOC ордера не исполнились — позиции нет, риска нет (${m[2]}мс)`;
+            return `⏹ ${m[1]}: оба IOC ордера не залиты — риска нет (${m[2]}мс)`;
         }
         if (line.includes('Inserting confirmed trade')) {
-            return `✅ СДЕЛКА ОТКРЫТА И ЗАПИСАНА В БАЗУ`;
+            return `✅ Сделка подтверждена и записана в БД`;
         }
 
-        // ── SKIP / REJECT ──
+        // ── SKIP & REJECT ──
         if ((m = line.match(/SKIP (\S+) — no fresh L2 WS data for (\S+) \(age: (-?\d+)ms\) \/ (\S+) \(age: (-?\d+)ms\)/))) {
-            const ageA = parseInt(m[3]), ageB = parseInt(m[5]);
-            const probA = ageA < 0 ? `${m[2]} нет данных` : ageA > 5000 ? `${m[2]} устарел ${(ageA/1000).toFixed(1)}с` : `${m[2]} ок`;
-            const probB = ageB < 0 ? `${m[4]} нет данных` : ageB > 5000 ? `${m[4]} устарел ${(ageB/1000).toFixed(1)}с` : `${m[4]} ок`;
-            return `⏭ ${m[1]}: нет свежего ордербука — ${probA}, ${probB}`;
+            return `⏭ ${m[1]}: нет свежего L2 стакана (${m[2]} age=${m[3]}ms, ${m[4]} age=${m[5]}ms)`;
         }
         if ((m = line.match(/SKIP (\S+) L1 depth too shallow: A=([\d.]+)\$ B=([\d.]+)\$ < ([\d.]+)\$/))) {
-            return `⏭ ${m[1]}: стакан слишком тонкий — A=$${m[2]} B=$${m[3]}, нужно минимум $${m[4]}`;
+            return `⏭ ${m[1]}: тонкий L1 стакан (A=$${m[2]}, B=$${m[3]} < порога $${m[4]})`;
         }
         if ((m = line.match(/SKIP (\S+): insufficient margin (\S+) \(avail=\$([\d.]+), required=\$([\d.]+).*lev=(\d+)x\)/))) {
-            return `⏭ ${m[1]}: не хватает маржи на ${m[2]} — доступно $${m[3]}, нужно $${m[4]} (плечо ${m[5]}x)`;
+            return `⏭ ${m[1]}: нехватка маржи на ${m[2]} (доступно $${m[3]}, нужно $${m[4]})`;
         }
 
         // ── ABORT ──
-        if ((m = line.match(/ABORT (\S+): VWAP spread ([\d.-]+)% < break-even ([\d.]+)% \(L1 spread=([\d.]+)%\)/))) {
-            return `🛑 ${m[1]}: ОТМЕНА — реальный спред в стакане ${m[2]}% ниже безубытка ${m[3]}% (L1 показывал ${m[4]}%). Сделка была бы убыточной.`;
-        }
-        if ((m = line.match(/ABORT (\S+): Insufficient L2 depth! req A=[\d.]+ \(has ([\d.]+)\), req B=[\d.]+ \(has ([\d.]+)\)/))) {
-            return `🛑 ${m[1]}: ОТМЕНА — в стакане не хватает ликвидности (A=${m[2]} B=${m[3]} монет)`;
-        }
-
-        // ── LEG ERRORS ──
-        if ((m = line.match(/LEG_A reject (\S+)\/(\S+): (.*)/))) {
-            return `❌ ${m[2]}: ошибка ноги A на ${m[1]} — ${m[3]}`;
-        }
-        if ((m = line.match(/LEG_B reject (\S+)\/(\S+): (.*)/))) {
-            return `❌ ${m[2]}: ошибка ноги B на ${m[1]} — ${m[3]}`;
-        }
-        if ((m = line.match(/Leg A failed for (\S+)/))) {
-            return `⛔ ${m[1]}: нога A провалилась — нога B отменена чтобы не было однобокой позиции`;
+        if ((m = line.match(/ABORT (\S+): VWAP spread ([\d.-]+)% < break-even ([\d.]+)%/))) {
+            return `🛑 ${m[1]}: ОТМЕНА — VWAP спред ${m[2]}% ниже безубытка ${m[3]}%`;
         }
 
         // ── CLOSE FLOW ──
         if ((m = line.match(/Closing (\d+) (\S+) reason=(\S+) pct=([\d.-]+)% exit_sp=([\d.-]+)/))) {
-            const reasons = {TP:'тейк-профит',STOP:'трейлинг-стоп',MANUAL:'ручное закрытие',ZERO_SPREAD:'спред схлопнулся',RETRY_CLOSE:'повтор закрытия'};
-            return `📤 ЗАКРЫТИЕ #${m[1]} ${m[2]}: причина — ${reasons[m[3]]||m[3]} | PnL ${m[4]}%`;
+            const reasons = {TP:'тейк-профит',STOP:'стоп-лосс / расширение',MANUAL:'ручной выход',ZERO_SPREAD:'схлопывание спреда',RETRY_CLOSE:'повтор закрытия'};
+            return `📤 ЗАКРЫТИЕ #${m[1]} ${m[2]}: ${reasons[m[3]]||m[3]} | PnL ${m[4]}%`;
         }
         if ((m = line.match(/EXCHANGE_VERIFIED.*PnL id=(\d+) pna=([\d.-]+) pnb=([\d.-]+) gross=([\d.-]+)/))) {
             const gross = parseFloat(m[4]);
-            const icon = gross >= 0 ? '💰' : '💸';
-            return `${icon} СДЕЛКА #${m[1]} ЗАКРЫТА: PnL ноги A=$${m[2]} B=$${m[3]} | итого=$${m[4]}`;
+            return `${gross >= 0 ? '💰' : '💸'} СДЕЛКА #${m[1]} ЗАКРЫТА: Leg A=$${m[2]} | Leg B=$${m[3]} | ИТОГО=${gross >= 0 ? '+' : ''}$${gross.toFixed(2)}`;
         }
         if (line.includes('CLOSE FAILED OR UNVERIFIED')) {
-            return `❌ ОШИБКА ЗАКРЫТИЯ — ордер не подтверждён биржей, повтор через 5с`;
-        }
-        if (line.includes('POSITION STILL EXISTS after close')) {
-            return `⚠️ ПОЗИЦИЯ ВСЁ ЕЩЁ ОТКРЫТА после попытки закрытия — повторная попытка`;
-        }
-
-        // ── MIRAGE ──
-        if ((m = line.match(/VWAP MIRAGE \((\w+)\): L1 spread=([\d.-]+)%, VWAP spread=([\d.-]+)%/))) {
-            return `👻 МИРАЖ (${m[1]}): L1 показывал ${m[2]}%, реальный VWAP ${m[3]}% — закрываем по факту`;
-        }
-        if ((m = line.match(/FORCE CLOSE (\S+) after (\d+)s/))) {
-            return `⏰ ${m[1]}: ПРИНУДИТЕЛЬНОЕ ЗАКРЫТИЕ через ${m[2]}с зависания — лучше зафиксировать`;
+            return `❌ Ошибка закрытия ордера — повтор через 5с`;
         }
 
         // ── RISK ──
-        if ((m = line.match(/MARKET REGIME ALERT: (\S+) velocity ([\d.]+)% in (\d+)ms/))) {
-            return `🌪 ${m[1]}: резкое движение цены ${m[2]}% за ${m[3]}мс — пауза 15с от волатильности`;
+        if ((m = line.match(/MARKET REGIME ALERT: (\S+) velocity ([\d.]+)%/))) {
+            return `🌪 ${m[1]}: резкий импульс цены ${m[2]}% — пауза волатильности`;
         }
-        if (line.includes('KILL-SWITCH IS ACTIVE')) {
-            return `🚨 АВАРИЙНАЯ ОСТАНОВКА: движок заблокирован после 10 провалов подряд. Нужен перезапуск.`;
-        }
-        if (line.includes('KILL-SWITCH TRIGGERED')) {
-            return `💀 АВАРИЙНАЯ ОСТАНОВКА АКТИВИРОВАНА — 10 IOC ордеров подряд не исполнились`;
-        }
-        if ((m = line.match(/ASYMMETRIC FILL (\S+): A \((\S+)\) filled ([\d.]+), B \((\S+)\) filled ([\d.]+)/))) {
-            return `⚠️ ${m[1]}: НЕРАВНОМЕРНОЕ ИСПОЛНЕНИЕ — ${m[2]}=${m[3]} vs ${m[4]}=${m[5]}, подрезаем лишнее`;
-        }
-        if ((m = line.match(/LATENCY ALERT: (\S+) RTT >800ms/))) {
-            return `🐢 ${m[1]}: задержка API >800мс — биржа на паузе 1 мин`;
+        if (line.includes('KILL-SWITCH IS ACTIVE') || line.includes('KILL-SWITCH TRIGGERED')) {
+            return `🚨 АВАРИЙНЫЙ СТОП: движок временно приостановил новые входы.`;
         }
 
-        // ── VERIFY ──
-        if ((m = line.match(/Leg ([AB]) fill confirmed on slow attempt (\d+)/))) {
-            return `✅ Нога ${m[1]}: исполнение подтверждено с попытки #${m[2]}`;
-        }
-        if ((m = line.match(/Leg ([AB]) fill unverified/))) {
-            return `🔍 Нога ${m[1]}: исполнение не подтверждено — проверяем позицию на бирже`;
-        }
-        if ((m = line.match(/Leg ([AB]) orderId=\S+ accepted but fill not yet confirmed/))) {
-            return `⏳ Нога ${m[1]}: ордер принят биржей, ждём подтверждения исполнения...`;
-        }
-
-        // ── SCANNER ──
-        if ((m = line.match(/\[scanner\] SIGNAL (\S+): (\S+) vs (\S+) spread=([\d.]+)% BE=([\d.]+)%/))) {
-            return `📡 СИГНАЛ ${m[1]}: ${m[2]}↔${m[3]} спред=${m[4]}% безубыток=${m[5]}%`;
-        }
-        if ((m = line.match(/\[scanner\] REJECT (\S+).*?->\s*(.*)/))) {
-            return `🛡 ФИЛЬТР ${m[1]}: ${m[2]}`;
-        }
-
-        // ── SETTINGS (only shown on change now) ──
-        if (line.includes('[settings]')) {
-            return line; // already formatted in backend with ОБНОВЛЕНО
-        }
-
-        // ── MANUAL CLOSE ──
-        if ((m = line.match(/MANUAL_CLOSE detected for trade (\d+) (\S+) on (\S+)\/(\S+)/))) {
-            return `🖐 РУЧНОЕ ЗАКРЫТИЕ сделки #${m[1]} ${m[2]} (${m[3]}/${m[4]})`;
-        }
-
-        return null; // no translation — show original
+        return null;
     };
 
-    const formatLogLine = (line) => {
-        if (!line.trim()) return '';
-        let cleanLine = line;
-        const match = line.match(/Z\s+(INFO|ERROR|WARN|DEBUG)\s+core_node.*?:\s+(.*)/);
-        if (match) {
-            const timeMatch = line.match(/(\d{2}:\d{2}:\d{2})\.\d+Z/);
-            const timeStr = timeMatch ? `[${timeMatch[1]}] ` : '';
-            cleanLine = `${timeStr}[${match[1]}] ${match[2]}`;
-        } else if (line.includes('core-node')) {
-            cleanLine = line.split('core-node')[1] || line;
+    let renderedCount = 0;
+    let htmlOutput = '';
+
+    rawLines.forEach((line, idx) => {
+        let clean = line;
+        let timeStr = '';
+        let level = 'INFO';
+
+        // Extract timestamp and log level
+        const tsMatch = line.match(/(\d{4}-\d{2}-\d{2}T)?(\d{2}:\d{2}:\d{2})(\.\d+)?Z?/);
+        if (tsMatch) {
+            timeStr = tsMatch[2];
         }
 
-        // Context filtering
-        if (cleanLine.includes('[settings]')) {
-            if (!cleanLine.includes(`id=${activeTabId}`)) return '';
+        if (line.includes(' ERROR ') || line.includes('[ERROR]') || line.includes('ERR') || line.includes('reject') || line.includes('KILL-SWITCH')) {
+            level = 'ERROR';
+        } else if (line.includes(' WARN ') || line.includes('[WARN]') || line.includes('ABORT') || line.includes('SKIP') || line.includes('ALERT')) {
+            level = 'WARN';
+        } else if (line.includes('FIRE') || line.includes('RESULT') || line.includes('Closing') || line.includes('EXCHANGE_VERIFIED') || line.includes('SIGNAL')) {
+            level = 'TRADE';
         }
 
-        // Sub-Type filtering (Trades vs Technical)
-        const isTradeLog = cleanLine.includes('[real]') || cleanLine.includes('[settings]') || (cleanLine.includes('[scanner]') && cleanLine.includes('REJECT'));
-        const isTechLog = !isTradeLog;
-        if (window.logViewMode === 'trade' && isTechLog) return '';
-        if (window.logViewMode === 'tech' && isTradeLog) return '';
+        // Mode filtering
+        if (mode === 'trade' && level !== 'TRADE') return;
+        if (mode === 'error' && level !== 'ERROR' && level !== 'WARN') return;
+        if (mode === 'exec' && !line.includes('Executing') && !line.includes('RESULT') && !line.includes('RETRY') && !line.includes('IOC') && !line.includes('fill') && !line.includes('orderId')) return;
 
-        // Extract time prefix for translated lines
-        const timePfx = cleanLine.match(/^\[[\d:]+\]/)?.[0] || '';
-
-        // Try translating to Russian
-        const translated = translateLog(cleanLine);
-        let displayLine = translated || cleanLine;
-        if (translated && timePfx && !translated.startsWith('[')) {
-            displayLine = `${timePfx} ${translated}`;
+        // Search query filtering
+        if (searchQuery) {
+            if (!line.toLowerCase().includes(searchQuery)) return;
         }
 
-        let html = escHtml(displayLine);
-        let style = 'color: var(--text);';
+        renderedCount++;
+        const lineNum = String(renderedCount).padStart(3, '0');
 
-        if (html.includes('❌') || html.includes('💀') || html.includes('🚨')) {
-            style = 'color: #ff4b4b; font-weight: bold;';
-        } else if (html.includes('⏭') || html.includes('⏹')) {
-            style = 'color: var(--text-sub);';
-        } else if (html.includes('🚀') || html.includes('⚡')) {
-            style = 'color: #00f2fe;';
-        } else if (html.includes('✅')) {
-            style = 'color: var(--green); font-weight: 600;';
-        } else if (html.includes('💰') || html.includes('💸')) {
-            style = 'color: #ffcc00; font-weight: bold;';
-        } else if (html.includes('⚙')) {
-            style = 'color: #a8b2d1;';
-        } else if (html.includes('🛑') || html.includes('⛔')) {
-            style = 'color: #ff8c42;';
-        } else if (html.includes('⚠')) {
-            style = 'color: #ff4b4b; background: rgba(255,0,0,0.08); padding: 2px 4px; border-radius: 4px;';
-        } else if (html.includes('🛡')) {
-            style = 'color: #e8a87c;';
-        } else if (html.includes('📡')) {
-            style = 'color: #64dfdf;';
-        } else if (html.includes('🌪') || html.includes('👻')) {
-            style = 'color: #c89bff;';
-        }
+        // Check translation
+        const translated = translateLog(line);
+        let displayContent = translated || line;
 
-        // Bold pair names
-        html = html.replace(/\b([A-Z0-9]{2,}USDT)\b/g, '<span style="color:#fff;font-weight:700;">$1</span>');
-        return `<div style="padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.02); ${style}">${html}</div>`;
-        };
+        // Format symbol highlights
+        let safeContent = escHtml(displayContent);
+        safeContent = safeContent.replace(/\b([A-Z0-9]{2,}USDT)\b/g, '<span style="color:#60a5fa;font-weight:700;">$1</span>');
+        safeContent = safeContent.replace(/(\+?\$[\d.-]+|\+?[\d.-]+%)/g, '<span style="color:#fbbf24;font-weight:600;">$1</span>');
 
-        const formattedHTML = text.split('\n').filter(l => l.trim()).map(formatLogLine).join('');
-        
-        if (el.innerHTML !== formattedHTML) {
-            el.innerHTML = formattedHTML;
-        }
-        
-        if (!isScrolled) {
-            el.scrollTop = 0;
-        }
+        const levelClass = level === 'ERROR' ? 'log-line--error' : level === 'WARN' ? 'log-line--warn' : level === 'TRADE' ? 'log-line--trade' : '';
+        const badgeClass = level === 'ERROR' ? 'log-badge-error' : level === 'WARN' ? 'log-badge-warn' : level === 'TRADE' ? 'log-badge-trade' : 'log-badge-info';
+
+        htmlOutput += `
+            <div class="log-line ${levelClass}">
+                <span class="log-line-num">${lineNum}</span>
+                <span style="color:var(--text-sub);font-size:0.75rem;min-width:60px;flex-shrink:0;">${timeStr}</span>
+                <span class="log-badge-level ${badgeClass}">${level}</span>
+                <div class="log-line-content">${safeContent}</div>
+            </div>
+        `;
+    });
+
+    if (renderedCount === 0) {
+        htmlOutput = `<div style="text-align:center;padding:48px 0;color:var(--text-sub);">✨ No log entries match the current filter (${mode}${searchQuery ? ' + "' + escHtml(searchQuery) + '"' : ''})</div>`;
+    }
+
+    el.innerHTML = htmlOutput;
+    if (countBadge) countBadge.textContent = `${renderedCount} lines`;
+
+    if (window._logAutoScroll) {
+        el.scrollTop = 0;
+    }
 };
 
 window.fetchLogs = async function(isBackground = false) {
     const el = document.getElementById('logs-container');
+    const statusEl = document.getElementById('logs-status');
     if (!el) return;
     
-    if (!isBackground) el.textContent = "Loading logs...";
+    if (!isBackground && (!window.lastFetchedLogs || window.lastFetchedLogs.trim() === '')) {
+        el.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-sub);">⏳ Loading logs stream from core-node…</div>';
+    }
+    
+    try {
+        const creds = localStorage.getItem('cex_auth') || '';
+        const res = await fetch(`${API_BASE}/api/logs/core-node`, {
+            headers: { 'Authorization': 'Basic ' + creds }
+        });
+        if (res.status === 401) throw new Error("Unauthorized");
+        if (!res.ok) throw new Error("Status " + res.status);
+        const text = await res.text();
+        
+        window.lastFetchedLogs = text;
+        window.renderLogsHTML(text);
+        
+        if (statusEl) statusEl.textContent = `Synced: ${new Date().toLocaleTimeString()}`;
+    } catch(e) {
+        if (!isBackground) el.innerHTML = `<div style="color:var(--red);padding:24px;text-align:center;">Failed to load logs: ${e.message}</div>`;
+        if (statusEl) statusEl.textContent = `Sync failed`;
+    }
+};
     
     try {
         const creds = localStorage.getItem('cex_auth') || '';

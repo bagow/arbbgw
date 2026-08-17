@@ -142,37 +142,25 @@ pub async fn handle_get_logs(
             .into_response();
     }
     let mode = query.mode.unwrap_or_default();
-    let result = if mode == "trade" {
-        // Trade mode: use --since instead of -n to avoid loading entire journal.
-        // Wrap in timeout to prevent Cloudflare Worker 30s timeout from killing request.
-        tokio::process::Command::new("bash")
-            .args([
-                "-c",
-                "timeout 15 bash -c 'sudo journalctl -u core-node --since \"6 hours ago\" -r --no-pager | grep -E \"\\[real\\]|\\[settings\\]|EXCHANGE_VERIFIED|SANITY|Closing|MANUAL_CLOSE|KILL-SWITCH|ASYMMETRIC|Auto-verified|ema_warmup\" | head -500'",
-            ])
-            .output()
-            .await
-    } else {
-        // Technical mode: raw logs, limited lines for speed
-        tokio::process::Command::new("sudo")
-            .args([
-                "journalctl",
-                "-u",
-                "core-node",
-                "-n",
-                "2000",
-                "-r",
-                "--no-pager",
-            ])
-            .output()
-            .await
-    };
+    let n_lines = if mode == "trade" { "1000" } else { "1500" };
+    let result = tokio::process::Command::new("sudo")
+        .args([
+            "journalctl",
+            "-u",
+            "core-node",
+            "-n",
+            n_lines,
+            "-r",
+            "--no-pager",
+        ])
+        .output()
+        .await;
+
     match result {
         Ok(out) => {
             let mut s = String::from_utf8_lossy(&out.stdout).to_string();
             if s.trim().is_empty() {
-                // If grep found nothing, show a helpful message instead of blank page
-                s = format!("No trade-relevant logs in the last 6 hours (mode={}).\nStderr: {}", mode, String::from_utf8_lossy(&out.stderr));
+                s = format!("No logs available yet from core-node.\nStderr: {}", String::from_utf8_lossy(&out.stderr));
             }
             (StatusCode::OK, s).into_response()
         }
