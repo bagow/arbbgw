@@ -1016,6 +1016,27 @@ async function loadTechnicalSettings() {
     }
 }
 
+// ── Blacklist load/save ──────────────────────────────────────────────────────
+let _blacklistOriginal = '';
+
+async function loadBlacklistIntoTextarea() {
+    const ta = document.getElementById('sf-blacklist');
+    if (!ta) return;
+    try {
+        const data = await apiFetch('/api/technical-settings');
+        if (Array.isArray(data)) {
+            const bl = data.find(d => d.key === 'blacklist');
+            if (bl && bl.value) {
+                const lines = bl.value.split(',').map(s => s.trim()).filter(s => s.length > 0);
+                ta.value = lines.join('\n');
+                _blacklistOriginal = bl.value;
+            }
+        }
+    } catch (e) {
+        console.warn('Failed to load blacklist:', e);
+    }
+}
+
 window.filterTechSettingsRealtime = function() {
     const wrap = document.getElementById('tech-settings-table');
     if (wrap && _techSettingsData) {
