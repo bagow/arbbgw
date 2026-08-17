@@ -437,7 +437,12 @@ function renderTable() {
     if (currentProfile) {
         let disabled = [];
         try { disabled = typeof currentProfile.disabled_exchanges === 'string' ? JSON.parse(currentProfile.disabled_exchanges) : (currentProfile.disabled_exchanges || []); } catch(e){}
-        filtered = filtered.filter(r => !disabled.includes(r.exchangeA) && !disabled.includes(r.exchangeB));
+        const minVol = (parseFloat(currentProfile.min_volume_millions) || 0) * 1_000_000;
+        filtered = filtered.filter(r => {
+            if (disabled.includes(r.exchangeA) || disabled.includes(r.exchangeB)) return false;
+            if (minVol > 0 && ((r.vol_a && r.vol_a < minVol) || (r.vol_b && r.vol_b < minVol))) return false;
+            return true;
+        });
     }
     const sorted = [...filtered]
         .map(r => { r.profit_pct = r.spread - r.structural_spread; return r; })
