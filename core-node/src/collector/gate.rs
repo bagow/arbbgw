@@ -286,7 +286,7 @@ async fn ws_shard(
 
     loop {
         tokio::select! {
-            msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
+            msg = ws.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     msg_count += 1;
                     if msg_count <= 3 {

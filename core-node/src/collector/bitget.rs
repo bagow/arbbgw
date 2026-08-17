@@ -293,11 +293,11 @@ async fn shard_handler(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let mut ping = tokio::time::interval(Duration::from_secs(25));
+    let mut ping = tokio::time::interval(Duration::from_secs(15));
 
     loop {
         tokio::select! {
-            msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
+            msg = ws.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     if text.as_str() == "pong" { continue; }
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {

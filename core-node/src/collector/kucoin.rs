@@ -115,7 +115,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     let sym_map = std::sync::Arc::new(sym_map);
     let mut join_handles = Vec::new();
     
-    for chunk in symbols.chunks(150) {
+    for (idx, chunk) in symbols.chunks(150).enumerate() {
         let chunk_symbols = chunk.to_vec();
         let p_map = price_map.clone();
         let sig = signal.clone();
@@ -124,8 +124,8 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
         join_handles.push(tokio::spawn(async move {
             loop {
-                if let Err(e) = run_ws(&chunk_symbols, &p_map, &sig, &l2, &*s_map).await {
-                    tracing::warn!("[kucoin] WS chunk task error: {}. Reconnecting in 5s...", e);
+                if let Err(e) = run_ws(idx, &chunk_symbols, &p_map, &sig, &l2, &*s_map).await {
+                    tracing::warn!("[kucoin] Shard {} WS error: {}. Reconnecting in 5s...", idx, e);
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }
             }
@@ -137,6 +137,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 }
 
 async fn run_ws(
+    shard_idx: usize,
     symbols: &[String],
     price_map: &PriceMap,
     signal: &UpdateSignal,
@@ -156,8 +157,9 @@ async fn run_ws(
     let endpoint = resp["data"]["instanceServers"][0]["endpoint"]
         .as_str()
         .unwrap_or("wss://ws-api-futures.kucoin.com");
+    let connect_id = format!("cn_{}_{}", shard_idx, uuid::Uuid::new_v4());
     let (mut ws, _) = connect_async_tls_with_config(
-        &format!("{}?token={}&connectId=corenode", endpoint, token),
+        &format!("{}?token={}&connectId={}", endpoint, token, connect_id),
         None,
         false,
         None,
@@ -242,7 +244,7 @@ async fn run_ws(
     // Ensure kucoin map exists for mutably getting later
     price_map.entry("kucoin".to_string()).or_default();
 
-    let mut ping = tokio::time::interval(Duration::from_secs(20));
+    let mut ping = tokio::time::interval(Duration::from_secs(12));
     // Heartbeat: refresh L2 timestamps every 500ms for static books
     let mut heartbeat = tokio::time::interval(Duration::from_millis(500));
     heartbeat.tick().await; // skip immediate
@@ -253,7 +255,7 @@ async fn run_ws(
             break;
         }
         tokio::select! {
-            msg = tokio::time::timeout(Duration::from_secs(30), ws.next()) => match msg.ok().flatten() {
+            msg = ws.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(v) = serde_json::from_str::<KucoinMsg>(&text) {
                         if v.msg_type != "message" { continue; }
