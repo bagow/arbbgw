@@ -1062,11 +1062,12 @@ function renderTechSettingsTable(wrap, data) {
         multiplier_refresh_secs: 'Contract Specs Refresh (s)',
     };
 
-    // Keys that exist in DB but have zero effect in engine code or are managed elsewhere — hide from UI
+    // Keys that exist in DB but have zero effect in engine code or are duplicate of Profile settings
     const HIDDEN_KEYS = new Set([
         'safety_margin', 'deviation_safety', 'max_price_ratio',
         'max_funding_diff', 'min_ioc_tolerance_pct', 'funding_cache_secs',
-        'depth_multiplier', 'blacklist',
+        'depth_multiplier', 'blacklist', 'intra_spread_limit',
+        'vol_tolerance_pct', 'multiplier_refresh_secs', 'default_fee_rate',
     ]);
 
     const searchQuery = (document.getElementById('tech-search')?.value || '').trim().toLowerCase();
