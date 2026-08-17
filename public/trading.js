@@ -30,28 +30,41 @@ async function boot() {
         const loader = document.querySelector('.mt-loading');
         if (loader) loader.style.display = 'none';
 
-        // Restore last active tab from localStorage
+        if (!profiles || profiles.length === 0) {
+            profiles = [{
+                id: 'real-default',
+                name: 'Public Real',
+                mode: 'real',
+                is_active: true
+            }];
+        }
+
+        // Restore last active tab from localStorage or default
         const saved = localStorage.getItem('activeTabId');
         if (saved && profiles.find(p => p.id === saved)) {
             activeTabId = saved;
-        } else if (profiles.length) {
-            activeTabId = profiles[0].id;
+        } else {
+            activeTabId = profiles[0]?.id || 'real-default';
         }
         
-        if (profiles.length === 0) {
-            const panel = document.getElementById('mt-panel');
-            if (panel) panel.innerHTML = '<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--text-sub);"><h3>No Profiles Found</h3><p>Click the ＋ button below to create one.</p></div>';
-        } else {
-            renderTabBar();
-            if (activeTabId) {
-                await switchTab(activeTabId);
-            }
-            startPoll();
+        if (activeTabId) {
+            await switchTab(activeTabId);
         }
+        startPoll();
     } catch (e) {
-        console.warn('Boot halted due to error:', e.message);
+        console.warn('Boot fallback initialized:', e.message);
         const loader = document.querySelector('.mt-loading');
         if (loader) loader.style.display = 'none';
+
+        profiles = [{
+            id: 'real-default',
+            name: 'Public Real',
+            mode: 'real',
+            is_active: true
+        }];
+        activeTabId = 'real-default';
+        await switchTab(activeTabId);
+        startPoll();
     }
 }
 
@@ -80,12 +93,21 @@ async function apiFetch(path, opts = {}) {
 
 async function loadProfiles() {
     try {
-        profiles = await apiFetch('/api/profiles');
-        for (const p of profiles) p.is_active = Boolean(p.is_active);
+        const data = await apiFetch('/api/profiles');
+        if (Array.isArray(data) && data.length > 0) {
+            profiles = data;
+            for (const p of profiles) p.is_active = Boolean(p.is_active);
+            return;
+        }
     } catch (e) {
-        console.error('Failed to load profiles:', e);
-        profiles = [];
+        console.warn('Could not load profiles from API, using default:', e.message);
     }
+    profiles = [{
+        id: 'real-default',
+        name: 'Public Real',
+        mode: 'real',
+        is_active: true
+    }];
 }
 
 async function createProfile(name, mode) {
