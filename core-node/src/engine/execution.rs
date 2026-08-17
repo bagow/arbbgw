@@ -733,7 +733,7 @@ pub async fn execute_sequential_entry(
     // ── RETRY SECOND LEG: If IOC didn't fill, retry once with maximum slippage ──
     // A failed second leg means full ASYMMETRIC_CLOSE (trim loss), which is ALWAYS
     // worse than any slippage. So on retry, use the full profit margin.
-    if ver_second.phys_volume.unwrap_or(0.0) <= 1e-12 && !ctx.dry_run && oid_second.is_some() {
+    if ver_second.phys_volume.unwrap_or(0.0) <= 1e-12 && !ctx.dry_run && first_phys > 1e-12 {
         let retry_slip = profit_margin.max(ctx.ioc_slippage_pct).min(3.0);
         tracing::warn!(
             "[real] 🔄 RETRY second leg {} for {} with max slippage {:.3}% (was {:.3}%)",
