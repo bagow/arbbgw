@@ -194,9 +194,10 @@ impl ExchangeConnector for GateConnector {
                     .map_err(|e| format!("Gate REST place_order JSON error: {}", e))?;
                 if let Some(oid) = v["id"].as_i64().map(|i| i.to_string()).or_else(|| v["id"].as_str().map(|s| s.to_string())) {
                     let fill_price: f64 = v["fill_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);
-                    let fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
+                    let raw_fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
+                    let fee = if raw_fee.abs() > 0.0 { raw_fee.abs() } else { phys_amount * (if fill_price > 0.0 { fill_price } else { target_price }) * 0.0005 };
                     tracing::info!("[gate] ✅ place_order {} orderId={} fill_price={:.6} fee={:.6} (REST)", pair, oid, fill_price, fee);
-                    Ok((Some(oid), fill_price, fee.abs()))
+                    Ok((Some(oid), fill_price, fee))
                 } else {
                     let err = v["label"].as_str().or_else(|| v["message"].as_str()).unwrap_or("Unknown Gate REST error");
                     Err(format!("Gate REST error: {}", err))
@@ -269,9 +270,10 @@ impl ExchangeConnector for GateConnector {
                     .or_else(|| resp["data"]["result"].as_array().and_then(|a| a.first()).and_then(|v| v.as_object()));
                 if let Some(r) = result {
                     let fill_price: f64 = r.get("fill_price").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
-                    let fee: f64 = r.get("fee").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
+                    let raw_fee: f64 = r.get("fee").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
+                    let fee = if raw_fee.abs() > 0.0 { raw_fee.abs() } else { phys_amount * (if fill_price > 0.0 { fill_price } else { target_price }) * 0.0005 };
                     if fill_price > 0.0 || r.get("id").is_some() {
-                        return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee.abs(), closed_volume: phys_amount });
+                        return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee, closed_volume: phys_amount });
                     }
                 }
             }
@@ -293,9 +295,10 @@ impl ExchangeConnector for GateConnector {
                     .or_else(|| fb_resp["data"]["result"].as_array().and_then(|a| a.first()).and_then(|v| v.as_object()));
                 if let Some(r) = result {
                     let fill_price: f64 = r.get("fill_price").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
-                    let fee: f64 = r.get("fee").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
+                    let raw_fee: f64 = r.get("fee").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
+                    let fee = if raw_fee.abs() > 0.0 { raw_fee.abs() } else { phys_amount * (if fill_price > 0.0 { fill_price } else { target_price }) * 0.0005 };
                     if fill_price > 0.0 || r.get("id").is_some() {
-                        return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee.abs(), closed_volume: phys_amount });
+                        return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee, closed_volume: phys_amount });
                     }
                 }
             }
@@ -318,8 +321,9 @@ impl ExchangeConnector for GateConnector {
             if let Ok(v) = resp.json::<Value>().await {
                 if v.get("id").is_some() {
                     let fill_price: f64 = v["fill_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);
-                    let fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
-                    return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee.abs(), closed_volume: phys_amount });
+                    let raw_fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
+                    let fee = if raw_fee.abs() > 0.0 { raw_fee.abs() } else { phys_amount * (if fill_price > 0.0 { fill_price } else { target_price }) * 0.0005 };
+                    return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee, closed_volume: phys_amount });
                 } else {
                     tracing::error!("[gate] REST close response error for {}: {:?}", pair, v);
                 }
