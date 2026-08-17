@@ -697,7 +697,15 @@ function drawPricePanel(klines, live, minT, maxT, row, dataMinT) {
         ...allEx.flatMap(ex => (klines[ex] || []).filter(p => p.ts >= minT && p.ts <= maxT).map(p => p.close)),
         ...allEx.flatMap(ex => (live[ex] || []).filter(p => p.ts >= minT && p.ts <= maxT).map(p => p.close)),
     ].filter(v => v > 0);
-    if (!allVals.length) return; // If completely panned out of bounds with no data, avoid crash
+    if (!allVals.length) {
+        const gridEl = $('grid-p'), ylEl = $('ylabel-p');
+        if (gridEl) gridEl.innerHTML = '';
+        if (ylEl) ylEl.innerHTML = '';
+        if (priceLinesG) {
+            priceLinesG.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" fill="#64748b" font-size="12" font-family="sans-serif">Fetching klines for ${row.exchangeA} / ${row.exchangeB}…</text>`;
+        }
+        return;
+    }
 
     let minV = Math.min(...allVals), maxV = Math.max(...allVals);
     const rng = (maxV - minV) * 0.1 || maxV * 0.02 || 0.000001;
@@ -872,7 +880,16 @@ function drawHistPanel(klines, live, minT, maxT, row) {
     }
 
     const allS = [...histS, ...liveS];
-    if (!allS.length) return;
+    if (!allS.length) {
+        const gridEl = $('grid-h'), ylEl = $('ylabel-h'), xlEl = $('xlabel-h');
+        const bH = $('bars-hist'), bL = $('bars-live');
+        if (gridEl) gridEl.innerHTML = '';
+        if (ylEl) ylEl.innerHTML = '';
+        if (xlEl) xlEl.innerHTML = '';
+        if (bH) bH.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" fill="#64748b" font-size="12" font-family="sans-serif">Spread histogram requires matching candle history from both exchanges</text>`;
+        if (bL) bL.innerHTML = '';
+        return;
+    }
 
     const visibleVals = allS.filter(p => p.ts >= minT && p.ts <= maxT).map(p => p.v);
     if (!visibleVals.length) return;
