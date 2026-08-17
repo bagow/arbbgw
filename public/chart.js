@@ -26,14 +26,18 @@ async function authFetch(url, options = {}) {
 let KNOWN_EXCHANGES = [];
 
 const EXCHANGE_COLORS = {
-    binance: '#f97316',  // orange
-    bybit: '#60a5fa',  // blue
-    okx: '#34d399',  // green
-    gate: '#a78bfa',  // violet
-    bingx: '#86efac',  // light green
-    kucoin: '#0ea5e9', // sky blue
-    xt: '#eab308',   // yellow
-    coinex: '#d946ef'  // fuchsia
+    binance:  '#f97316',  // orange
+    bybit:    '#60a5fa',  // blue
+    gate:     '#a78bfa',  // violet
+    kucoin:   '#0ea5e9',  // sky blue
+    bitget:   '#00f0ff',  // cyan
+    bingx:    '#86efac',  // light green
+    okx:      '#34d399',  // emerald
+    xt:       '#eab308',  // yellow
+    toobit:   '#10b981',  // green
+    ascendex: '#ec4899',  // pink
+    bitmex:   '#e11d48',  // red
+    coinex:   '#d946ef'   // fuchsia
 };
 
 // Passed to /api/klines proxy — server maps to exchange-specific codes
@@ -151,14 +155,18 @@ function signedSpread(pA, pB) {
 }
 
 const TV_EXCHANGES = {
-    binance: 'BINANCE',
-    bybit: 'BYBIT',
-    okx: 'OKX',
-    gate: 'GATEIO',
-    bingx: 'BINGX',
-    kucoin: 'KUCOIN',
-    xt: 'XT',
-    coinex: 'COINEX'
+    binance:  'BINANCE',
+    bybit:    'BYBIT',
+    gate:     'GATEIO',
+    kucoin:   'KUCOIN',
+    bitget:   'BITGET',
+    bingx:    'BINGX',
+    okx:      'OKX',
+    xt:       'XT',
+    toobit:   'TOOBIT',
+    ascendex: 'ASCENDEX',
+    bitmex:   'BITMEX',
+    coinex:   'COINEX'
 };
 
 // ─── Exchange kline fetch ─────────────────────────────────────────────────────
@@ -223,10 +231,19 @@ async function loadChartData(row) {
     const key = rowKey(row);
     scannerState.loadKey = key;
 
-    // Only fetch the 2 exchanges from the clicked row (not all 6+)
+    // If viewing a trade from history (exitTime or entryTime is older than 5 min ago), pass target endTime to fetch historical candles
+    let targetEndTime = null;
+    if (row && (row.entryTime || row.exitTime)) {
+        const tradeEnd = row.exitTime || row.entryTime;
+        if (Date.now() - tradeEnd > 5 * 60 * 1000) {
+            targetEndTime = tradeEnd + 25 * 60 * 1000;
+        }
+    }
+
+    // Only fetch the 2 exchanges from the clicked row (fast — only 2 requests)
     const pairExchanges = [row.exchangeA, row.exchangeB];
     const results = await Promise.all(
-        pairExchanges.map(ex => fetchKlines(ex, row.pair, scannerState.timeframeSec)
+        pairExchanges.map(ex => fetchKlines(ex, row.pair, scannerState.timeframeSec, targetEndTime)
             .then(kl => [ex, kl])
         )
     );
@@ -259,19 +276,18 @@ async function loadChartData(row) {
     scannerState.visibleMinT = null;
     scannerState.visibleMaxT = null;
     
-    // Auto-zoom heavily if 15s timeframe is selected OR if viewing a specific trade
-    if (window.targetEntryTime && scannerState.visibleMinT === null) {
-        const entry = window.targetEntryTime;
-        const exit = window.targetExitTime || Date.now();
+    // Auto-zoom to trade entry/exit if available
+    if (row && row.entryTime) {
+        const entry = row.entryTime;
+        const exit = row.exitTime || Date.now();
         const mid = (entry + exit) / 2;
         const duration = Math.max(60000, exit - entry);
-        // Show 10x the duration or at least 10 minutes
-        const halfSpan = Math.max(duration * 5, 5 * 60 * 1000); 
+        const halfSpan = Math.max(duration * 4, 10 * 60 * 1000); 
         scannerState.visibleMinT = mid - halfSpan;
         scannerState.visibleMaxT = mid + halfSpan;
     } else if (scannerState.timeframeSec === 15 && scannerState.visibleMinT === null) {
         scannerState.visibleMaxT = Date.now();
-        scannerState.visibleMinT = scannerState.visibleMaxT - 15 * 60_000; // 15 minutes width
+        scannerState.visibleMinT = scannerState.visibleMaxT - 15 * 60_000;
     }
 
     drawCharts();
@@ -761,6 +777,48 @@ function drawPricePanel(klines, live, minT, maxT, row, dataMinT) {
         }
     }
 
+    // ─── Trade Event Markers (ENTRY / EXIT) ───
+    if (row && row.entryTime && row.entryTime >= minT && row.entryTime <= maxT) {
+        const xEntry = xOf(row.entryTime);
+        priceLinesG.appendChild(svgEl('line', {
+            x1: xEntry, y1: PAD.top, x2: xEntry, y2: H - PAD.bottom,
+            stroke: '#22c55e', 'stroke-width': 1.5, 'stroke-dasharray': '4 3', opacity: 0.9
+        }));
+        const badgeG = svgEl('g', {});
+        const bgRect = svgEl('rect', {
+            x: xEntry - 28, y: PAD.top + 4, width: 56, height: 18, rx: 4,
+            fill: '#22c55e', opacity: 0.95
+        });
+        const labelTxt = svgEl('text', {
+            x: xEntry, y: PAD.top + 16, 'text-anchor': 'middle', fill: '#000',
+            'font-size': '10px', 'font-weight': '700', 'font-family': 'monospace'
+        });
+        labelTxt.textContent = 'ENTRY';
+        badgeG.appendChild(bgRect);
+        badgeG.appendChild(labelTxt);
+        priceLinesG.appendChild(badgeG);
+    }
+    if (row && row.exitTime && row.exitTime >= minT && row.exitTime <= maxT) {
+        const xExit = xOf(row.exitTime);
+        priceLinesG.appendChild(svgEl('line', {
+            x1: xExit, y1: PAD.top, x2: xExit, y2: H - PAD.bottom,
+            stroke: '#ef4444', 'stroke-width': 1.5, 'stroke-dasharray': '4 3', opacity: 0.9
+        }));
+        const badgeG = svgEl('g', {});
+        const bgRect = svgEl('rect', {
+            x: xExit - 24, y: PAD.top + 4, width: 48, height: 18, rx: 4,
+            fill: '#ef4444', opacity: 0.95
+        });
+        const labelTxt = svgEl('text', {
+            x: xExit, y: PAD.top + 16, 'text-anchor': 'middle', fill: '#fff',
+            'font-size': '10px', 'font-weight': '700', 'font-family': 'monospace'
+        });
+        labelTxt.textContent = 'EXIT';
+        badgeG.appendChild(bgRect);
+        badgeG.appendChild(labelTxt);
+        priceLinesG.appendChild(badgeG);
+    }
+
     // Overlay on top
     const ov = $('overlay-p');
     ov.setAttribute('x', 0); ov.setAttribute('y', 0);
@@ -777,19 +835,41 @@ function drawHistPanel(klines, live, minT, maxT, row) {
     const klA = klines[row.exchangeA] || [];
     const klB = klines[row.exchangeB] || [];
 
-    // Merge by timestamp
-    const mapB = new Map(klB.map(c => [c.ts, c.close]));
-    const histS = klA
-        .filter(c => mapB.has(c.ts))
-        .map(c => ({ ts: c.ts, v: signedSpread(c.close, mapB.get(c.ts)) }));
+    // Bucket normalization (e.g. 60s for 1m) to match cross-exchange candle timestamps
+    const bucketMs = (scannerState.timeframeSec || 60) * 1000;
+    const norm = ts => Math.round(ts / bucketMs) * bucketMs;
+
+    const mapB = new Map();
+    for (const c of klB) {
+        if (c.close > 0) mapB.set(norm(c.ts), c.close);
+    }
+
+    const histS = [];
+    for (const c of klA) {
+        if (c.close <= 0) continue;
+        const nTs = norm(c.ts);
+        const pB = mapB.get(nTs);
+        if (pB != null && pB > 0) {
+            histS.push({ ts: nTs, v: signedSpread(c.close, pB) });
+        }
+    }
 
     // Live: use liveTicks if available, else skip
     const liveA = live[row.exchangeA] || [];
     const liveB = live[row.exchangeB] || [];
-    const mapLB = new Map(liveB.map(c => [c.ts, c.close]));
-    const liveS = liveA
-        .filter(c => mapLB.has(c.ts))
-        .map(c => ({ ts: c.ts, v: signedSpread(c.close, mapLB.get(c.ts)) }));
+    const mapLB = new Map();
+    for (const c of liveB) {
+        if (c.close > 0) mapLB.set(norm(c.ts), c.close);
+    }
+    const liveS = [];
+    for (const c of liveA) {
+        if (c.close <= 0) continue;
+        const nTs = norm(c.ts);
+        const pB = mapLB.get(nTs);
+        if (pB != null && pB > 0) {
+            liveS.push({ ts: nTs, v: signedSpread(c.close, pB) });
+        }
+    }
 
     const allS = [...histS, ...liveS];
     if (!allS.length) return;
@@ -843,6 +923,22 @@ function drawHistPanel(klines, live, minT, maxT, row) {
         barsHist.appendChild(svgEl('rect', {
             x, y, width: barW, height: h,
             fill: p.v >= 0 ? colA + 'cc' : colB + 'cc',
+        }));
+    }
+
+    // Trade markers on histogram
+    if (row && row.entryTime && row.entryTime >= minT && row.entryTime <= maxT) {
+        const xEntry = xOf(row.entryTime);
+        barsHist.appendChild(svgEl('line', {
+            x1: xEntry, y1: PAD_H.top, x2: xEntry, y2: H - PAD_H.bottom,
+            stroke: '#22c55e', 'stroke-width': 1.5, 'stroke-dasharray': '4 3', opacity: 0.8
+        }));
+    }
+    if (row && row.exitTime && row.exitTime >= minT && row.exitTime <= maxT) {
+        const xExit = xOf(row.exitTime);
+        barsHist.appendChild(svgEl('line', {
+            x1: xExit, y1: PAD_H.top, x2: xExit, y2: H - PAD_H.bottom,
+            stroke: '#ef4444', 'stroke-width': 1.5, 'stroke-dasharray': '4 3', opacity: 0.8
         }));
     }
 
@@ -1143,7 +1239,7 @@ function wsConfig(exchange, pair) {
             onOpen: ws => ws.send(JSON.stringify({ op: 'subscribe', args: [`tickers.${pair.toUpperCase()}`] })),
             extract: msg => { const d = JSON.parse(msg.data); const p = d?.data?.lastPrice; return p ? parseFloat(p) : null; },
         };
-    } else {
+    } else if (exchange === 'okx') {
         const instId = pair.replace(/^([A-Z0-9]+)(USDT)$/, '$1-USDT-SWAP');
         return {
             url: `wss://ws.okx.com:8443/ws/v5/public`,
@@ -1151,12 +1247,17 @@ function wsConfig(exchange, pair) {
             extract: msg => { const d = JSON.parse(msg.data); const p = d?.data?.[0]?.markPx; return p ? parseFloat(p) : null; },
         };
     }
+    return null;
 }
 
 function connectWS(row) {
     disconnectWS();
     const exTarget = scannerState.wsTarget === 'a' ? row.exchangeA : row.exchangeB;
     const cfg = wsConfig(exTarget, row.pair);
+    if (!cfg) {
+        if (wsStatus) wsStatus.className = 'ws-indicator ws-indicator--off';
+        return;
+    }
     let ws;
     try { ws = new WebSocket(cfg.url); } catch { if(wsStatus) wsStatus.className = 'ws-indicator ws-indicator--err'; return; }
 

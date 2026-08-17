@@ -1335,6 +1335,9 @@ pub async fn handle_get_klines(
         "bingx" => fetch_bingx_klines(&client, &pair, &interval, limit, query.end_time).await,
         "xt" => fetch_xt_klines(&client, &pair, &interval, limit, query.end_time).await,
         "bitget" => fetch_bitget_klines(&client, &pair, &interval, limit, query.end_time).await,
+        "toobit" => fetch_toobit_klines(&client, &pair, &interval, limit, query.end_time).await,
+        "ascendex" => fetch_ascendex_klines(&client, &pair, &interval, limit, query.end_time).await,
+        "bitmex" => fetch_bitmex_klines(&client, &pair, &interval, limit, query.end_time).await,
         _ => Ok(vec![]),
     };
 
@@ -1653,3 +1656,100 @@ async fn fetch_bitget_klines(
     klines.sort_by_key(|k| k.ts);
     Ok(klines)
 }
+
+async fn fetch_toobit_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    let mut url = format!(
+        "https://api.toobit.com/api/v1/klines?symbol={}&interval={}&limit={}",
+        pair, interval, limit.min(1000)
+    );
+    if let Some(et) = end_time { url.push_str(&format!("&endTime={}", et)); }
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let data: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let list = data.as_array().cloned().unwrap_or_default();
+    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
+        let arr = c.as_array()?;
+        Some(Kline {
+            ts: arr.get(0)?.as_i64()?,
+            open: arr.get(1)?.as_str()?.parse().ok()?,
+            high: arr.get(2)?.as_str()?.parse().ok()?,
+            low: arr.get(3)?.as_str()?.parse().ok()?,
+            close: arr.get(4)?.as_str()?.parse().ok()?,
+            volume: arr.get(5)?.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        })
+    }).collect();
+    klines.sort_by_key(|k| k.ts);
+    Ok(klines)
+}
+
+async fn fetch_ascendex_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    let asc_pair = if pair.ends_with("USDT") {
+        format!("{}-PERP", &pair[..pair.len()-4])
+    } else {
+        pair.to_string()
+    };
+    let asc_iv = match interval {
+        "1m" => "1", "3m" => "3", "5m" => "5", "15m" => "15", "1h" => "60",
+        _ => "1",
+    };
+    let mut url = format!(
+        "https://ascendex.com/api/pro/v1/futures/barhist?symbol={}&interval={}&n={}",
+        asc_pair, asc_iv, limit.min(500)
+    );
+    if let Some(et) = end_time { url.push_str(&format!("&to={}", et)); }
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let data: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let list = data["data"].as_array().cloned().unwrap_or_default();
+    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
+        let item = &c["data"];
+        Some(Kline {
+            ts: item["ts"].as_i64()?,
+            open: item["o"].as_str()?.parse().ok()?,
+            high: item["h"].as_str()?.parse().ok()?,
+            low: item["l"].as_str()?.parse().ok()?,
+            close: item["c"].as_str()?.parse().ok()?,
+            volume: item["v"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        })
+    }).collect();
+    klines.sort_by_key(|k| k.ts);
+    Ok(klines)
+}
+
+async fn fetch_bitmex_klines(
+    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    let bm_pair = if pair == "BTCUSDT" { "XBTUSDT" } else { pair };
+    let bm_iv = match interval {
+        "1m" => "1m", "5m" => "5m", "1h" => "1h", "1d" => "1d",
+        _ => "1m",
+    };
+    let mut url = format!(
+        "https://www.bitmex.com/api/v1/trade/bucketed?binSize={}&partial=false&symbol={}&count={}&reverse=true",
+        bm_iv, bm_pair, limit.min(500)
+    );
+    if let Some(et) = end_time {
+        // BitMEX uses ISO timestamp
+        let dt = chrono::DateTime::from_timestamp_millis(et).unwrap_or_default();
+        url.push_str(&format!("&endTime={}", dt.to_rfc3339()));
+    }
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let list: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
+    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
+        let ts_str = c["timestamp"].as_str()?;
+        let dt = chrono::DateTime::parse_from_rfc3339(ts_str).ok()?;
+        Some(Kline {
+            ts: dt.timestamp_millis(),
+            open: c["open"].as_f64()?,
+            high: c["high"].as_f64()?,
+            low: c["low"].as_f64()?,
+            close: c["close"].as_f64()?,
+            volume: c["volume"].as_f64().unwrap_or(0.0),
+        })
+    }).collect();
+    klines.sort_by_key(|k| k.ts);
+    Ok(klines)
+}
+
