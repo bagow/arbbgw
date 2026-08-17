@@ -84,6 +84,28 @@ async fn try_gate_ws_order(
 }
 
 
+async fn fetch_gate_order_fee(http: &Client, keys: &ExchangeKeys, contract: &str, order_id: &str) -> Option<f64> {
+    let path = format!("/api/v4/futures/usdt/my_trades?contract={}&order={}", contract, order_id);
+    let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, "");
+    let url = format!("https://api.gateio.ws{}", path);
+    if let Ok(resp) = http.get(&url).headers(headers).timeout(Duration::from_millis(2000)).send().await {
+        if let Ok(trades) = resp.json::<Value>().await {
+            if let Some(arr) = trades.as_array() {
+                let mut sum_fee = 0.0;
+                for t in arr {
+                    if let Some(f) = t["fee"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| t["fee"].as_f64()) {
+                        sum_fee += f.abs();
+                    }
+                }
+                if sum_fee > 0.0 {
+                    return Some(sum_fee);
+                }
+            }
+        }
+    }
+    None
+}
+
 #[async_trait]
 impl ExchangeConnector for GateConnector {
     fn name(&self) -> &'static str {
@@ -195,7 +217,13 @@ impl ExchangeConnector for GateConnector {
                 if let Some(oid) = v["id"].as_i64().map(|i| i.to_string()).or_else(|| v["id"].as_str().map(|s| s.to_string())) {
                     let fill_price: f64 = v["fill_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);
                     let raw_fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
-                    let fee = if raw_fee.abs() > 0.0 { raw_fee.abs() } else { phys_amount * (if fill_price > 0.0 { fill_price } else { target_price }) * 0.0005 };
+                    let fee = if raw_fee.abs() > 0.0 {
+                        raw_fee.abs()
+                    } else if let Some(real_fee) = fetch_gate_order_fee(_http, keys, &contract, &oid).await {
+                        real_fee
+                    } else {
+                        0.0
+                    };
                     tracing::info!("[gate] ✅ place_order {} orderId={} fill_price={:.6} fee={:.6} (REST)", pair, oid, fill_price, fee);
                     Ok((Some(oid), fill_price, fee))
                 } else {
@@ -271,7 +299,14 @@ impl ExchangeConnector for GateConnector {
                 if let Some(r) = result {
                     let fill_price: f64 = r.get("fill_price").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
                     let raw_fee: f64 = r.get("fee").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
-                    let fee = if raw_fee.abs() > 0.0 { raw_fee.abs() } else { phys_amount * (if fill_price > 0.0 { fill_price } else { target_price }) * 0.0005 };
+                    let oid_str = r.get("id").and_then(|v| v.as_i64().map(|i| i.to_string()).or_else(|| v.as_str().map(|s| s.to_string())));
+                    let fee = if raw_fee.abs() > 0.0 {
+                        raw_fee.abs()
+                    } else if let Some(oid) = oid_str {
+                        fetch_gate_order_fee(http, keys, &contract, &oid).await.unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
                     if fill_price > 0.0 || r.get("id").is_some() {
                         return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee, closed_volume: phys_amount });
                     }
@@ -296,7 +331,14 @@ impl ExchangeConnector for GateConnector {
                 if let Some(r) = result {
                     let fill_price: f64 = r.get("fill_price").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
                     let raw_fee: f64 = r.get("fee").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
-                    let fee = if raw_fee.abs() > 0.0 { raw_fee.abs() } else { phys_amount * (if fill_price > 0.0 { fill_price } else { target_price }) * 0.0005 };
+                    let oid_str = r.get("id").and_then(|v| v.as_i64().map(|i| i.to_string()).or_else(|| v.as_str().map(|s| s.to_string())));
+                    let fee = if raw_fee.abs() > 0.0 {
+                        raw_fee.abs()
+                    } else if let Some(oid) = oid_str {
+                        fetch_gate_order_fee(http, keys, &contract, &oid).await.unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
                     if fill_price > 0.0 || r.get("id").is_some() {
                         return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee, closed_volume: phys_amount });
                     }
@@ -322,7 +364,14 @@ impl ExchangeConnector for GateConnector {
                 if v.get("id").is_some() {
                     let fill_price: f64 = v["fill_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);
                     let raw_fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
-                    let fee = if raw_fee.abs() > 0.0 { raw_fee.abs() } else { phys_amount * (if fill_price > 0.0 { fill_price } else { target_price }) * 0.0005 };
+                    let oid_str = v.get("id").and_then(|v| v.as_i64().map(|i| i.to_string()).or_else(|| v.as_str().map(|s| s.to_string())));
+                    let fee = if raw_fee.abs() > 0.0 {
+                        raw_fee.abs()
+                    } else if let Some(oid) = oid_str {
+                        fetch_gate_order_fee(http, keys, &contract, &oid).await.unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
                     return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee, closed_volume: phys_amount });
                 } else {
                     tracing::error!("[gate] REST close response error for {}: {:?}", pair, v);
