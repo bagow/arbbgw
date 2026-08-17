@@ -1927,28 +1927,8 @@ window.fetchLogs = async function(isBackground = false) {
         if (statusEl) statusEl.textContent = `Sync failed`;
     }
 };
-    
-    try {
-        const creds = localStorage.getItem('cex_auth') || '';
-        const logMode = window.logViewMode || 'trade';
-        const res = await fetch(`${API_BASE}/api/logs/core-node?mode=${logMode}`, {
-            headers: { 'Authorization': 'Basic ' + creds }
-        });
-        if (res.status === 401) throw new Error("Unauthorized");
-        if (!res.ok) throw new Error("Status " + res.status);
-        const text = await res.text();
-        
-        window.lastFetchedLogs = text;
-        window.renderLogsHTML(text);
-        
-        const statusEl = document.getElementById('logs-status');
-        if (statusEl) statusEl.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
-    } catch(e) {
-        if (!isBackground) el.textContent = "Failed to load logs: " + e.message;
-        const statusEl = document.getElementById('logs-status');
-        if (statusEl) statusEl.textContent = `Error: ${e.message}`;
-    }
-};
+
+
 
 window.saveSettings = async function (profileId) {
     const g = id => document.getElementById(id)?.value;
