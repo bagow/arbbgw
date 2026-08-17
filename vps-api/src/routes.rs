@@ -1146,9 +1146,8 @@ pub async fn handle_market_close_all(
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
     }
 
-    let _id2 = id.clone();
     let r1 = state.real_db.call(move |conn| {
-        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status IN ('OPEN','CLOSING')", params![id])?;
+        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE status IN ('OPEN','CLOSING')", params![])?;
         Ok(())
     }).await;
 
