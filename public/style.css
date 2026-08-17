@@ -905,66 +905,246 @@ input:checked + .slider:before { transform: translateX(18px); }
   font-weight: 600; font-variant-numeric: tabular-nums;
 }
 
-/* ── CEX exchange card ───────────────────────────────────────────────────── */
+/* ── Premium CEX Dashboard Styles ── */
+.cex-dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 4px 0 24px;
+}
+
+.cex-summary-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+}
+
+.cex-summary-card {
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-shadow: var(--shadow-sm);
+}
+.cex-summary-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-sub);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cex-summary-value {
+  font-size: 1.35rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.cex-summary-sub {
+  font-size: 0.75rem;
+  color: var(--text-sub);
+}
+
+.cex-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 20px;
+}
+
 .cex-card {
   background: var(--bg-panel-2);
-  border: 1px solid var(--border-dim);
-  border-radius: var(--radius);
-  padding: 18px;
-  display: flex; flex-direction: column;
-  transition: all .2s;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-shadow: var(--shadow-sm);
+  transition: border-color .2s, box-shadow .2s;
 }
 .cex-card:hover {
-  border-color: var(--border);
-  box-shadow: var(--shadow-sm);
+  border-color: var(--border-glow);
+  box-shadow: var(--shadow-glow);
 }
 
 .cex-card-header {
-  display: flex; justify-content: space-between;
-  align-items: flex-start; margin-bottom: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-dim);
+}
+.cex-card-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cex-card-name {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.03em;
 }
 
-.cex-card-title {
-  display: flex; align-items: center; gap: 8px;
-}
 .cex-status-dot {
-  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
 }
-.cex-status-dot.on  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.cex-status-dot.on  { background: var(--green); box-shadow: 0 0 8px var(--green); }
 .cex-status-dot.off { background: var(--text-sub); }
 
-.cex-wallet {
-  text-align: right;
+.cex-balance-box {
+  background: var(--bg-ctrl);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
-.cex-wallet-label {
-  font-size: .65rem; color: var(--text-sub);
-  text-transform: uppercase; letter-spacing: .04em;
+.cex-balance-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
-.cex-wallet-value {
-  font-family: var(--font-mono); font-weight: 600;
-  font-variant-numeric: tabular-nums;
+.cex-balance-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
-
-.cex-meta {
-  display: flex; gap: 14px; padding: 8px 0;
-  border-bottom: 1px solid var(--border-dim);
-  margin-bottom: 10px; font-size: .78rem;
+.cex-balance-title {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: var(--text-sub);
 }
-.cex-meta strong { color: var(--text); }
-
-/* ── Stale banner ────────────────────────────────────────────────────────── */
-.stale-banner {
-  padding: 8px 12px;
-  border: 1px solid;
-  border-radius: var(--radius);
-  font-size: .82rem;
+.cex-balance-amount {
   font-family: var(--font-mono);
-  margin-bottom: 14px;
-  display: flex; align-items: center; gap: 8px;
+  font-size: 1.1rem;
+  font-weight: 700;
 }
-.stale-banner--warn { border-color: rgba(245,158,11,0.3); background: rgba(245,158,11,0.06); color: #b08900; }
-.stale-banner--crit { border-color: rgba(239,68,68,0.3); background: rgba(239,68,68,0.06); color: var(--red); }
+
+.cex-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cex-progress-bar-bg {
+  width: 100%;
+  height: 6px;
+  background: var(--border-dim);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.cex-progress-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.cex-progress-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.7rem;
+  color: var(--text-sub);
+}
+
+.cex-badges-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  padding: 2px 0;
+  color: var(--text-sub);
+}
+
+.cex-pos-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+.cex-pos-title {
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-sub);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.cex-pos-card {
+  background: var(--bg-ctrl);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  transition: border-color .15s;
+}
+.cex-pos-card:hover {
+  border-color: var(--border);
+}
+.cex-pos-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cex-pos-sym-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.cex-pos-price-row {
+  font-size: 0.75rem;
+  color: var(--text-sub);
+  font-family: var(--font-mono);
+}
+.cex-pos-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.cex-pos-pnl {
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
+  font-weight: 700;
+  text-align: right;
+}
+.cex-close-btn {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--red);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .15s;
+}
+.cex-close-btn:hover {
+  background: var(--red);
+  color: #fff;
+}
+.cex-empty-pos {
+  background: var(--bg-ctrl);
+  border: 1px dashed var(--border-dim);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--text-sub);
+}
 
 /* ══════════════════════════════════════════════════════════════════════════════
    TOAST

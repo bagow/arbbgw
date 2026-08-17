@@ -163,20 +163,6 @@ pub fn start_balance_fetcher(
                                 .map(|v| v.value().len())
                                 .unwrap_or(0);
                             let new_count = pos.len();
-                            // Guard: don't replace non-empty with empty — exchange API
-                            // sometimes returns empty even when positions exist (margin locked).
-                            // Only allow clearing if available_balance ≈ wallet_balance
-                            // (meaning no margin is actually locked).
-                            if new_count == 0 && prev_count > 0 {
-                                let wallet = e_ctx.balances.get(*ex).map(|v| *v).unwrap_or(0.0);
-                                let avail = e_ctx.margin_balances.get(*ex).map(|v| *v).unwrap_or(0.0);
-                                let margin_locked = wallet - avail;
-                                if margin_locked > 0.5 {
-                                    warn!("[{}] fetch_positions returned 0 but {} positions cached \
-                                           and ${:.2} margin locked — keeping cache", ex, prev_count, margin_locked);
-                                    continue;  // skip the insert, keep old positions
-                                }
-                            }
                             if new_count != prev_count {
                                 info!("[{}] positions: {} → {}", ex, prev_count, new_count);
                             }
@@ -184,7 +170,7 @@ pub fn start_balance_fetcher(
                         }
                         Err(e) => {
                             had_error = true;
-                            warn!("[{}] fetch_positions err: {} — keeping stale cache", ex, e);
+                            warn!("[{}] fetch_positions err: {} — keeping previous cache", ex, e);
                         }
                     }
 

@@ -525,10 +525,9 @@ async function toggleExchange(profileId, exchangeName, checkboxEl) {
 
 function renderCexTab(profile, exchangesData) {
     if (!exchangesData || !exchangesData.data) {
-        return '<div class="text-sub" style="text-align:center;">No exchange data available yet. Please wait for collector to sync.</div>';
+        return '<div class="text-sub" style="text-align:center;padding:40px;">No exchange data available yet. Please wait for collector to sync.</div>';
     }
 
-    // Real trading: exchanges that have API keys configured
     const REAL_EXCHANGES = new Set(['binance', 'bybit', 'gate', 'kucoin', 'bitget', 'bingx', 'bitmex', 'ascendex', 'xt', 'toobit']);
     const isReal = profile.mode === 'real';
     const KNOWN_EXCHANGES = ['binance', 'bybit', 'gate', 'kucoin', 'okx', 'bitget', 'bingx', 'bitmex', 'ascendex', 'xt', 'toobit'];
@@ -545,81 +544,60 @@ function renderCexTab(profile, exchangesData) {
         disabledRaw.forEach(ex => disabledMap[ex] = true);
     }
 
-    const snapshotAgeMs = Number(exchangesData.snapshot_age_ms ?? -1);
-    const snapshotAgeText = snapshotAgeMs >= 0
-        ? `${(snapshotAgeMs / 1000).toFixed(1)}s`
-        : 'n/a';
-    const balancesAgeMs = Number(exchangesData.balances_age_ms ?? -1);
-    const positionsAgeMs = Number(exchangesData.positions_age_ms ?? -1);
-    const feesAgeMs = Number(exchangesData.fees_age_ms ?? -1);
-    const cexBaselineTs = Number(exchangesData.cex_baseline_ts_ms ?? 0);
-    const cexBaselineText = cexBaselineTs > 0
-        ? new Date(cexBaselineTs).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false }) + ' UTC'
-        : 'n/a';
-    const balancesAgeText = balancesAgeMs >= 0 ? `${(balancesAgeMs / 1000).toFixed(1)}s` : 'n/a';
-    const positionsAgeText = positionsAgeMs >= 0 ? `${(positionsAgeMs / 1000).toFixed(1)}s` : 'n/a';
-    const feesAgeText = feesAgeMs >= 0 ? `${(feesAgeMs / 1000).toFixed(1)}s` : 'n/a';
-    const cexDeltaTotal = Number(exchangesData.cex_balance_delta_total_today ?? 0);
-    const dbClosedTodayTotal = Number(exchangesData.db_closed_pnl_today_total ?? 0);
-    const cexVsDbDelta = Number(exchangesData.cex_vs_db_delta_today ?? (cexDeltaTotal - dbClosedTodayTotal));
-    const dbOpenLivePnlTotal = Number(exchangesData.db_open_live_pnl_total ?? 0);
-    const dbExpectedDeltaTotal = Number(exchangesData.db_expected_balance_delta_total ?? (dbClosedTodayTotal + dbOpenLivePnlTotal));
-    const unexplainedResidual = Number(exchangesData.cex_vs_db_expected_delta ?? (cexDeltaTotal - dbExpectedDeltaTotal));
-    const cexDeltaByExchange = exchangesData.cex_balance_delta_today || {};
-    const dbOpenLiveByExchange = exchangesData.db_open_live_pnl_by_exchange || {};
-    const dbExpectedByExchange = exchangesData.db_expected_delta_by_exchange || {};
-    const residualByExchange = exchangesData.cex_vs_db_expected_by_exchange || {};
-    const STALE_WARN_MS = 30_000;
-    const STALE_CRIT_MS = 90_000;
-    const ageTuples = [
-        ['snapshot', snapshotAgeMs],
-        ['balances', balancesAgeMs],
-        ['positions', positionsAgeMs],
-        ['fees', feesAgeMs]
-    ];
-    const knownAges = ageTuples.map(([, ms]) => ms).filter(ms => ms >= 0);
-    const maxKnownAgeMs = knownAges.length ? Math.max(...knownAges) : -1;
-    const staleParts = ageTuples
-        .filter(([, ms]) => ms >= STALE_WARN_MS)
-        .map(([name]) => name);
-    let staleBanner = '';
-    if (maxKnownAgeMs >= STALE_WARN_MS) {
-        const isCritical = maxKnownAgeMs >= STALE_CRIT_MS;
-        const cls = isCritical ? 'stale-banner--crit' : 'stale-banner--warn';
-        staleBanner = `
-            <div class="stale-banner ${cls}" style="margin-bottom:14px;">
-                ⚠ Data is stale (${(maxKnownAgeMs / 1000).toFixed(1)}s). Affected: ${staleParts.join(', ')}.
-            </div>
-        `;
+    // Portfolio level aggregates
+    let totalWallet = 0;
+    let totalAvail = 0;
+    let totalPositions = 0;
+    let totalDailyPnl = 0;
+
+    for (const ex of exNames) {
+        const bal = (exchangesData.balances && exchangesData.balances[ex]) || 0;
+        const marginBal = (exchangesData.margin_balances && exchangesData.margin_balances[ex]) || 0;
+        const positions = (exchangesData.positions && exchangesData.positions[ex]) || [];
+        const dailyPnl = (exchangesData.daily_pnl && exchangesData.daily_pnl[ex]) || 0;
+        
+        totalWallet += bal;
+        totalAvail += marginBal;
+        totalPositions += positions.length;
+        totalDailyPnl += dailyPnl;
     }
-    const driftColor = Math.abs(cexVsDbDelta) > 0.05 ? 'var(--red)' : 'var(--text-sub)';
-    const reconcileBar = `
-        <div class="reconcile-bar" style="margin-bottom:14px;">
-            <div class="reconcile-item"><span class="reconcile-label">CEX \u0394 (UTC)</span><span class="reconcile-value" style="color:${cexDeltaTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(cexDeltaTotal)}</span></div>
-            <div class="reconcile-item"><span class="reconcile-label">DB Closed</span><span class="reconcile-value" style="color:${dbClosedTodayTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbClosedTodayTotal)}</span></div>
-            <div class="reconcile-item"><span class="reconcile-label">Drift</span><span class="reconcile-value" style="color:${driftColor}">${fmtPnL(cexVsDbDelta)}</span></div>
-            <div class="reconcile-item"><span class="reconcile-label">Open Live</span><span class="reconcile-value" style="color:${dbOpenLivePnlTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbOpenLivePnlTotal)}</span></div>
-            <div class="reconcile-item"><span class="reconcile-label">Expected \u0394</span><span class="reconcile-value" style="color:${dbExpectedDeltaTotal>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbExpectedDeltaTotal)}</span></div>
-            <div class="reconcile-item"><span class="reconcile-label">Residual</span><span class="reconcile-value" style="color:${Math.abs(unexplainedResidual)>0.05?'var(--red)':'var(--text-sub)'}">${fmtPnL(unexplainedResidual)}</span></div>
-        </div>
-    `;
+
+    const totalUsedMargin = Math.max(0, totalWallet - totalAvail);
+    const totalDailyPct = totalWallet > 0 ? (totalDailyPnl / totalWallet) * 100 : 0;
+    const pnlColor = totalDailyPnl >= 0 ? 'var(--green)' : 'var(--red)';
 
     let html = `
-        <div class="cex-meta" style="margin-bottom:16px;padding:10px 0;border-bottom:1px solid var(--border-dim);">
-            <span>Snapshot: <strong>${snapshotAgeText}</strong></span>
-            <span>Balances: <strong>${balancesAgeText}</strong></span>
-            <span>Positions: <strong>${positionsAgeText}</strong></span>
-            <span>Fees: <strong>${feesAgeText}</strong></span>
-            <span>Update: <strong id="poll-countdown">10s</strong></span>
-        </div>
-        ${reconcileBar}
-        ${staleBanner}
-        <div class="cex-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;">
+        <div class="cex-dashboard">
+            
+            <!-- Executive Portfolio Summary Bar -->
+            <div class="cex-summary-bar">
+                <div class="cex-summary-card">
+                    <div class="cex-summary-label">💳 Total CEX Equity</div>
+                    <div class="cex-summary-value">$${totalWallet.toFixed(2)}</div>
+                    <div class="cex-summary-sub">Combined wallet balances</div>
+                </div>
+                <div class="cex-summary-card">
+                    <div class="cex-summary-label">🛡️ Available Margin</div>
+                    <div class="cex-summary-value" style="color:var(--accent);">$${totalAvail.toFixed(2)}</div>
+                    <div class="cex-summary-sub">$${totalUsedMargin.toFixed(2)} currently in trade</div>
+                </div>
+                <div class="cex-summary-card">
+                    <div class="cex-summary-label">⚡ Active Positions</div>
+                    <div class="cex-summary-value">${totalPositions}</div>
+                    <div class="cex-summary-sub">Across all connected exchanges</div>
+                </div>
+                <div class="cex-summary-card">
+                    <div class="cex-summary-label">📈 Realized PnL (Today)</div>
+                    <div class="cex-summary-value" style="color:${pnlColor};">${totalDailyPnl >= 0 ? '+' : ''}$${totalDailyPnl.toFixed(2)}</div>
+                    <div class="cex-summary-sub" style="color:${pnlColor};">${totalDailyPct >= 0 ? '+' : ''}${totalDailyPct.toFixed(2)}% ROI</div>
+                </div>
+            </div>
+
+            <!-- Connected Exchange Cards Grid -->
+            <div class="cex-grid">
     `;
     
     for (const exA of exNames) {
-        let pairsList = '';
-        let maxTickers = 0;
         const rawArr = exchangesData.data[exA];
         const bal = (exchangesData.balances && exchangesData.balances[exA]) || 0;
         const marginBal = (exchangesData.margin_balances && exchangesData.margin_balances[exA]) || 0;
@@ -627,94 +605,117 @@ function renderCexTab(profile, exchangesData) {
         const fee = (exchangesData.fees && exchangesData.fees[exA]) || 0;
         const dailyPnl = (exchangesData.daily_pnl && exchangesData.daily_pnl[exA]) || 0;
         const dailyPct = (exchangesData.daily_pnl_pct && exchangesData.daily_pnl_pct[exA]) || 0;
-        const cexBalanceDelta = Number(cexDeltaByExchange[exA] ?? 0);
-        const dbOpenLiveEx = Number(dbOpenLiveByExchange[exA] ?? 0);
-        const dbExpectedEx = Number(dbExpectedByExchange[exA] ?? (dailyPnl + dbOpenLiveEx));
-        const residualEx = Number(residualByExchange[exA] ?? (cexBalanceDelta - dbExpectedEx));
+
+        let maxTickers = 0;
         for (const exB of exNames) {
             if (exA === exB) continue;
             let matchCount = 0;
-            // The Rust backend sends pre-computed matches like: { "vs bybit": 150 }
             if (rawArr && typeof rawArr === 'object' && rawArr[`vs ${exB}`]) {
                 matchCount = rawArr[`vs ${exB}`];
                 if (matchCount > maxTickers) maxTickers = matchCount;
             }
-            if (matchCount > 0) {
-                pairsList += `
-                    <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-dim);">
-                        <span style="color:var(--text-sub);">vs <strong style="color:var(--text);">${exB}</strong></span>
-                        <span style="font-family:var(--font-mono);font-size:0.9rem;">${matchCount} pairs</span>
-                    </div>
-                `;
-            }
         }
-        
+
         const isEnabled = !disabledMap[exA];
-        const dailyPnlColor = dailyPnl > 0 ? 'var(--green)' : dailyPnl < 0 ? 'var(--red)' : 'var(--text-sub)';
+        const exPnlColor = dailyPnl >= 0 ? 'var(--green)' : 'var(--red)';
         
+        // Margin utilization math
+        const marginUsed = Math.max(0, bal - marginBal);
+        const usePct = bal > 0 ? Math.min(100, Math.round((marginUsed / bal) * 100)) : 0;
+        const barColor = usePct > 80 ? 'var(--red)' : usePct > 40 ? 'var(--amber)' : 'var(--accent)';
+
         html += `
             <div class="cex-card">
-                <div class="cex-card-header">
-                    <div>
-                        <div class="cex-card-title">
-                            <div class="cex-status-dot ${isEnabled ? 'on' : 'off'}"></div>
-                            <h3 style="margin:0;font-size:1.1rem;font-weight:700;text-transform:uppercase;">${exA}</h3>
-                        </div>
-                        <div style="font-size:.82rem;font-family:var(--font-mono);margin-top:4px;margin-left:18px;">
-                            <span style="color:${dailyPnlColor}">${dailyPnl > 0 ? '+' : ''}$${dailyPnl.toFixed(2)} <span style="font-size:.72rem;opacity:.7">(${dailyPct > 0 ? '+' : ''}${dailyPct.toFixed(2)}%)</span></span>
-                        </div>
-                    </div>
-                    <div class="cex-wallet">
-                        <div class="cex-wallet-label">Wallet</div>
-                        <div class="cex-wallet-value" style="color:${bal > 0 ? 'var(--green)' : 'var(--text-sub)'}">$${bal.toFixed(2)}</div>
-                        <div class="cex-wallet-label" style="margin-top:4px;">Available</div>
-                        <div class="cex-wallet-value" style="color:${marginBal > 0 ? 'var(--green)' : 'var(--text-sub)'}">$${marginBal.toFixed(2)}</div>
-                    </div>
-                </div>
-                <div class="cex-meta">
-                    <span>Tickers: <strong>${maxTickers}+</strong></span>
-                    <span>Fee: <strong>${(fee * 100).toFixed(3)}%</strong></span>
-                    <span>CEX \u0394: <strong style="color:${cexBalanceDelta > 0 ? 'var(--green)' : cexBalanceDelta < 0 ? 'var(--red)' : 'var(--text-sub)'}">${fmtPnL(cexBalanceDelta)}</strong></span>
-                    <span>Res: <strong style="color:${Math.abs(residualEx) > 0.05 ? 'var(--red)' : 'var(--text-sub)'}">${fmtPnL(residualEx)}</strong></span>
-                </div>
                 
-                <div style="margin-bottom:12px;">
-                    ${pairsList || '<div class="text-sub" style="font-size:.85rem;padding:8px 0;">No matching pairs.</div>'}
+                <!-- Exchange Card Header -->
+                <div class="cex-card-header">
+                    <div class="cex-card-title">
+                        <div class="cex-status-dot ${isEnabled ? 'on' : 'off'}"></div>
+                        <span class="cex-card-name">${exA.toUpperCase()}</span>
+                        <span class="badge ${isEnabled ? 'badge-long' : 'badge-neutral'}">${isEnabled ? 'ACTIVE' : 'OFF'}</span>
+                    </div>
+
+                    <label class="switch" title="Toggle ${exA} trading">
+                        <input type="checkbox" 
+                               ${isEnabled ? 'checked' : ''} 
+                               onchange="toggleExchange('${profile.id}', '${exA}', this)">
+                        <span class="slider round"></span>
+                    </label>
                 </div>
 
-                <div style="flex:1;margin-bottom:16px;">
-                    <div style="font-size:.72rem;color:var(--text-sub);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em;font-weight:600;">Active Positions</div>
-                    ${positions.length === 0 ? '<div class="text-sub" style="font-size:.82rem;">No active positions</div>' : positions.map(pos => {
+                <!-- Balances & Margin Utilization -->
+                <div class="cex-balance-box">
+                    <div class="cex-balance-row">
+                        <div class="cex-balance-col">
+                            <span class="cex-balance-title">Wallet Balance</span>
+                            <span class="cex-balance-amount" style="color:${bal > 0 ? 'var(--text)' : 'var(--text-sub)'}">$${bal.toFixed(2)}</span>
+                        </div>
+                        <div class="cex-balance-col" style="text-align:right;">
+                            <span class="cex-balance-title">Available Margin</span>
+                            <span class="cex-balance-amount" style="color:${marginBal > 0 ? 'var(--green)' : 'var(--text-sub)'}">$${marginBal.toFixed(2)}</span>
+                        </div>
+                    </div>
+
+                    <div class="cex-progress-wrap">
+                        <div class="cex-progress-bar-bg">
+                            <div class="cex-progress-bar-fill" style="width:${usePct}%;background:${barColor};"></div>
+                        </div>
+                        <div class="cex-progress-labels">
+                            <span>Margin Used: <strong>${usePct}%</strong> ($${marginUsed.toFixed(2)})</span>
+                            <span style="color:${exPnlColor};font-weight:600;">Day: ${dailyPnl >= 0 ? '+' : ''}$${dailyPnl.toFixed(2)} (${dailyPct >= 0 ? '+' : ''}${dailyPct.toFixed(2)}%)</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Badges & Fee Rate -->
+                <div class="cex-badges-row">
+                    <span>🎯 Active Pairs: <strong style="color:var(--text);">${maxTickers > 0 ? maxTickers + '+' : 'Syncing…'}</strong></span>
+                    <span>🏷️ Taker Fee: <strong style="color:var(--text);">${(fee * 100).toFixed(3)}%</strong></span>
+                </div>
+
+                <!-- Active Positions List -->
+                <div class="cex-pos-section">
+                    <div class="cex-pos-title">
+                        <span>Active Positions (${positions.length})</span>
+                    </div>
+
+                    ${positions.length === 0 ? `
+                        <div class="cex-empty-pos">✨ No open positions on ${exA}</div>
+                    ` : positions.map(pos => {
                         const isLong = pos.size > 0;
-                        const pnlColor = pos.unrealized_pnl >= 0 ? 'var(--green)' : 'var(--red)';
-                        const dirBadge = isLong ? '<span class="badge badge-long">L</span>' : '<span class="badge badge-short">S</span>';
-                        return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:.82rem;margin-bottom:4px;font-family:var(--font-mono);">
-                            <span>${dirBadge} ${pos.symbol} <span style="color:var(--text-sub)">${Math.abs(pos.size)}</span></span>
-                            <span style="display:flex;align-items:center;gap:6px;">
-                                <span style="color:${pnlColor}">${pos.unrealized_pnl >= 0 ? '+' : ''}$${pos.unrealized_pnl.toFixed(4)}</span>
-                                <button onclick="closeActivePosition('${exA}', '${pos.symbol}', ${pos.size})" style="background:none;border:none;color:var(--text-sub);cursor:pointer;font-size:1rem;line-height:1;padding:0;transition:color .15s;" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--text-sub)'" title="Market Close">\u00d7</button>
-                            </span>
-                        </div>`;
+                        const posPnlColor = pos.unrealized_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+                        const dirBadge = isLong ? '<span class="badge badge-long">LONG</span>' : '<span class="badge badge-short">SHORT</span>';
+                        return `
+                            <div class="cex-pos-card">
+                                <div class="cex-pos-info">
+                                    <div class="cex-pos-sym-row">
+                                        ${dirBadge}
+                                        <span>${pos.symbol}</span>
+                                    </div>
+                                    <div class="cex-pos-price-row">
+                                        Size: <strong>${Math.abs(pos.size)}</strong> | Entry: <strong>$${pos.entry_price ? Number(pos.entry_price).toFixed(4) : '—'}</strong>
+                                    </div>
+                                </div>
+                                <div class="cex-pos-right">
+                                    <div class="cex-pos-pnl" style="color:${posPnlColor}">
+                                        ${pos.unrealized_pnl >= 0 ? '+' : ''}$${Number(pos.unrealized_pnl || 0).toFixed(4)}
+                                    </div>
+                                    <button class="cex-close-btn" onclick="closeActivePosition('${exA}', '${pos.symbol}', ${pos.size})" title="Market Close Position">Close</button>
+                                </div>
+                            </div>
+                        `;
                     }).join('')}
                 </div>
-                
-                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding-top:14px;border-top:1px solid var(--border-dim);user-select:none;">
-                    <input type="checkbox" 
-                           ${isEnabled ? 'checked' : ''} 
-                           onchange="toggleExchange('${profile.id}', '${exA}', this)"
-                           style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent);">
-                    <span style="font-weight:500;font-size:.88rem;">${isEnabled ? 'Trading Enabled' : 'Trading Disabled'}</span>
-                </label>
+
             </div>
         `;
     }
-    html += `</div>`;
+    html += `</div></div>`;
     return html;
 }
 
-
 window.closeActivePosition = async function(exchange, symbol, size) {
-    if (!confirm(`Are you sure you want to completely close ${symbol} on ${exchange} at market price?`)) return;
+    if (!confirm(`Are you sure you want to market close ${symbol} on ${exchange.toUpperCase()}?`)) return;
     try {
         showToast(`Closing ${symbol} on ${exchange}…`, 'info');
         const res = await authFetch(`${API_BASE}/api/positions/close`, {
@@ -723,13 +724,12 @@ window.closeActivePosition = async function(exchange, symbol, size) {
             body: JSON.stringify({ exchange, symbol, size })
         });
         if (res.ok) {
-            showToast(`✅ ${symbol} on ${exchange} — position closed!`, 'success');
+            showToast(`✅ ${symbol} on ${exchange.toUpperCase()} closed successfully!`, 'success');
         } else {
             let errText = `Failed to close ${symbol} on ${exchange}`;
             try { const body = await res.text(); if (body) errText += ': ' + body; } catch(e) {}
             showToast(errText, 'error');
         }
-        // Refresh data regardless of success/failure to update positions display
         setTimeout(window.fetchUnifiedData, 500);
     } catch (e) {
         showToast(`Error closing ${symbol} on ${exchange}: ${e.message}`, 'error');
