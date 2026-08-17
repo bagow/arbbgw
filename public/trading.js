@@ -330,10 +330,10 @@ function renderPanel(profile, active, history, stats, exchanges) {
                     <thead><tr>
                         <th>Pair</th><th>Net Live PnL</th><th>Entry Spread</th>
                         <th>Cur / Max Spread</th><th>Direction</th><th>Amount</th>
-                        <th>Time</th>
+                        <th>Time</th><th style="width:45px;text-align:center;">Action</th>
                     </tr></thead>
                     <tbody id="t-active-body-${profile.id}">
-                        ${active === null ? '<tr><td colspan="7" class="text-center text-sub">Loading…</td></tr>' : ''}
+                        ${active === null ? '<tr><td colspan="8" class="text-center text-sub">Loading…</td></tr>' : ''}
                     </tbody>
                     <tfoot style="background:var(--bg-row-alt);font-weight:600;">
                         <tr>
@@ -341,7 +341,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
                                 Total (<span id="t-count-${profile.id}">${active?.length??0}</span>)
                             </td>
                             <td id="t-live-pnl-${profile.id}" style="color:var(--text);border-top:1px solid var(--border-dim)">$0.00</td>
-                            <td colspan="5" style="border-top:1px solid var(--border-dim)"></td>
+                            <td colspan="6" style="border-top:1px solid var(--border-dim)"></td>
                         </tr>
                     </tfoot>
                 </table>
@@ -747,20 +747,24 @@ function renderCexTab(profile, exchangesData) {
 window.closeActivePosition = async function(exchange, symbol, size) {
     if (!confirm(`Are you sure you want to market close ${symbol} on ${exchange.toUpperCase()}?`)) return;
     try {
-        showToast(`Closing ${symbol} on ${exchange}…`, 'info');
-        const res = await authFetch(`${API_BASE}/api/positions/close`, {
+        showToast(`Closing ${symbol} on ${exchange.toUpperCase()}…`, 'info');
+        const creds = localStorage.getItem('cex_auth') || '';
+        const res = await fetch(`${API_BASE}/api/positions/close`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ exchange, symbol, size })
+            headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': 'Basic ' + creds
+            },
+            body: JSON.stringify({ exchange, symbol, size: parseFloat(size) })
         });
         if (res.ok) {
             showToast(`✅ ${symbol} on ${exchange.toUpperCase()} closed successfully!`, 'success');
+            setTimeout(refreshActiveTab, 1000);
         } else {
             let errText = `Failed to close ${symbol} on ${exchange}`;
             try { const body = await res.text(); if (body) errText += ': ' + body; } catch(e) {}
             showToast(errText, 'error');
         }
-        setTimeout(window.fetchUnifiedData, 500);
     } catch (e) {
         showToast(`Error closing ${symbol} on ${exchange}: ${e.message}`, 'error');
     }
@@ -1561,7 +1565,7 @@ function renderActiveTable(profileId, active) {
 
         const detailRow = `
             <tr id="detail-${rowKey}" style="display:${detailDisplay}">
-                <td colspan="7" class="p-0">
+                <td colspan="8" class="p-0">
                     <div class="trade-details-box">
                         <div class="td-col">
                             <div class="td-header">${t.exchange_a} <span class="badge ${isAHigher ? 'badge-short' : 'badge-long'}">${isAHigher ? 'SHORT' : 'LONG'}</span></div>
@@ -1601,6 +1605,9 @@ function renderActiveTable(profileId, active) {
                 <td><span style="color:var(--text-sub)">${t.direction}</span></td>
                 <td>$${fmtPx(t.volume)}</td>
                 <td style="color:var(--text-sub)">${time}</td>
+                <td style="text-align:center;" onclick="event.stopPropagation()">
+                    <button type="button" class="tab-close" style="color:var(--red);font-size:1.15rem;padding:2px 8px;cursor:pointer;background:transparent;border:1px solid rgba(239,68,68,0.25);border-radius:4px;" onclick="marketCloseTrade('${profileId}', ${t.id}, event)" title="Market Close Trade">✕</button>
+                </td>
             </tr>${detailRow}`;
     }).join('');
 }
@@ -2063,10 +2070,13 @@ window.marketCloseTrade = async function (profileId, tradeId, event) {
     if (event) event.stopPropagation();
     if (!confirm('Close this position at market price?')) return;
     try {
+        showToast('Requesting market close…', 'info');
         await apiFetch(`/api/trades/${tradeId}/close`, { method: 'POST' });
-        showToast('Market close requested', 'success');
-        await refreshActiveTab();
-    } catch (e) { alert('Failed: ' + e.message); }
+        showToast('✅ Market close requested', 'success');
+        setTimeout(refreshActiveTab, 1000);
+    } catch (e) {
+        showToast('Failed to close trade: ' + e.message, 'error');
+    }
 };
 
 // ─── New tab modal ────────────────────────────────────────────────────────────

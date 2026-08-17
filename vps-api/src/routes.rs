@@ -1288,15 +1288,15 @@ pub async fn handle_close_exchange_position(
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             if status.is_success() {
-                (axum::http::StatusCode::OK, body)
+                (axum::http::StatusCode::OK, axum::Json(serde_json::json!({ "success": true, "message": body }))).into_response()
             } else {
-                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, body)
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({ "error": body }))).into_response()
             }
         }
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("core-node unreachable: {}", e),
-        ),
+            axum::Json(serde_json::json!({ "error": format!("core-node unreachable: {}", e) })),
+        ).into_response(),
     }
 }
 
