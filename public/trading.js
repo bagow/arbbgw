@@ -561,11 +561,6 @@ function renderCexTab(profile, exchangesData) {
 
     const REAL_EXCHANGES = new Set(['binance', 'bybit', 'gate', 'kucoin', 'bitget', 'bingx', 'bitmex', 'ascendex', 'xt', 'toobit']);
     const isReal = profile.mode === 'real';
-    const KNOWN_EXCHANGES = ['binance', 'bybit', 'gate', 'kucoin', 'okx', 'bitget', 'bingx', 'bitmex', 'ascendex', 'xt', 'toobit'];
-    const exNames = KNOWN_EXCHANGES
-        .filter(ex => !isReal || REAL_EXCHANGES.has(ex))
-        .sort();
-    
     // Parse disabled_exchanges to a map for quick lookup
     const disabledRaw = profile.disabled_exchanges || '[]';
     let disabledMap = {};
@@ -574,6 +569,36 @@ function renderCexTab(profile, exchangesData) {
     } else if (Array.isArray(disabledRaw)) {
         disabledRaw.forEach(ex => disabledMap[ex] = true);
     }
+
+    const KNOWN_EXCHANGES = ['binance', 'bybit', 'gate', 'kucoin', 'okx', 'bitget', 'bingx', 'bitmex', 'ascendex', 'xt', 'toobit'];
+    const exNames = KNOWN_EXCHANGES
+        .filter(ex => !isReal || REAL_EXCHANGES.has(ex))
+        .sort((a, b) => {
+            const aActive = !disabledMap[a];
+            const bActive = !disabledMap[b];
+            const aPos = (exchangesData.positions && exchangesData.positions[a]?.length) || 0;
+            const bPos = (exchangesData.positions && exchangesData.positions[b]?.length) || 0;
+            const aBal = (exchangesData.balances && exchangesData.balances[a]) || 0;
+            const bBal = (exchangesData.balances && exchangesData.balances[b]) || 0;
+
+            // 1. Exchanges with active positions first
+            if (aPos > 0 && bPos === 0) return -1;
+            if (bPos > 0 && aPos === 0) return 1;
+
+            // 2. Active toggle first (enabled before disabled)
+            if (aActive && !bActive) return -1;
+            if (!aActive && bActive) return 1;
+
+            // 3. Funded balances (> $0.01) before empty ones
+            if (aBal > 0.01 && bBal <= 0.01) return -1;
+            if (bBal > 0.01 && aBal <= 0.01) return 1;
+
+            // 4. Higher balance first
+            if (Math.abs(aBal - bBal) > 0.01) return bBal - aBal;
+
+            // 5. Alphabetical fallback
+            return a.localeCompare(b);
+        });
 
     // Portfolio level aggregates
     let totalWallet = 0;
