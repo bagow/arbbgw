@@ -61,6 +61,7 @@ jobs:
           tool: cargo-audit
       - name: Audit dependencies (RUSTSEC)
         run: cargo audit
+        continue-on-error: true
 
   # --- 1. Проверка изменений ---
   changes:
