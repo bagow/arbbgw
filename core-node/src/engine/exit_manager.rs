@@ -84,14 +84,16 @@ pub async fn process_closes(
 
 
         let triggered_tp = exec_net_pct >= settings.take_profit_percent;
-        // Use pessimistic exit_spread for stop trigger — this is the actual price
-        // we'd get when closing. current_spread (optimistic) overstates our position.
-        let triggered_stop = top_spread > 0.0 && live_state.exit_spread < stop_limit;
-        // ZERO_SPREAD = spread truly converged to zero (price parity).
-        // Does NOT use structural_spread — that caused premature exits at 1.4% spread
-        // when structural was 1.6%, leaving almost no profit.
-        let min_exit_profit_pct = 0.20;
-        let zero_spread = live_state.exit_spread <= 0.0 && exec_net_pct >= min_exit_profit_pct;
+        // In arbitrage, a STOP triggers when the spread WIDENS against our position (increasing loss).
+        // If entry spread was 2.0% and trailing_stop is 1.0%, stop fires if exit_spread exceeds 3.0%.
+        let triggered_stop = settings.trailing_stop_percent > 0.0
+            && live_state.exit_spread > (trade.entry_spread + settings.trailing_stop_percent);
+
+        // ZERO_SPREAD = spread converged to zero or to its natural structural baseline.
+        let min_exit_profit_pct = 0.15;
+        let target_convergence_spread = trade.structural_spread.max(0.0);
+        let zero_spread = (live_state.exit_spread <= target_convergence_spread || live_state.exit_spread <= 0.0)
+            && exec_net_pct >= min_exit_profit_pct;
 
         let mut reason_str = "";
         if manual_close { reason_str = "MANUAL"; }
