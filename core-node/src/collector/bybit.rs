@@ -322,7 +322,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             break;
         }
         tokio::select! {
-            msg = tokio::time::timeout(Duration::from_secs(30), read.next()) => match msg.ok().flatten() {
+            msg = read.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(v) = serde_json::from_str::<BybitMsg>(&text) {
                         let topic = match v.topic {

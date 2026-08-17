@@ -166,7 +166,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
 
     loop {
         tokio::select! {
-            msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
+            msg = ws.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     if text.contains("\"ping\"") {
                         let _ = ws.send(Message::Text(text.replace("ping", "pong"))).await;

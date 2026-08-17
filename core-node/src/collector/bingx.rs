@@ -208,7 +208,7 @@ async fn shard_handler(
             break;
         }
         tokio::select! {
-            msg = tokio::time::timeout(Duration::from_secs(35), ws.next()) => match msg.ok().flatten() {
+            msg = ws.next() => match msg {
                 Some(Ok(msg)) => {
                     let mut text = String::new();
                     match msg {
