@@ -15,13 +15,44 @@ pub fn start_position_sync(
     e_ctx: Arc<crate::state::EngineContext>,
 ) {
     tokio::spawn(async move {
-        // Wait for initial startup to settle
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        // Wait briefly for initial fetcher pass to populate e_ctx.positions
+        tokio::time::sleep(Duration::from_secs(6)).await;
 
         loop {
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            // 1. Reconcile untracked/orphan exchange positions into DB
+            let open_trades_for_rec: Vec<Trade> = db.call(|conn| {
+                let mut stmt = conn.prepare("SELECT id, pair, status, exchange_a, exchange_b, direction, volume, entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, pnl_a, pnl_b, close_reason, contracts_a, contracts_b, commission_cost, slippage_cost, COALESCE(funding_cost,0.0), COALESCE(structural_spread,0.0) FROM trades WHERE status IN ('OPEN','CLOSING')")?;
+                let list = stmt.query_map([], |row| {
+                    Ok(Trade {
+                        id: row.get(0)?,
+                        pair: row.get(1)?,
+                        status: row.get(2)?,
+                        exchange_a: row.get(3)?,
+                        exchange_b: row.get(4)?,
+                        direction: row.get(5)?,
+                        volume: row.get(6)?,
+                        entry_price_a: row.get(7)?,
+                        entry_price_b: row.get(8)?,
+                        entry_spread: row.get(9)?,
+                        entry_time: row.get(10)?,
+                        highest_spread: row.get(11)?,
+                        pnl_a: row.get(12)?,
+                        pnl_b: row.get(13)?,
+                        close_reason: row.get(14)?,
+                        contracts_a: row.get::<_, Option<f64>>(15)?.unwrap_or(0.0),
+                        contracts_b: row.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+                        commission_cost: row.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
+                        slippage_cost: row.get::<_, Option<f64>>(18)?.unwrap_or(0.0),
+                        funding_cost: row.get::<_, Option<f64>>(19)?.unwrap_or(0.0),
+                        structural_spread: row.get::<_, Option<f64>>(20)?.unwrap_or(0.0),
+                    })
+                })?.filter_map(|r| r.ok()).collect::<Vec<_>>();
+                Ok(list)
+            }).await.unwrap_or_default();
 
-            // 1. Load ALL open trades (across all profiles)
+            reconcile_untracked_positions(&db, &e_ctx, &open_trades_for_rec).await;
+
+            // 2. Load ALL open trades (across all profiles)
             // Load trades WITH last_close_attempt_at for BUG-3 race condition fix
             let open_trades_with_close_ts: Vec<(Trade, i64)> = db.call(|conn| {
                 let mut stmt = conn.prepare(
@@ -63,11 +94,8 @@ pub fn start_position_sync(
             }).await.unwrap_or_default();
 
             if open_trades_with_close_ts.is_empty() {
-                // No open trades — clear missing counter but DON'T clear positions cache.
-                // Positions cache reflects what's actually on exchanges (managed by fetcher),
-                // not what we track internally. Clearing it here causes flickering in UI
-                // for positions that exist on the exchange but have no matching trade in DB.
                 e_ctx.position_missing_counter.clear();
+                tokio::time::sleep(Duration::from_secs(10)).await;
                 continue;
             }
 
@@ -340,4 +368,86 @@ pub fn start_position_sync(
             }
         }
     });
+}
+
+/// Automatically detect untracked or orphan arbitrage positions on exchanges
+/// (e.g. after crash, restart, or deploy) and restore them into the active trades DB
+/// so exit_manager can monitor and close them according to trading settings.
+async fn reconcile_untracked_positions(
+    db: &Connection,
+    e_ctx: &crate::state::EngineContext,
+    open_trades: &[Trade],
+) {
+    // 1. Gather all live exchange positions from e_ctx.positions
+    let mut sym_to_pos: std::collections::HashMap<String, Vec<(String, crate::engine::exchanges::traits::PositionInfo)>> = std::collections::HashMap::new();
+
+    for entry in e_ctx.positions.iter() {
+        let ex = entry.key().clone();
+        for pos in entry.value() {
+            if pos.size.abs() > 1e-12 {
+                let norm = pos.symbol.replace('_', "").replace('-', "").to_uppercase();
+                let clean_sym = if norm.ends_with("USDTM") {
+                    norm.replace("USDTM", "USDT")
+                } else {
+                    norm
+                };
+                if clean_sym.ends_with("USDT") {
+                    sym_to_pos.entry(clean_sym).or_default().push((ex.clone(), pos.clone()));
+                }
+            }
+        }
+    }
+
+    if sym_to_pos.is_empty() {
+        return;
+    }
+
+    // 2. Identify untracked positions and reconstruct arbitrage pairs
+    let repo = crate::engine::db::TradeRepository::new(db.clone());
+
+    for (sym, pos_list) in sym_to_pos {
+        let is_tracked = open_trades.iter().any(|t| symbols_match(&t.pair, &sym));
+        if is_tracked {
+            continue;
+        }
+
+        let shorts: Vec<_> = pos_list.iter().filter(|(_, p)| p.size < 0.0).collect();
+        let longs: Vec<_> = pos_list.iter().filter(|(_, p)| p.size > 0.0).collect();
+
+        if let (Some((ex_short, pos_short)), Some((ex_long, pos_long))) = (shorts.first(), longs.first()) {
+            if ex_short != ex_long {
+                let now = now_ms();
+                let dir = format!("{}>{}", ex_short, ex_long);
+                let entry_a = if pos_short.entry_price > 0.0 { pos_short.entry_price } else { 1.0 };
+                let entry_b = if pos_long.entry_price > 0.0 { pos_long.entry_price } else { 1.0 };
+                let spread = ((entry_a - entry_b) / entry_b) * 100.0;
+                let vol_usd = (pos_short.size.abs() * entry_a).max(pos_long.size.abs() * entry_b);
+
+                tracing::info!(
+                    "[reconcile] 🛡️ AUTO-RECOVERED open arbitrage position for {}: {} (SHORT {:.4} @ {:.6}) + {} (LONG {:.4} @ {:.6}) | Vol: ${:.2}. Restoring to active trades DB.",
+                    sym, ex_short, pos_short.size.abs(), entry_a, ex_long, pos_long.size.abs(), entry_b, vol_usd
+                );
+
+                repo.insert_new_entry(
+                    sym.clone(),
+                    ex_short.clone(),
+                    ex_long.clone(),
+                    dir,
+                    vol_usd,
+                    entry_a,
+                    entry_b,
+                    spread,
+                    now,
+                    "real-default".to_string(),
+                    0.0,
+                    0.0,
+                    String::new(),
+                    String::new(),
+                    pos_short.size.abs(),
+                    pos_long.size.abs(),
+                    0.0,
+                ).await;
+            }
+        }
+    }
 }
