@@ -251,9 +251,7 @@ impl ExchangeConnector for GateConnector {
         let mut raw_price_str = format!("{:.8}", final_price).trim_end_matches('0').to_string();
         if raw_price_str.ends_with('.') { raw_price_str.pop(); }
         if raw_price_str.is_empty() { raw_price_str = "0".to_string(); }
-        let is_market_close = raw_price_str == "0" || final_price <= 0.0;
-        let price_str = if is_market_close { "0".to_string() } else { raw_price_str };
-        let final_size = if is_market_close { 0 } else { size };
+        let price_str = if final_price <= 0.0 { "0".to_string() } else { raw_price_str };
 
         use super::ws_gate::send_gate_ws_request;
         let req_id = uuid::Uuid::new_v4().to_string();
@@ -261,7 +259,7 @@ impl ExchangeConnector for GateConnector {
             "request_id": req_id,
             "channel": "futures.order_place",
             "event": "api",
-            "payload": [{"contract": contract, "size": final_size, "price": price_str, "tif": "ioc", "reduce_only": true, "close": is_market_close, "text": "t-corenode-close"}]
+            "payload": [{"contract": contract, "size": size, "price": price_str, "tif": "ioc", "reduce_only": true, "close": false, "text": "t-corenode-close"}]
         });
 
         if let Ok(resp) = send_gate_ws_request(ws_req).await {
@@ -272,33 +270,21 @@ impl ExchangeConnector for GateConnector {
                 if let Some(r) = result {
                     let fill_price: f64 = r.get("fill_price").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
                     let fee: f64 = r.get("fee").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
-                    if fill_price > 0.0 {
-                        return Ok(CloseReceipt { final_price: fill_price, total_fee: fee.abs(), closed_volume: phys_amount });
+                    if fill_price > 0.0 || r.get("id").is_some() {
+                        return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee.abs(), closed_volume: phys_amount });
                     }
                 }
             }
         }
 
         // Fallback: aggressive WS close
-        tracing::error!("[gate] fallback close for {} (qty {})", pair, phys_amount);
-        let mut fb_price_str = "0".to_string();
-        if target_price > 0.0 {
-            // Use the same slippage_percent as the first attempt — do NOT widen to 2%.
-            let p = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
-            let rp = if is_buy { (p / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8) } else { (p / tick_size.max(1e-8)).floor() * tick_size.max(1e-8) };
-            fb_price_str = format!("{:.8}", rp).trim_end_matches('0').to_string();
-            if fb_price_str.ends_with('.') { fb_price_str.pop(); }
-            if fb_price_str.is_empty() { fb_price_str = "0".to_string(); }
-        }
-        let is_fb_market = fb_price_str == "0";
-        let fb_size = if is_fb_market { 0 } else { size };
-
+        tracing::warn!("[gate] fallback close for {} (qty {})", pair, phys_amount);
         let fb_req_id = uuid::Uuid::new_v4().to_string();
         let fb_ws = serde_json::json!({
             "request_id": fb_req_id,
             "channel": "futures.order_place",
             "event": "api",
-            "payload": [{"contract": contract, "size": fb_size, "price": fb_price_str, "tif": "ioc", "reduce_only": true, "close": is_fb_market, "text": "t-corenode-fb"}]
+            "payload": [{"contract": contract, "size": size, "price": "0", "tif": "ioc", "reduce_only": true, "close": false, "text": "t-corenode-fb"}]
         });
         if let Ok(fb_resp) = send_gate_ws_request(fb_ws).await {
             let fb_s = fb_resp["header"]["status"].as_str().unwrap_or("0");
@@ -308,42 +294,39 @@ impl ExchangeConnector for GateConnector {
                 if let Some(r) = result {
                     let fill_price: f64 = r.get("fill_price").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
                     let fee: f64 = r.get("fee").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
-                    if fill_price > 0.0 {
-                        return Ok(CloseReceipt { final_price: fill_price, total_fee: fee.abs(), closed_volume: phys_amount });
+                    if fill_price > 0.0 || r.get("id").is_some() {
+                        return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee.abs(), closed_volume: phys_amount });
                     }
                 }
             }
         }
 
-        // 3rd attempt: Signed REST fallback if WS is unavailable
+        // 3rd attempt: Signed REST fallback
         let rest_body = json!({
             "contract": contract,
-            "size": fb_size,
-            "price": fb_price_str,
+            "size": size,
+            "price": "0",
             "tif": "ioc",
             "reduce_only": true,
-            "close": is_fb_market,
+            "close": false,
             "text": "t-corenode-close-rest"
         }).to_string();
         let path = "/api/v4/futures/usdt/orders";
         let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &rest_body);
         let url = format!("https://api.gateio.ws{}", path);
-        if let Ok(resp) = http.post(&url).headers(headers).header("Content-Type", "application/json").body(rest_body).timeout(Duration::from_millis(3000)).send().await {
+        if let Ok(resp) = http.post(&url).headers(headers).header("Content-Type", "application/json").body(rest_body).timeout(Duration::from_millis(5000)).send().await {
             if let Ok(v) = resp.json::<Value>().await {
-                let fill_price: f64 = v["fill_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);
-                let fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
-                if fill_price > 0.0 {
-                    return Ok(CloseReceipt { final_price: fill_price, total_fee: fee.abs(), closed_volume: phys_amount });
+                if v["id"].is_some() {
+                    let fill_price: f64 = v["fill_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);
+                    let fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
+                    return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee.abs(), closed_volume: phys_amount });
+                } else {
+                    tracing::error!("[gate] REST close response error for {}: {:?}", pair, v);
                 }
             }
         }
 
-        tracing::warn!("[gate] fallback close unverified for {} (req_id {}). Assuming filled to prevent CLOSING trap.", pair, fb_req_id);
-        Ok(CloseReceipt {
-            final_price: target_price,
-            total_fee: 0.0,
-            closed_volume: phys_amount,
-        })
+        Err(format!("Gate.io close order failed for {}", pair))
     }
 
     async fn trim_position(
