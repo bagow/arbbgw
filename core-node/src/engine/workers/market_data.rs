@@ -791,7 +791,7 @@ pub fn start_multiplier_fetcher(
                         if let Some(arr) = json["symbols"].as_array() {
                             let map = &e_ctx.multipliers;
                             let tmap = &e_ctx.tick_sizes;
-                            let lmap = &e_ctx.launch_times;
+                            let _lmap = &e_ctx.launch_times;
                             let mut count = 0u32;
                             for c in arr {
                                 let sym = c["symbol"].as_str().unwrap_or("");

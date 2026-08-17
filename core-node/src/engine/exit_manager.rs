@@ -75,6 +75,10 @@ pub async fn process_closes(
         let exec_net_pnl = crate::engine::pnl::calculate_net_pnl(live_state.exec_gross_pnl, trade.commission_cost, trade.slippage_cost, fund_cost);
         let exec_net_pct = exec_net_pnl / trade.volume * 100.0;
 
+        let top_spread = trade.highest_spread.max(live_state.current_spread);
+        let mut exit_price_a = live_state.exit_price_a;
+        let mut exit_price_b = live_state.exit_price_b;
+
         let triggered_tp = exec_net_pct >= settings.take_profit_percent;
         // In arbitrage, a STOP triggers when the spread WIDENS against our position (increasing loss).
         // If entry spread was 2.0% and trailing_stop is 1.0%, stop fires if exit_spread exceeds 3.0%.

@@ -533,7 +533,7 @@ async fn trim_unhedged_maker(
     keys: &Arc<ExchangeKeys>,
     ts: &TechnicalSettings,
     e_ctx: &Arc<EngineContext>,
-    settings: &TradingSettings,
+    _settings: &TradingSettings,
 ) {
     error!(
         "[maker] ⚠️ TRIMMING unhedged maker: pair={} exchange={} oid={} price={:.8}",
