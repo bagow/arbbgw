@@ -738,93 +738,194 @@ window.closeActivePosition = async function(exchange, symbol, size) {
 
 function renderSettingsForm(profile) {
     const p = profile;
+    const isRunning = !!p.is_active;
     return `
         <div style="margin-bottom:20px;display:flex;gap:0;background:var(--bg-row);border-radius:8px;padding:3px;">
             <button class="mt-nav-btn mt-nav-btn--active" id="stab-profile-btn" onclick="switchSettingsTab('profile')"
-                style="flex:1;margin:0;border-radius:6px;padding:10px 0;font-size:.9rem;">Profile Settings</button>
+                style="flex:1;margin:0;border-radius:6px;padding:10px 0;font-size:.9rem;">Profile Strategy Settings</button>
             <button class="mt-nav-btn" id="stab-tech-btn" onclick="switchSettingsTab('technical')"
-                style="flex:1;margin:0;border-radius:6px;padding:10px 0;font-size:.9rem;">Technical Settings</button>
+                style="flex:1;margin:0;border-radius:6px;padding:10px 0;font-size:.9rem;">Technical & Engine Settings</button>
         </div>
 
         <!-- Profile Settings (per-profile) -->
         <section id="stab-profile" class="trading-settings-section" style="padding:0;background:transparent;border:none;">
-            <form id="settings-form-${p.id}" class="settings-grid" onsubmit="return false;">
-                <div class="form-group">
-                    <label>Trade Volume (USD)</label>
-                    <input type="number" id="sf-vol-${p.id}" step="0.01" value="${p.trade_volume??10}" />
-                </div>
-                <div class="form-group">
-                    <label>Take Profit (%)</label>
-                    <input type="number" id="sf-tp-${p.id}" step="0.01" value="${p.take_profit_percent??0.2}" />
-                </div>
-                <div class="form-group">
-                    <label>Min Entry Spread (%)</label>
-                    <input type="number" id="sf-min-${p.id}" step="0.01" value="${p.min_entry_spread??0.5}" />
-                </div>
-                <div class="form-group">
-                    <label>Max Entry Spread (%)</label>
-                    <input type="number" id="sf-max-${p.id}" step="0.1" value="${p.max_entry_spread??50}" />
-                </div>
-                <div class="form-group">
-                    <label>Max Active Trades</label>
-                    <input type="number" id="sf-max-trades-${p.id}" step="1" value="${p.max_active_trades??5}" />
-                </div>
-                <div class="form-group">
-                    <label>Leverage (x)</label>
-                    <input type="number" id="sf-leverage-${p.id}" step="1" min="1" max="125" value="${p.leverage??10}" />
-                </div>
-                <div class="form-group">
-                    <label>Min Volume (M$)</label>
-                    <input type="number" id="sf-minvol-${p.id}" step="0.1" value="${p.min_volume_millions??10}" />
-                </div>
-                <div class="form-group">
-                    <label>L1 Depth (% of vol)</label>
-                    <input type="number" id="sf-depth-${p.id}" step="1" title="Minimum L1 volume required as % of Trade Volume" value="${p.min_depth_percent??100}" />
-                </div>
-                <div class="form-group">
-                    <label>Slippage IOC (%)</label>
-                    <input type="number" id="sf-slip-${p.id}" step="0.01" min="0.01" max="5" title="Max price tolerance for IOC limit orders (entry & close). Also used as fallback close tolerance. Set = (spread/4) to avoid killing your own PnL." value="${p.slippage_percent??0.5}" />
+            <form id="settings-form-${p.id}" class="settings-container" onsubmit="return false;">
+                
+                <div class="settings-sections-grid">
+                    
+                    <!-- Card 1: Capital & Sizing -->
+                    <div class="settings-card">
+                        <div class="settings-card-header">
+                            <div class="settings-card-icon">💰</div>
+                            <div>
+                                <div class="settings-card-title">Capital & Position Sizing</div>
+                                <div class="settings-card-desc">Volume, leverage and concurrent position limits</div>
+                            </div>
+                        </div>
+                        <div class="settings-card-fields">
+                            <div class="field-item">
+                                <label for="sf-vol-${p.id}">Trade Volume (USD)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-vol-${p.id}" step="1" min="5" value="${p.trade_volume??10}" />
+                                </div>
+                                <div class="field-hint">Notional volume per leg</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-leverage-${p.id}">Leverage (x)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-leverage-${p.id}" step="1" min="1" max="125" value="${p.leverage??10}" />
+                                </div>
+                                <div class="field-hint">Isolated cross leverage</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-max-trades-${p.id}">Max Active Trades</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-max-trades-${p.id}" step="1" min="1" max="50" value="${p.max_active_trades??5}" />
+                                </div>
+                                <div class="field-hint">Max concurrent pairs</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Card 2: Targets & Risk Management -->
+                    <div class="settings-card">
+                        <div class="settings-card-header">
+                            <div class="settings-card-icon">🎯</div>
+                            <div>
+                                <div class="settings-card-title">Targets & Risk Management</div>
+                                <div class="settings-card-desc">Take profit, spread expansion stop loss and slippage</div>
+                            </div>
+                        </div>
+                        <div class="settings-card-fields">
+                            <div class="field-item">
+                                <label for="sf-tp-${p.id}">Take Profit (%)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-tp-${p.id}" step="0.01" min="0.01" value="${p.take_profit_percent??0.2}" />
+                                </div>
+                                <div class="field-hint">Target net profit to exit</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-stop-${p.id}">Stop Loss (%)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-stop-${p.id}" step="0.05" min="0" value="${p.trailing_stop_percent??0.5}" />
+                                </div>
+                                <div class="field-hint">Spread widening tolerance (0 = off)</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-slip-${p.id}">Slippage IOC (%)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-slip-${p.id}" step="0.01" min="0.01" max="5" value="${p.slippage_percent??0.5}" />
+                                </div>
+                                <div class="field-hint">Max price slip per leg</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Card 3: Scanner & Liquidity Filters -->
+                    <div class="settings-card" style="grid-column: 1 / -1;">
+                        <div class="settings-card-header">
+                            <div class="settings-card-icon">🔍</div>
+                            <div>
+                                <div class="settings-card-title">Scanner & Liquidity Filters</div>
+                                <div class="settings-card-desc">Spread entry window, structural deviation and orderbook depth</div>
+                            </div>
+                        </div>
+                        <div class="settings-card-fields" style="grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));">
+                            <div class="field-item">
+                                <label for="sf-min-${p.id}">Min Entry Spread (%)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-min-${p.id}" step="0.01" value="${p.min_entry_spread??0.5}" />
+                                </div>
+                                <div class="field-hint">Minimum spread to trigger signal</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-max-${p.id}">Max Entry Spread (%)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-max-${p.id}" step="0.5" value="${p.max_entry_spread??50}" />
+                                </div>
+                                <div class="field-hint">Upper bound (filters bad ticks)</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-dev-${p.id}">Min Structural Dev (%)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-dev-${p.id}" step="0.05" min="0" value="${p.min_structural_deviation??0}" />
+                                </div>
+                                <div class="field-hint">Spread minus EMA baseline (0 = off)</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-minvol-${p.id}">Min 24h Vol (M$)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-minvol-${p.id}" step="0.5" min="0" value="${p.min_volume_millions??10}" />
+                                </div>
+                                <div class="field-hint">24h volume floor per exchange</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-depth-${p.id}">L1 Book Depth (%)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-depth-${p.id}" step="5" min="0" value="${p.min_depth_percent??100}" />
+                                </div>
+                                <div class="field-hint">% of volume required in top level</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Card 4: Blacklist -->
+                    <div class="settings-card" style="grid-column: 1 / -1;">
+                        <div class="settings-card-header">
+                            <div class="settings-card-icon">🚫</div>
+                            <div>
+                                <div class="settings-card-title">Blacklisted Trading Pairs</div>
+                                <div class="settings-card-desc">Excluded from scanner and automated trading (one symbol per line)</div>
+                            </div>
+                        </div>
+                        <div>
+                            <textarea id="sf-blacklist"
+                                spellcheck="false"
+                                placeholder="BTCUSDT&#10;ETHUSDT&#10;..."
+                                style="width:100%;min-height:90px;max-height:200px;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-family:var(--font-mono);font-size:.85rem;line-height:1.6;resize:vertical;box-sizing:border-box;"
+                            ></textarea>
+                        </div>
+                    </div>
+
                 </div>
 
-                <!-- Blacklist textarea -->
-                <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid var(--border-dim);padding-top:16px;">
-                    <label style="display:block;text-transform:uppercase;font-size:.7rem;letter-spacing:.5px;color:var(--text-sub);margin-bottom:8px;">
-                        🚫 Blacklisted Pairs <span style="font-weight:400;text-transform:none;letter-spacing:0;">(one per line — excluded from scanner & trading)</span>
-                    </label>
-                    <textarea id="sf-blacklist"
-                        spellcheck="false"
-                        placeholder="BTCUSDT&#10;ETHUSDT&#10;..."
-                        style="width:100%;min-height:100px;max-height:220px;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-family:var(--font-mono);font-size:.85rem;line-height:1.6;resize:vertical;box-sizing:border-box;"
-                    ></textarea>
-                </div>
+                <!-- Bottom Control Actions Bar -->
+                <div class="settings-actions-panel">
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <span class="settings-status-badge" style="background:${isRunning ? 'var(--green-dim)' : 'var(--red-dim)'};color:${isRunning ? 'var(--green)' : 'var(--red)'};border:1px solid ${isRunning ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'};">
+                            <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${isRunning ? 'var(--green)' : 'var(--red)'};"></span>
+                            ${isRunning ? 'BOT ACTIVE' : 'BOT STOPPED'}
+                        </span>
+                        <span style="color:var(--text-sub);font-size:.82rem;">Profile ID: <strong>${p.id}</strong></span>
+                    </div>
 
-                <div class="form-actions" style="grid-column:1/-1;display:flex;gap:16px;margin-top:24px;border-top:1px solid var(--border-dim);padding-top:24px;align-items:center;flex-wrap:wrap;">
-                    <button type="button" id="sf-power-${p.id}"
-                        onclick="toggleBotPower('${p.id}')"
-                        class="trading-save-btn"
-                        style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:${p.is_active?'var(--red)':'var(--green)'};">
-                        ${p.is_active ? 'Stop Bot' : 'Start Bot'}
-                    </button>
-                    <button type="button" id="sf-resume-${p.id}"
-                        onclick="resumeKillSwitch()"
-                        class="trading-save-btn"
-                        style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:#ff3b3b;display:${window._killSwitchActive?'inline-flex':'none'};animation:pulse-red 1.5s infinite;">
-                        ⚠️ Engine Suspended — Resume
-                    </button>
-                    <button type="button"
-                        onclick="saveSettings('${p.id}')"
-                        class="trading-save-btn"
-                        id="sf-save-${p.id}"
-                        style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:var(--bg-ctrl);color:var(--text);border:1px solid var(--border);">
-                        Save Settings
-                    </button>
-
-                    <button type="button"
-                        onclick="clearTrades('${p.id}', '${p.mode}')"
-                        class="trading-save-btn outline-btn"
-                        style="margin:0;width:auto;padding:12px 32px;font-size:.95rem;background:transparent;color:var(--text-sub);border:1px solid var(--border);">
-                        Clear DB (Wipe Trades)
-                    </button>
+                    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+                        <button type="button" id="sf-power-${p.id}"
+                            onclick="toggleBotPower('${p.id}')"
+                            class="trading-save-btn"
+                            style="margin:0;width:auto;padding:10px 24px;font-size:.9rem;background:${isRunning ? 'var(--red)' : 'var(--green)'};">
+                            ${isRunning ? '⏹ Stop Bot' : '▶ Start Bot'}
+                        </button>
+                        <button type="button" id="sf-resume-${p.id}"
+                            onclick="resumeKillSwitch()"
+                            class="trading-save-btn"
+                            style="margin:0;width:auto;padding:10px 24px;font-size:.9rem;background:#ff3b3b;display:${window._killSwitchActive ? 'inline-flex' : 'none'};animation:pulse-red 1.5s infinite;">
+                            ⚠️ Resume Suspended Engine
+                        </button>
+                        <button type="button"
+                            onclick="saveSettings('${p.id}')"
+                            class="trading-save-btn"
+                            id="sf-save-${p.id}"
+                            style="margin:0;width:auto;padding:10px 24px;font-size:.9rem;background:var(--accent);color:#fff;border:none;">
+                            💾 Save Settings
+                        </button>
+                        <button type="button"
+                            onclick="clearTrades('${p.id}', '${p.mode}')"
+                            class="trading-save-btn outline-btn"
+                            style="margin:0;width:auto;padding:10px 20px;font-size:.85rem;background:transparent;color:var(--text-sub);border:1px solid var(--border);">
+                            🗑️ Wipe Trades
+                        </button>
+                    </div>
                 </div>
             </form>
         </section>
@@ -1783,15 +1884,17 @@ window.saveSettings = async function (profileId) {
     const g = id => document.getElementById(id)?.value;
     // NOTE: is_active is intentionally excluded here — use Start/Stop Bot for that.
     const settings = {
-        trade_volume:          parseFloat(g(`sf-vol-${profileId}`)),
-        take_profit_percent:   parseFloat(g(`sf-tp-${profileId}`)),
-        min_entry_spread:      parseFloat(g(`sf-min-${profileId}`)),
-        max_entry_spread:      parseFloat(g(`sf-max-${profileId}`)),
-        max_active_trades:     parseInt(g(`sf-max-trades-${profileId}`)),
-        leverage:              parseInt(g(`sf-leverage-${profileId}`)) || 10,
-        min_volume_millions:   parseFloat(g(`sf-minvol-${profileId}`)),
-        min_depth_percent:     parseFloat(g(`sf-depth-${profileId}`)),
-        slippage_percent:      parseFloat(g(`sf-slip-${profileId}`)) || 0.5,
+        trade_volume:              parseFloat(g(`sf-vol-${profileId}`)),
+        take_profit_percent:       parseFloat(g(`sf-tp-${profileId}`)),
+        trailing_stop_percent:     parseFloat(g(`sf-stop-${profileId}`)) || 0.0,
+        min_entry_spread:          parseFloat(g(`sf-min-${profileId}`)),
+        max_entry_spread:          parseFloat(g(`sf-max-${profileId}`)),
+        min_structural_deviation:  parseFloat(g(`sf-dev-${profileId}`)) || 0.0,
+        max_active_trades:         parseInt(g(`sf-max-trades-${profileId}`)),
+        leverage:                  parseInt(g(`sf-leverage-${profileId}`)) || 10,
+        min_volume_millions:       parseFloat(g(`sf-minvol-${profileId}`)),
+        min_depth_percent:         parseFloat(g(`sf-depth-${profileId}`)),
+        slippage_percent:          parseFloat(g(`sf-slip-${profileId}`)) || 0.5,
     };
     const btn = document.getElementById(`sf-save-${profileId}`);
     try {
