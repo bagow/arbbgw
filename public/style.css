@@ -702,54 +702,13 @@ input:checked + .slider:before { transform: translateX(18px); }
    MULTI-TAB UI
    ══════════════════════════════════════════════════════════════════════════════ */
 
-/* ── Bottom tab bar ──────────────────────────────────────────────────────── */
-.tab-bar {
-  position: fixed !important; bottom: 0 !important; top: auto !important;
-  left: 0 !important; right: 0 !important; z-index: 1000 !important;
-  height: 48px !important; display: flex !important; align-items: stretch !important;
-  background: var(--glass-bg) !important;
-  backdrop-filter: blur(16px) !important;
-  -webkit-backdrop-filter: blur(16px) !important;
-  border-top: 1px solid var(--glass-border) !important;
-  box-shadow: 0 -4px 20px rgba(0,0,0,0.3) !important;
-  padding: 0 !important; gap: 0 !important;
-  overflow-x: auto !important; scrollbar-width: none !important;
-}
-.tab-bar::-webkit-scrollbar { display: none; }
-
-.tab-item {
-  display: flex; align-items: center; gap: 6px;
-  padding: 0 10px 0 12px; min-width: 120px; max-width: 200px;
-  cursor: pointer; font-size: .8rem; font-weight: 500;
-  border-right: 1px solid var(--border-dim);
-  transition: all .15s; user-select: none; flex-shrink: 0;
-  color: var(--text-sub);
-}
-.tab-item:hover { background: var(--bg-ctrl); color: var(--text); }
-.tab-item--active {
-  background: rgba(79, 125, 248, 0.08); color: var(--text);
-  box-shadow: inset 0 -2px 0 var(--accent);
-}
-
-.tab-badge { font-size: .85rem; flex-shrink: 0; }
-.tab-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
+/* ── Tab close utility button ─────────────────────────────────────────── */
 .tab-close {
   background: none; border: none; color: var(--text-dim);
   cursor: pointer; font-size: 1.1rem; line-height: 1;
   padding: 0 2px; flex-shrink: 0; transition: color .15s;
 }
 .tab-close:hover { color: var(--red); }
-
-.tab-add-btn {
-  height: 100%; padding: 0 14px;
-  background: none; border: none;
-  border-left: 1px solid var(--border-dim);
-  color: var(--text-sub); font-size: 1.3rem;
-  cursor: pointer; transition: all .15s;
-  margin-left: auto; flex-shrink: 0;
-}
-.tab-add-btn:hover { color: var(--accent); background: var(--accent-dim); }
 
 /* ── Main panel ──────────────────────────────────────────────────────────── */
 .mt-layout { display: block !important; width: 100% !important; margin: 0 !important; padding: 0 !important; }

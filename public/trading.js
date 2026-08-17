@@ -116,33 +116,7 @@ async function saveProfileSettings(id, settings) {
 // ─── Tab bar rendering ────────────────────────────────────────────────────────
 
 function renderTabBar() {
-    const bar = document.getElementById('tab-bar');
-    const addBtn = document.getElementById('tab-add-btn');
-    // Remove all tabs (keep add button)
-    bar.querySelectorAll('.tab-item').forEach(el => el.remove());
-
-    for (const p of profiles) {
-        const tab = document.createElement('div');
-        tab.className = 'tab-item' + (p.id === activeTabId ? ' tab-item--active' : '');
-        tab.dataset.id = p.id;
-
-        const badge = '<span class="tab-badge tab-badge--real">💰</span>';
-
-        const isDefault = p.id === 'real-default';
-        let dispName = escHtml(p.name);
-        if (p.id === 'real-default') dispName = 'Public Real';
-
-        tab.innerHTML = `
-            ${badge}
-            <span class="tab-name">${dispName}</span>
-            ${isDefault ? '' : `<button class="tab-close" data-id="${p.id}" title="Close tab">&times;</button>`}
-        `;
-        tab.addEventListener('click', (e) => {
-            if (e.target.classList.contains('tab-close')) return;
-            switchTab(p.id);
-        });
-        bar.insertBefore(tab, addBtn);
-    }
+    // Legacy bottom tab bar removed
 }
 
 // ─── Tab switching ────────────────────────────────────────────────────────────
@@ -2250,31 +2224,6 @@ window.marketCloseTrade = async function (profileId, tradeId, event) {
     }
 };
 
-// ─── New tab modal ────────────────────────────────────────────────────────────
-
-document.getElementById('tab-add-btn').addEventListener('click', () => {
-    document.getElementById('new-tab-modal').classList.remove('hidden');
-    document.getElementById('nt-name').focus();
-});
-document.getElementById('nt-cancel').addEventListener('click', () => {
-    document.getElementById('new-tab-modal').classList.add('hidden');
-});
-document.getElementById('nt-create').addEventListener('click', async () => {
-    const name = document.getElementById('nt-name').value.trim() || 'New Profile';
-    const mode = document.querySelector('input[name="nt-mode"]:checked')?.value || 'real';
-    document.getElementById('nt-create').textContent = 'Creating…';
-    try {
-        const p = await createProfile(name, mode);
-        document.getElementById('new-tab-modal').classList.add('hidden');
-        document.getElementById('nt-name').value = '';
-        renderTabBar();
-        await switchTab(p.id);
-    } catch (e) {
-        alert('Failed to create profile: ' + e.message);
-    }
-    document.getElementById('nt-create').textContent = 'Create Profile';
-});
-
 // ─── Login Form ───────────────────────────────────────────────────────────────
 const loginForm = document.getElementById('login-form');
 if (loginForm) {
@@ -2316,24 +2265,6 @@ if (loginForm) {
         }
     });
 }
-
-// Tab close delegation
-document.getElementById('tab-bar').addEventListener('click', async (e) => {
-    if (!e.target.classList.contains('tab-close')) return;
-    const id = e.target.dataset.id;
-    if (id === 'real-default') {
-        alert('Cannot close the default profiles.');
-        return;
-    }
-    if (!confirm('Close and delete this trading profile and all its trades?')) return;
-    await deleteProfile(id);
-    if (activeTabId === id) {
-        activeTabId = profiles[0]?.id ?? null;
-        localStorage.setItem('activeTabId', activeTabId ?? '');
-    }
-    renderTabBar();
-    if (activeTabId) await switchTab(activeTabId);
-});
 
 // ─── Chart Modal (Integrated) ────────────────────────────────────────────────
 // Handled by chart.js globals: window.openModal, window.closeModal
