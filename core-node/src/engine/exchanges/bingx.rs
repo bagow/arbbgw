@@ -192,13 +192,13 @@ impl ExchangeConnector for BingxConnector {
         super::ws_bingx_private::ensure_private_ws(&keys.bingx_key, &keys.bingx_secret).await;
 
         let sym = to_bingx_symbol(pair);
-        // Closing: reverse side, reverse positionSide
-        let side = if is_buy { "SELL" } else { "BUY" };
-        let pos_side = if is_buy { "LONG" } else { "SHORT" };
+        // Closing: is_buy=true means BUY to close SHORT; is_buy=false means SELL to close LONG
+        let side = if is_buy { "BUY" } else { "SELL" };
+        let pos_side = if is_buy { "SHORT" } else { "LONG" };
 
         for attempt in 0..retries {
             let slip = slippage_percent / 100.0;
-            let raw_price = if is_buy { target_price * (1.0 - slip) } else { target_price * (1.0 + slip) };
+            let raw_price = if is_buy { target_price * (1.0 + slip) } else { target_price * (1.0 - slip) };
             let limit_price = round_to_tick(raw_price, tick_size);
             let (order_type, price_part) = if use_ioc && limit_price > 0.0 {
                 ("LIMIT", format!("&price={}", fmt(limit_price)))

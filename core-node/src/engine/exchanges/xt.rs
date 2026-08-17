@@ -159,12 +159,13 @@ impl ExchangeConnector for XtConnector {
             return Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount });
         }
         let sym = to_xt_symbol(pair);
-        let close_side = if is_buy { "SELL" } else { "BUY" };
-        let pos_side = if is_buy { "LONG" } else { "SHORT" };
+        // Closing: is_buy=true means BUY to close SHORT; is_buy=false means SELL to close LONG
+        let close_side = if is_buy { "BUY" } else { "SELL" };
+        let pos_side = if is_buy { "SHORT" } else { "LONG" };
 
         for attempt in 0..retries {
             let slip = slippage_percent / 100.0;
-            let raw_price = if is_buy { target_price * (1.0 - slip) } else { target_price * (1.0 + slip) };
+            let raw_price = if is_buy { target_price * (1.0 + slip) } else { target_price * (1.0 - slip) };
             let body = if use_ioc && raw_price > 0.0 {
                 serde_json::json!({
                     "symbol": sym, "side": close_side, "entrustType": "LIMIT",

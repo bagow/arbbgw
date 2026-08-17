@@ -160,11 +160,12 @@ impl ExchangeConnector for AscendexConnector {
             return Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount });
         }
         let sym = to_ascendex_symbol(pair);
-        let side = if is_buy { "sell" } else { "buy" }; // closing reverses direction
+        // Closing: is_buy=true means BUY to close short; is_buy=false means SELL to close long
+        let side = if is_buy { "buy" } else { "sell" };
 
         for attempt in 0..retries {
             let slip = slippage_percent / 100.0;
-            let raw_price = if is_buy { target_price * (1.0 - slip) } else { target_price * (1.0 + slip) };
+            let raw_price = if is_buy { target_price * (1.0 + slip) } else { target_price * (1.0 - slip) };
             let body = serde_json::json!({
                 "symbol": sym,
                 "orderQty": fmt(phys_amount),

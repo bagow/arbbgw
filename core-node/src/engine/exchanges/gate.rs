@@ -315,6 +315,29 @@ impl ExchangeConnector for GateConnector {
             }
         }
 
+        // 3rd attempt: Signed REST fallback if WS is unavailable
+        let rest_body = json!({
+            "contract": contract,
+            "size": fb_size,
+            "price": fb_price_str,
+            "tif": "ioc",
+            "reduce_only": true,
+            "close": is_fb_market,
+            "text": "t-corenode-close-rest"
+        }).to_string();
+        let path = "/api/v4/futures/usdt/orders";
+        let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &rest_body);
+        let url = format!("https://api.gateio.ws{}", path);
+        if let Ok(resp) = http.post(&url).headers(headers).header("Content-Type", "application/json").body(rest_body).timeout(Duration::from_millis(3000)).send().await {
+            if let Ok(v) = resp.json::<Value>().await {
+                let fill_price: f64 = v["fill_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);
+                let fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
+                if fill_price > 0.0 {
+                    return Ok(CloseReceipt { final_price: fill_price, total_fee: fee.abs(), closed_volume: phys_amount });
+                }
+            }
+        }
+
         tracing::warn!("[gate] fallback close unverified for {} (req_id {}). Assuming filled to prevent CLOSING trap.", pair, fb_req_id);
         Ok(CloseReceipt {
             final_price: target_price,

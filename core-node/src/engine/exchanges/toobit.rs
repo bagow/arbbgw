@@ -163,12 +163,13 @@ impl ExchangeConnector for ToobitConnector {
         if dry_run {
             return Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount });
         }
-        let close_side = if is_buy { "SELL" } else { "BUY" };
-        let pos_side = if is_buy { "LONG" } else { "SHORT" };
+        // Closing: is_buy=true means BUY to close SHORT; is_buy=false means SELL to close LONG
+        let close_side = if is_buy { "BUY" } else { "SELL" };
+        let pos_side = if is_buy { "SHORT" } else { "LONG" };
 
         for attempt in 0..retries {
             let slip = slippage_percent / 100.0;
-            let raw_price = if is_buy { target_price * (1.0 - slip) } else { target_price * (1.0 + slip) };
+            let raw_price = if is_buy { target_price * (1.0 + slip) } else { target_price * (1.0 - slip) };
             let limit_price = round_to_tick(raw_price, tick_size);
             let params = if use_ioc && limit_price > 0.0 {
                 format!("symbol={}&side={}&type=LIMIT&quantity={}&price={}&timeInForce=IOC&positionSide={}", pair, close_side, fmt(phys_amount), fmt(limit_price), pos_side)
