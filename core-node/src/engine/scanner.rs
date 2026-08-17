@@ -219,7 +219,8 @@ pub fn generate_signals(
             {
                 continue;
             }
-            if row.spread < profile.min_entry_spread || row.spread > profile.max_entry_spread {
+            let real_profit_spread = row.spread - row.structural_spread.abs();
+            if real_profit_spread < profile.min_entry_spread || real_profit_spread > profile.max_entry_spread {
                 continue;
             }
             // Intentional product rule: listing age is treated as token age from the

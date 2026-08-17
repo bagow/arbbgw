@@ -443,10 +443,12 @@ function renderTable() {
             if (minVol > 0 && ((r.vol_a && r.vol_a < minVol) || (r.vol_b && r.vol_b < minVol))) return false;
             return true;
         });
-    }
+    const minProfit = (parseFloat(currentProfile?.min_entry_spread) || 0);
+    const maxSpread = (parseFloat(currentProfile?.max_entry_spread) || 100);
+
     const sorted = [...filtered]
-        .map(r => { r.profit_pct = r.spread - r.structural_spread; return r; })
-        .filter(r => r.profit_pct > 0) // Hide rows with no real profit opportunity
+        .map(r => { r.profit_pct = r.spread - Math.abs(r.structural_spread); return r; })
+        .filter(r => r.profit_pct >= minProfit && r.profit_pct <= maxSpread)
         .sort((a, b) => {
             const av = a[scannerState.sortKey] ?? 0, bv = b[scannerState.sortKey] ?? 0;
             return typeof av === 'string' ? av.localeCompare(bv) * scannerState.sortDir : (av - bv) * scannerState.sortDir;
