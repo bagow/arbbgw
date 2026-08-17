@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, UpdateSignal};
 
 /// Max symbols per single WS connection — keeps well under Gate's implicit limit.
-const SYMBOLS_PER_WS: usize = 100;
+const SYMBOLS_PER_WS: usize = 30;
 
 pub async fn run(
     prices: PriceMap,

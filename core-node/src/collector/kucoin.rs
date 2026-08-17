@@ -115,7 +115,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     let sym_map = std::sync::Arc::new(sym_map);
     let mut join_handles = Vec::new();
     
-    for (idx, chunk) in symbols.chunks(150).enumerate() {
+    for (idx, chunk) in symbols.chunks(60).enumerate() {
         let chunk_symbols = chunk.to_vec();
         let p_map = price_map.clone();
         let sig = signal.clone();
@@ -123,10 +123,14 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         let s_map = sym_map.clone();
 
         join_handles.push(tokio::spawn(async move {
+            let mut backoff = tokio::time::Duration::from_secs(1);
             loop {
                 if let Err(e) = run_ws(idx, &chunk_symbols, &p_map, &sig, &l2, &*s_map).await {
-                    tracing::warn!("[kucoin] Shard {} WS error: {}. Reconnecting in 5s...", idx, e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    tracing::warn!("[kucoin] Shard {} WS error: {}. Reconnecting in {:?}...", idx, e, backoff);
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(tokio::time::Duration::from_secs(5));
+                } else {
+                    backoff = tokio::time::Duration::from_secs(1);
                 }
             }
         }));
@@ -167,15 +171,12 @@ async fn run_ws(
     .await
     .context("KuCoin WS connect failed")?;
     
-    for chunk in symbols.chunks(100) {
+    // Subscribe to L1 ticker stream for this shard's symbols
+    for chunk in symbols.chunks(50) {
         let topic = format!("/contractMarket/tickerV2:{}", chunk.join(","));
-        ws.send(Message::Text(json!({"id":"sub","type":"subscribe","topic":topic,"privateChannel":false,"response":true}).to_string().into())).await?;
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    }
-    for chunk in symbols.chunks(100) {
-        let topic_l2 = format!("/contractMarket/level2Depth5:{}", chunk.join(","));
-        ws.send(Message::Text(json!({"id":"subL2","type":"subscribe","topic":topic_l2,"privateChannel":false,"response":true}).to_string().into())).await?;
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        let sub_id = format!("sub_{}_{}", shard_idx, uuid::Uuid::new_v4());
+        ws.send(Message::Text(json!({"id": sub_id, "type": "subscribe", "topic": topic, "privateChannel": false, "response": true}).to_string().into())).await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
@@ -315,7 +316,10 @@ async fn run_ws(
                 Some(Err(e)) => return Err(e.into()),
                 _ => {}
             },
-            _ = ping.tick() => { ws.send(Message::Text(json!({"id":"ping","type":"ping"}).to_string().into())).await?; }
+            _ = ping.tick() => {
+                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                ws.send(Message::Text(json!({"id": format!("{}", ts), "type": "ping"}).to_string().into())).await?;
+            }
             _ = heartbeat.tick() => {
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
