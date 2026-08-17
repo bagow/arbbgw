@@ -542,17 +542,14 @@ pub async fn handle_get_unified(
     let trade_db = state.real_db.clone();
 
     let active_trades = trade_db
-        .call({
-            let p = pid.clone();
-            move |conn| {
-                let mut stmt =
-                    conn.prepare("SELECT * FROM trades WHERE status IN ('OPEN','CLOSING') AND profile_id=?")?;
-                let items: Vec<_> = stmt
-                    .query_map([p], row_to_trade)?
-                    .filter_map(|r| r.ok())
-                    .collect();
-                Ok(items)
-            }
+        .call(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT * FROM trades WHERE status IN ('OPEN','CLOSING') ORDER BY entry_time DESC")?;
+            let items: Vec<_> = stmt
+                .query_map([], row_to_trade)?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(items)
         })
         .await
         .unwrap_or_else(|_| vec![]);
@@ -607,18 +604,15 @@ pub async fn handle_get_unified(
         })
         .collect();
 
-    let history_trades_raw = trade_db.call({
-        let p = pid.clone();
-        move |conn| {
-            let mut stmt = conn.prepare("SELECT * FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time DESC LIMIT 50")?;
-            let items: Vec<_> = stmt.query_map([p], row_to_trade)?.filter_map(|r| {
-                if let Err(e) = &r {
-                    tracing::error!("row_to_trade parse error: {:?}", e);
-                }
-                r.ok()
-            }).collect();
-            Ok(items)
-        }
+    let history_trades_raw = trade_db.call(|conn| {
+        let mut stmt = conn.prepare("SELECT * FROM trades WHERE status='CLOSED' ORDER BY exit_time DESC LIMIT 50")?;
+        let items: Vec<_> = stmt.query_map([], row_to_trade)?.filter_map(|r| {
+            if let Err(e) = &r {
+                tracing::error!("row_to_trade parse error: {:?}", e);
+            }
+            r.ok()
+        }).collect();
+        Ok(items)
     }).await.unwrap_or_else(|_| vec![]);
 
     let history_trades: Vec<serde_json::Value> = history_trades_raw

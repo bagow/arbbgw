@@ -190,24 +190,15 @@ async function refreshActiveTab() {
         }
     }
 
-    // Use profile-scoped data if available (from profile_id param in request)
-    // Use profile-scoped data
-    let active, history;
-    if (profile_active !== undefined) {
-        active  = profile_active;
-        history = profile_history || [];
-    } else {
-        active  = profile.mode === 'real' ? (real?.active  || []) : (trades?.active  || []);
-        history = profile.mode === 'real' ? (real?.history || []) : (trades?.history || []);
-    }
+    // Unified active trades, history and stats directly
+    const active = profile_active !== undefined ? profile_active : (trades?.active || []);
+    const history = profile_history !== undefined ? profile_history : (trades?.history || []);
+    const stats = profile_stats || trades?.stats || {};
 
     // Auto-refresh logs if the logs tab is currently active
     if (activeSubTabId === 'logs') {
         window.fetchLogs(true);
     }
-
-    // Use per-profile stats if available, fall back to global
-    const stats = profile_stats || (profile.mode === 'real' ? (real?.stats || {}) : (trades?.stats || {}));
 
     renderPanel(profile, active, history, stats, exchanges);
 }
