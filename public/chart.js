@@ -252,7 +252,22 @@ async function loadChartData(row) {
 
     scannerState.klines = {};
     for (const [ex, kl] of results) {
-        if (kl.length > 0) scannerState.klines[ex] = kl;
+        if (kl && kl.length > 0) scannerState.klines[ex] = kl;
+    }
+
+    const hasData = Object.keys(scannerState.klines).length > 0;
+    if (!hasData && scannerState.activeRow && rowKey(scannerState.activeRow) === key) {
+        if (!scannerState.retryCount) scannerState.retryCount = 0;
+        if (scannerState.retryCount < 4) {
+            scannerState.retryCount++;
+            setTimeout(() => {
+                if (scannerState.activeRow && rowKey(scannerState.activeRow) === key) {
+                    loadChartData(row);
+                }
+            }, 2500);
+        }
+    } else {
+        scannerState.retryCount = 0;
     }
 
     // Fallback: If 15s was selected but main exchanges have NO data, try 1m
