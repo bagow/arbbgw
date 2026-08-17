@@ -401,6 +401,7 @@ function renderPanel(profile, active, history, stats, exchanges) {
                 <div class="logs-toolbar">
                     <div class="logs-filters">
                         <div style="background:var(--bg-ctrl); padding:3px; border-radius:6px; display:flex; gap:3px; border:1px solid var(--border-dim);">
+                            <button class="mt-nav-btn ${window.logViewMode==='simple'?'mt-nav-btn--active':''}" id="btn-log-simple" onclick="setLogView('simple')" style="padding:6px 14px; margin:0; font-size:12px; border-radius:4px;">✨ Simple</button>
                             <button class="mt-nav-btn ${window.logViewMode==='trade'?'mt-nav-btn--active':''}" id="btn-log-trade" onclick="setLogView('trade')" style="padding:6px 14px; margin:0; font-size:12px; border-radius:4px;">🎯 Trades & Signals</button>
                             <button class="mt-nav-btn ${window.logViewMode==='error'?'mt-nav-btn--active':''}" id="btn-log-error" onclick="setLogView('error')" style="padding:6px 14px; margin:0; font-size:12px; border-radius:4px;">⚠️ Warnings & Errors</button>
                             <button class="mt-nav-btn ${window.logViewMode==='exec'?'mt-nav-btn--active':''}" id="btn-log-exec" onclick="setLogView('exec')" style="padding:6px 14px; margin:0; font-size:12px; border-radius:4px;">⚡ Execution</button>
@@ -1738,16 +1739,13 @@ window.showSubTab = function (btn, tab) {
         window.fetchLogs();
     }
 };
-window.logViewMode = window.logViewMode || 'trade';
-window.lastFetchedLogs = window.lastFetchedLogs || '';
-
-window.logViewMode = window.logViewMode || 'trade';
+window.logViewMode = window.logViewMode || 'simple';
 window.lastFetchedLogs = window.lastFetchedLogs || '';
 window._logAutoScroll = true;
 
 window.setLogView = function(mode) {
     window.logViewMode = mode;
-    ['trade', 'error', 'exec', 'all'].forEach(m => {
+    ['simple', 'trade', 'error', 'exec', 'all'].forEach(m => {
         const btn = document.getElementById(`btn-log-${m}`);
         if (btn) btn.classList.toggle('mt-nav-btn--active', mode === m);
     });
@@ -1789,7 +1787,128 @@ window.renderLogsHTML = function(text) {
 
     const rawLines = text.split('\n').filter(l => l.trim().length > 0);
     const searchQuery = (document.getElementById('logs-search')?.value || '').trim().toLowerCase();
-    const mode = window.logViewMode || 'trade';
+    const mode = window.logViewMode || 'simple';
+
+    // ── Pure Trade Translator for Simple Mode ──
+    const translateSimpleLog = (line) => {
+        let m;
+        // Entry Trigger
+        if ((m = line.match(/FIRE (\S+) \[(\w+)\] A=(\S+) c=(\d+) lim=([\d.]+) \| B=(\S+) c=(\d+) lim=([\d.]+) spread=([\d.]+)% be=([\d.]+)%/))) {
+            return {
+                level: 'ENTRY',
+                badgeClass: 'log-badge-info',
+                lineClass: 'log-line--trade',
+                text: `🚀 ВХОД ${m[1]}: ${m[3]} ↔ ${m[6]} | Объём: ${m[4]}×${m[7]} шт | Спред: ${m[9]}% > BE: ${m[10]}% (${m[2]})`
+            };
+        }
+        // Fill Result
+        if ((m = line.match(/RESULT (\S+) A=(\S+) B=(\S+) phys_a=([\d.]+) phys_b=([\d.]+) fill_a=([\d.]+) fill_b=([\d.]+) latency=(\d+)ms/))) {
+            const aOk = m[2] === 'true', bOk = m[3] === 'true';
+            if (aOk && bOk) {
+                return {
+                    level: 'FILLED',
+                    badgeClass: 'log-badge-trade',
+                    lineClass: 'log-line--trade',
+                    text: `✅ ${m[1]}: ОБЕ НОГИ ЗАЛИТЫ — Leg A: $${m[6]} ($${m[4]}) | Leg B: $${m[7]} ($${m[5]}) [${m[8]}мс]`
+                };
+            }
+            if (!aOk && !bOk) {
+                return {
+                    level: 'REJECT',
+                    badgeClass: 'log-badge-warn',
+                    lineClass: 'log-line--warn',
+                    text: `⏹ ${m[1]}: ОРДЕРА НЕ ИСПОЛНИЛИСЬ — позиция не открыта [${m[8]}мс]`
+                };
+            }
+            return {
+                level: 'PARTIAL',
+                badgeClass: 'log-badge-error',
+                lineClass: 'log-line--error',
+                text: `⚠️ ${m[1]}: ЧАСТИЧНЫЙ ФИЛЛ — Leg A=${aOk ? '✅' : '❌'} | Leg B=${bOk ? '✅' : '❌'} [${m[8]}мс]`
+            };
+        }
+        // Open Verified
+        if ((m = line.match(/\[EXCHANGE_VERIFIED\] ✅ OPEN (\S+) phys=([\d.]+) .* A_price=([\d.]+) B_price=([\d.]+) fees=([\d.]+) slip=([\d.]+) actual_sp=([\d.]+)%/))) {
+            return {
+                level: 'OPEN',
+                badgeClass: 'log-badge-trade',
+                lineClass: 'log-line--trade',
+                text: `✨ ПОЗИЦИЯ ОТКРЫТА ${m[1]}: Объём $${m[2]} | A: $${m[3]}, B: $${m[4]} | Спред: ${m[7]}% | Комиссия: -$${m[5]}`
+            };
+        }
+        // Retries
+        if ((m = line.match(/RETRY second leg (\S+) for (\S+) with max slippage ([\d.]+)%/))) {
+            return {
+                level: 'RETRY',
+                badgeClass: 'log-badge-warn',
+                lineClass: 'log-line--warn',
+                text: `🔄 ${m[2]}: Повтор второй ноги на ${m[1]} со slippage ${m[3]}%`
+            };
+        }
+        if ((m = line.match(/RETRY SUCCESS: second leg (\S+) filled on retry/))) {
+            return {
+                level: 'FILLED',
+                badgeClass: 'log-badge-trade',
+                lineClass: 'log-line--trade',
+                text: `✅ ${m[1]}: ВТОРАЯ НОГА УСПЕШНО ЗАЛИТА на повторе`
+            };
+        }
+        // Close Trigger
+        if ((m = line.match(/Closing (\d+) (\S+) reason=(\S+) pct=([\d.-]+)% exit_sp=([\d.-]+)/))) {
+            const reasons = {
+                TP: '🎯 Тейк-профит',
+                STOP: '🛑 Стоп-лосс',
+                MANUAL: '👤 Ручной выход',
+                ZERO_SPREAD: '📉 Схождение спреда',
+                RETRY_CLOSE: '🔄 Повтор закрытия'
+            };
+            const rName = reasons[m[3]] || m[3];
+            const pct = parseFloat(m[4]);
+            return {
+                level: 'CLOSE',
+                badgeClass: 'log-badge-info',
+                lineClass: 'log-line--trade',
+                text: `📤 ЗАКРЫТИЕ #${m[1]} ${m[2]}: ${rName} | PnL: ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% | Спред: ${m[5]}%`
+            };
+        }
+        // Completed PnL
+        if ((m = line.match(/EXCHANGE_VERIFIED.*PnL id=(\d+) pna=([\d.-]+) pnb=([\d.-]+) gross=([\d.-]+)/))) {
+            const gross = parseFloat(m[4]);
+            const isProfit = gross >= 0;
+            return {
+                level: isProfit ? 'PROFIT' : 'LOSS',
+                badgeClass: isProfit ? 'log-badge-trade' : 'log-badge-error',
+                lineClass: isProfit ? 'log-line--trade' : 'log-line--error',
+                text: `${isProfit ? '💰' : '💸'} СДЕЛКА #${m[1]} ЗАВЕРШЕНА: Leg A=$${m[2]} | Leg B=$${m[3]} | ИТОГ = ${isProfit ? '+' : ''}$${gross.toFixed(2)}`
+            };
+        }
+        // Asymmetry / Abort
+        if ((m = line.match(/FULL ASYMMETRY DUMPED (\S+) on (\S+).*Trimming Loss: ([\d.-]+), Trimming Fee: ([\d.-]+)/))) {
+            return {
+                level: 'DUMP',
+                badgeClass: 'log-badge-error',
+                lineClass: 'log-line--error',
+                text: `❌ СБРОС АСИММЕТРИИ ${m[1]} на ${m[2]}: сделка отменена (убыток -$${m[3]}, ком. -$${m[4]})`
+            };
+        }
+        if (line.includes('Both IOC unfilled') && (m = line.match(/Both IOC unfilled (\S+) — no exposure \((\d+)ms\)/))) {
+            return {
+                level: 'REJECT',
+                badgeClass: 'log-badge-warn',
+                lineClass: 'log-line--warn',
+                text: `⏹ ${m[1]}: Оба ордера не залиты — риска нет (${m[2]}мс)`
+            };
+        }
+        if (line.includes('KILL-SWITCH IS ACTIVE') || line.includes('KILL-SWITCH TRIGGERED')) {
+            return {
+                level: 'ALERT',
+                badgeClass: 'log-badge-error',
+                lineClass: 'log-line--error',
+                text: `🚨 АВАРИЙНЫЙ СТОП: движок приостановил торговлю`
+            };
+        }
+        return null;
+    };
 
     const translateLog = (line) => {
         let m;
@@ -1867,10 +1986,37 @@ window.renderLogsHTML = function(text) {
         let timeStr = '';
         let level = 'INFO';
 
-        // Extract timestamp and log level
+        // Extract timestamp
         const tsMatch = line.match(/(\d{4}-\d{2}-\d{2}T)?(\d{2}:\d{2}:\d{2})(\.\d+)?Z?/);
         if (tsMatch) {
             timeStr = tsMatch[2];
+        }
+
+        // Simple mode: pure trade events only
+        if (mode === 'simple') {
+            const simpleItem = translateSimpleLog(line);
+            if (!simpleItem) return;
+
+            if (searchQuery && !simpleItem.text.toLowerCase().includes(searchQuery) && !line.toLowerCase().includes(searchQuery)) {
+                return;
+            }
+
+            renderedCount++;
+            const lineNum = String(renderedCount).padStart(3, '0');
+
+            let safeContent = escHtml(simpleItem.text);
+            safeContent = safeContent.replace(/\b([A-Z0-9]{2,}USDT)\b/g, '<span style="color:#60a5fa;font-weight:700;">$1</span>');
+            safeContent = safeContent.replace(/(\+?\$[\d.-]+|\+?[\d.-]+%)/g, '<span style="color:#fbbf24;font-weight:600;">$1</span>');
+
+            htmlOutput += `
+                <div class="log-line ${simpleItem.lineClass}">
+                    <span class="log-line-num">${lineNum}</span>
+                    <span style="color:var(--text-sub);font-size:0.75rem;min-width:60px;flex-shrink:0;">${timeStr}</span>
+                    <span class="log-badge-level ${simpleItem.badgeClass}">${simpleItem.level}</span>
+                    <div class="log-line-content">${safeContent}</div>
+                </div>
+            `;
+            return;
         }
 
         if (line.includes(' ERROR ') || line.includes('[ERROR]') || line.includes('ERR') || line.includes('reject') || line.includes('KILL-SWITCH')) {
