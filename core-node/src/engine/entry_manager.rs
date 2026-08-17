@@ -181,21 +181,23 @@ pub async fn process_entries(
         }
 
         // ── BALANCE LOW GUARD (zero-latency) ─────────────────────────────────
-        if !has_sufficient_margin(&exa, actual_vol_a, settings.leverage as f64, &e_ctx) {
+        if !has_sufficient_margin(&exa, actual_vol_a, settings.leverage as f64, &e_ctx, ts.margin_check_multiplier) {
             let now_m = now_ms() as i64;
             if now_m - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
                 let avail = e_ctx.margin_balances.get(&exa).map(|v| *v).unwrap_or(-1.0);
-                let req = actual_vol_a / (settings.leverage as f64).max(1.0) * 1.5;
+                let mult = if ts.margin_check_multiplier > 0.0 { ts.margin_check_multiplier } else { 1.2 };
+                let req = actual_vol_a / (settings.leverage as f64).max(1.0) * mult;
                 info!("[real] SKIP {}: insufficient margin {} (avail=${:.2}, required=${:.2}, notional=${:.2}, lev={}x)", pair, exa, avail, req, actual_vol_a, settings.leverage);
                 LAST_MARGIN_LOG.store(now_m, Ordering::Relaxed);
             }
             continue;
         }
-        if !has_sufficient_margin(&exb, actual_vol_b, settings.leverage as f64, &e_ctx) {
+        if !has_sufficient_margin(&exb, actual_vol_b, settings.leverage as f64, &e_ctx, ts.margin_check_multiplier) {
             let now_m = now_ms() as i64;
             if now_m - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 10000 {
                 let avail = e_ctx.margin_balances.get(&exb).map(|v| *v).unwrap_or(-1.0);
-                let req = actual_vol_b / (settings.leverage as f64).max(1.0) * 1.5;
+                let mult = if ts.margin_check_multiplier > 0.0 { ts.margin_check_multiplier } else { 1.2 };
+                let req = actual_vol_b / (settings.leverage as f64).max(1.0) * mult;
                 info!("[real] SKIP {}: insufficient margin {} (avail=${:.2}, required=${:.2}, notional=${:.2}, lev={}x)", pair, exb, avail, req, actual_vol_b, settings.leverage);
                 LAST_MARGIN_LOG.store(now_m, Ordering::Relaxed);
             }

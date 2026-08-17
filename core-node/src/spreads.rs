@@ -120,8 +120,9 @@ pub fn compute_spreads(
                     cnt_invalid_price += 1;
                     continue;
                 }
-                if data_a.ask > data_a.bid * ts.intra_spread_limit
-                    || data_b.ask > data_b.bid * ts.intra_spread_limit
+                let max_intra_mult = 1.0 + ts.intra_spread_max_pct / 100.0;
+                if data_a.ask > data_a.bid * max_intra_mult
+                    || data_b.ask > data_b.bid * max_intra_mult
                 {
                     cnt_intra_spread += 1;
                     continue;

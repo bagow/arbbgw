@@ -52,19 +52,21 @@ pub fn has_sufficient_margin(
     notional_usd: f64,
     leverage: f64,
     e_ctx: &EngineContext,
+    multiplier: f64,
 ) -> bool {
+    let mult = if multiplier > 0.0 { multiplier } else { 1.2 };
     match e_ctx.margin_balances.get(exchange) {
         Some(margin) => {
             let available = *margin;
             let required = notional_usd / leverage.max(1.0);
-            let ok = available >= required * 1.5;
+            let ok = available >= required * mult;
             if !ok {
                 let now = now_ms();
                 if now - LAST_MARGIN_LOG.load(Ordering::Relaxed) > 15_000 {
                     LAST_MARGIN_LOG.store(now, Ordering::Relaxed);
                     tracing::warn!(
-                        "[margin] {} available=${:.2} required=${:.2} (notional=${:.2} lev={}x) — INSUFFICIENT",
-                        exchange, available, required * 1.5, notional_usd, leverage
+                        "[margin] {} available=${:.2} required=${:.2} (notional=${:.2} lev={}x mult={:.2}x) — INSUFFICIENT",
+                        exchange, available, required * mult, notional_usd, leverage, mult
                     );
                 }
             }
