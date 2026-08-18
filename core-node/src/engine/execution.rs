@@ -76,6 +76,16 @@ pub async fn verify_fill(
         tracing::info!("[{}] ⚡ Inline fill: price={:.6} fee={:.6} — skipping verify", label, fill_price, fee);
     }
 
+    // Instant return if no order ID was issued (unfilled/rejected) or if inline fill is already complete
+    if order_id.is_none() || (got && phys.is_some()) {
+        return VerifyResult {
+            fill_price,
+            fee,
+            phys_volume: phys,
+            got_fill: got && phys.map(|v| v > 1e-12).unwrap_or(false),
+        };
+    }
+
     // ── Fast verify loop ──
     let mut order_definitively_unfilled = false;
     for attempt in 0..config.fast_retries {
@@ -1179,8 +1189,10 @@ pub async fn execute_parallel_entry(
     // ── PHASE 2: Verify fills (in parallel too) ─────────────────────────────
     let phys_a_init = if fill_a_inline > 0.0 { Some(ctx.qty_a) } else { None };
     let phys_b_init = if fill_b_inline > 0.0 { Some(ctx.qty_b) } else { None };
-    let retries_a = if fill_a_inline <= 0.0 { 5_i64 } else { ts.fill_verify_retries };
-    let retries_b = if fill_b_inline <= 0.0 { 5_i64 } else { ts.fill_verify_retries };
+    let retries_a = if oid_a.is_none() || fill_a_inline > 0.0 { 0_i64 } else { ts.fill_verify_retries };
+    let retries_b = if oid_b.is_none() || fill_b_inline > 0.0 { 0_i64 } else { ts.fill_verify_retries };
+    let slow_retries_a = if oid_a.is_none() || fill_a_inline > 0.0 { 0 } else { 2 };
+    let slow_retries_b = if oid_b.is_none() || fill_b_inline > 0.0 { 0 } else { 2 };
 
     let (ver_a, ver_b) = tokio::join!(
         verify_fill(
@@ -1189,7 +1201,7 @@ pub async fn execute_parallel_entry(
             VerifyConfig {
                 fast_retries: retries_a,
                 fast_delay_ms: ts.fill_verify_delay_ms as u64,
-                slow_retries: 2,
+                slow_retries: slow_retries_a,
                 slow_delay_ms: 200,
                 position_fallback: false,
                 mult: ctx.mult_a,
@@ -1202,7 +1214,7 @@ pub async fn execute_parallel_entry(
             VerifyConfig {
                 fast_retries: retries_b,
                 fast_delay_ms: ts.fill_verify_delay_ms as u64,
-                slow_retries: 2,
+                slow_retries: slow_retries_b,
                 slow_delay_ms: 200,
                 position_fallback: false,
                 mult: ctx.mult_b,

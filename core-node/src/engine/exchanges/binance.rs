@@ -519,100 +519,10 @@ impl ExchangeConnector for BinanceConnector {
                 resp_price, resp_side, resp_orig_qty, resp_tif
             );
 
-            // For IOC/EXPIRED: if order was cancelled without any fill, try REST before giving up.
-            // Binance WS ws-fapi has a known issue where IOC LIMIT orders expire despite being
-            // fillable (confirmed: identical order via REST fills instantly). This retry
-            // is entirely within the connector — cycle.rs/execution.rs don't know about it.
+            // For IOC/EXPIRED: if order was cancelled/expired without fill, return immediately (0ms delay)
             if (order_status == "EXPIRED" || order_status == "CANCELED" || order_status == "REJECTED")
                 && exec_qty < 1e-12
             {
-                // Only retry IOC orders (not market orders that legitimately expired)
-                if params.get("timeInForce").and_then(|v| v.as_str()) == Some("IOC") {
-                    tracing::warn!(
-                        "[binance] place_order {} IOC EXPIRED on WS — retrying via REST (WS IOC bug workaround)...",
-                        pair
-                    );
-
-                    // Build REST request with fresh timestamp
-                    let mut rest_params = params.clone();
-                    let fresh_ts = now_ms();
-                    rest_params.insert("timestamp".to_string(), serde_json::json!(fresh_ts));
-                    // Remove apiKey (REST uses header) and old signature
-                    rest_params.remove("apiKey");
-                    rest_params.remove("signature");
-
-                    let mut sorted_keys: Vec<&String> = rest_params.keys().collect();
-                    sorted_keys.sort();
-                    let qs: String = sorted_keys.iter()
-                        .map(|k| {
-                            let val = &rest_params[k.as_str()];
-                            let vs = match val {
-                                Value::String(s) => s.clone(),
-                                Value::Number(n) => n.to_string(),
-                                Value::Bool(b) => b.to_string(),
-                                _ => val.to_string(),
-                            };
-                            format!("{}={}", k, vs)
-                        })
-                        .collect::<Vec<_>>()
-                        .join("&");
-                    let sig = binance_sign(&keys.binance_secret, &qs);
-                    let full_qs = format!("{}&signature={}", qs, sig);
-
-                    let url = format!("https://fapi.binance.com/fapi/v1/order?{}", full_qs);
-                    match http.post(&url)
-                        .header("X-MBX-APIKEY", &keys.binance_key)
-                        .timeout(Duration::from_millis(api_timeout_ms.max(1500)))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) => {
-                            let status_code = resp.status();
-                            let headers = resp.headers().clone();
-                            let body: Value = resp.json().await.unwrap_or_default();
-                            record_binance_response(status_code.as_u16(), &headers);
-
-                            let rest_status = body["status"].as_str().unwrap_or("?");
-                            let rest_exec_qty: f64 = body["executedQty"]
-                                .as_str().and_then(|s| s.parse().ok())
-                                .or_else(|| body["executedQty"].as_f64())
-                                .unwrap_or(0.0);
-                            let rest_avg_price: f64 = body["avgPrice"]
-                                .as_str().and_then(|s| s.parse().ok())
-                                .or_else(|| body["avgPrice"].as_f64())
-                                .unwrap_or(0.0);
-                            let rest_fee: f64 = body["cumCommission"]
-                                .as_str().and_then(|s| s.parse::<f64>().ok())
-                                .or_else(|| body["cumCommission"].as_f64())
-                                .unwrap_or(0.0).abs();
-                            let rest_oid = body["orderId"].as_i64().map(|id| id.to_string());
-
-                            tracing::info!(
-                                "[binance] place_order {} REST retry: status={} execQty={} avgPrice={} fee={} orderId={:?}",
-                                pair, rest_status, rest_exec_qty, rest_avg_price, rest_fee, rest_oid
-                            );
-
-                            if rest_exec_qty > 1e-12 && rest_avg_price > 0.0 {
-                                tracing::info!("[binance] ✅ REST retry FILLED {} — WS bug bypassed!", pair);
-                                return Ok((rest_oid, rest_avg_price, rest_fee));
-                            }
-
-                            // REST also expired/failed — genuine no fill
-                            if let Some(code) = body.get("code") {
-                                let code_i = code.as_i64().unwrap_or(0);
-                                if code_i != 0 && code_i != 200 {
-                                    let msg = body["msg"].as_str().unwrap_or("?");
-                                    tracing::error!("[binance] REST retry error: code={} msg={}", code_i, msg);
-                                    return Err(format!("Binance REST IOC Error: {} (code={})", msg, code_i));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("[binance] REST retry HTTP error for {}: {}", pair, e);
-                        }
-                    }
-                }
-
                 tracing::warn!(
                     "[binance] place_order {} IOC order {} — NOT FILLED (status={})",
                     pair, order_id.as_deref().unwrap_or("?"), order_status
