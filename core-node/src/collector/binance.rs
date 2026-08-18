@@ -323,29 +323,6 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
                             
                             backoff = Duration::from_secs(1);
 
-                            // Heartbeat: depth5@100ms only fires when the book changes.
-                            // For low-volume pairs, the book can be static for seconds.
-                            // While the WS is alive, the cached data IS still accurate —
-                            // refresh updated_ms so the 2s freshness check doesn't reject it.
-                            let ws_alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-                            let ws_alive_hb = ws_alive.clone();
-                            let l2_hb = l2_books_clone.clone();
-                            let hb_syms: Vec<String> = chunk_symbols.iter().map(|s| format!("binance:{}", s)).collect();
-                            let hb_handle = tokio::spawn(async move {
-                                while ws_alive_hb.load(std::sync::atomic::Ordering::Relaxed) {
-                                    tokio::time::sleep(Duration::from_millis(500)).await;
-                                    let now_ms = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis() as i64;
-                                    for key in &hb_syms {
-                                        if let Some(mut book) = l2_hb.get_mut(key) {
-                                            book.updated_ms = now_ms;
-                                        }
-                                    }
-                                }
-                            });
-                            
                             while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
                                 if conn_start.elapsed() > max_age {
                                     break;
@@ -381,9 +358,6 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::
                                     }
                                 }
                             }
-                            // WS disconnected — stop heartbeat
-                            ws_alive.store(false, std::sync::atomic::Ordering::Relaxed);
-                            hb_handle.abort();
                         }
                         Err(e) => {
                             error!("[binance_l2_chunk] Connect failed: {}. Retry in {:?}", e, backoff);

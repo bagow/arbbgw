@@ -274,13 +274,44 @@ pub async fn process_entries(
         // If L2 EXISTS but is STALE (>5s) — still block (data was live but stopped updating).
         let make_l2 = |cached: &Option<crate::state::L2Snapshot>, ex_name: &str, price_data: &crate::state::TickerData| -> Option<(Vec<(f64, f64)>, Vec<(f64, f64)>)> {
             match cached {
-                Some(snap) if (now_cache - snap.updated_ms) < 5_000 => {
-                    Some((snap.bids.clone(), snap.asks.clone()))
+                Some(snap) if (now_cache - snap.updated_ms) < 2_000 => {
+                    let l2_best_bid = snap.bids.first().map(|x| x.0).unwrap_or(0.0);
+                    let l2_best_ask = snap.asks.first().map(|x| x.0).unwrap_or(0.0);
+                    let diff_bid = if price_data.bid > 0.0 && l2_best_bid > 0.0 {
+                        ((l2_best_bid - price_data.bid) / price_data.bid).abs()
+                    } else { 0.0 };
+                    let diff_ask = if price_data.ask > 0.0 && l2_best_ask > 0.0 {
+                        ((l2_best_ask - price_data.ask) / price_data.ask).abs()
+                    } else { 0.0 };
+
+                    if diff_bid > 0.002 || diff_ask > 0.002 {
+                        // L2 orderbook is lagging behind the live L1 ticker stream — use fresh L1
+                        tracing::debug!("[real] L2 diverged from L1 for {} {} (bid_diff={:.4}%, ask_diff={:.4}%), using fresh L1", pair, ex_name, diff_bid*100.0, diff_ask*100.0);
+                        if price_data.bid > 0.0 && price_data.ask > 0.0 {
+                            let bid_usd = price_data.bid_size;
+                            let ask_usd = price_data.ask_size;
+                            let bid_coins = if price_data.bid > 0.0 { bid_usd / price_data.bid } else { 0.0 };
+                            let ask_coins = if price_data.ask > 0.0 { ask_usd / price_data.ask } else { 0.0 };
+                            Some((vec![(price_data.bid, bid_coins)], vec![(price_data.ask, ask_coins)]))
+                        } else {
+                            None
+                        }
+                    } else {
+                        Some((snap.bids.clone(), snap.asks.clone()))
+                    }
                 }
                 Some(snap) => {
-                    // L2 exists but stale
-                    tracing::debug!("[real] L2 stale for {} {} (age={}ms)", pair, ex_name, now_cache - snap.updated_ms);
-                    None
+                    // L2 exists but stale (>2s) — fallback to fresh L1 ticker
+                    tracing::debug!("[real] L2 stale for {} {} (age={}ms), using fresh L1", pair, ex_name, now_cache - snap.updated_ms);
+                    if price_data.bid > 0.0 && price_data.ask > 0.0 {
+                        let bid_usd = price_data.bid_size;
+                        let ask_usd = price_data.ask_size;
+                        let bid_coins = if price_data.bid > 0.0 { bid_usd / price_data.bid } else { 0.0 };
+                        let ask_coins = if price_data.ask > 0.0 { ask_usd / price_data.ask } else { 0.0 };
+                        Some((vec![(price_data.bid, bid_coins)], vec![(price_data.ask, ask_coins)]))
+                    } else {
+                        None
+                    }
                 }
                 None => {
                     // No L2 at all — build synthetic from L1 (bid/ask already passed scanner filters)
