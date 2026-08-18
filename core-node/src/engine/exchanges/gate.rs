@@ -208,7 +208,7 @@ impl ExchangeConnector for GateConnector {
                     .headers(headers)
                     .header("Content-Type", "application/json")
                     .body(body_str)
-                    .timeout(Duration::from_millis(3000))
+                    .timeout(Duration::from_millis(1500))
                     .send()
                     .await
                     .map_err(|e| format!("Gate REST place_order HTTP error: {}", e))?;
@@ -359,7 +359,7 @@ impl ExchangeConnector for GateConnector {
         let path = "/api/v4/futures/usdt/orders";
         let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &rest_body);
         let url = format!("https://api.gateio.ws{}", path);
-        if let Ok(resp) = http.post(&url).headers(headers).header("Content-Type", "application/json").body(rest_body).timeout(Duration::from_millis(5000)).send().await {
+        if let Ok(resp) = http.post(&url).headers(headers).header("Content-Type", "application/json").body(rest_body).timeout(Duration::from_millis(2000)).send().await {
             if let Ok(v) = resp.json::<Value>().await {
                 if v.get("id").is_some() {
                     let fill_price: f64 = v["fill_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);

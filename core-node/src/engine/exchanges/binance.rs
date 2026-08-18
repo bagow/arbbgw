@@ -352,7 +352,7 @@ async fn execute_binance_order(
             let url = format!("https://fapi.binance.com/fapi/v1/order?{}", full_qs);
             let resp = _http.post(&url)
                 .header("X-MBX-APIKEY", &keys.binance_key)
-                .timeout(Duration::from_millis(_api_timeout_ms.max(5000)))
+                .timeout(Duration::from_millis(_api_timeout_ms.max(1500)))
                 .send()
                 .await
                 .map_err(|e| format!("Binance REST fallback HTTP error: {}", e))?;
@@ -562,7 +562,7 @@ impl ExchangeConnector for BinanceConnector {
                     let url = format!("https://fapi.binance.com/fapi/v1/order?{}", full_qs);
                     match http.post(&url)
                         .header("X-MBX-APIKEY", &keys.binance_key)
-                        .timeout(Duration::from_millis(api_timeout_ms.max(5000)))
+                        .timeout(Duration::from_millis(api_timeout_ms.max(1500)))
                         .send()
                         .await
                     {
@@ -925,7 +925,7 @@ impl ExchangeConnector for BinanceConnector {
                 let url = format!("https://fapi.binance.com/fapi/v1/order?{}", full_qs);
                 let resp = _http.get(&url)
                     .header("X-MBX-APIKEY", &keys.binance_key)
-                    .timeout(std::time::Duration::from_millis(5000))
+                    .timeout(std::time::Duration::from_millis(2000))
                     .send()
                     .await
                     .map_err(|e| format!("Binance REST fetch_order HTTP error: {}", e))?;
