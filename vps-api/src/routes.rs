@@ -141,9 +141,21 @@ pub async fn handle_get_logs(
         )
             .into_response();
     }
+    static LOGS_CACHE: OnceLock<Mutex<Option<(Instant, String)>>> = OnceLock::new();
+    let cache = LOGS_CACHE.get_or_init(|| Mutex::new(None));
+
+    {
+        let guard = cache.lock().unwrap();
+        if let Some((ts, ref s)) = *guard {
+            if ts.elapsed().as_secs() < 3 {
+                return (StatusCode::OK, s.clone()).into_response();
+            }
+        }
+    }
+
     let mode = query.mode.unwrap_or_default();
-    let n_lines = if mode == "trade" { "1000" } else { "1500" };
-    let result = tokio::process::Command::new("sudo")
+    let n_lines = if mode == "trade" { "200" } else { "300" };
+    let child = tokio::process::Command::new("sudo")
         .args([
             "journalctl",
             "-u",
@@ -153,18 +165,28 @@ pub async fn handle_get_logs(
             "-r",
             "--no-pager",
         ])
-        .output()
-        .await;
+        .output();
+
+    let result = tokio::time::timeout(std::time::Duration::from_millis(1500), child).await;
 
     match result {
-        Ok(out) => {
+        Ok(Ok(out)) => {
             let mut s = String::from_utf8_lossy(&out.stdout).to_string();
             if s.trim().is_empty() {
                 s = format!("No logs available yet from core-node.\nStderr: {}", String::from_utf8_lossy(&out.stderr));
             }
+            if let Ok(mut guard) = cache.lock() {
+                *guard = Some((Instant::now(), s.clone()));
+            }
             (StatusCode::OK, s).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(_) => {
+            // Timeout — return cached if available or friendly message
+            let fallback = cache.lock().ok().and_then(|g| g.as_ref().map(|(_, s)| s.clone()))
+                .unwrap_or_else(|| "⏳ Journal busy, refreshing in next cycle…".to_string());
+            (StatusCode::OK, fallback).into_response()
+        }
     }
 }
 

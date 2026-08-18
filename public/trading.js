@@ -2186,8 +2186,12 @@ window.fetchLogs = async function(isBackground = false) {
         const res = await fetch(`${API_BASE}/api/logs/core-node`, {
             headers: { 'Authorization': 'Basic ' + creds }
         });
-        if (res.status === 401) throw new Error("Unauthorized");
-        if (!res.ok) throw new Error("Status " + res.status);
+        if (res.status === 401) {
+            const modal = document.getElementById('login-modal');
+            if (modal) modal.classList.remove('hidden');
+            throw new Error("Unauthorized");
+        }
+        if (!res.ok) return;
         const text = await res.text();
         
         window.lastFetchedLogs = text;
