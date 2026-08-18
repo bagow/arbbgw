@@ -155,9 +155,8 @@ pub async fn handle_get_logs(
 
     let mode = query.mode.unwrap_or_default();
     let n_lines = if mode == "trade" { "200" } else { "300" };
-    let child = tokio::process::Command::new("sudo")
+    let child = tokio::process::Command::new("journalctl")
         .args([
-            "journalctl",
             "-u",
             "core-node",
             "-n",
@@ -167,7 +166,7 @@ pub async fn handle_get_logs(
         ])
         .output();
 
-    let result = tokio::time::timeout(std::time::Duration::from_millis(1500), child).await;
+    let result = tokio::time::timeout(std::time::Duration::from_millis(2000), child).await;
 
     match result {
         Ok(Ok(out)) => {
@@ -180,7 +179,11 @@ pub async fn handle_get_logs(
             }
             (StatusCode::OK, s).into_response()
         }
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(Err(e)) => {
+            let fallback = cache.lock().ok().and_then(|g| g.as_ref().map(|(_, s)| s.clone()))
+                .unwrap_or_else(|| format!("Log read error: {}", e));
+            (StatusCode::OK, fallback).into_response()
+        }
         Err(_) => {
             // Timeout — return cached if available or friendly message
             let fallback = cache.lock().ok().and_then(|g| g.as_ref().map(|(_, s)| s.clone()))
