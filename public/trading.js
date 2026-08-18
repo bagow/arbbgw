@@ -1699,6 +1699,7 @@ function renderHistoryTable(profileId, history) {
         return;
     }
     tbody.innerHTML = history.map(t => {
+        const time = t.exit_time ? new Date(t.exit_time).toLocaleString('en-GB', { timeZone: 'Europe/Kyiv' }) : '—';
         const pnl = t.pnl !== null && t.pnl !== undefined 
             ? t.pnl 
             : ((t.gross_pnl ?? ((t.pnl_a ?? 0) + (t.pnl_b ?? 0))) - (t.commission_cost ?? 0) - (t.funding_cost ?? 0));
