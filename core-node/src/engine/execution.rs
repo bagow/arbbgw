@@ -666,18 +666,34 @@ pub async fn execute_sequential_entry(
         (&conn_ensure_a, !ctx.is_a_higher, ctx.limit_price_a, ctx.mult_a, ctx.tick_a)
     };
 
-    // After first leg is filled, we're already committed/exposed.
-    // Use aggressive slippage on second leg: 80% of (spread - BE).
-    // This keeps at least 20% of expected profit while maximizing fill probability.
-    // A failed second leg costs MORE than slippage (full trim loss + fees).
-    let profit_margin = (ctx.sig_spread - ctx.break_even_pct).max(0.0);
-    let aggressive_slip = (profit_margin * 0.80)
-        .max(ctx.ioc_slippage_pct)  // never less than base slippage
-        .min(2.5);                   // safety cap 2.5% (trim loss is always worse)
+    // Calculate actual gross spread achieved from the verified fill price of Leg 1
+    let actual_gross_spread = if a_is_less_liquid {
+        if ctx.is_a_higher {
+            (ver_first.fill_price - ctx.limit_price_b) / ctx.limit_price_b.max(1e-12) * 100.0
+        } else {
+            (ctx.limit_price_b - ver_first.fill_price) / ver_first.fill_price.max(1e-12) * 100.0
+        }
+    } else {
+        if ctx.is_a_higher {
+            (ctx.limit_price_a - ver_first.fill_price) / ver_first.fill_price.max(1e-12) * 100.0
+        } else {
+            (ver_first.fill_price - ctx.limit_price_a) / ctx.limit_price_a.max(1e-12) * 100.0
+        }
+    };
+
+    // Guaranteed minimum net profit floor: 0.10% net profit after all roundtrip fees & funding
+    let min_guaranteed_profit_pct = 0.10;
+    let max_safe_slip = (actual_gross_spread - ctx.break_even_pct - min_guaranteed_profit_pct).max(0.0);
+
+    // Initial attempt on second leg: use conservative slippage (50% of available profit margin)
+    let aggressive_slip = (max_safe_slip * 0.50)
+        .max(ctx.ioc_slippage_pct)
+        .min(max_safe_slip.max(ctx.ioc_slippage_pct))
+        .min(2.0);
 
     tracing::info!(
-        "[real] 🎯 Second leg {} slippage: base={:.3}% aggressive={:.3}% (spread={:.3}% BE={:.3}% profit_margin={:.3}%)",
-        second_label, ctx.ioc_slippage_pct, aggressive_slip, ctx.sig_spread, ctx.break_even_pct, profit_margin
+        "[real] 🎯 Second leg {} slippage: base={:.3}% init={:.3}% max_safe={:.3}% (actual_gross_sp={:.3}% BE={:.3}% min_profit={:.2}%)",
+        second_label, ctx.ioc_slippage_pct, aggressive_slip, max_safe_slip, actual_gross_spread, ctx.break_even_pct, min_guaranteed_profit_pct
     );
 
     let res_second = second_conn.place_order(
@@ -730,14 +746,16 @@ pub async fn execute_sequential_entry(
         "real",
     ).await;
 
-    // ── RETRY SECOND LEG: If IOC didn't fill, retry once with maximum slippage ──
-    // A failed second leg means full ASYMMETRIC_CLOSE (trim loss), which is ALWAYS
-    // worse than any slippage. So on retry, use the full profit margin.
+    // ── RETRY SECOND LEG: If IOC didn't fill, retry once expanding IOC slippage ──
+    // Expand IOC range up to max_safe_slip so that at least +0.10% net profit is guaranteed.
     if ver_second.phys_volume.unwrap_or(0.0) <= 1e-12 && !ctx.dry_run && first_phys > 1e-12 {
-        let retry_slip = profit_margin.max(ctx.ioc_slippage_pct).min(3.0);
+        let retry_slip = max_safe_slip
+            .max(ctx.ioc_slippage_pct)
+            .min(2.0); // Safety cap 2.0%
+
         tracing::warn!(
-            "[real] 🔄 RETRY second leg {} for {} with max slippage {:.3}% (was {:.3}%)",
-            second_label, ctx.pair, retry_slip, aggressive_slip
+            "[real] 🔄 RETRY second leg {} for {} expanding IOC slippage to {:.3}% (was {:.3}%, min net profit floor: +{:.2}%)",
+            second_label, ctx.pair, retry_slip, aggressive_slip, min_guaranteed_profit_pct
         );
 
         let res_retry = second_conn.place_order(
