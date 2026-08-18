@@ -154,7 +154,7 @@ pub async fn handle_get_logs(
     }
 
     let mode = query.mode.unwrap_or_default();
-    let n_lines = if mode == "trade" { "200" } else { "300" };
+    let n_lines = if mode == "trade" { "1000" } else { "1500" };
     let child = tokio::process::Command::new("journalctl")
         .args([
             "-u",
