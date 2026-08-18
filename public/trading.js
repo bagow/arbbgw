@@ -8,8 +8,8 @@
  */
 'use strict';
 
-// ─── Backend URL (VPS via Cloudflare Tunnel) ──────────────────────────────────
-const API_BASE = window.API_BASE = window.API_BASE || 'https://api.arb.bagow.com';
+// ─── Backend URL (set by chart.js, fallback if loaded standalone) ──────────────
+if (!window.API_BASE) window.API_BASE = 'https://api.arb.bagow.com';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
