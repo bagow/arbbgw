@@ -677,18 +677,19 @@ pub async fn execute_sequential_entry(
         (&conn_ensure_a, !ctx.is_a_higher, ctx.limit_price_a, ctx.mult_a, ctx.tick_a)
     };
 
-    // Calculate actual gross spread achieved from the verified fill price of Leg 1
+    // Calculate actual gross spread achieved from the verified fill price of Leg 1 vs expected Leg 2 price
+    let target_price_second = if a_is_first { ctx.sig_entry_b } else { ctx.sig_entry_a };
     let actual_gross_spread = if a_is_first {
         if ctx.is_a_higher {
-            (ver_first.fill_price - ctx.limit_price_b) / ctx.limit_price_b.max(1e-12) * 100.0
+            (ver_first.fill_price - target_price_second) / target_price_second.max(1e-12) * 100.0
         } else {
-            (ctx.limit_price_b - ver_first.fill_price) / ver_first.fill_price.max(1e-12) * 100.0
+            (target_price_second - ver_first.fill_price) / ver_first.fill_price.max(1e-12) * 100.0
         }
     } else {
         if ctx.is_a_higher {
-            (ctx.limit_price_a - ver_first.fill_price) / ver_first.fill_price.max(1e-12) * 100.0
+            (target_price_second - ver_first.fill_price) / ver_first.fill_price.max(1e-12) * 100.0
         } else {
-            (ver_first.fill_price - ctx.limit_price_a) / ctx.limit_price_a.max(1e-12) * 100.0
+            (ver_first.fill_price - target_price_second) / target_price_second.max(1e-12) * 100.0
         }
     };
 

@@ -1907,7 +1907,7 @@ window.renderLogsHTML = function(text) {
                     level: 'FILLED',
                     badgeClass: 'log-badge-trade',
                     lineClass: 'log-line--trade',
-                    text: `✅ ${m[1]}: ОБЕ НОГИ ЗАЛИТЫ — Leg A: $${m[6]} ($${m[4]}) | Leg B: $${m[7]} ($${m[5]}) [${m[8]}мс]`
+                    text: `✅ ${m[1]}: ОБЕ НОГИ ЗАЛИТЫ — Leg A: $${m[6]} (${m[4]} шт) | Leg B: $${m[7]} (${m[5]} шт) [${m[8]}мс]`
                 };
             }
             if (!aOk && !bOk) {
@@ -2022,7 +2022,7 @@ window.renderLogsHTML = function(text) {
         }
         if ((m = line.match(/RESULT (\S+) A=(\S+) B=(\S+) phys_a=([\d.]+) phys_b=([\d.]+) fill_a=([\d.]+) fill_b=([\d.]+) latency=(\d+)ms/))) {
             const aOk = m[2] === 'true', bOk = m[3] === 'true';
-            if (aOk && bOk) return `✅ ${m[1]}: ОБЕ НОГИ ЗАЛИТЫ — A: ${m[6]} ($${m[4]}) | B: ${m[7]} ($${m[5]}) [${m[8]}мс]`;
+            if (aOk && bOk) return `✅ ${m[1]}: ОБЕ НОГИ ЗАЛИТЫ — A: $${m[6]} (${m[4]} шт) | B: $${m[7]} (${m[5]} шт) [${m[8]}мс]`;
             if (!aOk && !bOk) return `⛔ ${m[1]}: ОБЕ НОГИ ОТКЛОНЕНЫ — ордера не исполнились [${m[8]}мс]`;
             return `⚠️ ${m[1]}: ЧАСТИЧНЫЙ ФИЛЛ — A=${m[2]} B=${m[3]} [${m[8]}мс]`;
         }
