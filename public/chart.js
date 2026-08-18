@@ -11,7 +11,7 @@
 'use strict';
 
 // ─── Backend URL (same-origin: Worker at arb.bagow.com proxies /api/* to VPS) ─
-const API_BASE = window.API_BASE = '';
+var API_BASE = window.API_BASE = '';
 
 async function authFetch(url, options = {}) {
     const creds = localStorage.getItem('cex_auth');
