@@ -939,11 +939,18 @@ pub async fn execute_sequential_entry(
         let pnl_a_val = if a_filled { gross_pnl } else { 0.0 };
         let pnl_b_val = if !a_filled { gross_pnl } else { 0.0 };
 
+        let ext_a = if a_filled {
+            if delta_a > 1e-12 { (fill_a - (trimming_loss / delta_a)).max(0.0) } else { fill_a }
+        } else { 0.0 };
+        let ext_b = if !a_filled {
+            if delta_b > 1e-12 { (fill_b - (trimming_loss / delta_b)).max(0.0) } else { fill_b }
+        } else { 0.0 };
+
         repo.append_asymmetric_close(
             ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
             fv_usd, ent_a, ent_b, ctx.sig_spread, crate::engine::utils::now_ms(),
             pnl_a_val, pnl_b_val, ctx.profile_id.clone(),
-            total_fee, 0.0, net_pnl, gross_pnl, 0.0, 0.0,
+            total_fee, trimming_loss, net_pnl, gross_pnl, ext_a, ext_b,
         ).await;
         return true;
     }
@@ -1402,11 +1409,18 @@ pub async fn execute_parallel_entry(
         let pnl_a_val = if a_filled { gross_pnl } else { 0.0 };
         let pnl_b_val = if !a_filled { gross_pnl } else { 0.0 };
 
+        let ext_a = if a_filled {
+            if delta_a > 1e-12 { (fill_a - (trimming_loss / delta_a)).max(0.0) } else { fill_a }
+        } else { 0.0 };
+        let ext_b = if !a_filled {
+            if delta_b > 1e-12 { (fill_b - (trimming_loss / delta_b)).max(0.0) } else { fill_b }
+        } else { 0.0 };
+
         repo.append_asymmetric_close(
             ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
             fv_usd, ent_a, ent_b, ctx.sig_spread, crate::engine::utils::now_ms(),
             pnl_a_val, pnl_b_val, ctx.profile_id.clone(),
-            total_fee, 0.0, net_pnl, gross_pnl, 0.0, 0.0,
+            total_fee, trimming_loss, net_pnl, gross_pnl, ext_a, ext_b,
         ).await;
         return true;
     }
