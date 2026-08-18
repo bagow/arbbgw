@@ -515,13 +515,14 @@ pub async fn process_entries(
             break_even_pct,
         };
 
-        if crate::engine::execution::execute_parallel_entry(
+        if crate::engine::execution::execute_sequential_entry(
             ctx,
             http,
             keys,
             db,
             e_ctx,
             ts,
+            true, // sort_by_liquidity: fast/strict exchange first
         ).await {
             opened_this_cycle = true;
         }

@@ -565,9 +565,9 @@ pub async fn execute_sequential_entry(
     
     let rank_a = crate::engine::utils::liquidity_rank(&ctx.exa);
     let rank_b = crate::engine::utils::liquidity_rank(&ctx.exb);
-    let a_is_less_liquid = if sort_by_liquidity { rank_a >= rank_b } else { true };
+    let a_is_first = if sort_by_liquidity { rank_a <= rank_b } else { true };
 
-    let (first_label, second_label) = if a_is_less_liquid {
+    let (first_label, second_label) = if a_is_first {
         (ctx.exa.as_str(), ctx.exb.as_str())
     } else {
         (ctx.exb.as_str(), ctx.exa.as_str())
@@ -575,15 +575,15 @@ pub async fn execute_sequential_entry(
 
     if sort_by_liquidity {
         tracing::info!(
-            "[real] 🔄 Последовательное исполнение: сначала {} (менее ликв.), затем {} для {}...",
+            "[real] 🔄 Последовательное исполнение: сначала {} (лидер/быстрая нога), затем {} для {}...",
             first_label, second_label, ctx.pair
         );
     }
 
     let t0_exec = std::time::Instant::now();
 
-    // ── PHASE 1: Less liquid leg (or Leg A for HFT) ─────────────────────────
-    let (first_conn, first_is_buy, first_qty, first_limit, first_mult, first_tick) = if a_is_less_liquid {
+    // ── PHASE 1: Primary fast leg ──────────────────────────────────────────
+    let (first_conn, first_is_buy, first_qty, first_limit, first_mult, first_tick) = if a_is_first {
         (&conn_ensure_a, !ctx.is_a_higher, ctx.qty_a, ctx.limit_price_a, ctx.mult_a, ctx.tick_a)
     } else {
         (&conn_ensure_b, ctx.is_a_higher, ctx.qty_b, ctx.limit_price_b, ctx.mult_b, ctx.tick_b)
@@ -665,19 +665,19 @@ pub async fn execute_sequential_entry(
         );
     }
 
-    // ── PHASE 2: More liquid leg (or Leg B for HFT) ─────────────────────────
+    // ── PHASE 2: Second leg (with adaptive slippage) ────────────────────────
     let final_qty_second = if ctx.dry_run { 
-        if a_is_less_liquid { ctx.qty_b } else { ctx.qty_a } 
+        if a_is_first { ctx.qty_b } else { ctx.qty_a } 
     } else { first_phys };
 
-    let (second_conn, second_is_buy, second_limit, second_mult, second_tick) = if a_is_less_liquid {
+    let (second_conn, second_is_buy, second_limit, second_mult, second_tick) = if a_is_first {
         (&conn_ensure_b, ctx.is_a_higher, ctx.limit_price_b, ctx.mult_b, ctx.tick_b)
     } else {
         (&conn_ensure_a, !ctx.is_a_higher, ctx.limit_price_a, ctx.mult_a, ctx.tick_a)
     };
 
     // Calculate actual gross spread achieved from the verified fill price of Leg 1
-    let actual_gross_spread = if a_is_less_liquid {
+    let actual_gross_spread = if a_is_first {
         if ctx.is_a_higher {
             (ver_first.fill_price - ctx.limit_price_b) / ctx.limit_price_b.max(1e-12) * 100.0
         } else {
@@ -837,7 +837,7 @@ pub async fn execute_sequential_entry(
     let (oid_a, oid_b);
     let (mut fill_a, fee_a_val, actual_vol_phys_a);
     let (mut fill_b, fee_b_val, actual_vol_phys_b);
-    if a_is_less_liquid {
+    if a_is_first {
         oid_a = oid_first;
         fill_a = ver_first.fill_price;
         fee_a_val = ver_first.fee;
