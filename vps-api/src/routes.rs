@@ -628,12 +628,13 @@ pub async fn handle_get_unified(
                 obj.insert("slippage_cost".into(), json!(display_slip));
                 // Exit slippage (separate for display)
                 obj.insert("exit_slippage_cost".into(), json!(t.exit_slippage_cost.unwrap_or(0.0)));
-                if t.funding_cost.is_none() {
-                    obj.insert("funding_cost".into(), json!(0.0));
-                }
+                let fund_cost = t.funding_cost.unwrap_or(0.0);
+                obj.insert("funding_cost".into(), json!(fund_cost));
                 // Gross PnL: actual fill-based PnL (slippage already baked in)
-                let actual_gross = t.gross_pnl.unwrap_or(0.0);
+                let actual_gross = t.gross_pnl.unwrap_or_else(|| t.pnl_a.unwrap_or(0.0) + t.pnl_b.unwrap_or(0.0));
+                let calculated_net_pnl = t.pnl.unwrap_or(actual_gross - display_comm - fund_cost);
                 obj.insert("gross_pnl".into(), json!(actual_gross));
+                obj.insert("pnl".into(), json!(calculated_net_pnl));
             }
             v
         })

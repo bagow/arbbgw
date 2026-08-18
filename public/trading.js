@@ -1691,8 +1691,9 @@ function renderHistoryTable(profileId, history) {
         return;
     }
     tbody.innerHTML = history.map(t => {
-        const time = new Date(t.exit_time).toLocaleString('en-GB', { timeZone: 'Europe/Kyiv' });
-        const pnl = t.pnl ?? 0;
+        const pnl = t.pnl !== null && t.pnl !== undefined 
+            ? t.pnl 
+            : ((t.gross_pnl ?? ((t.pnl_a ?? 0) + (t.pnl_b ?? 0))) - (t.commission_cost ?? 0) - (t.funding_cost ?? 0));
         const pnlColor = pnl > 0 ? 'var(--green)' : 'var(--red)';
         const pnlStr = fmtPnL(pnl);
         const rowKey = `${profileId}_h_${t.id}`;
