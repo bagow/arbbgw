@@ -371,7 +371,7 @@ pub async fn send_bybit_ws_request(req: Value) -> Result<Value, String> {
 
     tx.send((req, resp_tx)).await.map_err(|_| "Bybit WS channel closed")?;
 
-    match tokio::time::timeout(tokio::time::Duration::from_secs(5), resp_rx).await {
+    match tokio::time::timeout(tokio::time::Duration::from_millis(800), resp_rx).await {
         Ok(Ok(val)) => Ok(val),
         Ok(Err(_)) => Err("Response sender dropped".to_string()),
         Err(_) => Err("Timeout waiting for Bybit WS response".to_string()),

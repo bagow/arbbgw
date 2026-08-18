@@ -139,7 +139,7 @@ pub async fn send_ws_request(req: Value) -> Result<Value, String> {
     // instead of blocking the entire trade cycle forever
     tx.try_send((req, resp_tx)).map_err(|e| format!("WS channel full/closed (is Binance WS connected?): {}", e))?;
     
-    match tokio::time::timeout(tokio::time::Duration::from_secs(5), resp_rx).await {
+    match tokio::time::timeout(tokio::time::Duration::from_millis(800), resp_rx).await {
         Ok(Ok(val)) => Ok(val),
         Ok(Err(_)) => Err("Response sender dropped".to_string()),
         Err(_) => Err("Timeout waiting for WS response".to_string()),

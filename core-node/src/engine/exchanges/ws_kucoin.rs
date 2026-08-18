@@ -19,7 +19,10 @@ static KUCOIN_HTTP: OnceLock<reqwest::Client> = OnceLock::new();
 fn get_http() -> &'static reqwest::Client {
     KUCOIN_HTTP.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .tcp_nodelay(true)
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .pool_max_idle_per_host(20)
+            .timeout(Duration::from_millis(1500))
             .build()
             .unwrap()
     })
