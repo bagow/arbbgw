@@ -110,7 +110,7 @@ async fn bitget_private_ws_loop(api_key: String, api_secret: String, passphrase:
         }
 
         if !authed {
-            tracing::error!("[bitget_ws_private] Auth failed or timed out. Reconnecting in 3s...");
+            tracing::warn!("[bitget_ws_private] Auth failed or timed out. Reconnecting in 3s...");
             tokio::time::sleep(Duration::from_secs(3)).await;
             continue;
         }

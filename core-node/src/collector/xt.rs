@@ -43,7 +43,7 @@ pub async fn run(
             res = handler(&prices, &signal, &l2_books) => {
                 match res {
                     Ok(_) => { warn!("[xt] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
-                    Err(e) => error!("[xt] Error: {}. Reconnecting in {:?}", e, backoff),
+                    Err(e) => warn!("[xt] WS disconnected: {}. Reconnecting in {:?}", e, backoff),
                 }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(10));

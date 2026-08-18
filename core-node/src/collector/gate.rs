@@ -59,7 +59,7 @@ pub async fn run(
             res = orchestrator(&prices, &signal, &l2_books) => {
                 match res {
                     Ok(_)  => { warn!("[gate] orchestrator returned, restarting..."); backoff = Duration::from_secs(1); }
-                    Err(e) => error!("[gate] Error: {}. Reconnecting in {:?}", e, backoff),
+                    Err(e) => warn!("[gate] WS disconnected: {}. Reconnecting in {:?}", e, backoff),
                 }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -176,7 +176,7 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2
                         backoff = Duration::from_secs(1);
                     }
                     Err(e) => {
-                        error!("[gate] Shard {} error: {}. Reconnecting in {:?}", idx, e, backoff);
+                        warn!("[gate] Shard {} WS disconnected: {}. Reconnecting in {:?}", idx, e, backoff);
                     }
                 }
                 tokio::time::sleep(backoff).await;

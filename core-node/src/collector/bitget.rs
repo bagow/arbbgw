@@ -55,7 +55,7 @@ pub async fn run(
             res = run_sharded(&prices, &signal, &l2_books) => {
                 match res {
                     Ok(_)  => { warn!("[bitget] All shards exited, restarting..."); backoff = Duration::from_secs(1); }
-                    Err(e) => error!("[bitget] Error: {}. Reconnecting in {:?}", e, backoff),
+                    Err(e) => warn!("[bitget] WS disconnected: {}. Reconnecting in {:?}", e, backoff),
                 }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(5));
@@ -125,7 +125,7 @@ async fn shard_loop(
                 backoff = Duration::from_secs(1);
             }
             Err(e) => {
-                error!("[bitget] Shard {} error: {}. Reconnecting in {:?}", shard_id, e, backoff);
+                warn!("[bitget] Shard {} WS disconnected: {}. Reconnecting in {:?}", shard_id, e, backoff);
                 backoff = (backoff * 2).min(Duration::from_secs(5));
             }
         }

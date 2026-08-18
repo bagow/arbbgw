@@ -94,7 +94,7 @@ async fn run_shard(
                 backoff = Duration::from_secs(1);
             }
             Err(e) => {
-                error!("[bingx] Shard {} error: {}. Reconnecting in {:?}", shard_idx, e, backoff);
+                warn!("[bingx] Shard {} WS disconnected: {}. Reconnecting in {:?}", shard_idx, e, backoff);
             }
         }
         tokio::time::sleep(backoff).await;

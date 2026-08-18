@@ -163,7 +163,7 @@ async fn bybit_private_ws_loop(api_key: String, api_secret: String) {
         }
 
         if !authed {
-            tracing::error!("[bybit_ws_private] auth timeout or failed. Reconnecting in 3s...");
+            tracing::warn!("[bybit_ws_private] Auth timeout or failed. Reconnecting in 3s...");
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             continue;
         }
@@ -291,7 +291,7 @@ async fn bybit_ws_loop(
         }
 
         if !authed {
-            tracing::error!("[bybit_ws] auth timeout or failed. Reconnecting in 3s...");
+            tracing::warn!("[bybit_ws] Auth timeout or failed. Reconnecting in 3s...");
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             continue;
         }
