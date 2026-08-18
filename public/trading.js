@@ -153,7 +153,15 @@ async function switchTab(id) {
     renderTabBar();
     const profile = profiles.find(p => p.id === id);
     if (!profile) return;
-    renderPanel(profile, null, null, null, null);
+    if (lastUnified) {
+        const { trades, exchanges, profile_stats, profile_active, profile_history } = lastUnified;
+        const active = profile_active !== undefined ? profile_active : (trades?.active || []);
+        const history = profile_history !== undefined ? profile_history : (trades?.history || []);
+        const stats = profile_stats || trades?.stats || {};
+        renderPanel(profile, active, history, stats, exchanges);
+    } else {
+        renderPanel(profile, null, null, null, null);
+    }
     await refreshActiveTab();
 }
 
@@ -1799,6 +1807,27 @@ window.showSubTab = function (btn, tab) {
     document.querySelectorAll('.mt-content').forEach(c => c.style.display = 'none');
     const el = document.getElementById(`mt-sub-${tab}`);
     if (el) el.style.display = 'block';
+
+    const profile = profiles.find(p => p.id === activeTabId) || profiles[0];
+    if (profile && lastUnified) {
+        const { trades, profile_active, profile_history, profile_stats, exchanges } = lastUnified;
+        const active = profile_active !== undefined ? profile_active : (trades?.active || []);
+        const history = profile_history !== undefined ? profile_history : (trades?.history || []);
+        const stats = profile_stats || trades?.stats || {};
+
+        if (tab === 'history') {
+            renderHistoryTable(profile.id, history);
+            const reconcileEl = document.getElementById('history-reconcile-box');
+            if (reconcileEl && exchanges) reconcileEl.outerHTML = renderHistoryReconcile(exchanges);
+        } else if (tab === 'active') {
+            renderActiveTable(profile.id, active);
+        } else if (tab === 'cex' && exchanges) {
+            const cexWrap = document.getElementById('mt-sub-cex');
+            if (cexWrap) cexWrap.innerHTML = renderCexTab(profile, exchanges);
+        } else if (tab === 'dashboard' && stats) {
+            renderDashboardCharts(profile.id, stats, exchanges);
+        }
+    }
 
     // (Re)init scanner when tab is shown
     if (tab === 'scanner' && window.initScanner) {
