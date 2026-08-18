@@ -223,13 +223,12 @@ pub async fn process_entries(
         );
         let _t0 = std::time::Instant::now();
         let use_ioc = ts.entry_order_type == "ioc";
-        // Dynamic IOC slippage: (signal_spread - break_even) / 2
-        // This guarantees profitability: even if BOTH legs get worst-case fill,
-        // total slippage = 2 * per_leg ≤ (spread - BE) → net PnL ≥ 0
-        // Clamped: min 0.05% (tick rounding), max 0.5% (safety cap)
-        let ioc_slippage_pct = ((sig.spread - break_even_pct) / 2.0)
-            .max(0.10)
-            .min(0.5);
+        // Sequential IOC slippage: allows the primary leader leg (Binance) to fill reliably
+        // within the available profit margin (spread - BE - min_profit).
+        // Phase 2 automatically recalculates remaining spread from Leg 1's actual fill price.
+        let ioc_slippage_pct = (sig.spread - break_even_pct - 0.10)
+            .max(0.25)
+            .min(1.0);
         // NOTE: FIRE log moved to after L2/depth checks to avoid false-positive log entries
 
         // ── PRE-FORMAT CACHE KEYS ──
