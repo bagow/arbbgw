@@ -38,7 +38,7 @@ async function boot() {
                 id: 'real-default',
                 name: 'Public Real',
                 mode: 'real',
-                is_active: true
+                is_active: false
             }];
         }
 
@@ -63,7 +63,7 @@ async function boot() {
             id: 'real-default',
             name: 'Public Real',
             mode: 'real',
-            is_active: true
+            is_active: false
         }];
         activeTabId = 'real-default';
         await switchTab(activeTabId);
@@ -109,7 +109,7 @@ async function loadProfiles() {
         id: 'real-default',
         name: 'Public Real',
         mode: 'real',
-        is_active: true
+        is_active: false
     }];
 }
 
