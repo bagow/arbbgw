@@ -81,128 +81,92 @@ pub fn start_balance_fetcher(
                     .collect()
             };
 
-            // Determine which exchanges have balance_low set
-            let low_exchanges: Vec<&str> = active_exchanges
-                .iter()
-                .copied()
-                .filter(|ex| {
-                    keys.supports(ex) && e_ctx.balance_low.get(*ex).map(|v| *v).unwrap_or(false)
-                })
-                .collect();
-
-            if !low_exchanges.is_empty() {
-                // Recovery mode: only fetch balances for low exchanges
-                for ex in &low_exchanges {
-                    let conn = match get_connector(ex) {
-                        Some(c) => c,
-                        None => continue,
-                    };
-                    match conn.fetch_balances(&http, &keys).await {
-                        Ok((bal, _)) => {
-                            e_ctx.balances.insert(ex.to_string(), bal);
-                            record_fetch_success(ex);
-                            if bal > 1.0 {
-                                info!("[balance] {} recovered (${:.2}) — clearing balance_low flag, trades unblocked", ex, bal);
-                                e_ctx.balance_low.insert(ex.to_string(), false);
-                            } else {
-                                warn!(
-                                    "[balance] {} still balance_low (${:.2}) — retry in {}ms",
-                                    ex, bal, fast_interval_ms
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            error!("[balance] {} fetch error (recovery mode): {}", ex, e);
-                            record_fetch_error(ex, &e_ctx);
-                        }
-                    }
+            // Clear positions for disabled exchanges to prevent stale ghost positions
+            for ex in &all_exchanges {
+                if !active_exchanges.contains(ex) {
+                    e_ctx.positions.remove(*ex);
                 }
-                tokio::time::sleep(Duration::from_millis(fast_interval_ms)).await;
-            } else {
-                // Normal mode: full refresh for all active exchanges
-                // Clear positions for disabled exchanges to prevent stale ghost positions
-                for ex in &all_exchanges {
-                    if !active_exchanges.contains(ex) {
-                        e_ctx.positions.remove(*ex);
-                    }
-                }
-
-                for ex in &active_exchanges {
-                    if !keys.supports(ex) {
-                        continue;
-                    }
-                    // Skip exchanges that are currently banned (no point fetching if we can't trade)
-                    if crate::engine::risk_manager::is_exchange_banned(ex) {
-                        continue;
-                    }
-                    let conn = match get_connector(ex) {
-                        Some(c) => c,
-                        None => continue,
-                    };
-
-                    let mut had_error = false;
-
-                    match conn.fetch_balances(&http, &keys).await {
-                        Ok((w, a)) => {
-                            e_ctx.balances.insert(ex.to_string(), w);
-                            e_ctx.margin_balances.insert(ex.to_string(), a);
-                        }
-                        Err(e) => {
-                            had_error = true;
-                            let msg = e.to_string();
-                            if msg.contains("banned") || msg.contains("ban") {
-                                tracing::debug!("[{}] balance fetch skipped (banned)", ex);
-                            } else {
-                                error!("[{}] balance fetch err: {}", ex, msg);
-                            }
-                        }
-                    }
-                    match conn.fetch_positions(&http, &keys).await {
-                        Ok(pos) => {
-                            let prev_count = e_ctx.positions.get(*ex)
-                                .map(|v| v.value().len())
-                                .unwrap_or(0);
-                            let new_count = pos.len();
-                            if new_count != prev_count {
-                                info!("[{}] positions: {} → {}", ex, prev_count, new_count);
-                            }
-                            e_ctx.positions.insert(ex.to_string(), pos);
-                        }
-                        Err(e) => {
-                            had_error = true;
-                            warn!("[{}] fetch_positions err: {} — keeping previous cache", ex, e);
-                        }
-                    }
-
-                    // Track consecutive errors for auto-ban
-                    if had_error {
-                        record_fetch_error(ex, &e_ctx);
-                    } else {
-                        record_fetch_success(ex);
-                    }
-
-                    if let Ok(fee) = conn.fetch_taker_fee(&http, &keys).await {
-                        e_ctx.fee_rates.insert(ex.to_string(), fee);
-                    }
-                    // Fetch maker fee rate (for maker mode break-even calculation)
-                    if let Ok(maker_fee) = conn.fetch_maker_fee(&http, &keys).await {
-                        e_ctx.maker_fee_rates.insert(ex.to_string(), maker_fee);
-                    }
-                }
-                // Diagnostic: log current fee_rates and balances
-                {
-                    let mut fee_diag = String::from("[fetcher] fee_rates:");
-                    for item in e_ctx.fee_rates.iter() {
-                        fee_diag.push_str(&format!(" {}={:.6}", item.key(), item.value()));
-                    }
-                    let mut bal_diag = String::from(" | balances:");
-                    for item in e_ctx.balances.iter() {
-                        bal_diag.push_str(&format!(" {}=${:.2}", item.key(), item.value()));
-                    }
-                    info!("{}{}", fee_diag, bal_diag);
-                }
-                tokio::time::sleep(Duration::from_secs(normal_interval_s)).await;
             }
+
+            for ex in &active_exchanges {
+                if !keys.supports(ex) {
+                    continue;
+                }
+
+                let conn = match get_connector(ex) {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                let mut had_error = false;
+
+                match conn.fetch_balances(&http, &keys).await {
+                    Ok((w, a)) => {
+                        e_ctx.balances.insert(ex.to_string(), w);
+                        e_ctx.margin_balances.insert(ex.to_string(), a);
+                        if w > 1.0 {
+                            e_ctx.balance_low.insert(ex.to_string(), false);
+                        } else {
+                            e_ctx.balance_low.insert(ex.to_string(), true);
+                        }
+                    }
+                    Err(e) => {
+                        had_error = true;
+                        let msg = e.to_string();
+                        if msg.contains("banned") || msg.contains("ban") {
+                            tracing::debug!("[{}] balance fetch skipped (banned)", ex);
+                        } else {
+                            error!("[{}] balance fetch err: {}", ex, msg);
+                        }
+                    }
+                }
+
+                match conn.fetch_positions(&http, &keys).await {
+                    Ok(pos) => {
+                        let prev_count = e_ctx.positions.get(*ex)
+                            .map(|v| v.value().len())
+                            .unwrap_or(0);
+                        let new_count = pos.len();
+                        if new_count != prev_count {
+                            info!("[{}] positions: {} → {}", ex, prev_count, new_count);
+                        }
+                        e_ctx.positions.insert(ex.to_string(), pos);
+                    }
+                    Err(e) => {
+                        had_error = true;
+                        warn!("[{}] fetch_positions err: {} — keeping previous cache", ex, e);
+                    }
+                }
+
+                // Track consecutive errors for auto-ban
+                if had_error {
+                    record_fetch_error(ex, &e_ctx);
+                } else {
+                    record_fetch_success(ex);
+                }
+
+                if let Ok(fee) = conn.fetch_taker_fee(&http, &keys).await {
+                    e_ctx.fee_rates.insert(ex.to_string(), fee);
+                }
+                if let Ok(maker_fee) = conn.fetch_maker_fee(&http, &keys).await {
+                    e_ctx.maker_fee_rates.insert(ex.to_string(), maker_fee);
+                }
+            }
+
+            // Diagnostic: log current fee_rates and balances
+            {
+                let mut fee_diag = String::from("[fetcher] fee_rates:");
+                for item in e_ctx.fee_rates.iter() {
+                    fee_diag.push_str(&format!(" {}={:.6}", item.key(), item.value()));
+                }
+                let mut bal_diag = String::from(" | balances:");
+                for item in e_ctx.balances.iter() {
+                    bal_diag.push_str(&format!(" {}=${:.2}", item.key(), item.value()));
+                }
+                info!("{}{}", fee_diag, bal_diag);
+            }
+
+            tokio::time::sleep(Duration::from_secs(normal_interval_s)).await;
         }
     });
 }
