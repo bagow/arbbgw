@@ -69,10 +69,13 @@ async fn gate_ws_loop(
                 match msg {
                     Ok(Message::Text(t)) => {
                         if let Ok(val) = serde_json::from_str::<Value>(&t) {
-                            // Gate uses "request_id" for correlation — can be string OR integer
-                            let id_opt = val["request_id"].as_str().map(|s| s.to_string())
+                            // Gate uses "request_id" for correlation — located in val["header"]["request_id"] or root
+                            let id_opt = val["header"]["request_id"].as_str().map(|s| s.to_string())
+                                .or_else(|| val["header"]["request_id"].as_i64().map(|n| n.to_string()))
+                                .or_else(|| val["request_id"].as_str().map(|s| s.to_string()))
                                 .or_else(|| val["request_id"].as_i64().map(|n| n.to_string()))
-                                .or_else(|| val["request_id"].as_u64().map(|n| n.to_string()));
+                                .or_else(|| val["id"].as_str().map(|s| s.to_string()))
+                                .or_else(|| val["id"].as_i64().map(|n| n.to_string()));
                             if let Some(id) = id_opt {
                                 if let Some(sender) = pending_clone.lock().await.remove(&id) {
                                     let _ = sender.send(val);
@@ -167,7 +170,7 @@ pub async fn send_gate_ws_request(req: Value) -> Result<Value, String> {
 
     tx.send((req, resp_tx)).await.map_err(|_| "Gate WS channel closed")?;
 
-    match tokio::time::timeout(tokio::time::Duration::from_secs(5), resp_rx).await {
+    match tokio::time::timeout(tokio::time::Duration::from_millis(1000), resp_rx).await {
         Ok(Ok(val)) => Ok(val),
         Ok(Err(_)) => Err("Response sender dropped".to_string()),
         Err(_) => Err("Timeout waiting for Gate WS response".to_string()),
