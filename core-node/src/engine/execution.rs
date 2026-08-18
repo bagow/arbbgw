@@ -581,6 +581,7 @@ pub async fn execute_sequential_entry(
     }
 
     let t0_exec = std::time::Instant::now();
+    let use_ioc = ts.entry_order_type == "ioc";
 
     // ── PHASE 1: Primary fast leg ──────────────────────────────────────────
     let (first_conn, first_is_buy, first_qty, first_limit, first_mult, first_tick) = if a_is_first {
@@ -591,7 +592,7 @@ pub async fn execute_sequential_entry(
 
     let res_first = first_conn.place_order(
         http, keys, &ctx.pair, first_is_buy, first_qty, ctx.dry_run,
-        first_limit, first_limit > 0.0,
+        first_limit, use_ioc,
         ctx.leverage, first_mult, ctx.ioc_slippage_pct, first_tick, ts.api_timeout_ms
     ).await;
 
@@ -708,7 +709,7 @@ pub async fn execute_sequential_entry(
 
     let res_second = second_conn.place_order(
         http, keys, &ctx.pair, second_is_buy, final_qty_second, ctx.dry_run,
-        second_limit, second_limit > 0.0,
+        second_limit, use_ioc,
         ctx.leverage, second_mult, aggressive_slip, second_tick, ts.api_timeout_ms
     ).await;
 
