@@ -34,7 +34,7 @@ pub fn generate_signals(
 
     // Log diagnostics throttled
     let last_diag = LAST_DIAG_LOG.load(Ordering::Relaxed);
-    let log_diag = (now - last_diag) > (ts.diag_log_interval as i64 * 100);
+    let log_diag = (now - last_diag) > (ts.diag_log_interval as i64);
     if log_diag {
         LAST_DIAG_LOG.store(now, Ordering::Relaxed);
     }
