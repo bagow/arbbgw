@@ -800,20 +800,24 @@ pub async fn execute_sequential_entry(
     let total_exec_ms = t0_exec.elapsed().as_millis();
 
     if total_exec_ms > 800 {
-        let mut strikes_a = e_ctx.high_latency_strikes.entry(ctx.exa.clone()).or_insert(0);
-        *strikes_a += 1;
-        if *strikes_a >= 3 {
-            e_ctx.exchange_cooldown.insert(ctx.exa.clone(), now + 60_000);
-            tracing::error!("[real] 🐢 LATENCY ALERT: {} RTT >800ms. Cooldown 1m.", ctx.exa);
-            *strikes_a = 0;
+        {
+            let mut strikes_a = e_ctx.high_latency_strikes.entry(ctx.exa.clone()).or_insert(0);
+            *strikes_a += 1;
+            if *strikes_a >= 3 {
+                e_ctx.exchange_cooldown.insert(ctx.exa.clone(), now + 60_000);
+                tracing::error!("[real] 🐢 LATENCY ALERT: {} RTT >800ms. Cooldown 1m.", ctx.exa);
+                *strikes_a = 0;
+            }
         }
 
-        let mut strikes_b = e_ctx.high_latency_strikes.entry(ctx.exb.clone()).or_insert(0);
-        *strikes_b += 1;
-        if *strikes_b >= 3 {
-            e_ctx.exchange_cooldown.insert(ctx.exb.clone(), now + 60_000);
-            tracing::error!("[real] 🐢 LATENCY ALERT: {} RTT >800ms. Cooldown 1m.", ctx.exb);
-            *strikes_b = 0;
+        {
+            let mut strikes_b = e_ctx.high_latency_strikes.entry(ctx.exb.clone()).or_insert(0);
+            *strikes_b += 1;
+            if *strikes_b >= 3 {
+                e_ctx.exchange_cooldown.insert(ctx.exb.clone(), now + 60_000);
+                tracing::error!("[real] 🐢 LATENCY ALERT: {} RTT >800ms. Cooldown 1m.", ctx.exb);
+                *strikes_b = 0;
+            }
         }
     } else {
         e_ctx.high_latency_strikes.insert(ctx.exa.clone(), 0);
