@@ -432,49 +432,10 @@ impl ExchangeConnector for BinanceConnector {
             ));
         }
 
-        // For IOC orders, refresh target_price from live Binance bookTicker.
-        // Scanner L1 data can lag by 0.5-2% on low-volume pairs (bookTicker
-        // only fires when bid/ask changes). Without this, IOC orders expire
-        // because sent_price is below real ask (BUY) or above real bid (SELL).
-        let effective_target = if use_ioc && target_price > 0.0 {
-            match http.get(&format!(
-                "https://fapi.binance.com/fapi/v1/ticker/bookTicker?symbol={}", pair
-            )).timeout(std::time::Duration::from_millis(200)).send().await {
-                Ok(resp) => {
-                    if let Ok(body) = resp.json::<serde_json::Value>().await {
-                        let live_bid: f64 = body["bidPrice"].as_str()
-                            .and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                        let live_ask: f64 = body["askPrice"].as_str()
-                            .and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                        if is_buy && live_ask > 0.0 && live_ask > target_price {
-                            tracing::info!(
-                                "[binance] 🔄 IOC BUY {} price refresh: scanner={:.6} → live_ask={:.6} (+{:.3}%)",
-                                pair, target_price, live_ask,
-                                (live_ask - target_price) / target_price * 100.0
-                            );
-                            live_ask
-                        } else if !is_buy && live_bid > 0.0 && live_bid < target_price {
-                            tracing::info!(
-                                "[binance] 🔄 IOC SELL {} price refresh: scanner={:.6} → live_bid={:.6} ({:.3}%)",
-                                pair, target_price, live_bid,
-                                (live_bid - target_price) / target_price * 100.0
-                            );
-                            live_bid
-                        } else {
-                            target_price
-                        }
-                    } else { target_price }
-                }
-                Err(_) => target_price // timeout/error → use scanner price
-            }
-        } else {
-            target_price
-        };
-
         let price = if is_buy {
-            effective_target * (1.0 + slippage_percent / 100.0)
+            target_price * (1.0 + slippage_percent / 100.0)
         } else {
-            effective_target * (1.0 - slippage_percent / 100.0)
+            target_price * (1.0 - slippage_percent / 100.0)
         };
         let rounded_price = if is_buy {
             (price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
