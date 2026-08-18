@@ -728,10 +728,21 @@ impl ExchangeConnector for BinanceConnector {
                 .as_str().and_then(|s| s.parse().ok())
                 .or_else(|| v["executedQty"].as_f64())
                 .unwrap_or(0.0);
-            let avg_price: f64 = v["avgPrice"]
+            let mut avg_price: f64 = v["avgPrice"]
                 .as_str().and_then(|s| s.parse().ok())
                 .or_else(|| v["avgPrice"].as_f64())
                 .unwrap_or(0.0);
+            if avg_price <= 0.0 && exec_qty > 1e-12 {
+                let cum_quote: f64 = v["cumQuote"]
+                    .as_str().and_then(|s| s.parse().ok())
+                    .or_else(|| v["cumQuote"].as_f64())
+                    .unwrap_or(0.0);
+                if cum_quote > 0.0 {
+                    avg_price = cum_quote / exec_qty;
+                } else if target_price > 0.0 {
+                    avg_price = target_price;
+                }
+            }
             let cum_fee: f64 = v["cumCommission"]
                 .as_str().and_then(|s| s.parse::<f64>().ok())
                 .or_else(|| v["cumCommission"].as_f64())
@@ -790,7 +801,21 @@ impl ExchangeConnector for BinanceConnector {
         fb_params.insert("timestamp".to_string(), serde_json::json!(ts_fb));
         fb_params.insert("newOrderRespType".to_string(), serde_json::json!("RESULT"));
         
-        let v_fb = execute_binance_order(http, keys, &fb_params, api_timeout_ms).await.map_err(|e| format!("Fallback close rejected: {}", e))?;
+        let v_fb = match execute_binance_order(http, keys, &fb_params, api_timeout_ms).await {
+            Ok(v) => v,
+            Err(e) => {
+                // If reduce-only order is rejected, position is already closed (filled by initial order)
+                if e.contains("ReduceOnly Order is rejected") {
+                    tracing::info!("[binance] position already closed (ReduceOnly rejected) for {}", pair);
+                    return Ok(CloseReceipt {
+                        final_price: target_price,
+                        total_fee: 0.0,
+                        closed_volume: phys_amount,
+                    });
+                }
+                return Err(format!("Fallback close rejected: {}", e));
+            }
+        };
         
         // Extract fill from fallback WS response
         let fb_exec_qty: f64 = v_fb["executedQty"]
