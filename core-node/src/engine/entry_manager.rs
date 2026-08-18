@@ -465,18 +465,58 @@ pub async fn process_entries(
             continue;
         }
 
+        // ── LIVE SPREAD PRE-FLIGHT RE-CHECK (Instant in-memory validation) ──
+        let mut final_limit_a = limit_price_a;
+        let mut final_limit_b = limit_price_b;
+        let mut final_slip = ioc_slippage_pct;
+        let mut final_entry_a = sig.entry_a;
+        let mut final_entry_b = sig.entry_b;
+        let mut final_spread = sig.spread;
+
+        if use_ioc {
+            if let (Some(da), Some(db)) = (
+                prices.get(&exa).and_then(|m| m.get(&pair).cloned()),
+                prices.get(&exb).and_then(|m| m.get(&pair).cloned())
+            ) {
+                let live_a = if is_a_higher { da.bid } else { da.ask };
+                let live_b = if is_a_higher { db.ask } else { db.bid };
+                if live_a > 0.0 && live_b > 0.0 {
+                    let live_spread = if is_a_higher {
+                        (live_a - live_b) / live_b.max(1e-12) * 100.0
+                    } else {
+                        (live_b - live_a) / live_a.max(1e-12) * 100.0
+                    };
+                    // If spread already dropped below break-even + profit buffer, abort cleanly
+                    if live_spread < break_even_pct + 0.10 {
+                        tracing::info!(
+                            "[real] ⏭️ PRE-FLIGHT ABORT {}: spread evaporated (live={:.4}% < min_req={:.4}%, was {:.4}%)",
+                            pair, live_spread, break_even_pct + 0.10, sig.spread
+                        );
+                        e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 3_000);
+                        continue;
+                    }
+                    final_limit_a = live_a;
+                    final_limit_b = live_b;
+                    final_entry_a = live_a;
+                    final_entry_b = live_b;
+                    final_spread = live_spread;
+                    final_slip = (live_spread - break_even_pct - 0.10).max(0.20).min(1.0);
+                }
+            }
+        }
+
         // ── IOC / MARKET MODE: existing parallel entry ──────────────────────
         let order_type_label_fire = if use_ioc { "IOC" } else { "MKT" };
         info!(
             "[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}% slip={:.3}% dir={} is_a_hi={}",
-            pair, order_type_label_fire, exa, contracts_a, limit_price_a,
-            exb, contracts_b, limit_price_b, sig.spread, break_even_pct, ioc_slippage_pct,
+            pair, order_type_label_fire, exa, contracts_a, final_limit_a,
+            exb, contracts_b, final_limit_b, final_spread, break_even_pct, final_slip,
             sig.direction, is_a_higher
         );
         let snapshot = serde_json::json!({
-            "bid_a": sig.entry_a, "bid_b": sig.entry_b,
-            "ask_a": sig.entry_a, "ask_b": sig.entry_b,
-            "spread": sig.spread, "latency": 0
+            "bid_a": final_entry_a, "bid_b": final_entry_b,
+            "ask_a": final_entry_a, "ask_b": final_entry_b,
+            "spread": final_spread, "latency": 0
         }).to_string();
         tokio::spawn({
             let snap_repo = TradeRepository::new(db.clone());
@@ -496,20 +536,20 @@ pub async fn process_entries(
             is_a_higher,
             qty_a,
             qty_b,
-            limit_price_a,
-            limit_price_b,
+            limit_price_a: final_limit_a,
+            limit_price_b: final_limit_b,
             mult_a,
             mult_b,
             tick_a,
             tick_b,
-            ioc_slippage_pct,
+            ioc_slippage_pct: final_slip,
             leverage: settings.leverage as f64,
             dry_run: false,
-            sig_spread: sig.spread,
+            sig_spread: final_spread,
             sig_structural_spread: sig.structural_spread,
             sig_direction: sig.direction.clone(),
-            sig_entry_a: sig.entry_a,
-            sig_entry_b: sig.entry_b,
+            sig_entry_a: final_entry_a,
+            sig_entry_b: final_entry_b,
             profile_id: settings.id.clone(),
             break_even_pct,
         };

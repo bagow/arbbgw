@@ -229,6 +229,19 @@ async fn main() -> Result<()> {
         info!("[startup] Gate Private WS ready.");
     }
 
+    // ── Pre-init Trading WebSockets (Binance + Gate) ─────────────────────────
+    if exchange_keys.supports("binance") {
+        info!("[startup] Pre-initializing Binance WS trading API...");
+        let _ = engine::exchanges::ws_trader::get_or_init_ws();
+    }
+    if exchange_keys.supports("gate") {
+        info!("[startup] Pre-initializing Gate WS trading API...");
+        let _ = engine::exchanges::ws_gate::get_or_init_gate_ws(
+            exchange_keys.gate_key.clone(),
+            exchange_keys.gate_secret.clone(),
+        );
+    }
+
     // ── Spawn collectors ─────────────────────────────────────────────────────
     engine::startup::spawn_collectors(&prices, &signal, &engine_ctx, &real_settings_cache);
 
