@@ -88,7 +88,7 @@ pub fn start_balance_fetcher(
                 }
             }
 
-            for ex in &active_exchanges {
+            for &ex in &active_exchanges {
                 if !keys.supports(ex) {
                     continue;
                 }
@@ -123,7 +123,7 @@ pub fn start_balance_fetcher(
 
                 match conn.fetch_positions(&http, &keys).await {
                     Ok(pos) => {
-                        let prev_count = e_ctx.positions.get(*ex)
+                        let prev_count = e_ctx.positions.get(ex)
                             .map(|v| v.value().len())
                             .unwrap_or(0);
                         let new_count = pos.len();

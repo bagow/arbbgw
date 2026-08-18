@@ -244,7 +244,7 @@ async fn ws_shard(
     price_map: &PriceMap,
     signal: &UpdateSignal,
     sym_map: Arc<std::collections::HashMap<String, (String, f64)>>,
-    l2_books: &L2OrderbookMap,
+    _l2_books: &L2OrderbookMap,
 ) -> Result<()> {
     let (mut ws, _) =
         connect_async_tls_with_config("wss://fx-ws.gateio.ws/v4/ws/usdt", None, false, None)

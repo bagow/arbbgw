@@ -637,7 +637,7 @@ impl ExchangeConnector for BinanceConnector {
         dry_run: bool,
         leverage: f64,
         target_price: f64,
-        use_ioc: bool,
+        _use_ioc: bool,
         slippage_percent: f64,
         multiplier: f64,
         tick_size: f64,

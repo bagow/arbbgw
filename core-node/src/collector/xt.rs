@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::state::{L2OrderbookMap, PriceMap, TickerData, UpdateSignal};
 
@@ -151,7 +151,6 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
     let mut ping = tokio::time::interval(Duration::from_secs(15));
     let mut msg_count: u64 = 0;
     let mut tick_count: u64 = 0;
-    let mut first_msg_logged = false;
 
     loop {
         tokio::select! {
