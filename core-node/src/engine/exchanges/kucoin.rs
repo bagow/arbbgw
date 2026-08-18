@@ -120,8 +120,35 @@ impl ExchangeConnector for KucoinConnector {
             v["code"]
         );
 
+        let mut v = v;
         if v["code"].as_str() != Some("200000") {
-            return Err(format!("KuCoin API Error: {}", v));
+            let api_code = v["code"].as_str().unwrap_or("");
+            let api_msg = v["msg"].as_str().unwrap_or("");
+            // Handle error 300011: "Order price cannot be higher than 92.01."
+            if api_code == "300011" {
+                if let Some(clamped_str) = api_msg.split("than ").nth(1).and_then(|s| s.trim_end_matches('.').trim().split_whitespace().next()) {
+                    let mut retry_body = body_json.clone();
+                    retry_body["price"] = serde_json::json!(clamped_str);
+                    let retry_body_str = retry_body.to_string();
+                    tracing::warn!("[kucoin] ⚠️ Clamping order price to {} due to 300011 filter for {}", clamped_str, pair);
+                    if let Ok(v_retry) = super::ws_kucoin::send_kucoin_request(
+                        &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
+                        "POST", path, &retry_body_str, api_timeout_ms,
+                    ).await {
+                        if v_retry["code"].as_str() == Some("200000") {
+                            v = v_retry;
+                        } else {
+                            return Err(format!("KuCoin API Error: {}", v_retry));
+                        }
+                    } else {
+                        return Err(format!("KuCoin API Error: {}", v));
+                    }
+                } else {
+                    return Err(format!("KuCoin API Error: {}", v));
+                }
+            } else {
+                return Err(format!("KuCoin API Error: {}", v));
+            }
         }
 
         let order_id = v["data"]["orderId"].as_str().map(|s| s.to_string());
