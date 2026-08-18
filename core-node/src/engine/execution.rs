@@ -1247,8 +1247,23 @@ pub async fn execute_parallel_entry(
     // This mirrors sequential entry's retry logic (L706-753).
     if (a_filled && !b_filled) || (!a_filled && b_filled) {
         if !ctx.dry_run {
-            let profit_margin = (ctx.sig_spread - ctx.break_even_pct).max(0.0);
-            let retry_slip = profit_margin.max(ctx.ioc_slippage_pct).min(3.0);
+            let actual_gross_spread = if a_filled && !b_filled {
+                if ctx.is_a_higher {
+                    if ctx.sig_entry_b > 0.0 { (fill_a - ctx.sig_entry_b) / ctx.sig_entry_b * 100.0 } else { ctx.sig_spread }
+                } else {
+                    if fill_a > 0.0 { (ctx.sig_entry_b - fill_a) / fill_a * 100.0 } else { ctx.sig_spread }
+                }
+            } else {
+                if ctx.is_a_higher {
+                    if fill_b > 0.0 { (ctx.sig_entry_a - fill_b) / fill_b * 100.0 } else { ctx.sig_spread }
+                } else {
+                    if ctx.sig_entry_a > 0.0 { (fill_b - ctx.sig_entry_a) / ctx.sig_entry_a * 100.0 } else { ctx.sig_spread }
+                }
+            };
+
+            let min_guaranteed_profit = 0.10;
+            let max_safe_slip = (actual_gross_spread - ctx.break_even_pct - min_guaranteed_profit).max(0.0);
+            let retry_slip = max_safe_slip.max(ctx.ioc_slippage_pct).min(2.0);
 
             let (retry_conn, retry_is_buy, retry_qty, retry_limit, retry_mult, retry_tick, retry_label) =
                 if a_filled && !b_filled {
@@ -1258,7 +1273,7 @@ pub async fn execute_parallel_entry(
                 };
 
             tracing::warn!(
-                "[real] 🔄 PARALLEL RETRY {} leg {} for {} with aggressive slippage {:.3}% (was {:.3}%)",
+                "[real] 🔄 PARALLEL RETRY {} leg {} for {} expanding IOC slippage to {:.3}% (was {:.3}%, min net profit floor: +0.10%)",
                 if a_filled { "B" } else { "A" }, retry_label, ctx.pair, retry_slip, ctx.ioc_slippage_pct
             );
 

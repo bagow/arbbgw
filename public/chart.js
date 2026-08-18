@@ -320,7 +320,10 @@ async function fetchSnapshot() {
     try {
         const url = `${API_BASE}/api/unified?min=${scannerState.threshold}&max=${scannerState.maxSpread}`;
         const res = await authFetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+            setStatus('ok', `Waiting for server update…`);
+            return;
+        }
         const json = await res.json();
         
         // 1. Snapshot

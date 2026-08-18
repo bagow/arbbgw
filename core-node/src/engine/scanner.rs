@@ -318,8 +318,8 @@ pub fn generate_signals(
 
             // ── L1 DEPTH FILTER (Zero-Latency Fake Liquidity Protection) ──
             // Uses exact websocket Bid/Ask volume received in the same tick as the price.
-            if profile.min_depth_percent > 0.0 {
-                let min_depth_usd = profile.trade_volume * (profile.min_depth_percent / 100.0);
+            {
+                let min_depth_usd = (profile.trade_volume * (profile.min_depth_percent.max(250.0) / 100.0)).max(15.0);
 
                 // bid_size from collectors is ALREADY in TRUE USD (for all exchanges, natively calculated in the collectors).
                 // If A is higher, we SELL A (hit bid) and BUY B (hit ask).

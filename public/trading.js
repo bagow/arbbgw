@@ -179,7 +179,7 @@ async function refreshActiveTab() {
         const profileParam = profile ? `&profile_id=${encodeURIComponent(profile.id)}` : '';
         lastUnified = await apiFetch(`/api/unified${profileParam ? '?' + profileParam.slice(1) : ''}`);
     } catch (e) {
-        console.error('Poll failed:', e);
+        // Quietly fail during transient network glitches / server restarts
         return;
     }
     const profile = profiles.find(p => p.id === activeTabId);
@@ -191,7 +191,6 @@ async function refreshActiveTab() {
     document.querySelectorAll('[id^="sf-resume-"]').forEach(btn => {
         btn.style.display = window._killSwitchActive ? 'inline-flex' : 'none';
     });
-    console.log(`[DEBUG] Received Unified for ${activeTabId}:`, { profile_stats, trades_stats: trades?.stats, kill_switch_active });
 
     // Sync local profile settings from server profiles data
     if (serverProfiles) {
