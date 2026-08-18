@@ -455,6 +455,9 @@ function updateDynamicElements(profile, active, stats, exchanges) {
         statsEl.innerHTML = renderSubNavStats(active, stats, profile.mode);
     }
     
+    // Sync bot status from server profile on every poll
+    updateBotStatusUI(!!profile.is_active, profile.id);
+
     // Update active PnL list counts
     const tCountEl = document.getElementById(`t-count-${profile.id}`);
     if (tCountEl) tCountEl.textContent = active?.length ?? 0;
@@ -498,6 +501,8 @@ function renderHistoryReconcile(exchangesData) {
 function renderSubNavStats(active, stats, mode) {
     const pnl = stats?.total_pnl || 0;
     const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+    const profile = profiles.find(p => p.id === activeTabId);
+    const isRunning = profile ? !!profile.is_active : false;
     return `
         ${active !== null ? `
         <span style="font-size:.78rem;color:var(--text-sub);font-variant-numeric:tabular-nums;">
@@ -505,8 +510,56 @@ function renderSubNavStats(active, stats, mode) {
             ·
             PnL: <strong class="${pnlClass}">${fmtPnL(pnl)}</strong>
         </span>` : ''}
+        <span id="subnav-bot-status" style="display:inline-flex;align-items:center;gap:5px;font-size:.78rem;font-weight:600;padding:4px 10px;border-radius:6px;
+            background:${isRunning ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)'};
+            color:${isRunning ? 'var(--green)' : 'var(--red)'};
+            border:1px solid ${isRunning ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'};
+            transition:all .3s ease;">
+            <span style="width:7px;height:7px;border-radius:50%;background:${isRunning ? 'var(--green)' : 'var(--red)'};${isRunning ? 'animation:pulse-green 2s infinite;' : ''}"></span>
+            ${isRunning ? 'Bot Active' : 'Bot Stopped'}
+        </span>
         <span class="mode-badge mode-badge--real">💰 Real</span>
     `;
+}
+
+/**
+ * Instantly sync all bot status UI elements (Settings badge, Start/Stop button, top-right indicator).
+ * Called from toggleBotPower on click AND from updateDynamicElements on every poll.
+ */
+function updateBotStatusUI(isRunning, profileId) {
+    // 1. Settings footer badge
+    const badge = document.querySelector('.settings-status-badge');
+    if (badge) {
+        badge.style.background = isRunning ? 'var(--green-dim)' : 'var(--red-dim)';
+        badge.style.color = isRunning ? 'var(--green)' : 'var(--red)';
+        badge.style.borderColor = isRunning ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)';
+        const dot = badge.querySelector('span');
+        if (dot) dot.style.background = isRunning ? 'var(--green)' : 'var(--red)';
+        badge.lastChild.textContent = isRunning ? ' BOT ACTIVE' : ' BOT STOPPED';
+    }
+
+    // 2. Start/Stop button
+    const btn = document.getElementById(`sf-power-${profileId}`);
+    if (btn) {
+        btn.textContent = isRunning ? '⏹ Stop Bot' : '▶ Start Bot';
+        btn.style.background = isRunning ? 'var(--red)' : 'var(--green)';
+    }
+
+    // 3. Top-right subnav indicator
+    const subnavStatus = document.getElementById('subnav-bot-status');
+    if (subnavStatus) {
+        subnavStatus.style.background = isRunning ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)';
+        subnavStatus.style.color = isRunning ? 'var(--green)' : 'var(--red)';
+        subnavStatus.style.borderColor = isRunning ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)';
+        const dot = subnavStatus.querySelector('span');
+        if (dot) {
+            dot.style.background = isRunning ? 'var(--green)' : 'var(--red)';
+            dot.style.animation = isRunning ? 'pulse-green 2s infinite' : 'none';
+        }
+        // Update text node (last child)
+        const textNodes = [...subnavStatus.childNodes].filter(n => n.nodeType === 3);
+        if (textNodes.length) textNodes[textNodes.length - 1].textContent = isRunning ? ' Bot Active' : ' Bot Stopped';
+    }
 }
 
 // ─── CEX Tab Logic ────────────────────────────────────────────────────────────
@@ -2177,18 +2230,17 @@ window.toggleBotPower = async function (profileId) {
     const newActive = !previousState;
     profile.is_active = newActive;
 
+    // Instantly update all UI elements
+    updateBotStatusUI(!!newActive, profileId);
+
     // Send ONLY is_active — do not spread the whole profile object
     // to avoid sending stale or unintended field values.
     try {
         await saveProfileSettings(profileId, { is_active: newActive ? 1 : 0 });
-        const btn = document.getElementById(`sf-power-${profileId}`);
-        if (btn) {
-            btn.textContent = newActive ? 'Stop Bot' : 'Start Bot';
-            btn.style.background = newActive ? 'var(--red)' : 'var(--green)';
-        }
         showToast(`Bot ${newActive ? 'Started' : 'Stopped'}`, 'success');
     } catch (e) {
         profile.is_active = previousState; // Revert locally
+        updateBotStatusUI(!!previousState, profileId); // Revert UI
         console.error('Bot toggle failed:', e);
         showToast(`Action failed: ${e.message || 'Check ownership'}`, 'error');
     }
