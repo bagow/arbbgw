@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state)
         .layer(CorsLayer::permissive());
 
-    let addr = "0.0.0.0:4000";
+    let addr = "[::]:4000";
     tracing::info!("Server listening on {}", addr);
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
