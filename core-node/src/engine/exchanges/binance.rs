@@ -1091,61 +1091,31 @@ impl ExchangeConnector for BinanceConnector {
             return Ok(());
         }
 
-        // Early return if banned
-        if check_ip_ban().is_err() { return Ok(()); }
-        use crate::engine::exchanges::ws_trader::send_ws_request;
-        let ts = now_ms();
-        let qs = format!("apiKey={}&leverage={}&symbol={}&timestamp={}", keys.binance_key, lev, pair, ts);
-        let sig = binance_sign(&keys.binance_secret, &qs);
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "id": req_id,
-            "method": "v1/account.setLeverage",
-            "params": {
-                "apiKey": keys.binance_key,
-                "symbol": pair,
-                "leverage": lev,
-                "timestamp": ts,
-                "signature": sig
-            }
-        });
-        match send_ws_request(ws_req).await {
-            Ok(_) => {
-                leverage_cache().insert(cache_key);
-                Ok(())
+        // 2. Ensure leverage via REST (cached per symbol + leverage)
+        let fresh_ts = now_ms();
+        let rest_qs = format!("leverage={}&symbol={}&timestamp={}", lev, pair, fresh_ts);
+        let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
+        let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
+        let url = format!("https://fapi.binance.com/fapi/v1/leverage?{}", full_qs);
+        match _http.post(&url)
+            .header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(std::time::Duration::from_millis(3000))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                let headers = resp.headers().clone();
+                record_binance_response(status.as_u16(), &headers);
+                if status.is_success() {
+                    leverage_cache().insert(cache_key);
+                }
             },
             Err(e) => {
-                tracing::trace!("[binance] WS setLeverage failed ({}). Trying REST...", e);
-                if check_ip_ban().is_err() { return Ok(()); }
-                // Rate-limit REST fallback — same pattern as balance/positions
-                if let Err(reason) = check_rest_fallback_allowed(&REST_FALLBACK_LEVERAGE_MS, "leverage") {
-                    tracing::trace!("[binance] {}", reason);
-                    return Ok(());
-                }
-                let fresh_ts = now_ms();
-                let rest_qs = format!("leverage={}&symbol={}&timestamp={}", lev, pair, fresh_ts);
-                let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
-                let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
-                let url = format!("https://fapi.binance.com/fapi/v1/leverage?{}", full_qs);
-                match _http.post(&url)
-                    .header("X-MBX-APIKEY", &keys.binance_key)
-                    .timeout(std::time::Duration::from_millis(5000))
-                    .send()
-                    .await
-                {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let headers = resp.headers().clone();
-                        record_binance_response(status.as_u16(), &headers);
-                        if status.is_success() {
-                            leverage_cache().insert(cache_key);
-                        }
-                    },
-                    Err(_) => {},
-                }
-                Ok(())
+                tracing::warn!("[binance] Failed to set leverage for {}: {}", pair, e);
             }
         }
+        Ok(())
     }
 
 
