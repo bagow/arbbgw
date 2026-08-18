@@ -10,8 +10,8 @@
  */
 'use strict';
 
-// ─── Backend URL (VPS via Cloudflare Tunnel) ──────────────────────────────────
-const API_BASE = window.API_BASE = 'https://api.arb.bagow.com';
+// ─── Backend URL (same-origin: Worker at arb.bagow.com proxies /api/* to VPS) ─
+const API_BASE = window.API_BASE = '';
 
 async function authFetch(url, options = {}) {
     const creds = localStorage.getItem('cex_auth');

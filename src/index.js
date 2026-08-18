@@ -286,8 +286,6 @@ async function handleRequest(request, env, ctx) {
         }
     }
 
-    // ── PROXY EXTENSIONS /api/* -> vps-api (via Cloudflare Tunnel) ───────────
-    
     // Forward every API request to api.arb.bagow.com which routes via
     // Cloudflare Tunnel (tunnel ID: 89353ffb) to localhost:4000 on VPS.
     
@@ -296,26 +294,39 @@ async function handleRequest(request, env, ctx) {
     targetUrl.port = '';
     targetUrl.protocol = 'https:';
 
-    // Clone request to forward
-    const proxyRequest = new Request(targetUrl.toString(), new Request(request));
-    proxyRequest.headers.set('Host', targetUrl.hostname);
-    
-    // Maintain auth headers naturally
-    try {
-        const response = await fetch(proxyRequest);
-        // Map the proxy's response, inject CORS headers
-        const newResponse = new Response(response.body, response);
-        const corsDirs = corsHeaders();
-        for (const key of Object.keys(corsDirs)) {
-            newResponse.headers.set(key, corsDirs[key]);
+    // Clone request to forward — retry up to 3 times on tunnel 502s
+    const maxRetries = 3;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            const proxyRequest = new Request(targetUrl.toString(), new Request(request));
+            proxyRequest.headers.set('Host', targetUrl.hostname);
+            
+            const response = await fetch(proxyRequest);
+            
+            // Retry on 502 Bad Gateway (tunnel hiccup)
+            if (response.status === 502 && attempt < maxRetries - 1) {
+                await new Promise(r => setTimeout(r, 150 * (attempt + 1)));
+                continue;
+            }
+            
+            // Map the proxy's response, inject CORS headers
+            const newResponse = new Response(response.body, response);
+            const corsDirs = corsHeaders();
+            for (const key of Object.keys(corsDirs)) {
+                newResponse.headers.set(key, corsDirs[key]);
+            }
+            return newResponse;
+        } catch (e) {
+            if (attempt < maxRetries - 1) {
+                await new Promise(r => setTimeout(r, 150 * (attempt + 1)));
+                continue;
+            }
+            return jsonResponse({ 
+                error: 'VPS API Unavailable', 
+                details: 'Could not reach VPS backend. Ensure vps-api is running.',
+                message: e.message 
+            }, 502);
         }
-        return newResponse;
-    } catch (e) {
-        return jsonResponse({ 
-            error: 'VPS API Unavailable', 
-            details: 'Could not reach VPS backend at 140.238.217.190:4000. Ensure vps-api is running.',
-            message: e.message 
-        }, 502);
     }
 }
 
