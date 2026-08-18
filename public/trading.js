@@ -8,8 +8,8 @@
  */
 'use strict';
 
-// ─── Backend URL (set by chart.js, fallback if loaded standalone) ──────────────
-if (!window.API_BASE) window.API_BASE = 'https://api.arb.bagow.com';
+// ─── Backend URL (same-origin: Worker at arb.bagow.com proxies /api/* to VPS) ─
+const API_BASE = window.API_BASE = '';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
