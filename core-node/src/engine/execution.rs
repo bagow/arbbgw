@@ -324,13 +324,6 @@ pub async fn execute_close(
         }
     }
 
-    // If exchange didn't report exit fee inline, calculate from standard taker fee rate
-    if exit_fee <= 1e-9 {
-        let notional_a = q_a * if real_exit_a > 0.0 { real_exit_a } else { exit_price_a };
-        let notional_b = q_b * if real_exit_b > 0.0 { real_exit_b } else { exit_price_b };
-        exit_fee = (notional_a + notional_b) * 0.0005;
-    }
-
     // Compute real PnL from actual fill prices
     let pnl_result = crate::engine::pnl::calculate_gross_pnl(
         is_a_higher, entry_a, entry_b,
@@ -527,18 +520,6 @@ pub async fn trim_asymmetric_legs(
             }
         }
     }
-    // If trimming_fee was not returned by the exchange, estimate from fee rate
-    if trimming_fee <= 1e-9 {
-        let rate_a = e_ctx.fee_rates.get(exa).map(|v| *v).unwrap_or(0.0005);
-        let rate_b = e_ctx.fee_rates.get(exb).map(|v| *v).unwrap_or(0.0005);
-        if delta_a > 1e-12 && fill_a > 0.0 {
-            trimming_fee += delta_a * fill_a * rate_a;
-        }
-        if delta_b > 1e-12 && fill_b > 0.0 {
-            trimming_fee += delta_b * fill_b * rate_b;
-        }
-    }
-
     (trimming_fee, trimming_loss, all_trimmed)
 
 }
@@ -886,13 +867,21 @@ pub async fn execute_sequential_entry(
 
     let mut fee_a_val = fee_a_val;
     let mut fee_b_val = fee_b_val;
-    if fee_a_val <= 1e-9 && phys_a > 1e-12 && fill_a > 0.0 {
-        let rate_a = e_ctx.fee_rates.get(&ctx.exa).map(|v| *v).unwrap_or(0.0005);
-        fee_a_val = phys_a * fill_a * rate_a;
+    if fee_a_val <= 1e-9 && phys_a > 1e-12 && oid_a.is_some() && !ctx.dry_run {
+        let conn_a = crate::engine::exchanges::get_connector(&ctx.exa).unwrap();
+        if let Some(ref oid) = oid_a {
+            if let Ok((_, real_fee, _)) = conn_a.fetch_order(http, keys, &ctx.pair, oid, ctx.mult_a).await {
+                if real_fee > 0.0 { fee_a_val = real_fee; }
+            }
+        }
     }
-    if fee_b_val <= 1e-9 && phys_b > 1e-12 && fill_b > 0.0 {
-        let rate_b = e_ctx.fee_rates.get(&ctx.exb).map(|v| *v).unwrap_or(0.0005);
-        fee_b_val = phys_b * fill_b * rate_b;
+    if fee_b_val <= 1e-9 && phys_b > 1e-12 && oid_b.is_some() && !ctx.dry_run {
+        let conn_b = crate::engine::exchanges::get_connector(&ctx.exb).unwrap();
+        if let Some(ref oid) = oid_b {
+            if let Ok((_, real_fee, _)) = conn_b.fetch_order(http, keys, &ctx.pair, oid, ctx.mult_b).await {
+                if real_fee > 0.0 { fee_b_val = real_fee; }
+            }
+        }
     }
 
     let a_filled = oid_a.is_some() && phys_a > 0.0;
@@ -1260,14 +1249,20 @@ pub async fn execute_parallel_entry(
     let mut fee_a_val = ver_a.fee;
     let mut fee_b_val = ver_b.fee;
 
-    // Fee fallback: if exchange didn't report fee inline, calculate from known fee rate
-    if fee_a_val <= 1e-9 && phys_a > 1e-12 && fill_a > 0.0 {
-        let rate_a = e_ctx.fee_rates.get(&ctx.exa).map(|v| *v).unwrap_or(0.0005);
-        fee_a_val = phys_a * fill_a * rate_a;
+    // Fetch exact real fee directly from exchange if not returned inline
+    if fee_a_val <= 1e-9 && phys_a > 1e-12 && oid_a.is_some() && !ctx.dry_run {
+        if let Some(ref oid) = oid_a {
+            if let Ok((_, real_fee, _)) = conn_a.fetch_order(http, keys, &ctx.pair, oid, ctx.mult_a).await {
+                if real_fee > 0.0 { fee_a_val = real_fee; }
+            }
+        }
     }
-    if fee_b_val <= 1e-9 && phys_b > 1e-12 && fill_b > 0.0 {
-        let rate_b = e_ctx.fee_rates.get(&ctx.exb).map(|v| *v).unwrap_or(0.0005);
-        fee_b_val = phys_b * fill_b * rate_b;
+    if fee_b_val <= 1e-9 && phys_b > 1e-12 && oid_b.is_some() && !ctx.dry_run {
+        if let Some(ref oid) = oid_b {
+            if let Ok((_, real_fee, _)) = conn_b.fetch_order(http, keys, &ctx.pair, oid, ctx.mult_b).await {
+                if real_fee > 0.0 { fee_b_val = real_fee; }
+            }
+        }
     }
 
     // Guard phantom fills

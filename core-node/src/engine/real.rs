@@ -131,8 +131,13 @@ pub fn gate_sign(
 ) -> reqwest::header::HeaderMap {
     use sha2::Digest;
     let ts = now_secs().to_string();
+    let (url_path, query_str) = if let Some(idx) = path.find('?') {
+        (&path[..idx], &path[idx + 1..])
+    } else {
+        (path, "")
+    };
     let body_hash = hex::encode(sha2::Sha512::digest(body.as_bytes()));
-    let sign_str = format!("{}\n{}\n\n{}\n{}", method, path, body_hash, ts);
+    let sign_str = format!("{}\n{}\n{}\n{}\n{}", method, url_path, query_str, body_hash, ts);
     let sig = {
         let mut mac = Hmac::<sha2::Sha512>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(sign_str.as_bytes());

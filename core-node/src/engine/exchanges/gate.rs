@@ -86,19 +86,24 @@ async fn try_gate_ws_order(
 
 async fn fetch_gate_order_fee(http: &Client, keys: &ExchangeKeys, contract: &str, order_id: &str) -> Option<f64> {
     let path = format!("/api/v4/futures/usdt/my_trades?contract={}&order={}", contract, order_id);
-    let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, "");
     let url = format!("https://api.gateio.ws{}", path);
-    if let Ok(resp) = http.get(&url).headers(headers).timeout(Duration::from_millis(2000)).send().await {
-        if let Ok(trades) = resp.json::<Value>().await {
-            if let Some(arr) = trades.as_array() {
-                let mut sum_fee = 0.0;
-                for t in arr {
-                    if let Some(f) = t["fee"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| t["fee"].as_f64()) {
-                        sum_fee += f.abs();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, "");
+        if let Ok(resp) = http.get(&url).headers(headers).timeout(Duration::from_millis(1500)).send().await {
+            if let Ok(trades) = resp.json::<Value>().await {
+                if let Some(arr) = trades.as_array() {
+                    let mut sum_fee = 0.0;
+                    for t in arr {
+                        if let Some(f) = t["fee"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| t["fee"].as_f64()) {
+                            sum_fee += f.abs();
+                        }
                     }
-                }
-                if sum_fee > 0.0 {
-                    return Some(sum_fee);
+                    if sum_fee > 0.0 {
+                        return Some(sum_fee);
+                    }
                 }
             }
         }
@@ -464,7 +469,7 @@ impl ExchangeConnector for GateConnector {
                 order_id, exec_contracts, finish_as
             );
             let trades_path = format!(
-                "/api/v4/futures/usdt/my_trades?order_id={}&contract={}",
+                "/api/v4/futures/usdt/my_trades?order={}&contract={}",
                 order_id, contract
             );
             let headers = crate::engine::real::gate_sign(
@@ -511,7 +516,15 @@ impl ExchangeConnector for GateConnector {
             );
         }
         
-        Ok((final_price, fee.abs(), exec_contracts * multiplier.max(1e-12)))
+        let final_fee = if fee.abs() > 0.0 {
+            fee.abs()
+        } else if let Some(real_fee) = fetch_gate_order_fee(_http, keys, &contract, order_id).await {
+            real_fee
+        } else {
+            0.0
+        };
+
+        Ok((final_price, final_fee, exec_contracts * multiplier.max(1e-12)))
     }
 
     async fn fetch_balances(
