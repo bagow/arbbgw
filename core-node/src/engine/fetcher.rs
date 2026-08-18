@@ -145,12 +145,12 @@ pub fn start_balance_fetcher(
                     record_fetch_success(ex);
                 }
 
-                if !e_ctx.fee_rates.contains_key(ex) {
+                if e_ctx.fee_rates.get(ex).is_none() {
                     if let Ok(fee) = conn.fetch_taker_fee(&http, &keys).await {
                         e_ctx.fee_rates.insert(ex.to_string(), fee);
                     }
                 }
-                if !e_ctx.maker_fee_rates.contains_key(ex) {
+                if e_ctx.maker_fee_rates.get(ex).is_none() {
                     if let Ok(maker_fee) = conn.fetch_maker_fee(&http, &keys).await {
                         e_ctx.maker_fee_rates.insert(ex.to_string(), maker_fee);
                     }

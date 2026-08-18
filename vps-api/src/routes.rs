@@ -1141,7 +1141,7 @@ pub async fn handle_clear_trades(
 pub async fn handle_market_close_all(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(_id): Path<String>,
 ) -> Response {
     if check_basic_auth(&headers, &state).is_none() {
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::state::{L2OrderbookMap, PriceMap, TickerData, UpdateSignal};
 

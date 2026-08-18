@@ -7,9 +7,9 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, UpdateSignal};
+use crate::state::{L2OrderbookMap, PriceMap, UpdateSignal};
 
 /// Max symbols per single WS connection — keeps well under Gate's implicit limit.
 const SYMBOLS_PER_WS: usize = 30;
