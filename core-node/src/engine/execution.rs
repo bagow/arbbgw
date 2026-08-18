@@ -865,24 +865,8 @@ pub async fn execute_sequential_entry(
         fill_b = ctx.sig_entry_b;
     }
 
-    let mut fee_a_val = fee_a_val;
-    let mut fee_b_val = fee_b_val;
-    if fee_a_val <= 1e-9 && phys_a > 1e-12 && oid_a.is_some() && !ctx.dry_run {
-        let conn_a = crate::engine::exchanges::get_connector(&ctx.exa).unwrap();
-        if let Some(ref oid) = oid_a {
-            if let Ok((_, real_fee, _)) = conn_a.fetch_order(http, keys, &ctx.pair, oid, ctx.mult_a).await {
-                if real_fee > 0.0 { fee_a_val = real_fee; }
-            }
-        }
-    }
-    if fee_b_val <= 1e-9 && phys_b > 1e-12 && oid_b.is_some() && !ctx.dry_run {
-        let conn_b = crate::engine::exchanges::get_connector(&ctx.exb).unwrap();
-        if let Some(ref oid) = oid_b {
-            if let Ok((_, real_fee, _)) = conn_b.fetch_order(http, keys, &ctx.pair, oid, ctx.mult_b).await {
-                if real_fee > 0.0 { fee_b_val = real_fee; }
-            }
-        }
-    }
+    let fee_a_val = fee_a_val;
+    let fee_b_val = fee_b_val;
 
     let a_filled = oid_a.is_some() && phys_a > 0.0;
     let b_filled = oid_b.is_some() && phys_b > 0.0;
@@ -1111,13 +1095,51 @@ pub async fn execute_sequential_entry(
     tracing::info!("[real] [EXCHANGE_VERIFIED] ✅ OPEN {} phys={:.6} (Trimming: -${:.4}) A_price={:.6} B_price={:.6} fees={:.4} slip={:.4} actual_sp={:.4}%",
         ctx.pair, matched_phys, trimming_loss, fill_a, fill_b, entry_comm, entry_slip, actual_entry_spread);
 
+    let entry_time_ms = crate::engine::utils::now_ms();
     repo.insert_new_entry(
         ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
-        final_vol_usd, fill_a, fill_b, actual_entry_spread, crate::engine::utils::now_ms(),
+        final_vol_usd, fill_a, fill_b, actual_entry_spread, entry_time_ms,
         ctx.profile_id.clone(), entry_comm, entry_slip,
-        oid_a.unwrap_or_default(), oid_b.unwrap_or_default(),
+        oid_a.clone().unwrap_or_default(), oid_b.clone().unwrap_or_default(),
         contracts_a_db, contracts_b_db, ctx.sig_structural_spread,
     ).await;
+
+    // Asynchronously backfill real exchange fees without blocking hot execution
+    if !ctx.dry_run && ((fee_a_val <= 1e-9 && oid_a.is_some()) || (fee_b_val <= 1e-9 && oid_b.is_some())) {
+        let db_bg = db.clone();
+        let http_bg = http.clone();
+        let keys_bg = keys.clone();
+        let pair_bg = ctx.pair.clone();
+        let exa_bg = ctx.exa.clone();
+        let exb_bg = ctx.exb.clone();
+        let oid_a_bg = oid_a.clone();
+        let oid_b_bg = oid_b.clone();
+        let mult_a_bg = ctx.mult_a;
+        let mult_b_bg = ctx.mult_b;
+        let initial_comm = entry_comm;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            let mut extra_fee = 0.0;
+            if fee_a_val <= 1e-9 {
+                if let (Some(ref oid), Some(conn)) = (&oid_a_bg, crate::engine::exchanges::get_connector(&exa_bg)) {
+                    if let Ok((_, real_fee, _)) = conn.fetch_order(&http_bg, &keys_bg, &pair_bg, oid, mult_a_bg).await {
+                        if real_fee > 0.0 { extra_fee += real_fee; }
+                    }
+                }
+            }
+            if fee_b_val <= 1e-9 {
+                if let (Some(ref oid), Some(conn)) = (&oid_b_bg, crate::engine::exchanges::get_connector(&exb_bg)) {
+                    if let Ok((_, real_fee, _)) = conn.fetch_order(&http_bg, &keys_bg, &pair_bg, oid, mult_b_bg).await {
+                        if real_fee > 0.0 { extra_fee += real_fee; }
+                    }
+                }
+            }
+            if extra_fee > 0.0 {
+                let repo = crate::engine::db::TradeRepository::new(db_bg);
+                repo.update_trade_entry_commission(entry_time_ms, pair_bg, initial_comm + extra_fee).await;
+            }
+        });
+    }
     
     true
 }
@@ -1249,21 +1271,8 @@ pub async fn execute_parallel_entry(
     let mut fee_a_val = ver_a.fee;
     let mut fee_b_val = ver_b.fee;
 
-    // Fetch exact real fee directly from exchange if not returned inline
-    if fee_a_val <= 1e-9 && phys_a > 1e-12 && oid_a.is_some() && !ctx.dry_run {
-        if let Some(ref oid) = oid_a {
-            if let Ok((_, real_fee, _)) = conn_a.fetch_order(http, keys, &ctx.pair, oid, ctx.mult_a).await {
-                if real_fee > 0.0 { fee_a_val = real_fee; }
-            }
-        }
-    }
-    if fee_b_val <= 1e-9 && phys_b > 1e-12 && oid_b.is_some() && !ctx.dry_run {
-        if let Some(ref oid) = oid_b {
-            if let Ok((_, real_fee, _)) = conn_b.fetch_order(http, keys, &ctx.pair, oid, ctx.mult_b).await {
-                if real_fee > 0.0 { fee_b_val = real_fee; }
-            }
-        }
-    }
+    let fee_a_val = fee_a_val;
+    let fee_b_val = fee_b_val;
 
     // Guard phantom fills
     if phys_a > 1e-12 && fill_a <= 0.0 {
@@ -1611,13 +1620,51 @@ pub async fn execute_parallel_entry(
     tracing::info!("[real] [EXCHANGE_VERIFIED] ✅ OPEN {} phys={:.6} (Trimming: -${:.4}) A_price={:.6} B_price={:.6} fees={:.4} slip={:.4} actual_sp={:.4}%",
         ctx.pair, matched_phys, trimming_loss, fill_a, fill_b, entry_comm, entry_slip, actual_entry_spread);
 
+    let entry_time_ms = crate::engine::utils::now_ms();
     repo.insert_new_entry(
         ctx.pair.clone(), ctx.exa.clone(), ctx.exb.clone(), ctx.sig_direction.clone(),
-        final_vol_usd, fill_a, fill_b, actual_entry_spread, crate::engine::utils::now_ms(),
+        final_vol_usd, fill_a, fill_b, actual_entry_spread, entry_time_ms,
         ctx.profile_id.clone(), entry_comm, entry_slip,
-        oid_a.unwrap_or_default(), oid_b.unwrap_or_default(),
+        oid_a.clone().unwrap_or_default(), oid_b.clone().unwrap_or_default(),
         contracts_a_db, contracts_b_db, ctx.sig_structural_spread,
     ).await;
+
+    // Asynchronously backfill real exchange fees without blocking hot execution
+    if !ctx.dry_run && ((fee_a_val <= 1e-9 && oid_a.is_some()) || (fee_b_val <= 1e-9 && oid_b.is_some())) {
+        let db_bg = db.clone();
+        let http_bg = http.clone();
+        let keys_bg = keys.clone();
+        let pair_bg = ctx.pair.clone();
+        let exa_bg = ctx.exa.clone();
+        let exb_bg = ctx.exb.clone();
+        let oid_a_bg = oid_a.clone();
+        let oid_b_bg = oid_b.clone();
+        let mult_a_bg = ctx.mult_a;
+        let mult_b_bg = ctx.mult_b;
+        let initial_comm = entry_comm;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            let mut extra_fee = 0.0;
+            if fee_a_val <= 1e-9 {
+                if let (Some(ref oid), Some(conn)) = (&oid_a_bg, crate::engine::exchanges::get_connector(&exa_bg)) {
+                    if let Ok((_, real_fee, _)) = conn.fetch_order(&http_bg, &keys_bg, &pair_bg, oid, mult_a_bg).await {
+                        if real_fee > 0.0 { extra_fee += real_fee; }
+                    }
+                }
+            }
+            if fee_b_val <= 1e-9 {
+                if let (Some(ref oid), Some(conn)) = (&oid_b_bg, crate::engine::exchanges::get_connector(&exb_bg)) {
+                    if let Ok((_, real_fee, _)) = conn.fetch_order(&http_bg, &keys_bg, &pair_bg, oid, mult_b_bg).await {
+                        if real_fee > 0.0 { extra_fee += real_fee; }
+                    }
+                }
+            }
+            if extra_fee > 0.0 {
+                let repo = crate::engine::db::TradeRepository::new(db_bg);
+                repo.update_trade_entry_commission(entry_time_ms, pair_bg, initial_comm + extra_fee).await;
+            }
+        });
+    }
 
     true
 }

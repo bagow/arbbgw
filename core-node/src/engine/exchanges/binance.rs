@@ -8,13 +8,18 @@ use dashmap::DashSet;
 
 use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
 
-// ── LEVERAGE CACHE ─────────────────────────────────────────────────────────
-// Prevents re-setting leverage on every tick (was ~100 WS reqs per 100ms!).
+// ── LEVERAGE & MARGIN TYPE CACHE ───────────────────────────────────────────
+// Prevents re-setting leverage/margin on every tick (was ~100 WS reqs per 100ms!).
 // Key = "SYMBOL:LEV" e.g. "BEATUSDT:10".
 // Once set successfully, never retry until process restart.
 static LEVERAGE_CACHE: OnceLock<DashSet<String>> = OnceLock::new();
 fn leverage_cache() -> &'static DashSet<String> {
     LEVERAGE_CACHE.get_or_init(|| DashSet::new())
+}
+
+static MARGIN_TYPE_CACHE: OnceLock<DashSet<String>> = OnceLock::new();
+fn margin_type_cache() -> &'static DashSet<String> {
+    MARGIN_TYPE_CACHE.get_or_init(|| DashSet::new())
 }
 
 // ── REST FALLBACK RATE LIMITER ──────────────────────────────────────────────
@@ -1060,6 +1065,26 @@ impl ExchangeConnector for BinanceConnector {
     ) -> Result<(), String> {
         let lev = leverage as i64;
         let cache_key = format!("{}:{}", pair, lev);
+
+        // 1. Ensure CROSSED margin type (cache per symbol)
+        if !margin_type_cache().contains(pair) {
+            let ts_m = now_ms();
+            let qs_m = format!("marginType=CROSSED&symbol={}&timestamp={}", pair, ts_m);
+            let sig_m = binance_sign(&keys.binance_secret, &qs_m);
+            let url_m = format!("https://fapi.binance.com/fapi/v1/marginType?{}&signature={}", qs_m, sig_m);
+            if let Ok(resp) = _http.post(&url_m)
+                .header("X-MBX-APIKEY", &keys.binance_key)
+                .timeout(std::time::Duration::from_millis(3000))
+                .send()
+                .await
+            {
+                let status = resp.status();
+                if status.is_success() || status.as_u16() == 400 {
+                    // Code -4046 ("No need to change margin type.") also comes as HTTP 400
+                    margin_type_cache().insert(pair.to_string());
+                }
+            }
+        }
 
         // Skip if already set this session — prevents 100s of duplicate requests per second
         if leverage_cache().contains(&cache_key) {

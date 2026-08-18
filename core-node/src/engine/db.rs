@@ -66,6 +66,16 @@ impl TradeRepository {
         }).await;
     }
 
+    pub async fn update_trade_entry_commission(&self, entry_time: i64, pair: String, commission_cost: f64) {
+        let _ = self.db.call(move |conn| {
+            conn.execute(
+                "UPDATE trades SET commission_cost = ? WHERE entry_time = ? AND pair = ?",
+                params![commission_cost, entry_time, pair],
+            )?;
+            Ok(())
+        }).await;
+    }
+
     pub async fn append_asymmetric_close(
         &self,
         fp: String,
