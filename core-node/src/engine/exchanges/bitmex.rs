@@ -153,7 +153,7 @@ impl ExchangeConnector for BitmexConnector {
                 "orderQty": phys_amount,
                 "price": raw_price,
                 "ordType": "Limit",
-                "execInst": "ParticipateDoNotInitiate"
+                "timeInForce": "ImmediateOrCancel"
             }).to_string()
         } else {
             serde_json::json!({

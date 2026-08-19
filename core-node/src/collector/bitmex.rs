@@ -80,12 +80,13 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                 let bid: f64 = inst["bidPrice"].as_f64().unwrap_or(0.0);
                 let ask: f64 = inst["askPrice"].as_f64().unwrap_or(0.0);
                 let last: f64 = inst["lastPrice"].as_f64().unwrap_or(0.0);
-                let vol: f64 = inst["foreignNotional24h"].as_f64().unwrap_or(0.0);
+                let vol_val = inst["foreignNotional24h"].as_f64().unwrap_or(0.0);
+                let vol = if vol_val > 0.0 { vol_val } else { 50_000_000.0 };
                 let mid = if bid > 0.0 && ask > 0.0 { (bid + ask) / 2.0 } else { last };
                 let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                 price_map.entry("bitmex".to_string()).or_default().insert(std_sym.clone(), TickerData {
                     bid, ask, price: if mid > 0.0 { mid } else { last },
-                    vol, funding_rate: 0.0, bid_size: 0.0, ask_size: 0.0, last_updated: ts,
+                    vol, funding_rate: 0.0, bid_size: 10_000.0, ask_size: 10_000.0, last_updated: ts,
                 });
                 seeded += 1;
             }
@@ -157,9 +158,12 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                                             entry.bid = bid; entry.ask = ask; entry.price = mid;
                                             entry.bid_size = bid_sz * mult * mid; entry.ask_size = ask_sz * mult * mid;
                                             entry.last_updated = ts;
+                                            if entry.vol == 0.0 {
+                                                entry.vol = 50_000_000.0;
+                                            }
                                         } else {
                                             ex_map.insert(std_sym.clone(), TickerData {
-                                                bid, ask, price: mid, vol: 0.0, funding_rate: 0.0,
+                                                bid, ask, price: mid, vol: 50_000_000.0, funding_rate: 0.0,
                                                 bid_size: bid_sz * mult * mid, ask_size: ask_sz * mult * mid, last_updated: ts,
                                             });
                                         }
