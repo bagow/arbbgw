@@ -76,6 +76,10 @@ pub fn is_position_missing_or_liquidated_error(err: &str) -> bool {
     s.contains("position not found")
         || s.contains("no position")
         || s.contains("no open position")
+        || s.contains("empty position")
+        || s.contains("empty_position")
+        || s.contains("reduce_exceeded")
+        || s.contains("reduce-exceeded")
         || s.contains("position size is zero")
         || s.contains("reduce-only")
         || s.contains("liquidat")
@@ -193,6 +197,7 @@ mod tests {
         assert!(is_position_missing_or_liquidated_error("ORDER LIQUIDATED"));
         assert!(is_position_missing_or_liquidated_error("bitget error 22002"));
         assert!(is_position_missing_or_liquidated_error("code 300009 kucoin"));
+        assert!(is_position_missing_or_liquidated_error("Gate.io close order failed for XDCUSDT: REDUCE_EXCEEDED: empty position"));
         // Не должно глотать ошибки, требующие реальной реакции.
         assert!(!is_position_missing_or_liquidated_error("insufficient balance"));
         assert!(!is_position_missing_or_liquidated_error("rate limit exceeded"));

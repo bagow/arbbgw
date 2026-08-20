@@ -364,6 +364,7 @@ impl ExchangeConnector for GateConnector {
         let path = "/api/v4/futures/usdt/orders";
         let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &rest_body);
         let url = format!("https://api.gateio.ws{}", path);
+        let mut rest_err_detail = String::new();
         if let Ok(resp) = http.post(&url).headers(headers).header("Content-Type", "application/json").body(rest_body).timeout(Duration::from_millis(2000)).send().await {
             if let Ok(v) = resp.json::<Value>().await {
                 if v.get("id").is_some() {
@@ -380,11 +381,18 @@ impl ExchangeConnector for GateConnector {
                     return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee, closed_volume: phys_amount });
                 } else {
                     tracing::error!("[gate] REST close response error for {}: {:?}", pair, v);
+                    let label = v.get("label").and_then(|s| s.as_str()).unwrap_or("");
+                    let msg = v.get("message").and_then(|s| s.as_str()).unwrap_or("");
+                    rest_err_detail = format!("{}: {}", label, msg);
                 }
             }
         }
 
-        Err(format!("Gate.io close order failed for {}", pair))
+        if !rest_err_detail.is_empty() {
+            Err(format!("Gate.io close order failed for {}: {}", pair, rest_err_detail))
+        } else {
+            Err(format!("Gate.io close order failed for {}", pair))
+        }
     }
 
     async fn trim_position(

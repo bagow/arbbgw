@@ -1725,13 +1725,46 @@ pub fn spawn_close_task(
 
         let repo_close = TradeRepository::new(db.clone());
 
+        let mut cr = cr;
         if cr.real_exit_a <= 0.0 || cr.real_exit_b <= 0.0 {
-            tracing::error!("[real] ⚠️ CLOSE FAILED OR UNVERIFIED id={} {}. Error: {}", ctx.trade_id, ctx.pair, cr.error_msg);
-            let keep_closing = cr.leg_a_external || cr.leg_b_external || ctx.reason == "MANUAL";
-            repo_close.record_close_failure(ctx.trade_id, &cr.error_msg, keep_closing).await;
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            closing_guard.remove(&trade_id_for_guard);
-            return;
+            tracing::warn!("[real] ⚠️ CLOSE UNVERIFIED id={} {} (exit_a={:.6}, exit_b={:.6}, err={}). Checking exchange reality...",
+                ctx.trade_id, ctx.pair, cr.real_exit_a, cr.real_exit_b, cr.error_msg);
+
+            let pos_check_a = conn_a.fetch_positions(&http, &keys).await;
+            let pos_check_b = conn_b.fetch_positions(&http, &keys).await;
+
+            let still_a = pos_check_a.as_ref().ok().map(|ps| ps.iter().any(|p| crate::engine::utils::symbols_match(&p.symbol, &ctx.pair) && p.size.abs() > 1e-12)).unwrap_or(true);
+            let still_b = pos_check_b.as_ref().ok().map(|ps| ps.iter().any(|p| crate::engine::utils::symbols_match(&p.symbol, &ctx.pair) && p.size.abs() > 1e-12)).unwrap_or(true);
+
+            if !still_a && cr.real_exit_a <= 0.0 {
+                cr.leg_a_external = true;
+                cr.real_exit_a = ctx.entry_a;
+            }
+            if !still_b && cr.real_exit_b <= 0.0 {
+                cr.leg_b_external = true;
+                cr.real_exit_b = ctx.entry_b;
+            }
+
+            // If positions truly still exist on exchanges where close failed, keep trade OPEN and retry
+            if (still_a && cr.real_exit_a <= 0.0) || (still_b && cr.real_exit_b <= 0.0) {
+                tracing::error!("[real] ⚠️ POSITION STILL OPEN on exchange id={} {} still_a={} still_b={} — keeping trade OPEN for retry/recovery. Error: {}",
+                    ctx.trade_id, ctx.pair, still_a, still_b, cr.error_msg);
+                let keep_closing = cr.leg_a_external || cr.leg_b_external || ctx.reason == "MANUAL" || still_a || still_b;
+                repo_close.record_close_failure(ctx.trade_id, &cr.error_msg, keep_closing).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                closing_guard.remove(&trade_id_for_guard);
+                return;
+            }
+
+            // Recalculate PnL if legs were adjusted from exchange reality
+            let pnl_result = crate::engine::pnl::calculate_gross_pnl(
+                ctx.is_a_higher, ctx.entry_a, ctx.entry_b,
+                cr.real_exit_a, cr.real_exit_b, ctx.trade_coins_a, ctx.trade_coins_b,
+            );
+            cr.pnl_a = pnl_result.pnl_a;
+            cr.pnl_b = pnl_result.pnl_b;
+            tracing::info!("[real] ✅ Reality check resolved close id={} {}: exit_a={:.6} (ext={}), exit_b={:.6} (ext={})",
+                ctx.trade_id, ctx.pair, cr.real_exit_a, cr.leg_a_external, cr.real_exit_b, cr.leg_b_external);
         }
 
         let close_reason_db = if cr.leg_a_external && cr.leg_b_external {
