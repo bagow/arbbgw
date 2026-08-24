@@ -2,7 +2,7 @@ name = "cex-spread-scanner"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 workers_dev = true
-account_id = "7424e9f0c8fe891de4e0210eff786e85"
+account_id = "b928a02bf9c3d05e27bdb65d278cb853"
 
 # Static assets (dashboard frontend)
 [assets]
