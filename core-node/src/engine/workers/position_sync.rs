@@ -428,6 +428,11 @@ async fn reconcile_untracked_positions(
                     sym, ex_short, pos_short.size.abs(), entry_a, ex_long, pos_long.size.abs(), entry_b, vol_usd
                 );
 
+                // Estimate entry commission from known taker fee rates (both legs)
+                let fee_a = e_ctx.fee_rates.get(ex_short.as_str()).map(|v| *v).unwrap_or(0.0006);
+                let fee_b = e_ctx.fee_rates.get(ex_long.as_str()).map(|v| *v).unwrap_or(0.0006);
+                let estimated_entry_comm = vol_usd * (fee_a + fee_b);
+
                 repo.insert_new_entry(
                     sym.clone(),
                     ex_short.clone(),
@@ -439,7 +444,7 @@ async fn reconcile_untracked_positions(
                     spread,
                     now,
                     "real-default".to_string(),
-                    0.0,
+                    estimated_entry_comm,
                     0.0,
                     String::new(),
                     String::new(),

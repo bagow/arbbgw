@@ -254,6 +254,14 @@ async fn main() -> Result<()> {
         engine_ctx.clone(),
     );
 
+    // ── Trade Auditor — async background worker for exact exchange numbers ───
+    // Backfills real commissions, real exit prices, and real funding from exchange trade history.
+    engine::workers::trade_auditor::start_trade_auditor(
+        http.clone(),
+        exchange_keys.clone(),
+        real_db.clone(),
+    );
+
     // ── Pre-warm HTTP connections to exchange APIs ─────────────────────────
     engine::startup::prewarm_http(http.clone());
 

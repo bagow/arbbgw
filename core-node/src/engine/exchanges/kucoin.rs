@@ -4,7 +4,7 @@ use serde_json::json;
 use std::time::Duration;
 use uuid::Uuid;
 
-use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
+use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo, TradeAuditResult};
 use crate::engine::real::{now_ms, ExchangeKeys};
 
 pub struct KucoinConnector;
@@ -700,6 +700,69 @@ impl ExchangeConnector for KucoinConnector {
             }
         }
         Ok(positions)
+    }
+
+    async fn audit_trade(
+        &self,
+        _http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<TradeAuditResult, String> {
+        let norm = pair.replace('_', "").replace('-', "").to_uppercase();
+        let kucoin_sym = if norm == "BTCUSDT" { "XBTUSDTM".to_string() } else if norm.ends_with("USDT") { format!("{}M", norm) } else { norm };
+        let path = format!("/api/v1/fills?symbol={}&startAt={}&endAt={}", kucoin_sym, start_ts, end_ts);
+        let v = super::ws_kucoin::send_kucoin_request(
+            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
+            "GET", &path, "", 10000,
+        ).await?;
+
+        let code = v["code"].as_str().unwrap_or("");
+        if code != "200000" {
+            return Err(format!("KuCoin fills audit error: {}", v));
+        }
+
+        let mut total_fee = 0.0_f64;
+        let mut first_price = None;
+        let mut last_price = None;
+        let mut sum_qty = 0.0_f64;
+
+        let empty_vec = Vec::new();
+        let items = v["data"]["items"].as_array()
+            .or_else(|| v["data"].as_array())
+            .unwrap_or(&empty_vec);
+
+        for fill in items {
+            let fee: f64 = fill["fee"].as_f64()
+                .or_else(|| fill["fee"].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0.0);
+            let price: f64 = fill["matchPrice"].as_f64()
+                .or_else(|| fill["matchPrice"].as_str().and_then(|s| s.parse().ok()))
+                .or_else(|| fill["price"].as_f64())
+                .unwrap_or(0.0);
+            let size: f64 = fill["size"].as_f64()
+                .or_else(|| fill["size"].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0.0);
+
+            total_fee += fee.abs();
+            sum_qty += size;
+            if first_price.is_none() && price > 0.0 {
+                first_price = Some(price);
+            }
+            if price > 0.0 {
+                last_price = Some(price);
+            }
+        }
+
+        Ok(TradeAuditResult {
+            total_fee,
+            entry_price: first_price,
+            exit_price: last_price,
+            realized_pnl: None,
+            funding_cost: None,
+            filled_qty: sum_qty,
+        })
     }
 
 }

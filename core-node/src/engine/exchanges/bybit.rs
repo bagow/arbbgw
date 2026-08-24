@@ -5,7 +5,7 @@ use serde_json::json;
 use serde_json::Value;
 use std::time::Duration;
 
-use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
+use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo, TradeAuditResult};
 use crate::engine::real::{bybit_sign, now_ms, ExchangeKeys};
 
 pub struct BybitConnector;
@@ -665,6 +665,65 @@ impl ExchangeConnector for BybitConnector {
             cursor = next_cursor.to_string();
         }
         Ok(positions)
+    }
+
+    async fn audit_trade(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<TradeAuditResult, String> {
+        let sym = pair.replace('_', "").replace('-', "").to_uppercase();
+        let ts = now_ms();
+        let query = format!("category=linear&symbol={}&startTime={}&endTime={}", sym, start_ts, end_ts);
+        let sig = bybit_sign(&keys.bybit_secret, &keys.bybit_key, ts, &query);
+        let url = format!("https://api.bybit.com/v5/execution/list?{}", query);
+
+        let resp = http.get(&url)
+            .header("X-BAPI-API-KEY", &keys.bybit_key)
+            .header("X-BAPI-TIMESTAMP", ts.to_string())
+            .header("X-BAPI-SIGN", sig)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|e| format!("Bybit execution list HTTP error: {}", e))?;
+
+        let body: Value = resp.json().await.map_err(|e| format!("Bybit execution list JSON error: {}", e))?;
+        let list = body["result"]["list"].as_array();
+        if list.is_none() {
+            return Ok(TradeAuditResult::default());
+        }
+
+        let mut total_fee = 0.0_f64;
+        let mut first_price = None;
+        let mut last_price = None;
+        let mut sum_qty = 0.0_f64;
+
+        for item in list.unwrap() {
+            let fee: f64 = item["execFee"].as_str().and_then(|s| s.parse().ok()).or_else(|| item["execFee"].as_f64()).unwrap_or(0.0);
+            let px: f64 = item["execPrice"].as_str().and_then(|s| s.parse().ok()).or_else(|| item["execPrice"].as_f64()).unwrap_or(0.0);
+            let qty: f64 = item["execQty"].as_str().and_then(|s| s.parse().ok()).or_else(|| item["execQty"].as_f64()).unwrap_or(0.0);
+
+            total_fee += fee.abs();
+            sum_qty += qty;
+            if first_price.is_none() && px > 0.0 {
+                first_price = Some(px);
+            }
+            if px > 0.0 {
+                last_price = Some(px);
+            }
+        }
+
+        Ok(TradeAuditResult {
+            total_fee,
+            entry_price: first_price,
+            exit_price: last_price,
+            realized_pnl: None,
+            funding_cost: None,
+            filled_qty: sum_qty,
+        })
     }
 
 }

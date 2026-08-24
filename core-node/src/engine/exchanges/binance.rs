@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::sync::OnceLock;
 use dashmap::DashSet;
 
-use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
+use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo, TradeAuditResult};
 
 // ── LEVERAGE & MARGIN TYPE CACHE ───────────────────────────────────────────
 // Prevents re-setting leverage/margin on every tick (was ~100 WS reqs per 100ms!).
@@ -1209,6 +1209,99 @@ impl ExchangeConnector for BinanceConnector {
             });
         }
         Ok(positions)
+    }
+
+    async fn audit_trade(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<TradeAuditResult, String> {
+        let ts = now_ms();
+        let sym = pair.replace('_', "").replace('-', "").to_uppercase();
+        let rest_qs = format!("symbol={}&startTime={}&endTime={}&timestamp={}", sym, start_ts, end_ts, ts);
+        let sig = binance_sign(&keys.binance_secret, &rest_qs);
+        let url = format!("https://fapi.binance.com/fapi/v1/userTrades?{}&signature={}", rest_qs, sig);
+
+        let resp = http.get(&url)
+            .header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(std::time::Duration::from_millis(5000))
+            .send()
+            .await
+            .map_err(|e| format!("Binance audit userTrades HTTP error: {}", e))?;
+
+        let body: Value = resp.json().await.map_err(|e| format!("Binance audit userTrades JSON error: {}", e))?;
+        let trades = match body.as_array() {
+            Some(arr) => arr,
+            None => return Ok(TradeAuditResult::default()),
+        };
+
+        if trades.is_empty() {
+            return Ok(TradeAuditResult::default());
+        }
+
+        let mut total_fee = 0.0_f64;
+        let mut total_realized_pnl = 0.0_f64;
+        let mut sum_qty = 0.0_f64;
+        let mut first_price = None;
+        let mut last_price = None;
+
+        for t in trades {
+            let comm: f64 = t["commission"]
+                .as_str().and_then(|s| s.parse().ok())
+                .or_else(|| t["commission"].as_f64())
+                .unwrap_or(0.0);
+            let pnl: f64 = t["realizedPnl"]
+                .as_str().and_then(|s| s.parse().ok())
+                .or_else(|| t["realizedPnl"].as_f64())
+                .unwrap_or(0.0);
+            let price: f64 = t["price"]
+                .as_str().and_then(|s| s.parse().ok())
+                .or_else(|| t["price"].as_f64())
+                .unwrap_or(0.0);
+            let qty: f64 = t["qty"]
+                .as_str().and_then(|s| s.parse().ok())
+                .or_else(|| t["qty"].as_f64())
+                .unwrap_or(0.0);
+
+            total_fee += comm.abs();
+            total_realized_pnl += pnl;
+            sum_qty += qty;
+
+            if first_price.is_none() && price > 0.0 {
+                first_price = Some(price);
+            }
+            if price > 0.0 {
+                last_price = Some(price);
+            }
+        }
+
+        // Also fetch funding income for the symbol in this time range
+        let mut funding_cost = 0.0_f64;
+        let income_qs = format!("symbol={}&incomeType=FUNDING_FEE&startTime={}&endTime={}&timestamp={}", sym, start_ts, end_ts, ts);
+        let income_sig = binance_sign(&keys.binance_secret, &income_qs);
+        let income_url = format!("https://fapi.binance.com/fapi/v1/income?{}&signature={}", income_qs, income_sig);
+        if let Ok(inc_resp) = http.get(&income_url).header("X-MBX-APIKEY", &keys.binance_key).timeout(std::time::Duration::from_millis(4000)).send().await {
+            if let Ok(inc_arr) = inc_resp.json::<Value>().await {
+                if let Some(arr) = inc_arr.as_array() {
+                    for inc in arr {
+                        let amt: f64 = inc["income"].as_str().and_then(|s| s.parse().ok()).or_else(|| inc["income"].as_f64()).unwrap_or(0.0);
+                        funding_cost -= amt; // negative income is cost paid
+                    }
+                }
+            }
+        }
+
+        Ok(TradeAuditResult {
+            total_fee,
+            entry_price: first_price,
+            exit_price: last_price,
+            realized_pnl: Some(total_realized_pnl),
+            funding_cost: Some(funding_cost),
+            filled_qty: sum_qty,
+        })
     }
 
 }

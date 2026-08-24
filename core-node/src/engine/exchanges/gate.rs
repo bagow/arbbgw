@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::time::Duration;
 use uuid::Uuid;
 
-use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo};
+use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo, TradeAuditResult};
 use crate::engine::real::{gate_sign, ExchangeKeys};
 
 pub struct GateConnector;
@@ -826,6 +826,68 @@ impl ExchangeConnector for GateConnector {
             }
             Err(_) => Ok(0.00015) // Default maker fee if WS fails
         }
+    }
+
+    async fn audit_trade(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<TradeAuditResult, String> {
+        let contract = format!("{}_USDT", pair.trim_end_matches("USDT").replace('_', ""));
+        let trades_path = format!(
+            "/api/v4/futures/usdt/my_trades?contract={}&from={}&to={}",
+            contract, (start_ts / 1000).max(0), (end_ts / 1000).max(0)
+        );
+        let headers = gate_sign(
+            &keys.gate_key, &keys.gate_secret, "GET", &trades_path, ""
+        );
+        let url = format!("https://api.gateio.ws{}", trades_path);
+        let resp = http.get(&url)
+            .headers(headers)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|e| format!("Gate my_trades HTTP error: {}", e))?;
+
+        let trades_json: Value = resp.json().await.map_err(|e| format!("Gate my_trades JSON error: {}", e))?;
+        let arr = match trades_json.as_array() {
+            Some(a) => a,
+            None => return Ok(TradeAuditResult::default()),
+        };
+
+        let mut total_fee = 0.0_f64;
+        let mut first_price = None;
+        let mut last_price = None;
+        let mut sum_qty = 0.0_f64;
+
+        for trade in arr {
+            let tp = trade["price"].as_str().and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| trade["price"].as_f64()).unwrap_or(0.0);
+            let ts = trade["size"].as_i64().unwrap_or(0).abs() as f64;
+            let tf = trade["fee"].as_str().and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| trade["fee"].as_f64()).unwrap_or(0.0);
+
+            total_fee += tf.abs();
+            sum_qty += ts;
+            if first_price.is_none() && tp > 0.0 {
+                first_price = Some(tp);
+            }
+            if tp > 0.0 {
+                last_price = Some(tp);
+            }
+        }
+
+        Ok(TradeAuditResult {
+            total_fee,
+            entry_price: first_price,
+            exit_price: last_price,
+            realized_pnl: None,
+            funding_cost: None,
+            filled_qty: sum_qty,
+        })
     }
 
 }

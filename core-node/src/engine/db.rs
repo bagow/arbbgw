@@ -340,4 +340,78 @@ impl TradeRepository {
             Ok(())
         }).await;
     }
+
+    /// Asynchronously backfill and update trade record with exact verified exchange numbers
+    /// (real commissions paid, real exit prices, real realized PnL, real funding).
+    pub async fn apply_trade_audit(
+        &self,
+        id: i64,
+        entry_price_a: Option<f64>,
+        entry_price_b: Option<f64>,
+        exit_price_a: Option<f64>,
+        exit_price_b: Option<f64>,
+        commission_cost: f64,
+        funding_cost: f64,
+        pnl_a: Option<f64>,
+        pnl_b: Option<f64>,
+        gross_pnl: Option<f64>,
+        net_pnl: Option<f64>,
+    ) {
+        let _ = self.db.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT entry_price_a, entry_price_b, exit_price_a, exit_price_b, \
+                 COALESCE(commission_cost, 0.0), COALESCE(funding_cost, 0.0), \
+                 COALESCE(pnl_a, 0.0), COALESCE(pnl_b, 0.0), COALESCE(gross_pnl, 0.0), COALESCE(pnl, 0.0) \
+                 FROM trades WHERE id=?"
+            )?;
+            let current = stmt.query_row(params![id], |r| {
+                Ok((
+                    r.get::<_, f64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, Option<f64>>(2)?,
+                    r.get::<_, Option<f64>>(3)?,
+                    r.get::<_, f64>(4)?,
+                    r.get::<_, f64>(5)?,
+                    r.get::<_, f64>(6)?,
+                    r.get::<_, f64>(7)?,
+                    r.get::<_, f64>(8)?,
+                    r.get::<_, f64>(9)?,
+                ))
+            });
+
+            if let Ok((cur_ent_a, cur_ent_b, cur_ext_a, cur_ext_b, cur_comm, cur_fund, cur_pnl_a, cur_pnl_b, cur_gross, _cur_net)) = current {
+                let new_ent_a = entry_price_a.filter(|&p| p > 0.0).unwrap_or(cur_ent_a);
+                let new_ent_b = entry_price_b.filter(|&p| p > 0.0).unwrap_or(cur_ent_b);
+                let new_ext_a = exit_price_a.filter(|&p| p > 0.0).or(cur_ext_a);
+                let new_ext_b = exit_price_b.filter(|&p| p > 0.0).or(cur_ext_b);
+                let new_comm = if commission_cost > 0.0 { commission_cost } else { cur_comm };
+                let new_fund = if funding_cost != 0.0 { funding_cost } else { cur_fund };
+                let new_pnl_a = pnl_a.unwrap_or(cur_pnl_a);
+                let new_pnl_b = pnl_b.unwrap_or(cur_pnl_b);
+                let new_gross = gross_pnl.unwrap_or_else(|| {
+                    if pnl_a.is_some() || pnl_b.is_some() {
+                        new_pnl_a + new_pnl_b
+                    } else {
+                        cur_gross
+                    }
+                });
+                let new_net = net_pnl.unwrap_or(new_gross - new_comm - new_fund);
+
+                conn.execute(
+                    "UPDATE trades SET \
+                     entry_price_a=?, entry_price_b=?, exit_price_a=?, exit_price_b=?, \
+                     commission_cost=?, funding_cost=?, pnl_a=?, pnl_b=?, \
+                     gross_pnl=?, curr_gross_pnl=?, pnl=? \
+                     WHERE id=?",
+                    params![
+                        new_ent_a, new_ent_b, new_ext_a, new_ext_b,
+                        new_comm, new_fund, new_pnl_a, new_pnl_b,
+                        new_gross, new_gross, new_net,
+                        id
+                    ]
+                )?;
+            }
+            Ok(())
+        }).await;
+    }
 }

@@ -32,6 +32,23 @@ pub struct PositionInfo {
     pub accumulated_funding: f64,
 }
 
+/// Result of querying exchange trade/income history for auditing a completed or recovered trade.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TradeAuditResult {
+    /// Total real commission paid across all fills in the time window (in USD/USDT)
+    pub total_fee: f64,
+    /// Average entry fill price (if detected)
+    pub entry_price: Option<f64>,
+    /// Average exit fill price (if detected)
+    pub exit_price: Option<f64>,
+    /// Realized PnL reported directly by the exchange (if available)
+    pub realized_pnl: Option<f64>,
+    /// Realized funding payments (if available)
+    pub funding_cost: Option<f64>,
+    /// Total filled volume in base asset
+    pub filled_qty: f64,
+}
+
 #[async_trait]
 pub trait ExchangeConnector: Send + Sync {
     /// Returns the exchange name
@@ -168,5 +185,18 @@ pub trait ExchangeConnector: Send + Sync {
     /// Default: falls back to taker fee.
     async fn fetch_maker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
         self.fetch_taker_fee(http, keys).await
+    }
+
+    /// Asynchronously fetch verified exchange history (fills, fees, realized PnL, funding) for a symbol.
+    /// Runs in background after trade completion / reconciliation — does not block fast-path execution.
+    async fn audit_trade(
+        &self,
+        _http: &Client,
+        _keys: &ExchangeKeys,
+        _pair: &str,
+        _start_ts: i64,
+        _end_ts: i64,
+    ) -> Result<TradeAuditResult, String> {
+        Ok(TradeAuditResult::default())
     }
 }
