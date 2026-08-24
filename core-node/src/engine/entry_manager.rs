@@ -496,7 +496,7 @@ pub async fn process_entries(
                     final_entry_a = live_a;
                     final_entry_b = live_b;
                     final_spread = live_spread;
-                    final_slip = (live_spread - break_even_pct - 0.10).max(0.20).min(1.0);
+                    final_slip = (live_spread - break_even_pct - 0.10).max(0.20).min(1.5);
                 }
             }
         }
