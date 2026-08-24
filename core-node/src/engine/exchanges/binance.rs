@@ -522,6 +522,83 @@ impl ExchangeConnector for BinanceConnector {
                 resp_price, resp_side, resp_orig_qty, resp_tif
             );
 
+            // ── WORKAROUND: Binance Futures WS API returns avgPrice=0 for MARKET orders ──
+            // Calculate from cumQuote / executedQty as primary fallback.
+            let mut final_avg_price = avg_price;
+            if final_avg_price <= 0.0 && exec_qty > 0.0 {
+                let cum_quote: f64 = v["cumQuote"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| v["cumQuote"].as_f64())
+                    .unwrap_or(0.0);
+                if cum_quote > 0.0 {
+                    final_avg_price = cum_quote / exec_qty;
+                    tracing::info!(
+                        "[binance] avgPrice=0 fix: cumQuote={:.8}/execQty={:.4} → avgPrice={:.8} for {}",
+                        cum_quote, exec_qty, final_avg_price, pair
+                    );
+                }
+            }
+            // If still 0 after cumQuote fallback but order was FILLED, query REST for real avgPrice.
+            if final_avg_price <= 0.0 && exec_qty > 0.0
+                && (order_status == "FILLED" || order_status == "PARTIALLY_FILLED")
+            {
+                tracing::warn!(
+                    "[binance] avgPrice still 0 for FILLED {} — querying REST order status",
+                    pair
+                );
+                let oid_str = order_id.as_deref().unwrap_or("0");
+                let rest_ts = now_ms();
+                let rest_qs = format!(
+                    "orderId={}&symbol={}&timestamp={}",
+                    oid_str, pair, rest_ts
+                );
+                let rest_sig = binance_sign(&keys.binance_secret, &rest_qs);
+                let rest_url = format!(
+                    "https://fapi.binance.com/fapi/v1/order?{}&signature={}",
+                    rest_qs, rest_sig
+                );
+                match http
+                    .get(&rest_url)
+                    .header("X-MBX-APIKEY", &keys.binance_key)
+                    .timeout(Duration::from_millis(api_timeout_ms.max(2000)))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        let status_code = resp.status().as_u16();
+                        let headers = resp.headers().clone();
+                        record_binance_response(status_code, &headers);
+                        if let Ok(body) = resp.json::<serde_json::Value>().await {
+                            let rest_avg: f64 = body["avgPrice"]
+                                .as_str()
+                                .and_then(|s| s.parse().ok())
+                                .or_else(|| body["avgPrice"].as_f64())
+                                .unwrap_or(0.0);
+                            if rest_avg > 0.0 {
+                                final_avg_price = rest_avg;
+                                tracing::info!(
+                                    "[binance] REST fallback avgPrice={:.8} for {}",
+                                    final_avg_price, pair
+                                );
+                            }
+                            let rest_fee: f64 = body["cumCommission"]
+                                .as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .or_else(|| body["cumCommission"].as_f64())
+                                .unwrap_or(cum_fee)
+                                .abs();
+                            if rest_fee > cum_fee {
+                                return Ok((order_id, final_avg_price, rest_fee));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("[binance] REST order query failed for {}: {}", pair, e);
+                    }
+                }
+            }
+
             // For IOC/EXPIRED: if order was cancelled/expired without fill, return immediately (0ms delay)
             if (order_status == "EXPIRED" || order_status == "CANCELED" || order_status == "REJECTED")
                 && exec_qty < 1e-12
@@ -533,7 +610,7 @@ impl ExchangeConnector for BinanceConnector {
                 return Ok((None, 0.0, 0.0));
             }
 
-            Ok((order_id, avg_price, cum_fee))
+            Ok((order_id, final_avg_price, cum_fee))
         } else {
             tracing::error!("[binance] place_order {} — no orderId in WS response: {:?}", pair, v);
             Err("Binance failed to return orderId".to_string())
