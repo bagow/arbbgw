@@ -50,7 +50,7 @@ pub fn start_position_sync(
                 Ok(list)
             }).await.unwrap_or_default();
 
-            reconcile_untracked_positions(&db, &e_ctx, &open_trades_for_rec).await;
+            reconcile_untracked_positions(&http, &keys, &db, &e_ctx, &open_trades_for_rec).await;
 
             // 2. Load ALL open trades (across all profiles)
             // Load trades WITH last_close_attempt_at for BUG-3 race condition fix
@@ -373,7 +373,11 @@ pub fn start_position_sync(
 /// Automatically detect untracked or orphan arbitrage positions on exchanges
 /// (e.g. after crash, restart, or deploy) and restore them into the active trades DB
 /// so exit_manager can monitor and close them according to trading settings.
+/// If an untracked position is a single-legged unhedged orphan (no opposite leg anywhere),
+/// automatically liquidate it to prevent directional market risk.
 async fn reconcile_untracked_positions(
+    http: &Client,
+    keys: &Arc<ExchangeKeys>,
     db: &Connection,
     e_ctx: &crate::state::EngineContext,
     open_trades: &[Trade],
@@ -452,6 +456,65 @@ async fn reconcile_untracked_positions(
                     pos_long.size.abs(),
                     0.0,
                 ).await;
+                continue;
+            }
+        }
+
+        // UNHEDGED ORPHAN POSITION: No opposite leg exists on another exchange.
+        // Confirm across multiple cycles before liquidating to avoid closing in-flight entries.
+        for (ex, pos) in &pos_list {
+            if pos.size.abs() > 1e-12 {
+                let orphan_key = format!("{}:{}:{}", ex, sym, if pos.size > 0.0 { "LONG" } else { "SHORT" });
+                let now = now_ms();
+                let count = {
+                    let mut entry = e_ctx.orphan_confirm_counter.entry(orphan_key.clone()).or_insert((0, now));
+                    let (c, last_ts) = entry.value_mut();
+                    if now - *last_ts > 30_000 {
+                        *c = 0;
+                    }
+                    *c += 1;
+                    *last_ts = now;
+                    *c
+                };
+
+                if count >= 4 {
+                    // Confirmed unhedged orphan for >= 4 cycles (40 seconds). Auto-close it!
+                    tracing::error!(
+                        "[pos_sync] 🧹 AUTO-LIQUIDATING unhedged orphan position on {}: {} {} size={:.4} (confirmed {}x)",
+                        ex, if pos.size > 0.0 { "LONG" } else { "SHORT" }, sym, pos.size.abs(), count
+                    );
+                    e_ctx.orphan_confirm_counter.remove(&orphan_key);
+
+                    let http_c = http.clone();
+                    let keys_c = keys.clone();
+                    let ex_c = ex.clone();
+                    let sym_c = sym.clone();
+                    let is_buy = pos.size < 0.0;
+                    let qty = pos.size.abs();
+                    let mult = e_ctx.multipliers.get(&format!("{}:{}", ex, sym)).map(|v| *v).unwrap_or(1.0);
+                    let tick = e_ctx.tick_sizes.get(&format!("{}:{}", ex, sym)).map(|v| *v).unwrap_or(0.000001);
+
+                    tokio::spawn(async move {
+                        if let Some(conn) = crate::engine::exchanges::get_connector(&ex_c) {
+                            match conn.close_position(
+                                &http_c, &keys_c, &sym_c, is_buy, qty * mult,
+                                false, 10.0, 0.0, false, 0.0, mult, tick, 5, 50, 5000
+                            ).await {
+                                Ok(rc) => {
+                                    tracing::info!("[pos_sync] ✅ Orphan closed on {}: {} fill={:.6} fee={:.4}", ex_c, sym_c, rc.final_price, rc.total_fee);
+                                }
+                                Err(e) => {
+                                    tracing::error!("[pos_sync] ❌ Orphan close FAILED on {}: {}: {}", ex_c, sym_c, e);
+                                }
+                            }
+                        }
+                    });
+                } else {
+                    tracing::warn!(
+                        "[pos_sync] ⚠️ Unhedged orphan detected on {}: {} {} size={:.4} ({}/4 confirmations)",
+                        ex, if pos.size > 0.0 { "LONG" } else { "SHORT" }, sym, pos.size.abs(), count
+                    );
+                }
             }
         }
     }

@@ -31,21 +31,11 @@ static REST_FALLBACK_FEE_MS: AtomicI64 = AtomicI64::new(0);
 static REST_FALLBACK_LEVERAGE_MS: AtomicI64 = AtomicI64::new(0);
 static WS_CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
 
-const REST_FALLBACK_COOLDOWN_MS: i64 = 60_000; // 1 REST fallback per minute per method
-const WS_DEAD_THRESHOLD: u32 = 3; // After 3 WS failures, assume WS is dead
+const REST_FALLBACK_COOLDOWN_MS: i64 = 3_000; // 1 REST fallback per 3 seconds per method
 
 /// Check if REST fallback is allowed for a given method.
 /// Returns Ok(()) if allowed, Err if on cooldown.
 fn check_rest_fallback_allowed(last_call: &AtomicI64, method: &str) -> Result<(), String> {
-    // If WS has failed too many times, don't even try REST
-    let ws_fails = WS_CONSECUTIVE_FAILURES.load(Ordering::Relaxed);
-    if ws_fails >= WS_DEAD_THRESHOLD {
-        return Err(format!(
-            "Binance WS dead ({} consecutive failures) — skipping REST fallback for {}",
-            ws_fails, method
-        ));
-    }
-
     let now = now_ms() as i64;
     let last = last_call.load(Ordering::Relaxed);
     if now - last < REST_FALLBACK_COOLDOWN_MS {

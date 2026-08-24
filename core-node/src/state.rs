@@ -106,6 +106,8 @@ pub struct EngineContext {
     pub maker_fill_notify: Arc<Notify>,
     /// Per-exchange maker fee rates (e.g. "gate" → 0.00015).
     pub maker_fee_rates: Arc<DashMap<String, f64>>,
+    /// Unhedged orphan position confirmation counter: "exchange:pair:side" → (count, last_seen_ms).
+    pub orphan_confirm_counter: Arc<DashMap<String, (u32, i64)>>,
 }
 
 impl Default for EngineContext {
@@ -140,6 +142,7 @@ impl Default for EngineContext {
             pending_makers: Arc::new(DashMap::new()),
             maker_fill_notify: Arc::new(Notify::new()),
             maker_fee_rates: Arc::new(DashMap::new()),
+            orphan_confirm_counter: Arc::new(DashMap::new()),
         }
     }
 }
