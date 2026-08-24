@@ -259,12 +259,16 @@ impl ExchangeConnector for GateConnector {
     ) -> Result<CloseReceipt, String> {
         let contract = pair.replace("USDT", "_USDT");
         let size = if multiplier == 0.0 {
-            if is_buy { phys_amount.round() as i64 } else { -(phys_amount.round() as i64) }
+            let contracts = phys_amount.round() as i64;
+            let final_contracts = if phys_amount > 1e-12 && contracts == 0 { 1 } else { contracts };
+            if is_buy { final_contracts } else { -final_contracts }
         } else {
+            let contracts = (phys_amount / multiplier.max(1e-12)).round() as i64;
+            let final_contracts = if phys_amount > 1e-12 && contracts == 0 { 1 } else { contracts };
             if is_buy {
-                (phys_amount / multiplier.max(1e-12)).round() as i64
+                final_contracts
             } else {
-                -((phys_amount / multiplier.max(1e-12)).round() as i64)
+                -final_contracts
             }
         };
         if size == 0 { return Err("Amount too small to close".to_string()); }
@@ -319,14 +323,23 @@ impl ExchangeConnector for GateConnector {
             }
         }
 
-        // Fallback: aggressive WS close
+        // Fallback: aggressive WS close with deep slippage price
         tracing::warn!("[gate] fallback close for {} (qty {})", pair, phys_amount);
+        let fb_price_str = if target_price > 0.0 {
+            let fb_px = if is_buy { target_price * 1.05 } else { target_price * 0.95 };
+            let rounded = if is_buy { (fb_px / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8) } else { (fb_px / tick_size.max(1e-8)).floor() * tick_size.max(1e-8) };
+            let mut s = format!("{:.8}", rounded).trim_end_matches('0').to_string();
+            if s.ends_with('.') { s.pop(); }
+            if s.is_empty() { "0".to_string() } else { s }
+        } else {
+            "0".to_string()
+        };
         let fb_req_id = uuid::Uuid::new_v4().to_string();
         let fb_ws = serde_json::json!({
             "request_id": fb_req_id,
             "channel": "futures.order_place",
             "event": "api",
-            "payload": [{"contract": contract, "size": size, "price": "0", "tif": "ioc", "reduce_only": true, "close": false, "text": "t-corenode-fb"}]
+            "payload": [{"contract": contract, "size": size, "price": fb_price_str, "tif": "ioc", "reduce_only": true, "close": false, "text": "t-corenode-fb"}]
         });
         if let Ok(fb_resp) = send_gate_ws_request(fb_ws).await {
             let fb_s = fb_resp["header"]["status"].as_str().unwrap_or("0");
@@ -351,11 +364,11 @@ impl ExchangeConnector for GateConnector {
             }
         }
 
-        // 3rd attempt: Signed REST fallback
+        // 3rd attempt: Signed REST fallback with aggressive price
         let rest_body = json!({
             "contract": contract,
             "size": size,
-            "price": "0",
+            "price": fb_price_str,
             "tif": "ioc",
             "reduce_only": true,
             "close": false,
