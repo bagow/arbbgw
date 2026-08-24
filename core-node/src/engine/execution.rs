@@ -1269,12 +1269,8 @@ pub async fn execute_parallel_entry(
     let mut phys_a = ver_a.phys_volume.unwrap_or(0.0);
     let mut phys_b = ver_b.phys_volume.unwrap_or(0.0);
     let mut fill_a = ver_a.fill_price;
-    let mut fill_b = ver_b.fill_price;
-    let mut fee_a_val = ver_a.fee;
-    let mut fee_b_val = ver_b.fee;
-
-    let fee_a_val = fee_a_val;
-    let fee_b_val = fee_b_val;
+    let fee_a_val = ver_a.fee;
+    let fee_b_val = ver_b.fee;
 
     // Guard phantom fills
     if phys_a > 1e-12 && fill_a <= 0.0 {

@@ -676,14 +676,15 @@ impl ExchangeConnector for BybitConnector {
         end_ts: i64,
     ) -> Result<TradeAuditResult, String> {
         let sym = pair.replace('_', "").replace('-', "").to_uppercase();
-        let ts = now_ms();
+        let ts_str = now_ms().to_string();
         let query = format!("category=linear&symbol={}&startTime={}&endTime={}", sym, start_ts, end_ts);
-        let sig = bybit_sign(&keys.bybit_secret, &keys.bybit_key, ts, &query);
+        let sig = bybit_sign(&keys.bybit_secret, &ts_str, &keys.bybit_key, "5000", &query);
         let url = format!("https://api.bybit.com/v5/execution/list?{}", query);
 
         let resp = http.get(&url)
             .header("X-BAPI-API-KEY", &keys.bybit_key)
-            .header("X-BAPI-TIMESTAMP", ts.to_string())
+            .header("X-BAPI-TIMESTAMP", &ts_str)
+            .header("X-BAPI-RECV-WINDOW", "5000")
             .header("X-BAPI-SIGN", sig)
             .timeout(std::time::Duration::from_secs(5))
             .send()
