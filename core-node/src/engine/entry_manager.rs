@@ -474,6 +474,24 @@ pub async fn process_entries(
                 prices.get(&exa).and_then(|m| m.get(&pair).cloned()),
                 prices.get(&exb).and_then(|m| m.get(&pair).cloned())
             ) {
+                let now_s = (now_ms() / 1000) as u64;
+                let age_a = now_s.saturating_sub(da.last_updated);
+                let age_b = now_s.saturating_sub(db.last_updated);
+                let desync = (da.last_updated as i64 - db.last_updated as i64).abs();
+
+                // Stale or desynced quotes check
+                if (da.last_updated > 0 && age_a > 3)
+                    || (db.last_updated > 0 && age_b > 3)
+                    || (da.last_updated > 0 && db.last_updated > 0 && desync > 2)
+                {
+                    tracing::warn!(
+                        "[real] ⏭️ PRE-FLIGHT ABORT {}: stale/desynced feeds (age_a={}s age_b={}s desync={}s)",
+                        pair, age_a, age_b, desync
+                    );
+                    e_ctx.pair_cooldown.insert(pair.clone(), now_ms() + 3_000);
+                    continue;
+                }
+
                 let live_a = if is_a_higher { da.bid } else { da.ask };
                 let live_b = if is_a_higher { db.ask } else { db.bid };
                 if live_a > 0.0 && live_b > 0.0 {
@@ -501,7 +519,7 @@ pub async fn process_entries(
             }
         }
 
-        // ── IOC / MARKET MODE: existing parallel entry ──────────────────────
+        // ── IOC / MARKET MODE: sequential entry (liquid leg first with 0-risk abort) ──
         let order_type_label_fire = if use_ioc { "IOC" } else { "MKT" };
         info!(
             "[real] FIRE {} [{}] A={} c={} lim={:.6} | B={} c={} lim={:.6} spread={:.4}% be={:.4}% slip={:.3}% dir={} is_a_hi={}",
@@ -546,13 +564,14 @@ pub async fn process_entries(
             break_even_pct,
         };
 
-        if crate::engine::execution::execute_parallel_entry(
+        if crate::engine::execution::execute_sequential_entry(
             ctx,
             http,
             keys,
             db,
             e_ctx,
             ts,
+            true, // sort_by_liquidity: true (liquid leg first with 0-risk IOC abort)
         ).await {
             opened_this_cycle = true;
         }

@@ -102,17 +102,29 @@ pub fn compute_spreads(
                     continue;
                 }
 
+                let max_stale = ts.stale_secs.min(5);
                 if data_a.last_updated > 0
-                    && now_secs.saturating_sub(data_a.last_updated) > ts.stale_secs
+                    && now_secs.saturating_sub(data_a.last_updated) > max_stale
                 {
                     cnt_stale += 1;
                     continue;
                 }
                 if data_b.last_updated > 0
-                    && now_secs.saturating_sub(data_b.last_updated) > ts.stale_secs
+                    && now_secs.saturating_sub(data_b.last_updated) > max_stale
                 {
                     cnt_stale += 1;
                     continue;
+                }
+
+                // ── CROSS-EXCHANGE SYNCHRONIZATION GUARD ──
+                // If ticker feeds differ by >3s in age, they represent different market moments
+                // (e.g. one exchange lagged while price moved -> creates fake phantom spread).
+                if data_a.last_updated > 0 && data_b.last_updated > 0 {
+                    let desync = (data_a.last_updated as i64 - data_b.last_updated as i64).abs();
+                    if desync > 3 {
+                        cnt_stale += 1;
+                        continue;
+                    }
                 }
 
                 if data_a.bid <= 0.0 || data_a.ask <= 0.0 || data_b.bid <= 0.0 || data_b.ask <= 0.0
