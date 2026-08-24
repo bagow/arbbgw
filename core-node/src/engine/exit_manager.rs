@@ -85,6 +85,10 @@ pub async fn process_closes(
         let triggered_stop = settings.trailing_stop_percent > 0.0
             && live_state.exit_spread > (trade.entry_spread + settings.trailing_stop_percent);
 
+        // TIME_STOP: Force close if position has been held too long (prevents 20h+ hanging trades)
+        let time_stop = settings.max_holding_time_ms > 0
+            && _elapsed_ms > settings.max_holding_time_ms as i64;
+
         // ZERO_SPREAD = spread converged to zero or to its natural structural baseline.
         let min_exit_profit_pct = (settings.take_profit_percent * 0.5).max(0.05).min(0.20);
         let target_convergence_spread = trade.structural_spread.max(0.0);
@@ -94,10 +98,11 @@ pub async fn process_closes(
         let mut reason_str = "";
         if manual_close { reason_str = "MANUAL"; }
         else if triggered_stop { reason_str = "STOP"; }
+        else if time_stop { reason_str = "TIME_STOP"; }
         else if triggered_tp { reason_str = "TP"; }
         else if zero_spread { reason_str = "ZERO_SPREAD"; }
 
-        if closing_retry || manual_close || triggered_tp || triggered_stop || zero_spread {
+        if closing_retry || manual_close || triggered_tp || triggered_stop || zero_spread || time_stop {
             if e_ctx.closing_in_flight.get(&trade.id).map(|v| *v).unwrap_or(false) {
                 tracing::debug!("[real] Close already in-flight for id={} {}, skipping", trade.id, trade.pair);
                 continue;

@@ -87,6 +87,8 @@ pub struct TradingProfile {
     pub strategy_type: String,
     #[serde(default)]
     pub hft_timeout_ms: i64,
+    #[serde(default)]
+    pub max_holding_time_ms: i64,
 }
 
 impl Default for TradingProfile {
@@ -118,6 +120,7 @@ impl Default for TradingProfile {
             min_depth_percent: 100.0,
             strategy_type: "ema".to_string(),
             hft_timeout_ms: 10000,
+            max_holding_time_ms: 1_800_000,
         }
     }
 }

@@ -38,7 +38,8 @@ const PROFILE_SELECT: &str = "
         min_structural_deviation,
         min_depth_percent,
         strategy_type,
-        hft_timeout_ms
+        hft_timeout_ms,
+        max_holding_time_ms
     FROM trading_profiles
 ";
 
@@ -141,6 +142,11 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
             .ok()
             .flatten()
             .unwrap_or(10_000),
+        max_holding_time_ms: row
+            .get::<_, Option<i64>>(23)
+            .ok()
+            .flatten()
+            .unwrap_or(1_800_000),
     }
 }
 

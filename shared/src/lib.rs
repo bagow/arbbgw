@@ -162,6 +162,8 @@ pub struct TradingSettings {
     pub strategy_type: String,
     /// Maximum hold time for HFT trades in milliseconds before force-closing
     pub hft_timeout_ms: i64,
+    /// Maximum holding time for ANY trade in milliseconds before force-closing (0 = disabled)
+    pub max_holding_time_ms: i64,
 }
 
 impl Default for TradingSettings {
@@ -189,6 +191,7 @@ impl Default for TradingSettings {
             margin_mode: "cross".to_string(),
             strategy_type: "ema".to_string(),
             hft_timeout_ms: 10_000,
+            max_holding_time_ms: 1_800_000, // 30 minutes
         }
     }
 }

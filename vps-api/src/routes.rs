@@ -1018,7 +1018,7 @@ pub async fn handle_patch_profile(
                         params_vec.push(rusqlite::types::Value::Real(f));
                     }
                 }
-                "max_active_trades" | "collector_interval_secs" | "leverage" | "hft_timeout_ms" => {
+                "max_active_trades" | "collector_interval_secs" | "leverage" | "hft_timeout_ms" | "max_holding_time_ms" => {
                     if let Some(i) = v.as_i64() {
                         sets.push(format!("{}=?", k));
                         params_vec.push(rusqlite::types::Value::Integer(i));

@@ -44,7 +44,8 @@ pub async fn init_db(db: &Connection) -> Result<()> {
                 disabled_exchanges TEXT DEFAULT '[]',
                 min_depth_percent REAL DEFAULT 100.0,
                 strategy_type TEXT DEFAULT 'ema',
-                hft_timeout_ms INTEGER DEFAULT 10000
+                hft_timeout_ms INTEGER DEFAULT 10000,
+                max_holding_time_ms INTEGER DEFAULT 1800000
             );
             ",
         )?;
@@ -58,6 +59,7 @@ pub async fn init_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN min_depth_percent REAL DEFAULT 100.0", []);
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN strategy_type TEXT DEFAULT 'ema'", []);
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN hft_timeout_ms INTEGER DEFAULT 10000", []);
+        let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN max_holding_time_ms INTEGER DEFAULT 1800000", []);
 
         // ── Technical settings table (global engine params) ──
         conn.execute_batch("
@@ -192,8 +194,8 @@ pub async fn init_db(db: &Connection) -> Result<()> {
                  trade_volume,take_profit_percent,trailing_stop_percent,max_active_trades,
                  commission_rate,slippage_percent,funding_rate_8h,min_volume_millions,
                  collector_interval_secs,created_at,updated_at,disabled_exchanges,min_depth_percent,
-                 strategy_type,hft_timeout_ms)
-            VALUES ('real-default','Real Trading','real',0,1.0,10.0,100.0,0.2,0.3,3,0.05,0.05,0.01,10.0,5,?,?,'[]',100.0,'ema',10000)",
+                 strategy_type,hft_timeout_ms,max_holding_time_ms)
+            VALUES ('real-default','Real Trading','real',0,1.0,10.0,100.0,0.2,0.3,3,0.05,0.05,0.01,10.0,5,?,?,'[]',100.0,'ema',10000,1800000)",
             params![now, now],
         )?;
         Ok(())
@@ -322,6 +324,10 @@ pub fn row_to_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradingProfil
             .get::<_, Option<i64>>(25)
             .unwrap_or(Some(10000))
             .unwrap_or(10000),
+        max_holding_time_ms: row
+            .get::<_, Option<i64>>(26)
+            .unwrap_or(Some(1_800_000))
+            .unwrap_or(1_800_000),
     })
 }
 
