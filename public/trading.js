@@ -1803,6 +1803,81 @@ function renderActiveTable(profileId, active) {
     }).join('');
 }
 
+function formatCloseReasonInfo(t) {
+    const r = (t.close_reason || '').trim().toUpperCase();
+    if (r === 'ZERO_SPREAD') {
+        return {
+            label: '🟢 Схождение спреда',
+            badgeClass: 'badge-long',
+            desc: 'Спред между биржами успешно сошелся к нулю (цель арбитража достигнута).'
+        };
+    }
+    if (r === 'TP') {
+        return {
+            label: '🎯 Тейк-профит',
+            badgeClass: 'badge-long',
+            desc: 'Достигнут целевой процент чистой прибыли позиции.'
+        };
+    }
+    if (r === 'TIME_STOP') {
+        return {
+            label: '⏱️ Тайм-стоп',
+            badgeClass: 'badge-neutral',
+            desc: 'Позиция удерживалась более 30 минут — закрыта по времени для высвобождения маржи.'
+        };
+    }
+    if (r === 'STOP') {
+        return {
+            label: '🛑 Стоп-лосс',
+            badgeClass: 'badge-short',
+            desc: 'Спред расширился против позиции выше допустимого порога трейлинг-стопа.'
+        };
+    }
+    if (r === 'ASYMMETRIC_CLOSE') {
+        let failedEx = '';
+        if (t.entry_price_a > 0 && (!t.entry_price_b || t.entry_price_b <= 0)) {
+            failedEx = t.exchange_b;
+        } else if (t.entry_price_b > 0 && (!t.entry_price_a || t.entry_price_a <= 0)) {
+            failedEx = t.exchange_a;
+        }
+        const label = failedEx ? `⚠️ Сброс (${failedEx})` : '⚠️ Сброс асимметрии';
+        const desc = failedEx
+            ? `Ордер на ${failedEx} не исполнился (отменен биржей/истек). Открытая нога немедленно закрыта для защиты депозита.`
+            : 'Одна из ног не заполнилась на бирже. Открытая позиция сброшена для предотвращения риска.';
+        return {
+            label,
+            badgeClass: 'badge-neutral',
+            desc
+        };
+    }
+    if (r === 'EXTERNAL_CLOSE' || r === 'POSITION_SYNC_CLOSE') {
+        return {
+            label: '🔄 Синхронизация биржи',
+            badgeClass: 'badge-neutral',
+            desc: 'Позиция была закрыта на бирже извне или синхронизирована с балансом.'
+        };
+    }
+    if (r === 'LEG_MISSING_ON_CLOSE') {
+        return {
+            label: '⚠️ Рассинхрон закрытия',
+            badgeClass: 'badge-short',
+            desc: 'При попытке закрытия одна из ног не была обнаружена в открытых позициях биржи.'
+        };
+    }
+    if (r === 'MANUAL') {
+        return {
+            label: '👤 Вручную',
+            badgeClass: 'badge-neutral',
+            desc: 'Позиция закрыта пользователем вручную.'
+        };
+    }
+    return {
+        label: t.close_reason || '—',
+        badgeClass: 'badge-neutral',
+        desc: t.close_reason ? `Причина закрытия: ${t.close_reason}` : 'Нет данных о причине закрытия.'
+    };
+}
+
 // ─── History table ────────────────────────────────────────────────────────────
 
 function renderHistoryTable(profileId, history) {
@@ -1823,6 +1898,7 @@ function renderHistoryTable(profileId, history) {
         const isExpanded = expandedRows[profileId]?.has('h_' + t.id);
         const isAHigher = t.direction.startsWith(t.exchange_a);
         const openTimeStr = new Date(t.entry_time).toLocaleString('en-GB', { timeZone: 'Europe/Kyiv' });
+        const reasonInfo = formatCloseReasonInfo(t);
 
         const detailRow = `
             <tr id="detail-${rowKey}" style="display:${isExpanded ? 'table-row' : 'none'}">
@@ -1852,7 +1928,10 @@ function renderHistoryTable(profileId, history) {
                             <div class="td-line"><span>Total Slip:</span> <strong style="color:var(--red)">${fmtCost((t.slippage_cost??0)+(t.exit_slippage_cost??0))}</strong></div>
                             <div class="td-line"><span>Funding:</span> <strong style="color:${(t.funding_cost??0)<=0?'var(--green)':'var(--red)'}">${fmtCost(t.funding_cost)}</strong></div>
                             <div class="td-total-pnl">Net PnL: <span style="color:${pnlColor}">${pnlStr}</span> <span class="text-sub" style="font-weight:400;font-size:.8rem;">(${fmtDuration(t.exit_time-t.entry_time)})</span></div>
-                            <div style="margin-top:12px;">
+                            <div class="td-line" style="margin-top:6px;border-top:1px solid rgba(255,255,255,0.06);padding-top:4px;"><span>Статус:</span> <strong style="font-size:.78rem">${reasonInfo.label}</strong></div>
+                            <div class="td-line" style="color:var(--text-sub);font-size:0.72rem;line-height:1.2;margin-top:2px;"><span>${reasonInfo.desc}</span></div>
+                            ${t.close_error ? `<div class="td-line" style="color:var(--red);font-size:0.72rem;margin-top:2px;"><span>Ошибка:</span> <strong style="word-break:break-all;">${t.close_error}</strong></div>` : ''}
+                            <div style="margin-top:10px;">
                                 <button type="button" class="trading-save-btn outline-btn" style="margin:0;width:100%;padding:8px;font-size:12px;" 
                                     onclick='openModal({pair:"${t.pair}",exchangeA:"${t.exchange_a}",exchangeB:"${t.exchange_b}",priceA:${t.price_a},priceB:${t.price_b},spread:${t.entry_spread},volA:0,volB:0,direction:"${t.direction}",entryTime:${t.entry_time},exitTime:${t.exit_time}})'>📊 View Chart</button>
                             </div>
@@ -1868,7 +1947,7 @@ function renderHistoryTable(profileId, history) {
                 <td>${(t.entry_spread??0).toFixed(2)}% &rarr; ${(t.exit_spread??0).toFixed(2)}%</td>
                 <td><span style="color:var(--text-sub)">${t.direction}</span></td>
                 <td>$${fmtPx(t.volume)}</td>
-                <td><span class="badge ${t.close_reason==='TP'||t.close_reason==='ZERO_SPREAD'?'badge-long':t.close_reason==='STOP'?'badge-short':'badge-neutral'}">${t.close_reason??'—'}</span></td>
+                <td><span class="badge ${reasonInfo.badgeClass}" title="${reasonInfo.desc}">${reasonInfo.label}</span></td>
                 <td style="color:var(--text-sub)">${time}</td>
             </tr>${detailRow}`;
     }).join('');

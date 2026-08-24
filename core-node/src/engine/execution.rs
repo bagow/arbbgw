@@ -1004,11 +1004,11 @@ pub async fn execute_sequential_entry(
     let actual_entry_spread = compute_entry_spread(fill_a, fill_b, ctx.is_a_higher, ctx.sig_spread);
 
     // ── POST-FILL SPREAD GUARD (sequential) ──
-    // Reject only if slippage caused realized spread to drop below break-even fees (negative PnL).
-    let min_acceptable = ctx.break_even_pct;
+    // Reject if slippage caused realized spread to drop below safe margin (break_even + 0.30% min 0.60%).
+    let min_acceptable = (ctx.break_even_pct + 0.30).max(0.60);
     if a_filled && b_filled && actual_entry_spread < min_acceptable && !ctx.dry_run {
         tracing::warn!(
-            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < break_even {:.4}% (signal was {:.4}%). Closing BOTH positions.",
+            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < safe min {:.4}% (signal was {:.4}%). Closing BOTH positions.",
             ctx.pair, actual_entry_spread, min_acceptable, ctx.sig_spread
         );
         let conn_a_trim = crate::engine::exchanges::get_connector(&ctx.exa).unwrap();
@@ -1526,11 +1526,11 @@ pub async fn execute_parallel_entry(
 
     let actual_entry_spread = compute_entry_spread(fill_a, fill_b, ctx.is_a_higher, ctx.sig_spread);
 
-    // ── POST-FILL SPREAD GUARD: reject if slippage ate the profit margin below break-even ──
-    let min_acceptable = ctx.break_even_pct;
+    // ── POST-FILL SPREAD GUARD: reject if slippage ate the profit margin below safe minimum ──
+    let min_acceptable = (ctx.break_even_pct + 0.30).max(0.60);
     if a_filled && b_filled && actual_entry_spread < min_acceptable && !ctx.dry_run {
         tracing::warn!(
-            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < break_even {:.4}% (signal was {:.4}%). Closing BOTH positions.",
+            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < safe min {:.4}% (signal was {:.4}%). Closing BOTH positions.",
             ctx.pair, actual_entry_spread, min_acceptable, ctx.sig_spread
         );
 

@@ -90,10 +90,12 @@ pub async fn process_closes(
             && _elapsed_ms > settings.max_holding_time_ms as i64;
 
         // ZERO_SPREAD = spread converged to zero or to its natural structural baseline.
-        let min_exit_profit_pct = (settings.take_profit_percent * 0.5).max(0.05).min(0.20);
+        // Require meaningful net profit (>= 0.20% net of fees) before triggering convergence exit.
+        let min_exit_profit_pct = (settings.take_profit_percent * 0.30).max(0.20).min(0.50);
         let target_convergence_spread = trade.structural_spread.max(0.0);
         let zero_spread = (live_state.exit_spread <= target_convergence_spread || live_state.exit_spread <= 0.0)
-            && exec_net_pct >= min_exit_profit_pct;
+            && exec_net_pct >= min_exit_profit_pct
+            && exec_net_pnl > 0.0;
 
         let mut reason_str = "";
         if manual_close { reason_str = "MANUAL"; }
