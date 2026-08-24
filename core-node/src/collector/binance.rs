@@ -259,7 +259,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
 
 /// Separate L2 depth stream for top-volume pairs (dynamic, top 200 by volume).
 /// Rebuilds symbol list from price_map on each reconnect — handles REST seed failures.
-async fn run_l2_depth_stream(l2_books: L2OrderbookMap, price_map: crate::state::PriceMap, l2_wanted: std::sync::Arc<dashmap::DashSet<String>>) {
+async fn run_l2_depth_stream(l2_books: L2OrderbookMap, _price_map: crate::state::PriceMap, l2_wanted: std::sync::Arc<dashmap::DashSet<String>>) {
     // Hardcoded fallback covers common pairs when REST/price_map is empty
     const FALLBACK: &[&str] = &[
         "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","DOGEUSDT","XRPUSDT","PEPEUSDT",

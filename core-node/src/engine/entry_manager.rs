@@ -25,7 +25,6 @@ pub async fn process_entries(
     open_pairs: &std::collections::HashSet<String>,
     num_active: i64,
 ) {
-    let repo = TradeRepository::new(db.clone());
     let current_ms = now_ms() as u64;
     // ── Open new real trades ──────────────────────────────────────────────────
     // KEY PRINCIPLE: We do NOT write to DB until BOTH legs are confirmed filled.
@@ -111,9 +110,6 @@ pub async fn process_entries(
 
         let limit_price_a = sig.limit_price_a;
         let limit_price_b = sig.limit_price_b;
-
-        let entry_a = sig.entry_a;
-        let entry_b = sig.entry_b;
 
         let break_even_pct = sig.break_even_pct;
         let is_a_higher = sig.is_a_higher;
@@ -524,10 +520,6 @@ pub async fn process_entries(
             let ts_ms = current_ms as i64;
             async move { snap_repo.insert_snapshot(sp_pair, sp_exa, sp_exb, snapshot, ts_ms).await; }
         });
-
-        let rank_a = crate::engine::utils::liquidity_rank(&exa);
-        let rank_b = crate::engine::utils::liquidity_rank(&exb);
-        let a_is_less_liquid = rank_a >= rank_b;
 
         let ctx = crate::engine::execution::SequentialEntryContext {
             pair: pair.clone(),

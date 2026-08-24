@@ -1085,12 +1085,10 @@ pub async fn execute_sequential_entry(
         let cross_ratio = fill_ratio / sig_ratio;
         if cross_ratio > 5.0 || cross_ratio < 0.2 {
             tracing::error!(
-                "[real] 🚨 CROSS-LEG SANITY FAIL {}: fill_a/fill_b={:.6} sig_a/sig_b={:.6} cross_ratio={:.2}. Aborting trade + trimming.",
+                "[real] 🚨 CROSS-LEG SANITY FAIL {}: fill_a/fill_b={:.6} sig_a/sig_b={:.6} cross_ratio={:.2}. Aborting trade.",
                 ctx.pair, fill_ratio, sig_ratio, cross_ratio
             );
-            // Force matched_phys to 0 so the trade is fully trimmed below
-            phys_a = 0.0;
-            phys_b = 0.0;
+            matched_phys = 0.0;
         }
     }
 
@@ -1608,11 +1606,10 @@ pub async fn execute_parallel_entry(
         let cross_ratio = fill_ratio / sig_ratio;
         if cross_ratio > 5.0 || cross_ratio < 0.2 {
             tracing::error!(
-                "[real] 🚨 CROSS-LEG SANITY FAIL {}: fill_a/fill_b={:.6} sig_a/sig_b={:.6} cross_ratio={:.2}. Aborting trade + trimming.",
+                "[real] 🚨 CROSS-LEG SANITY FAIL {}: fill_a/fill_b={:.6} sig_a/sig_b={:.6} cross_ratio={:.2}. Aborting trade.",
                 ctx.pair, fill_ratio, sig_ratio, cross_ratio
             );
-            phys_a = 0.0;
-            phys_b = 0.0;
+            matched_phys = 0.0;
         }
     }
 
