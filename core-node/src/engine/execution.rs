@@ -859,8 +859,8 @@ pub async fn execute_sequential_entry(
         actual_vol_phys_b = ver_first.phys_volume;
     }
 
-    let mut phys_a = actual_vol_phys_a.unwrap_or(0.0);
-    let mut phys_b = actual_vol_phys_b.unwrap_or(0.0);
+    let phys_a = actual_vol_phys_a.unwrap_or(0.0);
+    let phys_b = actual_vol_phys_b.unwrap_or(0.0);
 
     if ctx.dry_run {
         fill_a = ctx.sig_entry_a;
@@ -883,7 +883,7 @@ pub async fn execute_sequential_entry(
     }
 
     let mv = match_volumes(phys_a, phys_b, ctx.mult_a, ctx.mult_b);
-    let matched_phys = mv.matched_phys;
+    let mut matched_phys = mv.matched_phys;
     let delta_a = mv.delta_a;
     let delta_b = mv.delta_b;
 
@@ -1419,7 +1419,7 @@ pub async fn execute_parallel_entry(
     }
 
     let mv = match_volumes(phys_a, phys_b, ctx.mult_a, ctx.mult_b);
-    let matched_phys = mv.matched_phys;
+    let mut matched_phys = mv.matched_phys;
     let delta_a = mv.delta_a;
     let delta_b = mv.delta_b;
 
