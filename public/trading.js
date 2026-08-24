@@ -8,8 +8,10 @@
  */
 'use strict';
 
-// ─── Backend URL (same-origin: Worker at arb.bagow.com proxies /api/* to VPS) ─
-var API_BASE = window.API_BASE = '';
+// ─── Backend URL (direct VPS via Cloudflare Tunnel: api.arb.bagow.com) ─
+var API_BASE = window.API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+    ? 'http://localhost:4000'
+    : 'https://api.arb.bagow.com';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -208,6 +210,10 @@ async function refreshActiveTab() {
     // Auto-refresh logs if the logs tab is currently active
     if (activeSubTabId === 'logs') {
         window.fetchLogs(true);
+    }
+    // Auto-refresh server metrics if settings tab is currently active
+    if (activeSubTabId === 'settings') {
+        loadServerMetrics();
     }
 
     renderPanel(profile, active, history, stats, exchanges);
@@ -849,7 +855,16 @@ window.closeActivePosition = async function(exchange, symbol, size) {
 function renderSettingsForm(profile) {
     const p = profile;
     const isRunning = !!p.is_active;
+    setTimeout(() => { loadServerMetrics(); }, 0);
     return `
+        <!-- Server Hardware Resources Monitor -->
+        <div id="server-metrics-container" class="server-metrics-wrap">
+            <div style="color:var(--text-sub);font-size:.82rem;text-align:center;padding:6px;">
+                <span class="spinner" style="width:12px;height:12px;display:inline-block;vertical-align:middle;margin-right:6px;"></span>
+                Fetching server resources…
+            </div>
+        </div>
+
         <div style="margin-bottom:20px;display:flex;gap:0;background:var(--bg-row);border-radius:8px;padding:3px;">
             <button class="mt-nav-btn mt-nav-btn--active" id="stab-profile-btn" onclick="switchSettingsTab('profile')"
                 style="flex:1;margin:0;border-radius:6px;padding:10px 0;font-size:.9rem;">Profile Strategy Settings</button>
@@ -1082,6 +1097,106 @@ window.switchSettingsTab = function(tab) {
         techBtn.classList.remove('mt-nav-btn--active');
     }
 };
+
+// ── Server Hardware Metrics ──────────────────────────────────────────────────
+function renderServerMetrics(data) {
+    const el = document.getElementById('server-metrics-container');
+    if (!el || !data) return;
+
+    const cpuPct = data.cpu?.usage_pct ?? 0;
+    const cpuCores = data.cpu?.cores ?? 1;
+    const load1 = (data.cpu?.load_1m ?? 0).toFixed(2);
+    const load5 = (data.cpu?.load_5m ?? 0).toFixed(2);
+    const load15 = (data.cpu?.load_15m ?? 0).toFixed(2);
+
+    const ramTotalGb = ((data.ram?.total_mb ?? 0) / 1024).toFixed(1);
+    const ramUsedGb = ((data.ram?.used_mb ?? 0) / 1024).toFixed(1);
+    const ramFreeGb = ((data.ram?.free_mb ?? 0) / 1024).toFixed(1);
+    const ramPct = data.ram?.used_pct ?? 0;
+
+    const diskTotalGb = (data.disk?.total_gb ?? 0).toFixed(1);
+    const diskUsedGb = (data.disk?.used_gb ?? 0).toFixed(1);
+    const diskFreeGb = (data.disk?.free_gb ?? 0).toFixed(1);
+    const diskPct = data.disk?.used_pct ?? 0;
+
+    const uptimeSecs = data.uptime_secs ?? 0;
+    const days = Math.floor(uptimeSecs / 86400);
+    const hours = Math.floor((uptimeSecs % 86400) / 3600);
+    const mins = Math.floor((uptimeSecs % 3600) / 60);
+    const uptimeStr = `${days > 0 ? days + 'd ' : ''}${hours}h ${mins}m`;
+
+    const getStatusClass = (pct) => pct >= 85 ? 'danger' : pct >= 65 ? 'warning' : 'normal';
+
+    el.innerHTML = `
+        <div class="server-metrics-header">
+            <div class="server-metrics-title">
+                <span>🖥️</span>
+                <span>VPS System Resources</span>
+            </div>
+            <div class="server-metrics-uptime">
+                ⏱️ Uptime: <strong>${uptimeStr}</strong>
+            </div>
+        </div>
+        <div class="server-metrics-grid">
+            <!-- CPU Card -->
+            <div class="server-metric-card">
+                <div class="metric-card-top">
+                    <div class="metric-label">⚡ CPU Load</div>
+                    <div class="metric-value-main" style="color: ${cpuPct >= 85 ? '#ef4444' : cpuPct >= 65 ? '#f59e0b' : '#10b981'};">${cpuPct.toFixed(1)}%</div>
+                </div>
+                <div class="metric-bar-bg">
+                    <div class="metric-bar-fill ${getStatusClass(cpuPct)}" style="width: ${Math.min(100, Math.max(2, cpuPct))}%;"></div>
+                </div>
+                <div class="metric-details">
+                    <span>${cpuCores} Cores · Load: ${load1} / ${load5} / ${load15}</span>
+                </div>
+            </div>
+
+            <!-- RAM Card -->
+            <div class="server-metric-card">
+                <div class="metric-card-top">
+                    <div class="metric-label">🧠 RAM Usage</div>
+                    <div class="metric-value-main" style="color: ${ramPct >= 85 ? '#ef4444' : ramPct >= 65 ? '#f59e0b' : '#10b981'};">${ramPct.toFixed(1)}%</div>
+                </div>
+                <div class="metric-bar-bg">
+                    <div class="metric-bar-fill ${getStatusClass(ramPct)}" style="width: ${Math.min(100, Math.max(2, ramPct))}%;"></div>
+                </div>
+                <div class="metric-details">
+                    <span>${ramUsedGb} / ${ramTotalGb} GB</span>
+                    <span>Free: ${ramFreeGb} GB</span>
+                </div>
+            </div>
+
+            <!-- Disk Card -->
+            <div class="server-metric-card">
+                <div class="metric-card-top">
+                    <div class="metric-label">💾 Disk Space (/)</div>
+                    <div class="metric-value-main" style="color: ${diskPct >= 85 ? '#ef4444' : diskPct >= 65 ? '#f59e0b' : '#10b981'};">${diskPct.toFixed(1)}%</div>
+                </div>
+                <div class="metric-bar-bg">
+                    <div class="metric-bar-fill ${getStatusClass(diskPct)}" style="width: ${Math.min(100, Math.max(2, diskPct))}%;"></div>
+                </div>
+                <div class="metric-details">
+                    <span>${diskUsedGb} / ${diskTotalGb} GB</span>
+                    <span>Free: ${diskFreeGb} GB</span>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+async function loadServerMetrics() {
+    try {
+        const data = await apiFetch('/api/system/metrics');
+        renderServerMetrics(data);
+    } catch (e) {
+        console.warn('Failed to load server metrics:', e);
+        const el = document.getElementById('server-metrics-container');
+        if (el && !el.querySelector('.server-metrics-grid')) {
+            el.innerHTML = `<div style="color:var(--text-sub);font-size:.8rem;padding:6px;text-align:center;">Could not fetch server metrics: ${e.message}</div>`;
+        }
+    }
+}
 
 let _techSettingsData = null;
 
@@ -1826,12 +1941,17 @@ window.showSubTab = function (btn, tab) {
             if (cexWrap) cexWrap.innerHTML = renderCexTab(profile, exchanges);
         } else if (tab === 'dashboard' && stats) {
             renderDashboardCharts(profile.id, stats, exchanges);
+        } else if (tab === 'settings') {
+            loadServerMetrics();
         }
     }
 
     // (Re)init scanner when tab is shown
     if (tab === 'scanner' && window.initScanner) {
         window.initScanner(activeTabId);
+    }
+    if (tab === 'settings') {
+        loadServerMetrics();
     }
     if (tab === 'logs') {
         window.fetchLogs();

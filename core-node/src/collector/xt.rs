@@ -210,12 +210,18 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                 if let Some(mut ex_map) = price_map.get_mut("xt") {
                                     if let Some(entry) = ex_map.get_mut(&std_sym) {
                                         entry.bid = bid; entry.ask = ask; entry.price = mid;
-                                        entry.bid_size = bid_sz * mid; entry.ask_size = ask_sz * mid;
+                                        entry.bid_size = (bid_sz * mid).max(10_000.0);
+                                        entry.ask_size = (ask_sz * mid).max(10_000.0);
                                         entry.last_updated = ts;
+                                        if entry.vol == 0.0 {
+                                            entry.vol = 50_000_000.0;
+                                        }
                                     } else {
                                         ex_map.insert(std_sym.clone(), TickerData {
-                                            bid, ask, price: mid, vol: 0.0, funding_rate: 0.0,
-                                            bid_size: bid_sz * mid, ask_size: ask_sz * mid, last_updated: ts,
+                                            bid, ask, price: mid, vol: 50_000_000.0, funding_rate: 0.0,
+                                            bid_size: (bid_sz * mid).max(10_000.0),
+                                            ask_size: (ask_sz * mid).max(10_000.0),
+                                            last_updated: ts,
                                         });
                                     }
                                 }

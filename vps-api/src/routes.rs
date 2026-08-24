@@ -1772,3 +1772,178 @@ async fn fetch_bitmex_klines(
     Ok(klines)
 }
 
+// ─── GET /api/system/metrics ───
+// Server health: CPU, RAM, Disk, Uptime
+
+struct CpuSample {
+    _timestamp: Instant,
+    work: u64,
+    total: u64,
+}
+
+fn read_cpu_metrics() -> (f64, f64, f64, f64, usize) {
+    static PREV_CPU: OnceLock<Mutex<Option<CpuSample>>> = OnceLock::new();
+    let prev_lock = PREV_CPU.get_or_init(|| Mutex::new(None));
+
+    let stat_content = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+    let mut cores = 0;
+    let mut cpu_line = "";
+
+    for line in stat_content.lines() {
+        if line.starts_with("cpu ") {
+            cpu_line = line;
+        } else if line.starts_with("cpu") {
+            cores += 1;
+        }
+    }
+    if cores == 0 {
+        cores = 1;
+    }
+
+    let mut usage_pct = 0.0;
+    if !cpu_line.is_empty() {
+        let parts: Vec<u64> = cpu_line
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if parts.len() >= 4 {
+            let user = parts[0];
+            let nice = parts[1];
+            let system = parts[2];
+            let idle = parts[3];
+            let iowait = parts.get(4).copied().unwrap_or(0);
+            let irq = parts.get(5).copied().unwrap_or(0);
+            let softirq = parts.get(6).copied().unwrap_or(0);
+            let steal = parts.get(7).copied().unwrap_or(0);
+
+            let work = user + nice + system + irq + softirq + steal;
+            let total = work + idle + iowait;
+
+            if let Ok(mut guard) = prev_lock.lock() {
+                if let Some(prev) = guard.as_ref() {
+                    let diff_work = work.saturating_sub(prev.work);
+                    let diff_total = total.saturating_sub(prev.total);
+                    if diff_total > 0 {
+                        usage_pct = (diff_work as f64 / diff_total as f64) * 100.0;
+                    }
+                }
+                *guard = Some(CpuSample {
+                    _timestamp: Instant::now(),
+                    work,
+                    total,
+                });
+            }
+        }
+    }
+
+    let loadavg_content = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
+    let load_parts: Vec<f64> = loadavg_content
+        .split_whitespace()
+        .take(3)
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    let l1 = load_parts.first().copied().unwrap_or(0.0);
+    let l5 = load_parts.get(1).copied().unwrap_or(0.0);
+    let l15 = load_parts.get(2).copied().unwrap_or(0.0);
+
+    (usage_pct.min(100.0).max(0.0), l1, l5, l15, cores)
+}
+
+fn read_ram_metrics() -> (f64, f64, f64, f64) {
+    let content = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let mut total_kb: f64 = 0.0;
+    let mut avail_kb: f64 = 0.0;
+
+    for line in content.lines() {
+        if line.starts_with("MemTotal:") {
+            total_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        } else if line.starts_with("MemAvailable:") {
+            avail_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        }
+    }
+
+    let total_mb = total_kb / 1024.0;
+    let free_mb = avail_kb / 1024.0;
+    let used_mb = (total_mb - free_mb).max(0.0);
+    let used_pct = if total_mb > 0.0 { (used_mb / total_mb) * 100.0 } else { 0.0 };
+
+    (total_mb, used_mb, free_mb, used_pct)
+}
+
+async fn read_disk_metrics() -> (f64, f64, f64, f64) {
+    let out = tokio::process::Command::new("df")
+        .args(["-k", "/"])
+        .output()
+        .await;
+
+    if let Ok(output) = out {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = stdout.lines().nth(1) {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if tokens.len() >= 4 {
+                let total_kb: f64 = tokens[1].parse().unwrap_or(0.0);
+                let used_kb: f64 = tokens[2].parse().unwrap_or(0.0);
+                let avail_kb: f64 = tokens[3].parse().unwrap_or(0.0);
+
+                let total_gb = total_kb / (1024.0 * 1024.0);
+                let used_gb = used_kb / (1024.0 * 1024.0);
+                let free_gb = avail_kb / (1024.0 * 1024.0);
+                let used_pct = if total_gb > 0.0 { (used_gb / total_gb) * 100.0 } else { 0.0 };
+
+                return (total_gb, used_gb, free_gb, used_pct);
+            }
+        }
+    }
+
+    (0.0, 0.0, 0.0, 0.0)
+}
+
+fn read_uptime() -> u64 {
+    std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+        .map(|f| f as u64)
+        .unwrap_or(0)
+}
+
+pub async fn handle_get_system_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if check_basic_auth(&headers, &state).is_none() {
+        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
+    }
+
+    let (cpu_usage, l1, l5, l15, cores) = read_cpu_metrics();
+    let (ram_total, ram_used, ram_free, ram_pct) = read_ram_metrics();
+    let (disk_total, disk_used, disk_free, disk_pct) = read_disk_metrics().await;
+    let uptime = read_uptime();
+
+    let res = json!({
+        "cpu": {
+            "usage_pct": (cpu_usage * 10.0).round() / 10.0,
+            "load_1m": l1,
+            "load_5m": l5,
+            "load_15m": l15,
+            "cores": cores
+        },
+        "ram": {
+            "total_mb": ram_total.round(),
+            "used_mb": ram_used.round(),
+            "free_mb": ram_free.round(),
+            "used_pct": (ram_pct * 10.0).round() / 10.0
+        },
+        "disk": {
+            "total_gb": (disk_total * 10.0).round() / 10.0,
+            "used_gb": (disk_used * 10.0).round() / 10.0,
+            "free_gb": (disk_free * 10.0).round() / 10.0,
+            "used_pct": (disk_pct * 10.0).round() / 10.0
+        },
+        "uptime_secs": uptime
+    });
+
+    (StatusCode::OK, Json(res)).into_response()
+}
+

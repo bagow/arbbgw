@@ -74,6 +74,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/positions/close",         post(routes::handle_close_exchange_position))
         .route("/api/kill-switch/reset",        post(routes::handle_kill_switch_reset))
         .route("/api/technical-settings",       get(routes::handle_get_technical_settings).patch(routes::handle_patch_technical_settings))
+        .route("/api/trading/settings",         get(routes::handle_get_technical_settings))
+        .route("/api/system/metrics",           get(routes::handle_get_system_metrics))
         .route("/api/klines/:exchange/:pair/:interval/:limit", get(routes::handle_get_klines))
         .route("/api/debug_ps", get({
             let db_clone = state.db.clone();

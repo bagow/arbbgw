@@ -1315,6 +1315,94 @@ input:checked + .slider:before { transform: translateX(18px); }
 .pnl-negative { color: var(--red); animation: glow-red 3s ease-in-out infinite; }
 
 /* ══════════════════════════════════════════════════════════════════════════════
+   SERVER HARDWARE & SYSTEM METRICS
+   ══════════════════════════════════════════════════════════════════════════════ */
+.server-metrics-wrap {
+  margin-bottom: 24px;
+  background: var(--bg-card, #11141d);
+  border: 1px solid var(--border, #1f2430);
+  border-radius: var(--radius-md, 8px);
+  padding: 16px 20px;
+}
+.server-metrics-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.server-metrics-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text, #e2e8f0);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.server-metrics-uptime {
+  font-size: 0.78rem;
+  color: var(--text-sub, #94a3b8);
+  font-family: monospace;
+}
+.server-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+.server-metric-card {
+  background: var(--bg-row-alt, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border-dim, rgba(255, 255, 255, 0.07));
+  border-radius: var(--radius-sm, 6px);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.metric-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.metric-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-sub, #94a3b8);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.metric-value-main {
+  font-size: 1.1rem;
+  font-weight: 700;
+  font-family: monospace;
+  color: var(--text, #f8fafc);
+}
+.metric-bar-bg {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.metric-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease, background-color 0.4s ease;
+}
+.metric-bar-fill.normal { background: #10b981; }
+.metric-bar-fill.warning { background: #f59e0b; }
+.metric-bar-fill.danger { background: #ef4444; }
+
+.metric-details {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.73rem;
+  color: var(--text-sub, #94a3b8);
+  font-family: monospace;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
    RESPONSIVE — Tablet
    ══════════════════════════════════════════════════════════════════════════════ */
 @media (max-width: 900px) {

@@ -10,8 +10,10 @@
  */
 'use strict';
 
-// ─── Backend URL (same-origin: Worker at arb.bagow.com proxies /api/* to VPS) ─
-var API_BASE = window.API_BASE = '';
+// ─── Backend URL (direct VPS via Cloudflare Tunnel: api.arb.bagow.com) ─
+var API_BASE = window.API_BASE = window.API_BASE || ((window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+    ? 'http://localhost:4000'
+    : 'https://api.arb.bagow.com');
 
 async function authFetch(url, options = {}) {
     const creds = localStorage.getItem('cex_auth');
