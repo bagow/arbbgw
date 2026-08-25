@@ -745,19 +745,18 @@ pub async fn execute_sequential_entry(
         }
     };
 
-    // Guaranteed minimum net profit floor: 0.10% net profit after all roundtrip fees & funding
-    let min_guaranteed_profit_pct = 0.10;
+    // Guaranteed minimum net profit floor: 0.05% net profit after all roundtrip fees & funding
+    let min_guaranteed_profit_pct = 0.05;
     let max_safe_slip = (actual_gross_spread - ctx.break_even_pct - min_guaranteed_profit_pct).max(0.0);
 
-    // Initial attempt on second leg: use conservative slippage (50% of available profit margin)
-    let aggressive_slip = (max_safe_slip * 0.50)
+    // Initial attempt on second leg: use full available profit margin above break-even (up to 2.5%)
+    let aggressive_slip = max_safe_slip
         .max(ctx.ioc_slippage_pct)
-        .min(max_safe_slip.max(ctx.ioc_slippage_pct))
-        .min(2.0);
+        .min(2.5);
 
     tracing::info!(
-        "[real] 🎯 Second leg {} slippage: base={:.3}% init={:.3}% max_safe={:.3}% (actual_gross_sp={:.3}% BE={:.3}% min_profit={:.2}%)",
-        second_label, ctx.ioc_slippage_pct, aggressive_slip, max_safe_slip, actual_gross_spread, ctx.break_even_pct, min_guaranteed_profit_pct
+        "[real] 🎯 Second leg {} slippage: base={:.3}% slip={:.3}% (actual_gross_sp={:.3}% BE={:.3}% min_profit={:.2}%)",
+        second_label, ctx.ioc_slippage_pct, aggressive_slip, actual_gross_spread, ctx.break_even_pct, min_guaranteed_profit_pct
     );
 
     let res_second = second_conn.place_order(
@@ -810,22 +809,19 @@ pub async fn execute_sequential_entry(
         "real",
     ).await;
 
-    // ── RETRY SECOND LEG: If IOC didn't fill, retry once expanding IOC slippage ──
-    // Expand IOC range up to max_safe_slip so that at least +0.10% net profit is guaranteed.
+    // ── RETRY SECOND LEG: If IOC didn't fill, execute Market Order to complete hedge ──
+    // Leg 1 is already open and exposed to market risk. We MUST complete the hedge
+    // rather than dumping Leg 1 at a loss. Post-Fill Spread Guard will protect afterwards.
     if ver_second.phys_volume.unwrap_or(0.0) <= 1e-12 && !ctx.dry_run && first_phys > 1e-12 {
-        let retry_slip = max_safe_slip
-            .max(ctx.ioc_slippage_pct)
-            .min(2.0); // Safety cap 2.0%
-
         tracing::warn!(
-            "[real] 🔄 RETRY second leg {} for {} expanding IOC slippage to {:.3}% (was {:.3}%, min net profit floor: +{:.2}%)",
-            second_label, ctx.pair, retry_slip, aggressive_slip, min_guaranteed_profit_pct
+            "[real] 🔄 RETRY second leg {} for {} using Market Order to guarantee hedge completion",
+            second_label, ctx.pair
         );
 
         let res_retry = second_conn.place_order(
             http, keys, &ctx.pair, second_is_buy, final_qty_second, ctx.dry_run,
-            second_limit, second_limit > 0.0,
-            ctx.leverage, second_mult, retry_slip, second_tick, ts.api_timeout_ms
+            0.0, false,
+            ctx.leverage, second_mult, 0.0, second_tick, ts.api_timeout_ms
         ).await;
 
         match res_retry {
