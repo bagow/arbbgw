@@ -282,7 +282,7 @@ impl ExchangeConnector for GateConnector {
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
         let _ = super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
 
-        let price_str = if final_price > 0.0 {
+        let price_str = if target_price > 0.0 {
             let p = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
             format_gate_price(p, tick_size)
         } else {
