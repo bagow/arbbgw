@@ -382,6 +382,40 @@ async fn execute_binance_order(
 }
 
 
+fn format_binance_qty(phys_amount: f64, step_size: f64) -> String {
+    let step = step_size.max(1e-12);
+    let precision = if step < 1.0 {
+        let s = format!("{:.8}", step);
+        let decimals = s.trim_end_matches('0').split('.').nth(1).unwrap_or("").len();
+        decimals.min(8)
+    } else {
+        0
+    };
+    let rounded = (phys_amount / step).round() * step;
+    let mut formatted = format!("{:.*}", precision, rounded);
+    if formatted.ends_with('.') {
+        formatted.pop();
+    }
+    formatted
+}
+
+fn format_binance_price(price: f64, tick_size: f64) -> String {
+    let tick = tick_size.max(1e-12);
+    let precision = if tick < 1.0 {
+        let s = format!("{:.8}", tick);
+        let decimals = s.trim_end_matches('0').split('.').nth(1).unwrap_or("").len();
+        decimals.min(8)
+    } else {
+        0
+    };
+    let rounded = (price / tick).round() * tick;
+    let mut formatted = format!("{:.*}", precision, rounded);
+    if formatted.ends_with('.') {
+        formatted.pop();
+    }
+    formatted
+}
+
 #[async_trait]
 impl ExchangeConnector for BinanceConnector {
     fn name(&self) -> &'static str {
@@ -414,15 +448,7 @@ impl ExchangeConnector for BinanceConnector {
         }
 
         let ts = now_ms();
-        let mut qty_str = format!(
-            "{:.8}",
-            (phys_amount / multiplier.max(1e-12)).round() * multiplier.max(1e-12)
-        )
-        .trim_end_matches('0')
-        .to_string();
-        if qty_str.ends_with('.') {
-            qty_str.pop();
-        }
+        let qty_str = format_binance_qty(phys_amount, multiplier);
         if qty_str.is_empty() || qty_str == "0" {
             return Err(format!(
                 "Calculated quantity is 0 for amt={} mult={}, check multiplier mismatch",
@@ -435,11 +461,7 @@ impl ExchangeConnector for BinanceConnector {
         } else {
             target_price * (1.0 - slippage_percent / 100.0)
         };
-        let rounded_price = if is_buy {
-            (price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
-        } else {
-            (price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
-        };
+        let price_str = format_binance_price(price, tick_size);
 
         let mut params = serde_json::Map::new();
         params.insert("symbol".to_string(), serde_json::json!(pair));
@@ -449,18 +471,9 @@ impl ExchangeConnector for BinanceConnector {
 
         // MARKET vs IOC LIMIT
         if use_ioc && target_price > 0.0 {
-            let mut price_str = format!("{:.8}", rounded_price)
-                .trim_end_matches('0')
-                .to_string();
-            if price_str.ends_with('.') {
-                price_str.pop();
-            }
-            if price_str.is_empty() {
-                price_str = "0".to_string();
-            }
             tracing::info!(
-                "[binance] IOC {} {} target={:.8} slip={}% → raw={:.8} rounded={:.8} sent={}  tick={}",
-                pair, side, target_price, slippage_percent, price, rounded_price, price_str, tick_size
+                "[binance] IOC {} {} target={:.8} slip={}% → sent_price={} tick={}",
+                pair, side, target_price, slippage_percent, price_str, tick_size
             );
             params.insert("type".to_string(), serde_json::json!("LIMIT"));
             params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
@@ -644,22 +657,8 @@ impl ExchangeConnector for BinanceConnector {
             });
         }
 
-        let mut qty_str = if multiplier == 0.0 {
-            format!("{:.8}", phys_amount)
-                .trim_end_matches('0')
-                .to_string()
-        } else {
-            format!(
-                "{:.8}",
-                (phys_amount / multiplier.max(1e-12)).round() * multiplier.max(1e-12)
-            )
-            .trim_end_matches('0')
-            .to_string()
-        };
-        if qty_str.ends_with('.') {
-            qty_str.pop();
-        }
-        if qty_str.is_empty() || phys_amount < 1e-12 {
+        let qty_str = format_binance_qty(phys_amount, multiplier);
+        if qty_str.is_empty() || qty_str == "0" || phys_amount < 1e-12 {
             return Err("Amounts too small to close".to_string());
         }
 
@@ -668,21 +667,7 @@ impl ExchangeConnector for BinanceConnector {
         } else {
             target_price * (1.0 - slippage_percent / 100.0)
         };
-        let rounded_price = if is_buy {
-            (price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
-        } else {
-            (price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
-        };
-
-        let mut price_str = format!("{:.8}", rounded_price)
-            .trim_end_matches('0')
-            .to_string();
-        if price_str.ends_with('.') {
-            price_str.pop();
-        }
-        if price_str.is_empty() {
-            price_str = "0".to_string();
-        }
+        let price_str = format_binance_price(price, tick_size);
 
         let mut params = serde_json::Map::new();
         params.insert("symbol".to_string(), serde_json::json!(pair));

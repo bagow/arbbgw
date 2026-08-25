@@ -415,6 +415,15 @@ async fn reconcile_untracked_positions(
             continue;
         }
 
+        // Prevent recovering positions during pair cooldown or immediate post-close window
+        let now_chk = now_ms();
+        if let Some(cd) = e_ctx.pair_cooldown.get(&sym) {
+            if *cd > now_chk {
+                tracing::debug!("[reconcile] Skipping {} — pair is currently in post-close cooldown", sym);
+                continue;
+            }
+        }
+
         let shorts: Vec<_> = pos_list.iter().filter(|(_, p)| p.size < 0.0).collect();
         let longs: Vec<_> = pos_list.iter().filter(|(_, p)| p.size > 0.0).collect();
 
@@ -426,6 +435,11 @@ async fn reconcile_untracked_positions(
                 let entry_b = if pos_long.entry_price > 0.0 { pos_long.entry_price } else { 1.0 };
                 let spread = ((entry_a - entry_b) / entry_b) * 100.0;
                 let vol_usd = (pos_short.size.abs() * entry_a).max(pos_long.size.abs() * entry_b);
+
+                // Ignore dust or negligible residual balances (< $3)
+                if vol_usd < 3.0 {
+                    continue;
+                }
 
                 tracing::info!(
                     "[reconcile] 🛡️ AUTO-RECOVERED open arbitrage position for {}: {} (SHORT {:.4} @ {:.6}) + {} (LONG {:.4} @ {:.6}) | Vol: ${:.2}. Restoring to active trades DB.",

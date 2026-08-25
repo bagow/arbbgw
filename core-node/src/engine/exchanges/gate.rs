@@ -111,6 +111,23 @@ async fn fetch_gate_order_fee(http: &Client, keys: &ExchangeKeys, contract: &str
     None
 }
 
+fn format_gate_price(price: f64, tick_size: f64) -> String {
+    let tick = tick_size.max(1e-12);
+    let precision = if tick < 1.0 {
+        let s = format!("{:.8}", tick);
+        let decimals = s.trim_end_matches('0').split('.').nth(1).unwrap_or("").len();
+        decimals.min(8)
+    } else {
+        0
+    };
+    let rounded = (price / tick).round() * tick;
+    let mut formatted = format!("{:.*}", precision, rounded);
+    if formatted.ends_with('.') {
+        formatted.pop();
+    }
+    formatted
+}
+
 #[async_trait]
 impl ExchangeConnector for GateConnector {
     fn name(&self) -> &'static str {
@@ -147,28 +164,13 @@ impl ExchangeConnector for GateConnector {
         }
         let _path = "/api/v4/futures/usdt/orders";
 
-        let price = if is_buy {
-            target_price * (1.0 + slippage_percent / 100.0)
-        } else {
-            target_price * (1.0 - slippage_percent / 100.0)
-        };
-        let rounded_price = if is_buy {
-            (price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
-        } else {
-            (price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
-        };
-
-        let mut raw_price_str = format!("{:.8}", rounded_price)
-            .trim_end_matches('0')
-            .to_string();
-        if raw_price_str.ends_with('.') {
-            raw_price_str.pop();
-        }
-        if raw_price_str.is_empty() {
-            raw_price_str = "0".to_string();
-        }
         let price_str = if use_ioc && target_price > 0.0 {
-            raw_price_str
+            let price = if is_buy {
+                target_price * (1.0 + slippage_percent / 100.0)
+            } else {
+                target_price * (1.0 - slippage_percent / 100.0)
+            };
+            format_gate_price(price, tick_size)
         } else {
             "0".to_string()
         };
@@ -280,16 +282,12 @@ impl ExchangeConnector for GateConnector {
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
         let _ = super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
 
-        let mut final_price = target_price;
-        if final_price > 0.0 {
-            final_price = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
-            final_price = if is_buy { (final_price / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8) } else { (final_price / tick_size.max(1e-8)).floor() * tick_size.max(1e-8) };
-        }
-
-        let mut raw_price_str = format!("{:.8}", final_price).trim_end_matches('0').to_string();
-        if raw_price_str.ends_with('.') { raw_price_str.pop(); }
-        if raw_price_str.is_empty() { raw_price_str = "0".to_string(); }
-        let price_str = if final_price <= 0.0 { "0".to_string() } else { raw_price_str };
+        let price_str = if final_price > 0.0 {
+            let p = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+            format_gate_price(p, tick_size)
+        } else {
+            "0".to_string()
+        };
 
         use super::ws_gate::send_gate_ws_request;
         let req_id = uuid::Uuid::new_v4().to_string();

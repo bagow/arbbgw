@@ -1004,12 +1004,12 @@ pub async fn execute_sequential_entry(
     let actual_entry_spread = compute_entry_spread(fill_a, fill_b, ctx.is_a_higher, ctx.sig_spread);
 
     // ── POST-FILL SPREAD GUARD (sequential) ──
-    // Reject if slippage caused realized spread to drop below break-even fees (negative PnL).
-    let min_acceptable = ctx.break_even_pct;
+    // Reject if slippage caused realized spread to drop below safe threshold (break_even + 0.15% or 70% of signal).
+    let min_acceptable = (ctx.sig_spread * 0.70).max(ctx.break_even_pct + 0.15);
     if a_filled && b_filled && actual_entry_spread < min_acceptable && !ctx.dry_run {
         tracing::warn!(
-            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < safe min {:.4}% (signal was {:.4}%). Closing BOTH positions.",
-            ctx.pair, actual_entry_spread, min_acceptable, ctx.sig_spread
+            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < safe min {:.4}% (signal was {:.4}%, BE={:.4}%). Closing BOTH positions immediately.",
+            ctx.pair, actual_entry_spread, min_acceptable, ctx.sig_spread, ctx.break_even_pct
         );
         let conn_a_trim = crate::engine::exchanges::get_connector(&ctx.exa).unwrap();
         let conn_b_trim = crate::engine::exchanges::get_connector(&ctx.exb).unwrap();
@@ -1526,12 +1526,12 @@ pub async fn execute_parallel_entry(
 
     let actual_entry_spread = compute_entry_spread(fill_a, fill_b, ctx.is_a_higher, ctx.sig_spread);
 
-    // ── POST-FILL SPREAD GUARD: reject if slippage ate the profit margin below break-even ──
-    let min_acceptable = ctx.break_even_pct;
+    // ── POST-FILL SPREAD GUARD: reject if slippage ate the profit margin below safe minimum ──
+    let min_acceptable = (ctx.sig_spread * 0.70).max(ctx.break_even_pct + 0.15);
     if a_filled && b_filled && actual_entry_spread < min_acceptable && !ctx.dry_run {
         tracing::warn!(
-            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < safe min {:.4}% (signal was {:.4}%). Closing BOTH positions.",
-            ctx.pair, actual_entry_spread, min_acceptable, ctx.sig_spread
+            "[real] ⛔ POST-FILL SPREAD GUARD: {} realized spread {:.4}% < safe min {:.4}% (signal was {:.4}%, BE={:.4}%). Closing BOTH positions immediately.",
+            ctx.pair, actual_entry_spread, min_acceptable, ctx.sig_spread, ctx.break_even_pct
         );
 
         // Close both legs immediately
