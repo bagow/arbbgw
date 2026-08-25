@@ -667,7 +667,10 @@ pub async fn execute_sequential_entry(
     }
 
     // ── PHASE 2: Second leg (with adaptive slippage) ────────────────────────
-    let final_qty_second = if ctx.dry_run { 
+    // Snap Leg 2 qty to the nearest integer-contract boundary on the second exchange.
+    // Without this, e.g. Binance fills 1.24 coins → Gate rounds to 1 contract (1.0 coins)
+    // → 0.24 coin unhedged delta → ASYMMETRIC_CLOSE.
+    let raw_qty_second = if ctx.dry_run { 
         if a_is_first { ctx.qty_b } else { ctx.qty_a } 
     } else { first_phys };
 
@@ -675,6 +678,55 @@ pub async fn execute_sequential_entry(
         (&conn_ensure_b, ctx.is_a_higher, ctx.limit_price_b, ctx.mult_b, ctx.tick_b)
     } else {
         (&conn_ensure_a, !ctx.is_a_higher, ctx.limit_price_a, ctx.mult_a, ctx.tick_a)
+    };
+
+    let final_qty_second = if second_mult > 1e-6 && !ctx.dry_run {
+        let contracts = (raw_qty_second / second_mult).round();
+        let snapped = contracts * second_mult;
+        if snapped < 1e-12 {
+            tracing::warn!(
+                "[real] ⛔ SNAP-TO-ZERO: {} Leg2 snapped qty={:.6} → 0 (mult={:.6}). Trimming Leg1.",
+                ctx.pair, raw_qty_second, second_mult
+            );
+            // Trim Leg 1 and abort
+            let first_conn_trim = if a_is_first { &conn_ensure_a } else { &conn_ensure_b };
+            let first_trim_buy = if a_is_first { ctx.is_a_higher } else { !ctx.is_a_higher };
+            let first_tick = if a_is_first { ctx.tick_a } else { ctx.tick_b };
+            let first_mult_t = if a_is_first { ctx.mult_a } else { ctx.mult_b };
+            let _ = first_conn_trim.trim_position(
+                http, keys, &ctx.pair, first_trim_buy, first_phys, false,
+                first_mult_t, first_tick, ver_first.fill_price, ts.api_timeout_ms,
+            ).await;
+            e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + 60_000);
+            return true;
+        }
+        let delta_coins = (raw_qty_second - snapped).abs();
+        let delta_pct = delta_coins / raw_qty_second.max(1e-12) * 100.0;
+        if delta_pct > 25.0 {
+            tracing::warn!(
+                "[real] ⛔ SNAP DELTA TOO LARGE: {} raw={:.6} snapped={:.6} delta={:.2}% (mult={:.6}). Trimming Leg1.",
+                ctx.pair, raw_qty_second, snapped, delta_pct, second_mult
+            );
+            let first_conn_trim = if a_is_first { &conn_ensure_a } else { &conn_ensure_b };
+            let first_trim_buy = if a_is_first { ctx.is_a_higher } else { !ctx.is_a_higher };
+            let first_tick = if a_is_first { ctx.tick_a } else { ctx.tick_b };
+            let first_mult_t = if a_is_first { ctx.mult_a } else { ctx.mult_b };
+            let _ = first_conn_trim.trim_position(
+                http, keys, &ctx.pair, first_trim_buy, first_phys, false,
+                first_mult_t, first_tick, ver_first.fill_price, ts.api_timeout_ms,
+            ).await;
+            e_ctx.pair_cooldown.insert(ctx.pair.clone(), now + 60_000);
+            return true;
+        }
+        if delta_pct > 0.1 {
+            tracing::info!(
+                "[real] 📐 SNAP {} Leg2 qty: {:.6} → {:.6} (delta={:.2}%, mult={:.6})",
+                ctx.pair, raw_qty_second, snapped, delta_pct, second_mult
+            );
+        }
+        snapped
+    } else {
+        raw_qty_second
     };
 
     // Calculate actual gross spread achieved from the verified fill price of Leg 1 vs expected Leg 2 price
