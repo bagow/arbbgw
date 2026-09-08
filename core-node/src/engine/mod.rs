@@ -18,3 +18,5 @@ pub mod settlement;
 pub mod account_monitor;
 
 pub mod book;
+
+pub mod funding_guard;

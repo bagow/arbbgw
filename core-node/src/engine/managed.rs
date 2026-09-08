@@ -163,6 +163,7 @@ async fn submit_using(
     o: &JournalOrder,
     transport: &dyn OrderTransport,
 ) -> anyhow::Result<OrderObservation> {
+    o.request.validate().map_err(anyhow::Error::msg)?;
     j.prepare(o).await?;
     let mut known = o.observation.clone();
     match transport.submit(&o.request).await {
@@ -315,6 +316,17 @@ async fn enter(
         if la.is_err() || lb.is_err() {
             continue;
         }
+        let (fa, fb) = tokio::join!(
+            super::funding_guard::next(http, &s.exchange_a, &s.pair),
+            super::funding_guard::next(http, &s.exchange_b, &s.pair)
+        );
+        let funding_deadline_ms = match (fa, fb) {
+            (Ok(a), Ok(b)) => super::funding_guard::deadline(a, b, now_ms()),
+            _ => None,
+        };
+        if funding_deadline_ms.is_none() {
+            continue;
+        }
         let (pa, pb) = match (
             executable(
                 prices,
@@ -341,7 +353,9 @@ async fn enter(
         } else {
             (pb - pa) / pa * 100.0
         };
-        let required = s.structural_spread + s.break_even_pct + p.min_entry_spread.max(0.05);
+        let required = s.structural_spread
+            + s.break_even_pct
+            + p.min_entry_spread.max(p.take_profit_percent).max(0.05);
         let budget = (gross - required).max(0.0);
         if budget <= 0.0 || gross - s.structural_spread > p.max_entry_spread {
             continue;
@@ -352,6 +366,7 @@ async fn enter(
         }
         let id = match j
             .reserve(Plan {
+                funding_deadline_ms,
                 signal: s.clone(),
                 settings: p.clone(),
             })
@@ -368,6 +383,7 @@ async fn enter(
             reason: None,
             created_ms: now_ms(),
             plan: Plan {
+                funding_deadline_ms,
                 signal: s.clone(),
                 settings: p,
             },
@@ -531,6 +547,11 @@ async fn manage(
     let manual = j.close_requested(t.id).await?;
     let closing = t.state != "OPEN" || manual;
     let elapsed = now_ms() - t.created_ms;
+    let funding_due = t
+        .plan
+        .funding_deadline_ms
+        .map(|d| now_ms() >= d)
+        .unwrap_or(true);
     let timed =
         t.plan.settings.max_holding_time_ms > 0 && elapsed > t.plan.settings.max_holding_time_ms;
     let (pxa, pxb) = (
@@ -585,7 +606,7 @@ async fn manage(
         stop = t.plan.settings.trailing_stop_percent > 0.0
             && percent <= peak - t.plan.settings.trailing_stop_percent;
     }
-    if !closing && !timed && !profit && !stop {
+    if !closing && !timed && !funding_due && !profit && !stop {
         return Ok(());
     }
     let reason = if manual {
@@ -595,6 +616,8 @@ async fn manage(
             .as_deref()
             .filter(|s| !s.is_empty())
             .unwrap_or("INTERRUPTED_ENTRY")
+    } else if funding_due {
+        "FUNDING_BOUNDARY"
     } else if timed {
         "TIME_STOP"
     } else if stop {
@@ -604,7 +627,7 @@ async fn manage(
     };
     j.state(t.id, "CLOSING", reason).await?;
     // Exit starts only once. Partial closes remain journaled and only residuals are submitted.
-    let emergency = closing || timed || stop;
+    let emergency = closing || timed || funding_due || stop;
     for (leg, qty, px) in [("A", a.remaining(), pxa), ("B", b.remaining(), pxb)] {
         let a_leg = leg == "A";
         let observed = if now_ms() - t.created_ms >= 10_000 {

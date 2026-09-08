@@ -24,6 +24,10 @@ on:
         type: boolean
         default: false
 
+concurrency:
+  group: arb-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   BUILD_SHA: ${{ github.sha }}
 
@@ -47,6 +51,10 @@ jobs:
         run: |
           set -o pipefail
           cargo test --workspace 2>&1 | tee ci-test.log
+      - name: Release build
+        run: |
+          set -o pipefail
+          cargo build --release -p core-node -p vps-api 2>&1 | tee ci-release.log
       - name: Preserve check logs
         if: always()
         uses: actions/upload-artifact@v4

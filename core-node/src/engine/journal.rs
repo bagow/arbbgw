@@ -6,6 +6,8 @@ use tokio_rusqlite::{params, Connection};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Plan {
+    #[serde(default)]
+    pub funding_deadline_ms: Option<i64>,
     pub signal: TradeSignal,
     pub settings: TradingSettings,
 }
@@ -368,6 +370,7 @@ mod tests {
     use crate::engine::orders::OrderState;
     fn plan() -> Plan {
         Plan {
+            funding_deadline_ms: None,
             settings: TradingSettings::default(),
             signal: TradeSignal {
                 profile_id: "real-default".into(),
@@ -427,6 +430,56 @@ mod tests {
                 fee: None,
             },
         }
+    }
+    #[tokio::test]
+    async fn restart_preserves_unknown_identity_plan_and_partial_exposure() {
+        let path = std::env::temp_dir().join(format!("arb-restart-{}.db", uuid::Uuid::new_v4()));
+        let db = Connection::open(&path).await.unwrap();
+        crate::engine::startup::init_trades_db(&db).await.unwrap();
+        let j = Journal { db };
+        j.init().await.unwrap();
+        let mut p = plan();
+        p.funding_deadline_ms = Some(1_900_000_000_000);
+        let id = j.reserve(p).await.unwrap().unwrap();
+        let o = order(id);
+        j.prepare(&o).await.unwrap();
+        // Process is lost after sending, before any acknowledgement is recorded.
+        j.db.close().await.unwrap();
+        let j = Journal {
+            db: Connection::open(&path).await.unwrap(),
+        };
+        j.init().await.unwrap();
+        let recovered = j.active().await.unwrap().remove(0);
+        assert_eq!(recovered.plan.funding_deadline_ms, Some(1_900_000_000_000));
+        assert_eq!(
+            j.orders(id).await.unwrap()[0].observation.state,
+            OrderState::Unknown
+        );
+        assert!(j.prepare(&o).await.is_err());
+        let fill = OrderObservation {
+            order_id: Some("accepted-before-crash".into()),
+            state: OrderState::Cancelled,
+            filled_quantity: 3.0,
+            average_price: Some(1.0),
+            fee: None,
+        };
+        j.observe(&o, fill.clone()).await.unwrap();
+        j.observe(&o, fill).await.unwrap();
+        j.project(&recovered, &j.orders(id).await.unwrap(), true)
+            .await
+            .unwrap();
+        j.db.close().await.unwrap();
+        let j = Journal {
+            db: Connection::open(&path).await.unwrap(),
+        };
+        j.init().await.unwrap();
+        assert_eq!(j.active().await.unwrap()[0].state, "CLOSING");
+        assert_eq!(
+            aggregate(&j.orders(id).await.unwrap(), "A").remaining(),
+            3.0
+        );
+        j.db.close().await.unwrap();
+        std::fs::remove_file(path).unwrap();
     }
     #[tokio::test]
     async fn reservation_uses_real_schema_and_blocks_unresolved_entries() {

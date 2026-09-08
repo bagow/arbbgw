@@ -513,39 +513,48 @@ impl ExchangeConnector for BinanceConnector {
         let v = managed_binance_get(http, keys, "/fapi/v1/order", &qs).await?;
         let mut o = parse_managed_binance(&v, r)?;
         if o.filled_quantity > 0.0 {
-            let id = o.order_id.as_deref().ok_or("Missing exchange order id")?;
-            let qs = format!(
-                "symbol={}&orderId={}&limit=1000&timestamp={}",
-                r.pair,
-                id,
-                now_ms()
-            );
-            if let Ok(fills) = managed_binance_get(http, keys, "/fapi/v1/userTrades", &qs).await {
-                if let Some(arr) = fills.as_array() {
-                    let mut fee = 0.0;
-                    let mut qty = 0.0;
-                    let mut seen = std::collections::HashSet::new();
-                    let mut valid = true;
-                    for f in arr {
-                        if crate::engine::orders::identity(f, "orderId").as_deref() != Some(id) {
-                            continue;
+            let accounting: Result<Option<f64>, String> = async {
+                let id = o.order_id.as_deref().ok_or("Missing exchange order id")?;
+                let qs = format!(
+                    "symbol={}&orderId={}&limit=1000&timestamp={}",
+                    r.pair,
+                    id,
+                    now_ms()
+                );
+                if let Ok(fills) = managed_binance_get(http, keys, "/fapi/v1/userTrades", &qs).await
+                {
+                    if let Some(arr) = fills.as_array() {
+                        let mut fee = 0.0;
+                        let mut qty = 0.0;
+                        let mut seen = std::collections::HashSet::new();
+                        let mut valid = true;
+                        for f in arr {
+                            if crate::engine::orders::identity(f, "orderId").as_deref() != Some(id)
+                            {
+                                continue;
+                            }
+                            let fid =
+                                crate::engine::orders::identity(f, "id").ok_or("Fill has no id")?;
+                            if !seen.insert(fid) {
+                                continue;
+                            }
+                            if f["commissionAsset"].as_str() != Some("USDT") {
+                                valid = false;
+                                break;
+                            }
+                            qty += crate::engine::orders::number(f, "qty")?;
+                            fee += crate::engine::orders::number(f, "commission")?;
                         }
-                        let fid =
-                            crate::engine::orders::identity(f, "id").ok_or("Fill has no id")?;
-                        if !seen.insert(fid) {
-                            continue;
+                        if valid && (qty - o.filled_quantity).abs() <= r.quantity * 1e-8 {
+                            return Ok(Some(fee));
                         }
-                        if f["commissionAsset"].as_str() != Some("USDT") {
-                            valid = false;
-                            break;
-                        }
-                        qty += crate::engine::orders::number(f, "qty")?;
-                        fee += crate::engine::orders::number(f, "commission")?;
-                    }
-                    if valid && (qty - o.filled_quantity).abs() <= r.quantity * 1e-8 {
-                        o.fee = Some(fee);
                     }
                 }
+                Ok(None)
+            }
+            .await;
+            if let Ok(fee) = accounting {
+                o.fee = fee;
             }
         } else if o.state.terminal() {
             o.fee = Some(0.0);

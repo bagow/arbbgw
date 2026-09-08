@@ -263,40 +263,55 @@ impl ExchangeConnector for GateConnector {
         let v = managed_gate_get(http, keys, &path).await?;
         let mut o = parse_managed_gate(&v, r)?;
         if o.filled_quantity > 0.0 {
-            let id = o.order_id.as_deref().ok_or("Missing Gate order id")?;
-            let mut qty = 0.0;
-            let mut cost = 0.0;
-            let mut fee = 0.0;
-            let mut seen = std::collections::HashSet::new();
-            for page in 0..10 {
-                let path = format!(
-                    "/api/v4/futures/usdt/my_trades?contract={}&order={}&limit=100&offset={}",
-                    r.pair.replace("USDT", "_USDT"),
-                    id,
-                    page * 100
-                );
-                let fills = managed_gate_get(http, keys, &path).await?;
-                let arr = fills.as_array().ok_or("Invalid Gate fills")?;
-                for f in arr {
-                    if crate::engine::orders::identity(f, "order_id").as_deref() != Some(id) {
-                        continue;
+            let accounting: Result<(f64, f64), String> = async {
+                let id = o.order_id.as_deref().ok_or("Missing Gate order id")?;
+                let mut qty = 0.0;
+                let mut cost = 0.0;
+                let mut fee = 0.0;
+                let mut seen = std::collections::HashSet::new();
+                for page in 0..10 {
+                    let path = format!(
+                        "/api/v4/futures/usdt/my_trades?contract={}&order={}&limit=100&offset={}",
+                        r.pair.replace("USDT", "_USDT"),
+                        id,
+                        page * 100
+                    );
+                    let fills = managed_gate_get(http, keys, &path).await?;
+                    let arr = fills.as_array().ok_or("Invalid Gate fills")?;
+                    for f in arr {
+                        if crate::engine::orders::identity(f, "order_id").as_deref() != Some(id) {
+                            continue;
+                        }
+                        let fid = crate::engine::orders::identity(f, "id")
+                            .ok_or("Missing Gate execution id")?;
+                        if !seen.insert(fid) {
+                            continue;
+                        }
+                        let q = crate::engine::orders::number(f, "size")?.abs() * r.multiplier;
+                        qty += q;
+                        cost += q * crate::engine::orders::number(f, "price")?;
+                        if f.get("point_fee").is_some()
+                            && crate::engine::orders::number(f, "point_fee")? != 0.0
+                        {
+                            return Err(
+                                "Gate point fees require separate currency reconciliation".into()
+                            );
+                        }
+                        fee += crate::engine::orders::number(f, "fee")?;
                     }
-                    let fid = crate::engine::orders::identity(f, "id")
-                        .ok_or("Missing Gate execution id")?;
-                    if !seen.insert(fid) {
-                        continue;
+                    if arr.len() < 100 {
+                        break;
                     }
-                    let q = crate::engine::orders::number(f, "size")?.abs() * r.multiplier;
-                    qty += q;
-                    cost += q * crate::engine::orders::number(f, "price")?;
-                    fee += crate::engine::orders::number(f, "fee")?;
                 }
-                if arr.len() < 100 {
-                    break;
+                if (qty - o.filled_quantity).abs() <= r.quantity * 1e-8 && qty > 0.0 {
+                    Ok((cost / qty, fee))
+                } else {
+                    Err("Incomplete Gate fill coverage".into())
                 }
             }
-            if (qty - o.filled_quantity).abs() <= r.quantity * 1e-8 && qty > 0.0 {
-                o.average_price = Some(cost / qty);
+            .await;
+            if let Ok((price, fee)) = accounting {
+                o.average_price = Some(price);
                 o.fee = Some(fee);
             }
         } else if o.state.terminal() {

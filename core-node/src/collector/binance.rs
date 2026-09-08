@@ -19,7 +19,7 @@ pub async fn run(
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     // Track whether L2 depth stream is already spawned to avoid duplicates
-    let l2_spawned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut children = tokio::task::JoinSet::new();
 
     let mut backoff = Duration::from_secs(1);
     loop {
@@ -30,6 +30,8 @@ pub async fn run(
                     .all(|x| x.disabled_exchanges.contains(&"binance".to_string()))
         };
         if is_disabled {
+            children.abort_all();
+            while children.join_next().await.is_some() {}
             if backoff == Duration::from_secs(1) {
                 info!("[binance] Disabled globally in profiles. Sleeping...");
             }
@@ -88,14 +90,14 @@ pub async fn run(
         info!("[binance] Connecting (ban check passed)...");
 
         // Spawn L2 depth stream ONCE (not on every reconnect)
-        if !l2_spawned.load(std::sync::atomic::Ordering::Relaxed) {
-            l2_spawned.store(true, std::sync::atomic::Ordering::Relaxed);
+        while children.try_join_next().is_some() {}
+        if children.is_empty() {
             let l2_books_for_depth = l2_books.clone();
             let prices_for_depth = prices.clone();
             let l2_wanted_for_depth = l2_wanted.clone();
             let signal_for_depth = signal.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(20)).await;
+            children.spawn(async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 run_l2_depth_stream(
                     l2_books_for_depth,
                     prices_for_depth,
