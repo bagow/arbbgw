@@ -1,5 +1,5 @@
 //! Binance USDT Futures WebSocket collector — individual real-time bookTicker streams
-//! + L2 depth stream for active pairs (top 5 levels @ 100ms)
+//! + stable L2 depth subscriptions (top 5 levels @ 100ms)
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
@@ -325,8 +325,8 @@ async fn handler(
     Ok(())
 }
 
-/// Separate L2 depth stream for top-volume pairs (dynamic, top 200 by volume).
-/// Rebuilds symbol list from price_map on each reconnect — handles REST seed failures.
+/// Separate L2 depth streams for the seeded universe, at most 200 symbols per connection.
+/// Wait for initial REST discovery; retry fallback discovery promptly if it fails.
 async fn run_l2_depth_stream(
     l2_books: L2OrderbookMap,
     price_map: crate::state::PriceMap,
@@ -402,6 +402,18 @@ async fn run_l2_depth_stream(
 
     let _backoff = Duration::from_secs(1);
     loop {
+        // The parent starts REST discovery concurrently. A one-second head start is
+        // not enough: locking the fallback universe for 30 minutes loses most books.
+        for _ in 0..80 {
+            if price_map
+                .get("binance")
+                .map(|m| !m.is_empty())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
         // Build symbol list from l2_wanted (demand-driven) + fallback
         let wanted_syms: std::collections::HashSet<String> = l2_wanted
             .iter()
@@ -415,6 +427,7 @@ async fn run_l2_depth_stream(
             .get("binance")
             .map(|m| m.keys().filter(|s| s.ends_with("USDT")).cloned().collect())
             .unwrap_or_default();
+        let discovery_ready = !universe.is_empty();
         universe.extend(wanted_syms);
         if universe.is_empty() {
             universe.extend(FALLBACK.iter().map(|s| s.to_string()));
@@ -572,7 +585,7 @@ async fn run_l2_depth_stream(
 
         // Refresh the full instrument universe periodically; candidate churn does not reconnect streams.
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(1800)) => {},
+            _ = tokio::time::sleep(Duration::from_secs(if discovery_ready { 1800 } else { 30 })) => {},
             _ = handles.join_next() => {},
         }
         handles.abort_all();
