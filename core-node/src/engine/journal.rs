@@ -1,5 +1,5 @@
 //! SQLite is the authority for order ownership and progress, including across restarts.
-use super::orders::{OrderObservation, OrderRequest, OrderState};
+use super::orders::{OrderObservation, OrderRequest};
 use serde::{Deserialize, Serialize};
 use shared::{TradeSignal, TradingSettings};
 use tokio_rusqlite::{params, Connection};
@@ -276,6 +276,7 @@ pub fn aggregate(orders: &[JournalOrder], leg: &str) -> LegTotals {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::orders::OrderState;
     fn plan() -> Plan {
         Plan {
             settings: TradingSettings::default(),
