@@ -977,102 +977,70 @@ impl ExchangeConnector for GateConnector {
 
     async fn ensure_leverage(
         &self,
-        _http: &Client,
+        http: &Client,
         keys: &ExchangeKeys,
         pair: &str,
         leverage: f64,
     ) -> Result<(), String> {
-        use super::ws_gate::send_gate_ws_request;
-        let _ =
-            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
         let contract = pair.replace("USDT", "_USDT");
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "request_id": req_id,
-            "channel": "futures.set_leverage",
-            "event": "api",
-            "payload": [contract, leverage as i64]
-        });
-        let _ = send_gate_ws_request(ws_req).await;
+        let path=format!("/api/v4/futures/usdt/positions/{contract}/leverage?leverage=0&cross_leverage_limit={leverage}");
+        let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "POST", &path, "");
+        let response = http
+            .post(format!("https://api.gateio.ws{path}"))
+            .headers(headers)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .map_err(|_| "Gate leverage transport failure")?;
+        if !response.status().is_success() {
+            return Err("Gate leverage rejected".into());
+        }
+        let v: Value = response
+            .json()
+            .await
+            .map_err(|_| "Invalid Gate leverage response")?;
+        if v["contract"].as_str() != Some(contract.as_str())
+            || crate::engine::orders::number(&v, "leverage")? != 0.0
+            || (crate::engine::orders::number(&v, "cross_leverage_limit")? - leverage).abs() > 1e-8
+        {
+            return Err("Gate cross leverage not confirmed".into());
+        }
         Ok(())
     }
 
     async fn fetch_positions(
         &self,
-        _http: &Client,
+        http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<Vec<PositionInfo>, String> {
-        use super::ws_gate::send_gate_ws_request;
-        let _ =
-            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "request_id": req_id,
-            "channel": "futures.position_list",
-            "event": "api",
-            "payload": []
-        });
-
-        // Try WS first, fall back to REST on timeout/error
-        let result_arr = match send_gate_ws_request(ws_req).await {
-            Ok(resp) => resp["data"]["result"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default(),
-            Err(_e) => {
-                // REST fallback — Gate WS is unreliable for position queries
-                let path = "/api/v4/futures/usdt/positions";
-                let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, "");
-                let url = format!("https://api.gateio.ws{}", path);
-                let resp = _http
-                    .get(&url)
-                    .headers(headers)
-                    .timeout(Duration::from_secs(15))
-                    .send()
-                    .await
-                    .map_err(|e| format!("Gate REST positions HTTP error: {}", e))?;
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| format!("Gate REST positions JSON error: {}", e))?;
-                body.as_array().cloned().unwrap_or_default()
+        let v = managed_gate_get(http, keys, "/api/v4/futures/usdt/positions").await?;
+        let rows = v.as_array().ok_or("Malformed Gate positions")?;
+        let mut out = Vec::new();
+        for p in rows {
+            let size = crate::engine::orders::number(p, "size")?;
+            if p["mode"].as_str() != Some("single") {
+                return Err("Managed execution requires Gate one-way mode".into());
             }
-        };
-
-        let mut positions = Vec::new();
-        for p in result_arr {
-            let size: f64 = p["size"].as_i64().unwrap_or(0) as f64;
-            if size.abs() < 1e-12 {
+            if size == 0.0 {
                 continue;
             }
-            let contract = p["contract"].as_str().unwrap_or("").replace("_", "");
-            let realized = p["realised_pnl"]
+            let symbol = p["contract"]
                 .as_str()
-                .and_then(|s| s.parse().ok())
-                .or_else(|| p["realised_pnl"].as_f64())
-                .unwrap_or(0.0);
-            positions.push(PositionInfo {
-                symbol: contract,
+                .filter(|s| !s.is_empty())
+                .ok_or("Missing Gate position symbol")?
+                .replace('_', "");
+            out.push(PositionInfo {
+                symbol,
                 size,
-                entry_price: p["entry_price"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .or_else(|| p["entry_price"].as_f64())
-                    .unwrap_or(0.0),
-                unrealized_pnl: p["unrealised_pnl"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .or_else(|| p["unrealised_pnl"].as_f64())
-                    .unwrap_or(0.0),
-                realized_pnl: realized,
+                entry_price: crate::engine::orders::number(p, "entry_price")?,
+                unrealized_pnl: crate::engine::orders::number(p, "unrealised_pnl")?,
+                realized_pnl: crate::engine::orders::number(p, "realised_pnl")?,
                 accumulated_fee: 0.0,
                 accumulated_funding: 0.0,
             });
         }
-        Ok(positions)
+        Ok(out)
     }
-
-    // ── Maker mode methods ──────────────────────────────────────────────────
 
     async fn place_maker_order(
         &self,

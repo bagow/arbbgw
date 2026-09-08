@@ -171,19 +171,25 @@ pub fn spawn_all_settings_refresher(
             // When we see '0' and engine is killed, reset the kill-switch.
             if let Some(ref ctx) = e_ctx {
                 if ctx.is_killed.load(std::sync::atomic::Ordering::Relaxed) {
-                    let reset_requested = db.call(|conn| {
-                        let val: Result<String, _> = conn.query_row(
-                            "SELECT value FROM server_cache WHERE key = 'kill_switch_active'",
-                            [],
-                            |r| r.get(0),
-                        );
-                        Ok(val.unwrap_or_else(|_| "1".to_string()))
-                    }).await.unwrap_or_else(|_| "1".to_string());
+                    let reset_requested = db
+                        .call(|conn| {
+                            let val: Result<String, _> = conn.query_row(
+                                "SELECT value FROM server_cache WHERE key = 'kill_switch_active'",
+                                [],
+                                |r| r.get(0),
+                            );
+                            Ok(val.unwrap_or_else(|_| "1".to_string()))
+                        })
+                        .await
+                        .unwrap_or_else(|_| "1".to_string());
 
                     if reset_requested == "0" {
-                        ctx.is_killed.store(false, std::sync::atomic::Ordering::Relaxed);
-                        ctx.consecutive_trims.store(0, std::sync::atomic::Ordering::Relaxed);
-                        ctx.consecutive_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+                        ctx.is_killed
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        ctx.consecutive_trims
+                            .store(0, std::sync::atomic::Ordering::Relaxed);
+                        ctx.consecutive_failures
+                            .store(0, std::sync::atomic::Ordering::Relaxed);
                         // Clear all exchange cooldowns so trading resumes immediately
                         ctx.exchange_cooldown.clear();
                         tracing::info!("[settings] ✅ KILL-SWITCH RESET by user via frontend Resume button. Engine resumed.");
@@ -207,12 +213,7 @@ pub async fn load_technical_settings(db: &Connection) -> TechnicalSettings {
         })
         .await
         .unwrap_or_default();
-    let mut ts = TechnicalSettings::from_db_rows(&rows);
-    // Clamp cooldowns so that a misconfigured DB doesn't freeze the bot for 30 minutes
-    ts.exchange_cooldown_ms = ts.exchange_cooldown_ms.min(60_000);
-    ts.pair_cooldown_ms = ts.pair_cooldown_ms.min(15_000);
-    ts.asymmetric_cooldown_ms = ts.asymmetric_cooldown_ms.min(60_000);
-    ts
+    TechnicalSettings::from_db_rows(&rows)
 }
 
 /// Spawn background task refreshing technical settings from DB.

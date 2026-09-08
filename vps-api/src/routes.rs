@@ -274,7 +274,7 @@ pub async fn handle_get_unified(
     let today_midnight_ms = now_ms - (now_ms % 86_400_000); // Rounds down to midnight UTC
     let daily_exch_stats = state.real_db.call(move |conn| {
         let mut map: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-        let mut stmt = match conn.prepare("SELECT exchange_a, exchange_b, COALESCE(pnl,0.0) FROM trades WHERE status='CLOSED' AND exit_time >= ?") {
+        let mut stmt = match conn.prepare("SELECT exchange_a, exchange_b, net_pnl_a, net_pnl_b FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND exit_time >= ?") {
             Ok(s) => s,
             Err(_) => return Ok::<_, tokio_rusqlite::Error>(map)
         };
@@ -283,15 +283,15 @@ pub async fn handle_get_unified(
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, f64>(2)?,
+                r.get::<_, f64>(3)?,
             ))
         }).map(|iter| iter.filter_map(|r| r.ok()).collect::<Vec<_>>()).unwrap_or_default();
 
         // Canonical per-exchange day PnL allocation:
         // each closed trade contributes half of final net pnl to each leg exchange.
-        for (exa, exb, net_pnl) in rows {
-            let half = net_pnl / 2.0;
-            *map.entry(exa).or_insert(0.0) += half;
-            *map.entry(exb).or_insert(0.0) += half;
+        for (exa, exb, net_a,net_b) in rows {
+            *map.entry(exa).or_insert(0.0) += net_a;
+            *map.entry(exb).or_insert(0.0) += net_b;
         }
         Ok::<_, tokio_rusqlite::Error>(map)
     }).await.unwrap_or_default();
@@ -718,8 +718,9 @@ pub async fn handle_get_unified(
             let total_trades = agg.count;
             let total_pnl = agg.pnl.unwrap_or(0.0);
             let wins = agg.wins.unwrap_or(0);
-            let losses = total_trades - wins;
-            let avg_pnl = if total_trades > 0 { total_pnl / total_trades as f64 } else { 0.0 };
+            let (losses,pending_count,legacy_count,verified_count):(i64,i64,i64,i64)=conn.query_row("SELECT COALESCE(SUM(pnl<0),0),COALESCE(SUM(pnl IS NULL),0),COALESCE(SUM(accounting_status='LEGACY_UNVERIFIED'),0),COALESCE(SUM(accounting_status='VERIFIED'),0) FROM trades WHERE status='CLOSED' AND profile_id=?",[&p],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+            let recorded_count=total_trades-pending_count;
+            let avg_pnl = if recorded_count > 0 { total_pnl / recorded_count as f64 } else { 0.0 };
 
             let avg_duration = if let (Some(td), Some(cc)) = (agg.total_duration, agg.closed_count) {
                 if cc > 0 { td / cc } else { 0 }
@@ -750,8 +751,6 @@ pub async fn handle_get_unified(
             let mut exchange_pairs: HashMap<String, f64> = HashMap::new();
 
             for (ex_a, ex_b, pnl) in rows {
-                *pnl_by_exchange.entry(ex_a.clone()).or_insert(0.0) += pnl / 2.0;
-                *pnl_by_exchange.entry(ex_b.clone()).or_insert(0.0) += pnl / 2.0;
 
                 let mut pair_arr = [ex_a, ex_b];
                 pair_arr.sort();
@@ -759,6 +758,8 @@ pub async fn handle_get_unified(
                 *exchange_pairs.entry(pair_key).or_insert(0.0) += pnl;
             }
 
+            let mut legs=conn.prepare("SELECT exchange_a,net_pnl_a FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND profile_id=?1 UNION ALL SELECT exchange_b,net_pnl_b FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND profile_id=?1")?;
+            for row in legs.query_map([&p],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?)))? {let (ex,net)=row?;*pnl_by_exchange.entry(ex).or_insert(0.0)+=net;}
             let mut top_exchange_pairs: Vec<serde_json::Value> = exchange_pairs.into_iter()
                 .map(|(pair, pnl)| json!({ "pair": pair, "pnl": pnl }))
                 .collect();
@@ -769,6 +770,9 @@ pub async fn handle_get_unified(
 
             Ok(json!({
                 "total_pnl": total_pnl,
+                "pending_count":pending_count,
+                "legacy_count":legacy_count,
+                "verified_count":verified_count,
                 "total_trades": total_trades,
                 "wins": wins,
                 "losses": losses,
@@ -917,6 +921,10 @@ pub async fn handle_post_profile(
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Response {
+    if let Err(e) = validate_profile_input(&payload) {
+        return json_err(StatusCode::BAD_REQUEST, &e);
+    }
+
     let username = match check_basic_auth(&headers, &state) {
         Some(u) => u,
         None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
@@ -1008,6 +1016,10 @@ pub async fn handle_patch_profile(
     Path(id): Path<String>,
     Json(payload): Json<Value>,
 ) -> Response {
+    if let Err(e) = validate_profile_input(&payload) {
+        return json_err(StatusCode::BAD_REQUEST, &e);
+    }
+
     let username = match check_basic_auth(&headers, &state) {
         Some(u) => u,
         None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
@@ -1199,19 +1211,22 @@ pub async fn handle_clear_trades(
 pub async fn handle_market_close_all(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
 ) -> Response {
     if check_basic_auth(&headers, &state).is_none() {
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
     }
 
     let r1 = state.real_db.call(move |conn| {
-        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE status IN ('ENTRY','RECONCILING','OPEN','CLOSING')", params![])?;
+        conn.execute("UPDATE trades SET manual_close_requested=1,close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status IN ('ENTRY','RECONCILING','OPEN','CLOSING')", params![id])?;
         Ok(())
     }).await;
 
     if let Err(e) = r1 {
-        tracing::error!("Failed to close all on real DB: {:?}", e);
+        return json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Cannot request close: {e}"),
+        );
     }
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
@@ -1231,7 +1246,7 @@ pub async fn handle_market_close_trade(
         .real_db
         .call(move |conn| {
             conn.execute(
-                "UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status IN ('ENTRY','RECONCILING','OPEN','CLOSING')",
+                "UPDATE trades SET manual_close_requested=1,close_reason='MANUAL_CLOSE' WHERE id=? AND status IN ('ENTRY','RECONCILING','OPEN','CLOSING')",
                 params![trade_id],
             )?;
             Ok(())
@@ -1239,7 +1254,10 @@ pub async fn handle_market_close_trade(
         .await;
 
     if let Err(e) = r1 {
-        tracing::error!("Failed to close trade {} on real DB: {:?}", trade_id, e);
+        return json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Cannot request close: {e}"),
+        );
     }
 
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
@@ -1290,6 +1308,42 @@ pub async fn handle_patch_technical_settings(
         }
     };
 
+    let defaults = serde_json::to_value(shared::TechnicalSettings::default())
+        .expect("Static technical defaults");
+    for (key, value) in &obj {
+        let default = defaults.get(key);
+        if default.is_none() {
+            return json_err(
+                StatusCode::BAD_REQUEST,
+                &format!("Unsupported setting {key}"),
+            );
+        }
+        if key == "entry_order_type" && value.as_str() != Some("ioc") {
+            return json_err(
+                StatusCode::BAD_REQUEST,
+                "Only bounded IOC entries are enabled",
+            );
+        }
+        if default.unwrap().is_number() {
+            let n = value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|x| x.parse::<f64>().ok()));
+            if !n.map(|x| x.is_finite() && x >= 0.0).unwrap_or(false) {
+                return json_err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Invalid numeric setting {key}"),
+                );
+            }
+            if matches!(
+                key.as_str(),
+                "ema_tau_secs" | "max_spreads_per_cycle" | "api_timeout_ms"
+            ) && n == Some(0.0)
+            {
+                return json_err(StatusCode::BAD_REQUEST, &format!("{key} must be positive"));
+            }
+        }
+    }
+
     let result = state
         .db
         .call(move |conn| {
@@ -1325,9 +1379,13 @@ pub struct PositionCloseReq {
 }
 
 pub async fn handle_close_exchange_position(
-    axum::extract::State(_state): axum::extract::State<crate::AppState>,
+    axum::extract::State(state): axum::extract::State<crate::AppState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<PositionCloseReq>,
 ) -> impl axum::response::IntoResponse {
+    if check_basic_auth(&headers, &state).is_none() {
+        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
+    }
     let client = reqwest::Client::new();
     let res = client
         .post("http://127.0.0.1:3003/api/positions/close")
@@ -2199,4 +2257,51 @@ pub async fn handle_get_system_metrics(
     });
 
     (StatusCode::OK, Json(res)).into_response()
+}
+
+fn validate_profile_input(payload: &Value) -> Result<(), String> {
+    let obj = payload.as_object().ok_or("Expected profile object")?;
+    for (key, value) in obj {
+        let positive = matches!(
+            key.as_str(),
+            "trade_volume" | "max_active_trades" | "leverage" | "collector_interval_secs"
+        );
+        let numeric = positive
+            || matches!(
+                key.as_str(),
+                "min_entry_spread"
+                    | "max_entry_spread"
+                    | "take_profit_percent"
+                    | "trailing_stop_percent"
+                    | "commission_rate"
+                    | "slippage_percent"
+                    | "min_volume_millions"
+                    | "min_structural_deviation"
+                    | "min_depth_percent"
+                    | "max_holding_time_ms"
+                    | "hft_timeout_ms"
+            );
+        if numeric {
+            let n = value
+                .as_f64()
+                .ok_or_else(|| format!("{key} must be numeric"))?;
+            if !n.is_finite() || n < 0.0 || (positive && n == 0.0) {
+                return Err(format!("Invalid {key}"));
+            }
+        }
+        if (key == "strategy_type" && value.as_str() != Some("ema"))
+            || (key == "margin_mode" && value.as_str() != Some("cross"))
+        {
+            return Err("Managed execution requires EMA and cross margin".into());
+        }
+    }
+    if let (Some(a), Some(b)) = (
+        payload["min_entry_spread"].as_f64(),
+        payload["max_entry_spread"].as_f64(),
+    ) {
+        if a > b {
+            return Err("Minimum spread exceeds maximum".into());
+        }
+    }
+    Ok(())
 }

@@ -15,6 +15,7 @@ use std::sync::{
 };
 
 static ENTRY_BUSY: AtomicBool = AtomicBool::new(false);
+static LAST_PREFLIGHT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 struct BusyGuard;
 impl Drop for BusyGuard {
     fn drop(&mut self) {
@@ -123,16 +124,53 @@ fn request(t: &ManagedTrade, leg: &str, qty: f64, price: f64, reduce: bool) -> J
     }
 }
 
+#[async_trait::async_trait]
+trait OrderTransport: Send + Sync {
+    async fn submit(&self, r: &OrderRequest) -> Result<OrderObservation, String>;
+    async fn query(&self, r: &OrderRequest, id: Option<&str>) -> Result<OrderObservation, String>;
+}
+struct ConnectorTransport<'a> {
+    connector: &'a dyn super::exchanges::traits::ExchangeConnector,
+    http: &'a Client,
+    keys: &'a ExchangeKeys,
+}
+#[async_trait::async_trait]
+impl OrderTransport for ConnectorTransport<'_> {
+    async fn submit(&self, r: &OrderRequest) -> Result<OrderObservation, String> {
+        self.connector.submit_managed(self.http, self.keys, r).await
+    }
+    async fn query(&self, r: &OrderRequest, id: Option<&str>) -> Result<OrderObservation, String> {
+        self.connector
+            .query_managed(self.http, self.keys, r, id)
+            .await
+    }
+}
 async fn submit(
     j: &Journal,
     o: &JournalOrder,
     http: &Client,
     keys: &ExchangeKeys,
 ) -> anyhow::Result<OrderObservation> {
-    j.prepare(o).await?; // durable identity BEFORE any external side effect
     let conn = get_connector(&o.exchange).ok_or_else(|| anyhow::anyhow!("Unknown connector"))?;
+    submit_using(
+        j,
+        o,
+        &ConnectorTransport {
+            connector: conn.as_ref(),
+            http,
+            keys,
+        },
+    )
+    .await
+}
+async fn submit_using(
+    j: &Journal,
+    o: &JournalOrder,
+    transport: &dyn OrderTransport,
+) -> anyhow::Result<OrderObservation> {
+    j.prepare(o).await?;
     let mut known = o.observation.clone();
-    match conn.submit_managed(http, keys, &o.request).await {
+    match transport.submit(&o.request).await {
         Ok(v) => {
             j.observe(o, v.clone()).await?;
             known = v;
@@ -152,10 +190,7 @@ async fn submit(
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if let Ok(v) = conn
-            .query_managed(http, keys, &o.request, known.order_id.as_deref())
-            .await
-        {
+        if let Ok(v) = transport.query(&o.request, known.order_id.as_deref()).await {
             j.observe(o, v.clone()).await?;
             known = v;
         }
@@ -198,7 +233,12 @@ async fn enter(
     ts: &TechnicalSettings,
 ) -> anyhow::Result<()> {
     // Existing unowned positions must be reconciled, not silently absorbed by a new trade.
-    for s in signals {
+    let now = now_ms();
+    if now - LAST_PREFLIGHT.load(Ordering::Acquire) < 2_000 {
+        return Ok(());
+    }
+    LAST_PREFLIGHT.store(now, Ordering::Release);
+    for s in signals.into_iter().take(3) {
         if ctx.is_killed.load(Ordering::Acquire) {
             break;
         }
@@ -209,6 +249,7 @@ async fn enter(
             Some(p) => p.clone(),
             None => continue,
         };
+        p.validate().map_err(anyhow::Error::msg)?;
         if ts.entry_order_type != "ioc" || p.strategy_type != "ema" {
             continue;
         }
@@ -255,6 +296,20 @@ async fn enter(
             .chain(posb.iter())
             .any(|x| super::utils::symbols_match(&x.symbol, &s.pair) && x.size.abs() > 1e-12)
         {
+            continue;
+        }
+        let (ba, bb) = tokio::join!(ca.fetch_balances(http, keys), cb.fetch_balances(http, keys));
+        let (available_a, available_b) = match (ba, bb) {
+            (Ok((_, a)), Ok((_, b))) if a.is_finite() && b.is_finite() => (a, b),
+            _ => continue,
+        };
+        let required_a = s.actual_vol_a_usd / (p.leverage as f64)
+            * ts.margin_check_multiplier.max(1.0)
+            + s.actual_vol_a_usd * 0.002;
+        let required_b = s.actual_vol_b_usd / (p.leverage as f64)
+            * ts.margin_check_multiplier.max(1.0)
+            + s.actual_vol_b_usd * 0.002;
+        if available_a < required_a || available_b < required_b {
             continue;
         }
         // Configure both venues before taking exposure; failures cannot be ignored.
@@ -324,7 +379,7 @@ async fn enter(
         };
         // Liquidity ranking only selects sequence; both legs have hard price bounds.
         let first_a = super::utils::liquidity_rank(&s.exchange_a)
-            <= super::utils::liquidity_rank(&s.exchange_b);
+            >= super::utils::liquidity_rank(&s.exchange_b);
         let (first, second, price, buy, qty) = if first_a {
             ("A", "B", pa, !s.is_a_higher, s.target_qty_a)
         } else {
@@ -585,4 +640,114 @@ async fn manage(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use std::sync::Mutex;
+    struct LostAck {
+        queries: Mutex<Vec<String>>,
+        submits: std::sync::atomic::AtomicU32,
+        resolved: bool,
+    }
+    #[async_trait::async_trait]
+    impl OrderTransport for LostAck {
+        async fn submit(&self, _: &OrderRequest) -> Result<OrderObservation, String> {
+            self.submits.fetch_add(1, Ordering::Relaxed);
+            Err("Connection lost after exchange accepted order".into())
+        }
+        async fn query(
+            &self,
+            r: &OrderRequest,
+            _: Option<&str>,
+        ) -> Result<OrderObservation, String> {
+            self.queries.lock().unwrap().push(r.client_id.clone());
+            if self.resolved {
+                Ok(OrderObservation {
+                    order_id: Some("exchange-owned-id".into()),
+                    state: OrderState::Cancelled,
+                    filled_quantity: 3.0,
+                    average_price: Some(10.0),
+                    fee: Some(0.01),
+                })
+            } else {
+                Err("Exchange unavailable".into())
+            }
+        }
+    }
+    async fn journal() -> Journal {
+        let db = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
+        crate::engine::startup::init_trades_db(&db).await.unwrap();
+        let j = Journal { db };
+        j.init().await.unwrap();
+        j
+    }
+    fn order() -> JournalOrder {
+        JournalOrder {
+            trade_id: 42,
+            leg: "A".into(),
+            exchange: "binance".into(),
+            request: OrderRequest {
+                client_id: "persist-before-send".into(),
+                pair: "TESTUSDT".into(),
+                is_buy: true,
+                quantity: 10.0,
+                limit_price: 10.0,
+                reduce_only: false,
+                multiplier: 1.0,
+                tick_size: 0.01,
+                leverage: 1.0,
+            },
+            observation: OrderObservation {
+                order_id: None,
+                state: OrderState::Unknown,
+                filled_quantity: 0.0,
+                average_price: None,
+                fee: None,
+            },
+        }
+    }
+    #[tokio::test]
+    async fn lost_ack_recovers_same_order_without_second_submission() {
+        let j = journal().await;
+        let o = order();
+        let fake = LostAck {
+            queries: Mutex::new(vec![]),
+            submits: std::sync::atomic::AtomicU32::new(0),
+            resolved: true,
+        };
+        let observed = submit_using(&j, &o, &fake).await.unwrap();
+        assert_eq!(observed.filled_quantity, 3.0);
+        assert_eq!(observed.state, OrderState::Cancelled);
+        assert_eq!(fake.submits.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            fake.queries.lock().unwrap().as_slice(),
+            [o.request.client_id.clone()]
+        );
+        // Duplicate invocation after a restart fails at the durable identity BEFORE transport.
+        assert!(submit_using(&j, &o, &fake).await.is_err());
+        assert_eq!(fake.submits.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            j.orders(42).await.unwrap()[0].observation.filled_quantity,
+            3.0
+        );
+    }
+    #[tokio::test]
+    async fn timeout_is_persisted_as_unknown_never_zero_fill_success() {
+        let j = journal().await;
+        let fake = LostAck {
+            queries: Mutex::new(vec![]),
+            submits: std::sync::atomic::AtomicU32::new(0),
+            resolved: false,
+        };
+        let result = submit_using(&j, &order(), &fake).await.unwrap();
+        assert_eq!(result.state, OrderState::Unknown);
+        assert!(!result.state.terminal());
+        assert_eq!(
+            j.orders(42).await.unwrap()[0].observation.state,
+            OrderState::Unknown
+        );
+        assert_eq!(fake.submits.load(Ordering::Relaxed), 1);
+    }
 }

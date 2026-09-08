@@ -47,6 +47,7 @@ pub fn generate_signals(
                 row.structural_verified, row.direction
             );
         }
+        if [&row.exchange_a,&row.exchange_b].iter().any(|ex|!crate::engine::exchanges::get_connector(ex).map(|c|c.supports_managed_orders()).unwrap_or(false)){continue;}
         if !keys.supports(&row.exchange_a) || !keys.supports(&row.exchange_b) {
             if log_diag {
                 tracing::debug!("[scanner] TRACE {} → SKIP: keys not supported ({} or {})", row.pair, row.exchange_a, row.exchange_b);

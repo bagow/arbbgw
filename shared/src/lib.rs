@@ -166,6 +166,37 @@ pub struct TradingSettings {
     pub max_holding_time_ms: i64,
 }
 
+impl TradingSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        let nonnegative = [
+            self.min_entry_spread,
+            self.max_entry_spread,
+            self.take_profit_percent,
+            self.trailing_stop_percent,
+            self.commission_rate,
+            self.slippage_percent,
+            self.min_volume_millions,
+            self.min_structural_deviation,
+            self.min_depth_percent,
+        ];
+        if nonnegative.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || !self.funding_rate_8h.is_finite()
+            || !self.trade_volume.is_finite()
+            || self.trade_volume <= 0.0
+            || self.max_entry_spread < self.min_entry_spread
+            || self.max_active_trades < 1
+            || self.leverage < 1
+            || self.max_holding_time_ms < 0
+        {
+            return Err("Invalid trading limits, amount, leverage or spread range".into());
+        }
+        if self.strategy_type != "ema" || self.margin_mode != "cross" {
+            return Err("Managed execution currently requires EMA and cross margin".into());
+        }
+        Ok(())
+    }
+}
+
 impl Default for TradingSettings {
     fn default() -> Self {
         Self {
@@ -300,7 +331,7 @@ impl Default for TechnicalSettings {
             diag_log_interval: 100,
             live_update_throttle_ms: 1000,
 
-            entry_order_type: "market".to_string(),
+            entry_order_type: "ioc".to_string(),
             maker_price_offset_pct: 0.01,
         }
     }
@@ -483,4 +514,3 @@ impl TechnicalSettings {
             .collect()
     }
 }
-

@@ -51,6 +51,14 @@ impl OrderRequest {
         {
             return Err("Invalid order quantity/price/specification".into());
         }
+        let steps = self.quantity / self.multiplier;
+        if !steps.is_finite()
+            || (steps - steps.round()).abs() > 1e-8
+            || (self.limit_price > 0.0
+                && bounded_price(self.limit_price, self.tick_size, self.is_buy) <= 0.0)
+        {
+            return Err("Off-grid quantity or price rounds to zero".into());
+        }
         Ok(())
     }
 }

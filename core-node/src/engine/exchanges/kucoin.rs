@@ -976,16 +976,17 @@ impl ExchangeConnector for KucoinConnector {
             return Err(format!("Kucoin API returned error: {}", v));
         }
         let mut positions = Vec::new();
-        if let Some(arr) = v["data"].as_array() {
+        {
+            let arr = v["data"].as_array().ok_or("Malformed KuCoin positions")?;
             for p in arr {
-                let qty: f64 = p["currentQty"]
-                    .as_f64()
-                    .or_else(|| p["currentQty"].as_i64().map(|i| i as f64))
-                    .unwrap_or(0.0);
+                let qty = crate::engine::orders::number(p, "currentQty")?;
                 if qty.abs() < 1e-12 {
                     continue;
                 }
-                let raw_sym = p["symbol"].as_str().unwrap_or("");
+                let raw_sym = p["symbol"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or("Missing KuCoin position symbol")?;
                 let mut std_sym = raw_sym.replace("USDTM", "USDT").replace("USDM", "USDT");
                 if std_sym == "XBTUSDT" {
                     std_sym = "BTCUSDT".to_string();

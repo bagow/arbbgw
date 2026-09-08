@@ -134,7 +134,7 @@ pub async fn init_db(db: &Connection) -> Result<()> {
              "cooldowns"),
 
             // ── Order execution ──
-            ("entry_order_type",       "market",
+            ("entry_order_type",       "ioc",
              "How entry orders are placed. 'market' = Market orders with guaranteed fill on both legs (no asymmetric risk, but possible slippage). 'ioc' = IOC Limit orders with price tolerance from slippage_percent settings (slippage-protected, but risk of one leg not filling → emergency close at loss).",
              "execution"),
             ("api_timeout_ms",         "2000",
@@ -198,6 +198,7 @@ pub async fn init_db(db: &Connection) -> Result<()> {
             VALUES ('real-default','Real Trading','real',0,1.0,10.0,100.0,0.2,0.3,3,0.05,0.05,0.01,10.0,5,?,?,'[]',100.0,'ema',10000,1800000)",
             params![now, now],
         )?;
+        conn.execute("UPDATE technical_settings SET value='ioc',description='Bounded IOC entry. Partial fills and unknown responses are reconciled by order identity.' WHERE key='entry_order_type' AND value='market'",[])?;
         Ok(())
     }).await?;
     Ok(())
@@ -271,6 +272,11 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN last_close_attempt_at INTEGER", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN close_error TEXT", []);
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN exit_slippage_cost REAL DEFAULT 0.0", []);
+        let mut stmt=conn.prepare("PRAGMA table_info(trades)")?;
+        let cols=stmt.query_map([],|r|r.get::<_,String>(1))?.collect::<Result<Vec<_>,_>>()?;drop(stmt);
+        for (name,ty) in [("accounting_status","TEXT DEFAULT 'LEGACY_UNVERIFIED'"),("manual_close_requested","INTEGER NOT NULL DEFAULT 0"),("net_pnl_a","REAL"),("net_pnl_b","REAL"),("accounting_error","TEXT"),("current_net_estimate","REAL"),("valuation_ms","INTEGER")] {
+            if !cols.iter().any(|c|c==name){conn.execute_batch(&format!("ALTER TABLE trades ADD COLUMN {name} {ty}"))?;}
+        }
         Ok(())
     }).await?;
     Ok(())

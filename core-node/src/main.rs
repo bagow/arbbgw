@@ -359,14 +359,6 @@ async fn main() -> Result<()> {
                     }
 
 
-                    // ── BACKGROUND LEVERAGE WARMUP ──
-                    crate::engine::real::warmup_leverages(
-                        &spreads,
-                        &real_profiles,
-                        t_http.clone(),
-                        t_keys.clone(),
-                    );
-
                     // ── UPDATE L2 WANTED SET (demand-driven subscriptions) ──
                     {
                         t_e_ctx.l2_wanted.clear();

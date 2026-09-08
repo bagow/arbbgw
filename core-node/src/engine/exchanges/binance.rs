@@ -1331,66 +1331,59 @@ impl ExchangeConnector for BinanceConnector {
 
     async fn ensure_leverage(
         &self,
-        _http: &Client,
+        http: &Client,
         keys: &ExchangeKeys,
         pair: &str,
         leverage: f64,
     ) -> Result<(), String> {
+        check_ip_ban()?;
         let lev = leverage as i64;
-        let cache_key = format!("{}:{}", pair, lev);
-
-        // 1. Ensure CROSSED margin type (cache per symbol)
-        if !margin_type_cache().contains(pair) {
-            let ts_m = now_ms();
-            let qs_m = format!("marginType=CROSSED&symbol={}&timestamp={}", pair, ts_m);
-            let sig_m = binance_sign(&keys.binance_secret, &qs_m);
-            let url_m = format!(
-                "https://fapi.binance.com/fapi/v1/marginType?{}&signature={}",
-                qs_m, sig_m
-            );
-            if let Ok(resp) = _http
-                .post(&url_m)
+        if !leverage.is_finite() || lev < 1 || leverage != lev as f64 {
+            return Err("Invalid leverage".into());
+        }
+        let cache_key = format!("{pair}:{lev}");
+        for (path, params) in [
+            (
+                "/fapi/v1/marginType",
+                format!("marginType=CROSSED&symbol={pair}"),
+            ),
+            ("/fapi/v1/leverage", format!("leverage={lev}&symbol={pair}")),
+        ] {
+            if (path.ends_with("marginType") && margin_type_cache().contains(pair))
+                || (path.ends_with("leverage") && leverage_cache().contains(&cache_key))
+            {
+                continue;
+            }
+            let qs = format!("{params}&timestamp={}", now_ms());
+            let signature = binance_sign(&keys.binance_secret, &qs);
+            let response = http
+                .post(format!(
+                    "https://fapi.binance.com{path}?{qs}&signature={signature}"
+                ))
                 .header("X-MBX-APIKEY", &keys.binance_key)
-                .timeout(std::time::Duration::from_millis(3000))
+                .timeout(Duration::from_secs(3))
                 .send()
                 .await
-            {
-                let status = resp.status();
-                if status.is_success() || status.as_u16() == 400 {
-                    // Code -4046 ("No need to change margin type.") also comes as HTTP 400
-                    margin_type_cache().insert(pair.to_string());
+                .map_err(|_| "Binance leverage transport failure")?;
+            let status = response.status();
+            record_binance_response(status.as_u16(), response.headers());
+            let v: Value = response
+                .json()
+                .await
+                .map_err(|_| "Invalid Binance leverage response")?;
+            if path.ends_with("marginType") {
+                if !status.is_success() && v["code"].as_i64() != Some(-4046) {
+                    return Err("Binance cross margin not confirmed".into());
                 }
-            }
-        }
-
-        // Skip if already set this session — prevents 100s of duplicate requests per second
-        if leverage_cache().contains(&cache_key) {
-            return Ok(());
-        }
-
-        // 2. Ensure leverage via REST (cached per symbol + leverage)
-        let fresh_ts = now_ms();
-        let rest_qs = format!("leverage={}&symbol={}&timestamp={}", lev, pair, fresh_ts);
-        let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
-        let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
-        let url = format!("https://fapi.binance.com/fapi/v1/leverage?{}", full_qs);
-        match _http
-            .post(&url)
-            .header("X-MBX-APIKEY", &keys.binance_key)
-            .timeout(std::time::Duration::from_millis(3000))
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                let status = resp.status();
-                let headers = resp.headers().clone();
-                record_binance_response(status.as_u16(), &headers);
-                if status.is_success() {
-                    leverage_cache().insert(cache_key);
+                margin_type_cache().insert(pair.to_string());
+            } else {
+                if !status.is_success()
+                    || v["symbol"].as_str() != Some(pair)
+                    || v["leverage"].as_i64() != Some(lev)
+                {
+                    return Err("Binance leverage not confirmed".into());
                 }
-            }
-            Err(e) => {
-                tracing::warn!("[binance] Failed to set leverage for {}: {}", pair, e);
+                leverage_cache().insert(cache_key.clone());
             }
         }
         Ok(())
@@ -1423,7 +1416,10 @@ impl ExchangeConnector for BinanceConnector {
                     detect_ban_from_response(err);
                     return Err(format!("Binance WS position error: {}", err));
                 }
-                resp["result"].as_array().cloned().unwrap_or_default()
+                resp["result"]
+                    .as_array()
+                    .cloned()
+                    .ok_or("Malformed Binance position list")?
             }
             Err(e) => {
                 record_ws_failure();
@@ -1460,22 +1456,27 @@ impl ExchangeConnector for BinanceConnector {
                 if let Some(_code) = body.get("code") {
                     return Err(format!("Binance REST positions API error: {}", body));
                 }
-                body.as_array().cloned().unwrap_or_default()
+                body.as_array()
+                    .cloned()
+                    .ok_or("Malformed Binance position list")?
             }
         };
 
         let mut positions = Vec::new();
         for p in result_arr {
-            let amt: f64 = p["positionAmt"]
+            let amt = crate::engine::orders::number(&p, "positionAmt")?;
+            let symbol = p["symbol"]
                 .as_str()
-                .and_then(|s| s.parse().ok())
-                .or_else(|| p["positionAmt"].as_f64())
-                .unwrap_or(0.0);
+                .filter(|s| !s.is_empty())
+                .ok_or("Missing Binance position symbol")?;
+            if p["positionSide"].as_str() != Some("BOTH") {
+                return Err("Managed execution requires one-way position mode".into());
+            }
             if amt.abs() < 1e-12 {
                 continue;
             }
             positions.push(PositionInfo {
-                symbol: p["symbol"].as_str().unwrap_or("").to_string(),
+                symbol: symbol.to_string(),
                 size: amt,
                 entry_price: p["entryPrice"]
                     .as_str()

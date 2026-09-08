@@ -481,7 +481,7 @@ function updateDynamicElements(profile, active, stats, exchanges) {
     
     const hPnlEl = document.getElementById(`h-pnl-${profile.id}`);
     if (hPnlEl && stats) {
-        hPnlEl.innerHTML = fmtPnL(stats.total_pnl || 0);
+        hPnlEl.innerHTML = fmtPnL(stats.total_pnl || 0) + `<div class="text-sub" style="font-size:.7rem">${stats.verified_count||0} reconciled · ${stats.legacy_count||0} legacy/unverified · ${stats.pending_count||0} pending</div>`;
         hPnlEl.style.color = (stats.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
     }
 
@@ -1328,7 +1328,6 @@ function renderTechSettingsTable(wrap, data) {
         for (const item of items) {
             const ENUMS = {
                 entry_order_type: [
-                    { value: 'market', label: 'Market — guaranteed fill, no asymmetric risk' },
                     { value: 'ioc', label: 'IOC — limit with slippage protection, risk of partial fill' },
                 ],
             };
