@@ -2068,6 +2068,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "shared",
  "tokio",
  "tokio-rusqlite",
  "tower-http",

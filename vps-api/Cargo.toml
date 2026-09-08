@@ -8,6 +8,7 @@ name = "vps-api"
 path = "src/main.rs"
 
 [dependencies]
+shared = { path = "../shared" }
 # Async runtime
 tokio = { version = "1", features = ["full", "rt-multi-thread"] }
 # HTTP server

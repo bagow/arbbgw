@@ -165,13 +165,13 @@ async fn orchestrator(
     );
 
     // Spawn self-healing WS shards — each reconnects independently on failure
-    let mut handles = Vec::with_capacity(n_conns);
+    let mut handles = tokio::task::JoinSet::new();
     for (idx, chunk) in sym_chunks.into_iter().enumerate() {
         let pm = price_map.clone();
         let sig = signal.clone();
         let sm = sym_map_arc.clone();
         let l2 = l2_books.clone();
-        handles.push(tokio::spawn(async move {
+        handles.spawn(async move {
             let mut backoff = Duration::from_secs(1);
             loop {
                 match ws_shard(idx, chunk.clone(), &pm, &sig, sm.clone(), &l2).await {
@@ -189,13 +189,13 @@ async fn orchestrator(
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(5));
             }
-        }));
+        });
     }
 
     // Also spawn periodic REST ticker refresh
     let pm_refresh = price_map.clone();
     let sig_refresh = signal.clone();
-    let refresh_handle = tokio::spawn(async move {
+    handles.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(120));
         interval.tick().await; // skip immediate
         loop {
@@ -237,8 +237,9 @@ async fn orchestrator(
     // Run forever — shards self-heal. Only returns if ALL shards somehow exit
     // (which won't happen because each has an infinite reconnect loop).
     // This keeps the orchestrator alive so the outer run() loop doesn't churn.
-    futures_util::future::join_all(handles).await;
-    refresh_handle.abort();
+    while let Some(result) = handles.join_next().await {
+        result.context("Gate collector child failed")?;
+    }
     Ok(())
 }
 
@@ -249,7 +250,7 @@ async fn ws_shard(
     price_map: &PriceMap,
     signal: &UpdateSignal,
     sym_map: Arc<std::collections::HashMap<String, (String, f64)>>,
-    _l2_books: &L2OrderbookMap,
+    l2_books: &L2OrderbookMap,
 ) -> Result<()> {
     let (mut ws, _) =
         connect_async_tls_with_config("wss://fx-ws.gateio.ws/v4/ws/usdt", None, false, None)
@@ -321,9 +322,14 @@ async fn ws_shard(
                                 if let Some((sym, mult)) = sym_map.get(raw_sym) {
                                     let bid: f64 = item.get("b").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     let ask: f64 = item.get("a").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                                    let bid_qty: f64 = item.get("B").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                    let ask_qty: f64 = item.get("A").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let bid_qty: f64 = item.get("B").and_then(|v|v.as_f64().or_else(||v.as_str().and_then(|s|s.parse().ok()))).unwrap_or(0.0);
+                                    let ask_qty: f64 = item.get("A").and_then(|v|v.as_f64().or_else(||v.as_str().and_then(|s|s.parse().ok()))).unwrap_or(0.0);
                                     if bid <= 0.0 || ask <= 0.0 { continue; }
+                                    let now_ms=crate::engine::utils::now_ms();
+                                    let exchange_ms=item.get("t").and_then(|v|v.as_i64()).unwrap_or(0);
+                                    if exchange_ms<=0 || exchange_ms>now_ms+250 || now_ms-exchange_ms>750 || ![bid,ask,bid_qty,ask_qty,*mult].iter().all(|n|n.is_finite() && *n>0.0) || bid>=ask {continue;}
+                                    // A measured best level is enough only for an order fully covered by it.
+                                    l2_books.insert(format!("gate:{sym}"),crate::state::L2Snapshot{bids:vec![(bid,bid_qty*mult)],asks:vec![(ask,ask_qty*mult)],updated_ms:exchange_ms.min(now_ms)});
                                     let mid = (bid + ask) / 2.0;
                                     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                                     if let Some(mut ex_map) = price_map.get_mut("gate") {

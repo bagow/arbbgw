@@ -21,17 +21,35 @@ struct EmaEntry {
     last_ts: f64,
 }
 
-static STRUCTURAL_EMA: OnceLock<DashMap<String, EmaEntry>> =
-    OnceLock::new();
+static STRUCTURAL_EMA: OnceLock<DashMap<String, EmaEntry>> = OnceLock::new();
 
 /// Set of EMA keys that have been verified from 24h historical warmup data.
 /// Pairs NOT in this set are "on probation" — entry is blocked.
 static VERIFIED_KEYS: OnceLock<DashSet<String>> = OnceLock::new();
 
 /// Tracks when each pair (ema_key) was FIRST observed with a valid spread.
-/// Used for auto-verification: verify if pair has had consistent spread for 5+ min.
+/// Live verification requires distinct fresh observations over at least ten minutes.
 /// Independent of zero-cross timer so WS reconnects don't reset the clock.
-static FIRST_SEEN: OnceLock<DashMap<String, f64>> = OnceLock::new();
+#[derive(Clone, Copy, Default)]
+struct ObservationQuality {
+    first: f64,
+    last: f64,
+    count: u64,
+}
+impl ObservationQuality {
+    fn observe(&mut self, stamp: f64) -> bool {
+        if stamp > self.last {
+            if self.count == 0 || stamp - self.last > 5.0 {
+                self.first = stamp;
+                self.count = 0;
+            }
+            self.last = stamp;
+            self.count += 1;
+        }
+        self.count >= 300 && self.last - self.first >= 600.0
+    }
+}
+static FIRST_SEEN: OnceLock<DashMap<String, ObservationQuality>> = OnceLock::new();
 
 /// Compute spread opportunities from PriceMap.
 /// Called directly by the engine loop — zero serialization/HTTP overhead.
@@ -102,6 +120,22 @@ pub fn compute_spreads(
                     continue;
                 }
 
+                if data_a.last_updated == 0
+                    || data_b.last_updated == 0
+                    || data_a.last_updated > now_secs
+                    || data_b.last_updated > now_secs
+                    || ![
+                        data_a.bid, data_a.ask, data_b.bid, data_b.ask, data_a.vol, data_b.vol,
+                    ]
+                    .iter()
+                    .all(|v| v.is_finite())
+                    || data_a.bid <= 0.0
+                    || data_b.bid <= 0.0
+                    || data_a.bid >= data_a.ask
+                    || data_b.bid >= data_b.ask
+                {
+                    continue;
+                }
                 let max_stale = ts.stale_secs.min(5);
                 if data_a.last_updated > 0
                     && now_secs.saturating_sub(data_a.last_updated) > max_stale
@@ -172,13 +206,6 @@ pub fn compute_spreads(
                     (b_over_a, format!("{name_b}>{name_a}"))
                 };
 
-                if spread < ts.spread_threshold || spread > ts.spread_max {
-                    cnt_spread_range += 1;
-                    continue;
-                }
-
-                cnt_passed += 1;
-
                 // ── STRUCTURAL SPREAD (EXECUTABLE SPREAD EMA) ──
                 let is_a_first = name_a < name_b;
                 let (name1, name2) = if is_a_first {
@@ -192,9 +219,9 @@ pub fn compute_spreads(
                     (&data_b, &data_a)
                 };
 
-                // Executable spreads in canonical order (what we'd actually GET trading)
-                let exec_12 = (data1.bid - data2.ask) / data2.ask * 100.0; // sell 1, buy 2
-                let exec_21 = (data2.bid - data1.ask) / data1.ask * 100.0; // sell 2, buy 1
+                // Signed mid-price premiums in canonical order; executable entry is calculated separately.
+                let exec_12 = ((data1.bid + data1.ask) / (data2.bid + data2.ask) - 1.0) * 100.0; // sell 1, buy 2
+                let exec_21 = ((data2.bid + data2.ask) / (data1.bid + data1.ask) - 1.0) * 100.0; // sell 2, buy 1
 
                 // Mid premiums — used ONLY for zero-crossing detection (direction stability)
                 let mid1 = (data1.bid + data1.ask) / 2.0;
@@ -203,7 +230,14 @@ pub fn compute_spreads(
                 let premium_2_over_1 = (mid2 - mid1) / mid1 * 100.0;
 
                 let ema_key = format!("{}|{}|{}", sym, name1, name2);
-                let is_verified = verified.contains(&ema_key);
+                let gap = ema_map
+                    .get(&ema_key)
+                    .map(|e| now_f64 - e.last_ts > 5.0)
+                    .unwrap_or(false);
+                if gap {
+                    verified.remove(&ema_key);
+                    first_seen_map.remove(&ema_key);
+                }
 
                 let (ema_12, ema_21, max_12, min_12, max_21, min_21, cross_12, cross_21) =
                     if let Some(mut entry) = ema_map.get_mut(&ema_key) {
@@ -215,7 +249,7 @@ pub fn compute_spreads(
                             0.0
                         };
 
-                        // EMA tracks EXECUTABLE spread (bid-ask), not mid premium
+                        // EMA tracks the same signed mid-price premium as historical warmup
                         let new_12 = e.ema_12 + alpha * (exec_12 - e.ema_12);
                         let new_21 = e.ema_21 + alpha * (exec_21 - e.ema_21);
 
@@ -225,8 +259,16 @@ pub fn compute_spreads(
                         let new_min_21 = e.min_21.min(exec_21);
 
                         // Zero-crossing still based on MID premium (direction stability check)
-                        let new_cross_12 = if premium_1_over_2 <= 0.0 { now_f64 } else { e.last_cross_12 };
-                        let new_cross_21 = if premium_2_over_1 <= 0.0 { now_f64 } else { e.last_cross_21 };
+                        let new_cross_12 = if premium_1_over_2 <= 0.0 {
+                            now_f64
+                        } else {
+                            e.last_cross_12
+                        };
+                        let new_cross_21 = if premium_2_over_1 <= 0.0 {
+                            now_f64
+                        } else {
+                            e.last_cross_21
+                        };
 
                         *entry = EmaEntry {
                             ema_12: new_12,
@@ -267,13 +309,7 @@ pub fn compute_spreads(
                             },
                         );
                         (
-                            exec_12,
-                            exec_21,
-                            exec_12,
-                            exec_12,
-                            exec_21,
-                            exec_21,
-                            cross_12,
+                            exec_12, exec_21, exec_12, exec_12, exec_21, exec_21, cross_12,
                             cross_21,
                         )
                     };
@@ -287,37 +323,30 @@ pub fn compute_spreads(
                     (max_21, min_21, cross_21)
                 };
 
-                // structural_spread = the persistent price gap between exchanges.
-                // Non-directional: always max(ema_12, ema_21) = the real baseline gap.
-                // If HUSDT has 2.5% persistent premium (bingx > bitget):
-                //   ema_12 = +2.5%, ema_21 = -3.5% → structural = 2.5%
-                // For pairs with no premium: both EMA ≈ -0.1% → structural = 0 (after clamp)
-                let structural_spread = ema_12.max(ema_21);
+                // Expected directional exit premium includes crossing both bid/ask spreads.
+                let close_cross_cost =
+                    ((data1.ask - data1.bid) / mid1 + (data2.ask - data2.bid) / mid2) * 50.0;
+                let structural_spread =
+                    (if is_dir_1_over_2 { ema_12 } else { ema_21 }).max(0.0) + close_cross_cost;
 
                 let has_structural_spread = (now_f64 - last_cross) > 86000.0;
 
-                // ── AUTO-VERIFY via first_seen timer ──────────────────────────
-                // Pairs without historical candle data (new listings, API rate limits)
-                // are auto-verified once they've been observed for 5+ minutes AND the
-                // EMA mid-spread is still confirming the premium (> 0.1%).
-                //
-                // Uses FIRST_SEEN (not last_cross) so Bybit/BingX WS reconnects can't
-                // reset the clock — stale prices briefly crossing zero must not block.
-                if !is_verified {
-                    first_seen_map.entry(ema_key.clone()).or_insert(now_f64);
-                    let first_ts = *first_seen_map.get(&ema_key).unwrap();
-                    let observation_age = now_f64 - first_ts;
-                    // Auto-verify: 2min observation (historical warmup fallback)
-                    if observation_age > 120.0 {
-                        let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
-                        verified.insert(ema_key.clone());
-                        tracing::info!(
-                            "[spreads] Auto-verified {} after {:.0}s observation, EMA={:.3}%",
-                            ema_key, observation_age, structural_spread
-                        );
-                    }
+                let stamp = data_a.last_updated.min(data_b.last_updated) as f64;
+                if first_seen_map
+                    .entry(ema_key.clone())
+                    .or_default()
+                    .observe(stamp)
+                {
+                    verified.insert(ema_key.clone());
                 }
                 let is_verified = verified.contains(&ema_key);
+
+                if spread < ts.spread_threshold || spread > ts.spread_max {
+                    cnt_spread_range += 1;
+                    continue;
+                }
+
+                cnt_passed += 1;
 
                 rows.push(SpreadRow {
                     pair: sym.clone(),
@@ -333,7 +362,7 @@ pub fn compute_spreads(
                     vol_b: data_b.vol,
                     funding_a: data_a.funding_rate,
                     funding_b: data_b.funding_rate,
-                    // Structural spread ≥ 0 always: it's the persistent gap that "always exists".
+                    // Negative directional premiums are conservatively floored before reserving crossing costs.
                     // Negative EMA = no premium in this direction → structural = 0.
                     structural_spread: (structural_spread.max(0.0) * 10000.0).round() / 10000.0,
                     structural_max,
@@ -353,14 +382,20 @@ pub fn compute_spreads(
         let mut ex_fresh: Vec<(&str, usize, usize)> = Vec::new();
         for (name, map) in &snapshot {
             let total = map.len();
-            let fresh = map.values().filter(|d| {
-                d.bid > 0.0 && d.ask > 0.0
-                    && (d.last_updated == 0 || now_secs.saturating_sub(d.last_updated) <= ts.stale_secs)
-            }).count();
+            let fresh = map
+                .values()
+                .filter(|d| {
+                    d.bid > 0.0
+                        && d.ask > 0.0
+                        && (d.last_updated == 0
+                            || now_secs.saturating_sub(d.last_updated) <= ts.stale_secs)
+                })
+                .count();
             ex_fresh.push((name.as_str(), fresh, total));
         }
         ex_fresh.sort_by(|a, b| b.1.cmp(&a.1));
-        let ex_summary: String = ex_fresh.iter()
+        let ex_summary: String = ex_fresh
+            .iter()
             .map(|(n, f, t)| format!("{}:{}/{}", n, f, t))
             .collect::<Vec<_>>()
             .join(" ");
@@ -399,62 +434,76 @@ pub fn warmup_ema_from_premiums(
     history: &[(f64, f64, f64, String, String, String)],
     ts: &TechnicalSettings,
 ) {
-    let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
-    let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
-    let tau = ts.ema_tau_secs;
-
-    let mut sorted = history.to_vec();
-    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    for (ts_val, premium_12, premium_21, pair, name1, name2) in &sorted {
-        let key = format!("{}|{}|{}", pair, name1, name2);
-        // Default cross to first candle ts (not 0.0) — prevents false has_structural_spread
-        let mut entry = ema_map.entry(key.clone()).or_insert(EmaEntry {
-            ema_12: *premium_12,
-            ema_21: *premium_21,
-            max_12: *premium_12,
-            min_12: *premium_12,
-            max_21: *premium_21,
-            min_21: *premium_21,
-            last_cross_12: *ts_val,
-            last_cross_21: *ts_val,
-            last_ts: *ts_val,
-        });
-        let e = *entry;
-        let dt = (ts_val - e.last_ts).max(0.0);
-        let alpha = if dt > 0.0 {
-            1.0 - (-dt / tau).exp()
-        } else {
-            0.0
+    let ema_map = STRUCTURAL_EMA.get_or_init(DashMap::new);
+    let verified = VERIFIED_KEYS.get_or_init(DashSet::new);
+    if !ts.ema_tau_secs.is_finite() || ts.ema_tau_secs <= 0.0 {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let mut grouped: HashMap<String, Vec<(f64, f64, f64)>> = HashMap::new();
+    for (stamp, a, b, pair, ex1, ex2) in history {
+        if [*stamp, *a, *b].iter().all(|n| n.is_finite()) && *stamp <= now {
+            grouped
+                .entry(format!("{pair}|{ex1}|{ex2}"))
+                .or_default()
+                .push((*stamp, *a, *b));
+        }
+    }
+    for (key, mut rows) in grouped {
+        if verified.contains(&key) {
+            continue;
+        }
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        rows.dedup_by(|a, b| a.0 == b.0);
+        if rows.len() < 80
+            || rows.last().unwrap().0 - rows[0].0 < 20.0 * 3600.0
+            || now - rows.last().unwrap().0 > 1800.0
+            || rows.windows(2).any(|r| r[1].0 - r[0].0 > 1800.0)
+        {
+            continue;
+        }
+        let (first, a, b) = rows[0];
+        let mut e = EmaEntry {
+            ema_12: a,
+            ema_21: b,
+            max_12: a,
+            min_12: a,
+            max_21: b,
+            min_21: b,
+            last_cross_12: first,
+            last_cross_21: first,
+            last_ts: first,
         };
-
-        let new_12 = e.ema_12 + alpha * (premium_12 - e.ema_12);
-        let new_21 = e.ema_21 + alpha * (premium_21 - e.ema_21);
-
-        let new_max_12 = e.max_12.max(*premium_12);
-        let new_min_12 = e.min_12.min(*premium_12);
-        let new_max_21 = e.max_21.max(*premium_21);
-        let new_min_21 = e.min_21.min(*premium_21);
-
-        let new_cross_12 = if *premium_12 <= 0.0 { *ts_val } else { e.last_cross_12 };
-        let new_cross_21 = if *premium_21 <= 0.0 { *ts_val } else { e.last_cross_21 };
-
-        *entry = EmaEntry {
-            ema_12: new_12,
-            ema_21: new_21,
-            max_12: new_max_12,
-            min_12: new_min_12,
-            max_21: new_max_21,
-            min_21: new_min_21,
-            last_cross_12: new_cross_12,
-            last_cross_21: new_cross_21,
-            last_ts: *ts_val,
-        };
-
-        // Mark this pair as VERIFIED — it has real historical data
+        for (stamp, a, b) in rows.into_iter().skip(1) {
+            let alpha = 1.0 - (-(stamp - e.last_ts) / ts.ema_tau_secs).exp();
+            e.ema_12 += alpha * (a - e.ema_12);
+            e.ema_21 += alpha * (b - e.ema_21);
+            e.max_12 = e.max_12.max(a);
+            e.min_12 = e.min_12.min(a);
+            e.max_21 = e.max_21.max(b);
+            e.min_21 = e.min_21.min(b);
+            if a <= 0.0 {
+                e.last_cross_12 = stamp;
+            }
+            if b <= 0.0 {
+                e.last_cross_21 = stamp;
+            }
+            e.last_ts = stamp;
+        }
+        if let Some(live) = ema_map.get(&key) {
+            let alpha = 1.0 - (-(now - e.last_ts).max(0.0) / ts.ema_tau_secs).exp();
+            e.ema_12 += alpha * (live.ema_12 - e.ema_12);
+            e.ema_21 += alpha * (live.ema_21 - e.ema_21);
+        }
+        e.last_ts = now;
+        ema_map.insert(key.clone(), e);
         verified.insert(key);
     }
 }
+
 /// Returns all EMA keys that are being tracked but not yet verified.
 /// Used by the background re-warmup task to retry candle fetches for new listings.
 pub fn unverified_ema_keys() -> Vec<String> {
@@ -464,7 +513,34 @@ pub fn unverified_ema_keys() -> Vec<String> {
         .iter()
         .filter_map(|e| {
             let key = e.key().clone();
-            if verified.contains(&key) { None } else { Some(key) }
+            if verified.contains(&key) {
+                None
+            } else {
+                Some(key)
+            }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+    #[test]
+    fn repeated_cached_quote_cannot_warm_up_ema() {
+        let mut q = ObservationQuality::default();
+        for _ in 0..1000 {
+            assert!(!q.observe(100.0));
+        }
+        assert_eq!(q.count, 1);
+    }
+    #[test]
+    fn observation_gap_requires_new_continuous_history() {
+        let mut q = ObservationQuality::default();
+        for t in 1..=601 {
+            q.observe(t as f64);
+        }
+        assert!(q.observe(602.0));
+        assert!(!q.observe(700.0));
+        assert_eq!(q.count, 1);
+    }
 }
