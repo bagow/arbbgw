@@ -40,11 +40,12 @@ impl Journal {
               CREATE TABLE IF NOT EXISTS execution_observations(id INTEGER PRIMARY KEY, client_id TEXT NOT NULL,
                 observed_ms INTEGER NOT NULL, observation TEXT NOT NULL);
               CREATE INDEX IF NOT EXISTS execution_orders_trade ON execution_orders(trade_id);
+              CREATE TABLE IF NOT EXISTS funding_events(exchange TEXT NOT NULL,event_id TEXT NOT NULL,trade_id INTEGER NOT NULL,time_ms INTEGER NOT NULL,cost REAL NOT NULL,PRIMARY KEY(exchange,event_id));
               CREATE TABLE IF NOT EXISTS reconciliation_alerts(key TEXT PRIMARY KEY, observed_ms INTEGER NOT NULL, detail TEXT NOT NULL);")?;
             let mut stmt=c.prepare("PRAGMA table_info(trades)")?;
             let cols=stmt.query_map([],|r|r.get::<_,String>(1))?.collect::<Result<Vec<_>,_>>()?;
             drop(stmt);
-            for (name,ty) in [("accounting_status","TEXT DEFAULT 'LEGACY_UNVERIFIED'"),("opened_qty_a","REAL"),("opened_qty_b","REAL"),("closed_qty_a","REAL"),("closed_qty_b","REAL"),("manual_close_requested","INTEGER NOT NULL DEFAULT 0"),("peak_net_percent","REAL NOT NULL DEFAULT 0")] {
+            for (name,ty) in [("accounting_status","TEXT DEFAULT 'LEGACY_UNVERIFIED'"),("opened_qty_a","REAL"),("opened_qty_b","REAL"),("closed_qty_a","REAL"),("closed_qty_b","REAL"),("manual_close_requested","INTEGER NOT NULL DEFAULT 0"),("peak_net_percent","REAL NOT NULL DEFAULT 0"),("last_accounting_check","INTEGER NOT NULL DEFAULT 0"),("accounting_error","TEXT"),("fee_a","REAL"),("fee_b","REAL"),("net_pnl_a","REAL"),("net_pnl_b","REAL"),("current_net_estimate","REAL"),("valuation_ms","INTEGER")] {
                 if !cols.iter().any(|x|x==name) { c.execute_batch(&format!("ALTER TABLE trades ADD COLUMN {name} {ty}"))?; }
             }
             Ok(())
@@ -137,6 +138,75 @@ impl Journal {
         self.db.call(move |c|{c.execute("UPDATE trades SET status=?,close_reason=?,close_error=NULL WHERE id=? AND status NOT IN ('CLOSED','CANCELLED')",params![state,reason,id])?;Ok(())}).await?;
         Ok(())
     }
+    pub async fn accounting_due(&self) -> anyhow::Result<Vec<(ManagedTrade, i64)>> {
+        let now = super::utils::now_ms();
+        let rows=self.db.call(move |c| {
+            let mut stmt=c.prepare("SELECT t.id,t.close_reason,t.entry_time,t.exit_time,p.plan FROM trades t JOIN execution_plans p ON p.trade_id=t.id WHERE t.status='CLOSED' AND t.exit_time<? AND (t.accounting_status!='VERIFIED' OR t.exit_time>?) AND t.last_accounting_check<? ORDER BY t.last_accounting_check,t.id LIMIT 10")?;
+            let rows=stmt.query_map(params![now-60_000,now-7*86_400_000,now-300_000],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,String>(4)?)))?.collect::<Result<Vec<_>,_>>()?;Ok(rows)
+        }).await?;
+        rows.into_iter()
+            .map(|(id, reason, created_ms, end, plan)| {
+                Ok((
+                    ManagedTrade {
+                        id,
+                        state: "CLOSED".into(),
+                        reason,
+                        created_ms,
+                        plan: serde_json::from_str(&plan)?,
+                    },
+                    end,
+                ))
+            })
+            .collect()
+    }
+    pub async fn accounting_attempt(&self, id: i64, error: Option<String>) -> anyhow::Result<()> {
+        let now = super::utils::now_ms();
+        self.db
+            .call(move |c| {
+                c.execute(
+                    "UPDATE trades SET last_accounting_check=?,accounting_error=? WHERE id=?",
+                    params![now, error, id],
+                )?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+    pub async fn settle(
+        &self,
+        id: i64,
+        events: Vec<(String, super::orders::FundingEvent)>,
+    ) -> anyhow::Result<()> {
+        let mut unique = std::collections::BTreeMap::new();
+        for (ex, e) in events {
+            if e.id.is_empty() || !e.cost.is_finite() {
+                anyhow::bail!("Invalid funding evidence");
+            }
+            if let Some(previous) = unique.insert((ex, e.id.clone()), (e.time_ms, e.cost)) {
+                if previous != (e.time_ms, e.cost) {
+                    anyhow::bail!("Conflicting funding event");
+                }
+            }
+        }
+        self.db.call(move |c| {
+            let tx=c.transaction()?;
+            for ((ex,event_id),(time_ms,cost)) in &unique {
+                let owner=tx.query_row("SELECT trade_id FROM funding_events WHERE exchange=? AND event_id=?",params![ex,event_id],|r|r.get::<_,i64>(0));
+                match owner {Ok(other) if other!=id=>return Err(tokio_rusqlite::Error::Other("Funding already belongs to another trade".into())),Err(rusqlite::Error::QueryReturnedNoRows)|Ok(_)=>{},Err(e)=>return Err(e.into())}
+                tx.execute("INSERT INTO funding_events(exchange,event_id,trade_id,time_ms,cost) VALUES(?,?,?,?,?) ON CONFLICT(exchange,event_id) DO UPDATE SET cost=excluded.cost,time_ms=excluded.time_ms",params![ex,event_id,id,time_ms,cost])?;
+            }
+            let stored:i64=tx.query_row("SELECT COUNT(*) FROM funding_events WHERE trade_id=?",[id],|r|r.get(0))?;
+            if stored!=unique.len() as i64{return Err(tokio_rusqlite::Error::Other("Funding ledger lost previously observed events".into()));}
+            let funding=unique.values().map(|(_,cost)|cost).sum::<f64>();
+            let (exa,exb):(String,String)=tx.query_row("SELECT exchange_a,exchange_b FROM trades WHERE id=?",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            let fa=unique.iter().filter(|((ex,_),_)|*ex==exa).map(|(_,(_,cost))|cost).sum::<f64>();
+            let fb=unique.iter().filter(|((ex,_),_)|*ex==exb).map(|(_,(_,cost))|cost).sum::<f64>();
+            let updated=tx.execute("UPDATE trades SET funding_cost=?,pnl=gross_pnl-commission_cost-?,accounting_status='VERIFIED',accounting_error=NULL,net_pnl_a=pnl_a-fee_a-?,net_pnl_b=pnl_b-fee_b-? WHERE id=? AND status='CLOSED' AND accounting_status='FUNDING_PENDING' AND gross_pnl IS NOT NULL",params![funding,funding,fa,fb,id])?;
+            if updated!=1{return Err(tokio_rusqlite::Error::Other("Trade not ready for accounting settlement".into()));}
+            tx.commit()?;Ok(())
+        }).await?;
+        Ok(())
+    }
     pub async fn request_close(&self, id: i64) -> anyhow::Result<()> {
         self.db.call(move |c| {c.execute("UPDATE trades SET manual_close_requested=1 WHERE id=? AND status NOT IN ('CLOSED','CANCELLED')",[id])?;Ok(())}).await?;
         Ok(())
@@ -163,7 +233,7 @@ impl Journal {
         net_percent: f64,
     ) -> anyhow::Result<f64> {
         Ok(self.db.call(move |c| {
-            c.execute("UPDATE trades SET last_price_a=?,last_price_b=?,curr_gross_pnl=?,peak_net_percent=MAX(peak_net_percent,?) WHERE id=?",params![pa,pb,gross,net_percent,id])?;
+            c.execute("UPDATE trades SET last_price_a=?,last_price_b=?,curr_gross_pnl=?,peak_net_percent=MAX(peak_net_percent,?),current_net_estimate=?*entry_price_a*opened_qty_a/100.0,valuation_ms=? WHERE id=?",params![pa,pb,gross,net_percent,net_percent,super::utils::now_ms(),id])?;
             c.query_row("SELECT peak_net_percent FROM trades WHERE id=?",[id],|r|r.get(0)).map_err(Into::into)
         }).await?)
     }
@@ -223,7 +293,25 @@ impl Journal {
         };
         let (id, multa, multb) = (t.id, s.mult_a, s.mult_b);
         let now = super::utils::now_ms();
+        let id_a = orders
+            .iter()
+            .find(|o| o.leg == "A" && !o.request.reduce_only)
+            .and_then(|o| o.observation.order_id.clone());
+        let id_b = orders
+            .iter()
+            .find(|o| o.leg == "B" && !o.request.reduce_only)
+            .and_then(|o| o.observation.order_id.clone());
+        let spread = if a.entry_price() > 0.0 && b.entry_price() > 0.0 {
+            if s.is_a_higher {
+                (a.entry_price() / b.entry_price() - 1.0) * 100.0
+            } else {
+                (b.entry_price() / a.entry_price() - 1.0) * 100.0
+            }
+        } else {
+            0.0
+        };
         self.db.call(move |c| {
+            c.execute("UPDATE trades SET fee_a=?,fee_b=?,order_id_a=?,order_id_b=?,entry_spread=? WHERE id=?",params![a.fee,b.fee,id_a,id_b,spread,id])?;
             c.execute("UPDATE trades SET status=?,entry_price_a=?,entry_price_b=?,exit_price_a=?,exit_price_b=?,opened_qty_a=?,opened_qty_b=?,closed_qty_a=?,closed_qty_b=?,contracts_a=?,contracts_b=?,volume=?,commission_cost=?,gross_pnl=?,pnl_a=?,pnl_b=?,pnl=NULL,accounting_status=?,exit_time=CASE WHEN ? THEN COALESCE(exit_time,?) ELSE exit_time END WHERE id=?",params![status,a.entry_price(),b.entry_price(),a.exit_price(),b.exit_price(),a.opened,b.opened,a.closed,b.closed,a.opened/multa,b.opened/multb,a.entry_value.max(b.entry_value),fees,gross,if flat {Some(pa)}else{None},if flat {Some(pb)}else{None},accounting,flat,now,id])?;Ok(())
         }).await?;
         Ok(())
@@ -411,5 +499,51 @@ mod tests {
         assert!(j.close_requested(id).await.unwrap());
         assert_eq!(j.mark_to_market(id, 1.0, 1.0, 0.3, 3.0).await.unwrap(), 3.0);
         assert_eq!(j.mark_to_market(id, 1.0, 1.0, 0.1, 1.0).await.unwrap(), 3.0);
+    }
+    #[tokio::test]
+    async fn funding_reconciliation_is_idempotent_and_cannot_double_assign_events() {
+        let j = setup().await;
+        let id = j.reserve(plan()).await.unwrap().unwrap();
+        let t = j.active().await.unwrap().remove(0);
+        let mut entry = order(id);
+        entry.observation = OrderObservation {
+            order_id: Some("entry".into()),
+            state: OrderState::Filled,
+            filled_quantity: 10.0,
+            average_price: Some(1.0),
+            fee: Some(0.01),
+        };
+        let mut close = entry.clone();
+        close.request.reduce_only = true;
+        close.request.client_id = "exit".into();
+        close.observation.order_id = Some("exit".into());
+        let orders = vec![entry, close];
+        let event = (
+            "gate".to_string(),
+            super::super::orders::FundingEvent {
+                id: "funding-1".into(),
+                time_ms: t.created_ms + 1,
+                cost: 0.005,
+            },
+        );
+        for _ in 0..2 {
+            j.project(&t, &orders, true).await.unwrap();
+            j.settle(id, vec![event.clone(), event.clone()])
+                .await
+                .unwrap();
+        }
+        let (net, count): (f64, i64) =
+            j.db.call(move |c| {
+                Ok((
+                    c.query_row("SELECT pnl FROM trades WHERE id=?", [id], |r| r.get(0))?,
+                    c.query_row("SELECT COUNT(*) FROM funding_events", [], |r| r.get(0))?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert!((net + 0.025).abs() < 1e-10);
+        assert_eq!(count, 1);
+        let second = j.reserve(plan()).await.unwrap().unwrap();
+        assert!(j.settle(second, vec![event]).await.is_err());
     }
 }

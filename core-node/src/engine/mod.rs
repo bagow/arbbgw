@@ -18,3 +18,5 @@ pub mod workers;
 pub mod orders;
 pub mod journal;
 pub mod managed;
+
+pub mod settlement;

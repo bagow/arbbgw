@@ -65,6 +65,15 @@ pub struct OrderObservation {
     pub fee: Option<f64>,
 }
 impl OrderObservation {
+    pub fn rejected() -> Self {
+        Self {
+            order_id: None,
+            state: OrderState::Rejected,
+            filled_quantity: 0.0,
+            average_price: None,
+            fee: Some(0.0),
+        }
+    }
     pub fn pending(order_id: Option<String>) -> Self {
         Self {
             order_id,
@@ -159,4 +168,12 @@ pub fn identity(v: &serde_json::Value, key: &str) -> Option<String> {
         .as_str()
         .map(str::to_string)
         .or_else(|| v[key].as_u64().map(|x| x.to_string()))
+}
+
+/// An exchange ledger credit is stored as a negative cost, a debit as positive.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FundingEvent {
+    pub id: String,
+    pub time_ms: i64,
+    pub cost: f64,
 }

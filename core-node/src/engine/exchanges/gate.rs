@@ -166,6 +166,43 @@ fn format_gate_price(price: f64, tick_size: f64) -> String {
 
 #[async_trait]
 impl ExchangeConnector for GateConnector {
+    async fn funding_events(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<crate::engine::orders::FundingEvent>, String> {
+        use crate::engine::orders::{identity, number, FundingEvent};
+        let contract = pair.replace("USDT", "_USDT");
+        let mut out = Vec::new();
+        for page in 0..100 {
+            let path=format!("/api/v4/futures/usdt/account_book?contract={contract}&type=fund&from={}&to={}&limit=100&offset={}",from/1000,(to+999)/1000,page*100);
+            let v = managed_gate_get(http, keys, &path).await?;
+            let rows = v.as_array().ok_or("Invalid Gate funding ledger")?;
+            for r in rows {
+                if r["contract"].as_str() != Some(contract.as_str())
+                    || r["type"].as_str() != Some("fund")
+                {
+                    return Err("Gate funding attribution mismatch".into());
+                }
+                let time_ms = (number(r, "time")? * 1000.0).round() as i64;
+                if time_ms < from || time_ms > to {
+                    return Err("Funding near trade boundary requires reconciliation".into());
+                }
+                out.push(FundingEvent {
+                    id: identity(r, "id").ok_or("Missing Gate funding identity")?,
+                    time_ms,
+                    cost: -number(r, "change")?,
+                });
+            }
+            if rows.len() < 100 {
+                return Ok(out);
+            }
+        }
+        Err("Gate funding pagination incomplete".into())
+    }
     fn supports_managed_orders(&self) -> bool {
         true
     }
@@ -191,6 +228,23 @@ impl ExchangeConnector for GateConnector {
         super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
         let v=super::ws_gate::send_gate_ws_request(json!({"request_id":Uuid::new_v4().to_string(),"channel":"futures.order_place","event":"api","payload":{"contract":r.pair.replace("USDT","_USDT"),"size":if r.is_buy{size.round() as i64}else{-(size.round() as i64)},"price":price,"tif":"ioc","reduce_only":r.reduce_only,"text":format!("t-{}",r.client_id)}})).await?;
         if v["header"]["status"].as_str() != Some("200") {
+            if matches!(
+                v["data"]["errs"]["label"].as_str(),
+                Some(
+                    "INVALID_PARAM_VALUE"
+                        | "INVALID_PARAM_FORMAT"
+                        | "INVALID_KEY"
+                        | "INVALID_SIGNATURE"
+                        | "CONTRACT_NOT_FOUND"
+                        | "INSUFFICIENT_AVAILABLE"
+                        | "ORDER_SIZE_TOO_SMALL"
+                        | "ORDER_SIZE_TOO_LARGE"
+                        | "INVALID_PRICE"
+                        | "REDUCE_EXCEEDED"
+                )
+            ) {
+                return Ok(crate::engine::orders::OrderObservation::rejected());
+            }
             return Err("Gate submission not confirmed".into());
         }
         parse_managed_gate(&v["data"]["result"], r)

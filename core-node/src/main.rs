@@ -282,6 +282,8 @@ async fn main() -> Result<()> {
         engine_ctx.clone(),
     );
 
+    engine::settlement::start(journal.clone(), http.clone(), exchange_keys.clone());
+
     // ── Pre-warm HTTP connections to exchange APIs ─────────────────────────
     engine::startup::prewarm_http(http.clone());
 

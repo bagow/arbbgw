@@ -303,6 +303,7 @@ async fn execute_binance_order(
     keys: &ExchangeKeys,
     params: &serde_json::Map<String, Value>,
     _api_timeout_ms: u64,
+    managed: bool,
 ) -> Result<Value, String> {
     check_ip_ban()?;
     use crate::engine::exchanges::ws_trader::send_ws_request;
@@ -348,6 +349,30 @@ async fn execute_binance_order(
             }
             if let Some(err) = v_ws.get("error") {
                 detect_ban_from_response(err);
+                if managed
+                    && matches!(
+                        err["code"].as_i64(),
+                        Some(
+                            -1021
+                                | -1022
+                                | -1100
+                                | -1102
+                                | -1111
+                                | -1121
+                                | -2010
+                                | -2019
+                                | -2022
+                                | -4003
+                                | -4004
+                                | -4005
+                                | -4014
+                                | -4023
+                                | -4164
+                        )
+                    )
+                {
+                    return Ok(json!({"managed_rejection":true}));
+                }
                 tracing::error!("[binance_ws] order error: {}", err);
                 return Err(format!(
                     "Binance WS API Error: {}",
@@ -406,6 +431,43 @@ fn format_binance_price(price: f64, tick_size: f64) -> String {
 
 #[async_trait]
 impl ExchangeConnector for BinanceConnector {
+    async fn funding_events(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<crate::engine::orders::FundingEvent>, String> {
+        use crate::engine::orders::{identity, number, FundingEvent};
+        let mut out = Vec::new();
+        for page in 1..=100 {
+            let q=format!("symbol={pair}&incomeType=FUNDING_FEE&startTime={from}&endTime={to}&limit=1000&page={page}&timestamp={}",now_ms());
+            let v = managed_binance_get(http, keys, "/fapi/v1/income", &q).await?;
+            let rows = v.as_array().ok_or("Invalid Binance funding ledger")?;
+            for r in rows {
+                if r["symbol"].as_str() != Some(pair)
+                    || r["incomeType"].as_str() != Some("FUNDING_FEE")
+                    || r["asset"].as_str() != Some("USDT")
+                {
+                    return Err("Binance funding attribution mismatch".into());
+                }
+                let time_ms = number(r, "time")? as i64;
+                if time_ms < from || time_ms > to {
+                    return Err("Binance funding outside requested range".into());
+                }
+                out.push(FundingEvent {
+                    id: identity(r, "tranId").ok_or("Missing funding identity")?,
+                    time_ms,
+                    cost: -number(r, "income")?,
+                });
+            }
+            if rows.len() < 1000 {
+                return Ok(out);
+            }
+        }
+        Err("Binance funding pagination incomplete".into())
+    }
     fn supports_managed_orders(&self) -> bool {
         true
     }
@@ -430,7 +492,10 @@ impl ExchangeConnector for BinanceConnector {
             );
             p.insert("timeInForce".into(), json!("IOC"));
         }
-        let v = execute_binance_order(http, keys, &p, 2000).await?;
+        let v = execute_binance_order(http, keys, &p, 2000, true).await?;
+        if v["managed_rejection"].as_bool() == Some(true) {
+            return Ok(crate::engine::orders::OrderObservation::rejected());
+        }
         parse_managed_binance(&v, r)
     }
     async fn query_managed(
@@ -559,7 +624,7 @@ impl ExchangeConnector for BinanceConnector {
         // With RESULT, the WS response contains the actual execution result inline.
         params.insert("newOrderRespType".to_string(), serde_json::json!("RESULT"));
 
-        let v = execute_binance_order(http, keys, &params, api_timeout_ms).await?;
+        let v = execute_binance_order(http, keys, &params, api_timeout_ms, false).await?;
 
         // Diagnostic: log order request and response
         let resp_oid = v["orderId"]
@@ -777,7 +842,7 @@ impl ExchangeConnector for BinanceConnector {
 
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
 
-        let v_resp = execute_binance_order(http, keys, &params, api_timeout_ms).await;
+        let v_resp = execute_binance_order(http, keys, &params, api_timeout_ms, false).await;
         if let Err(e) = &v_resp {
             tracing::error!("[binance] normal close rejected: {}", e);
         }
@@ -872,7 +937,8 @@ impl ExchangeConnector for BinanceConnector {
         fb_params.insert("timestamp".to_string(), serde_json::json!(ts_fb));
         fb_params.insert("newOrderRespType".to_string(), serde_json::json!("RESULT"));
 
-        let v_fb = match execute_binance_order(http, keys, &fb_params, api_timeout_ms).await {
+        let v_fb = match execute_binance_order(http, keys, &fb_params, api_timeout_ms, false).await
+        {
             Ok(v) => v,
             Err(e) => {
                 // If reduce-only order is rejected, position is already closed (filled by initial order)

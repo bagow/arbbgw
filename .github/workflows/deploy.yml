@@ -37,9 +37,32 @@ jobs:
         with:
           workspaces: "."
       - name: Workspace check
-        run: cargo check --workspace
+        run: |
+          set -o pipefail
+          cargo check --workspace 2>&1 | tee ci-check.log
       - name: Unit tests (PnL, lot sizing, utils)
-        run: cargo test --workspace
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee ci-test.log
+      - name: Preserve check logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs-${{ github.sha }}
+          path: ci-*.log
+          retention-days: 14
+      - name: Copy branch check logs to audit directory on VPS
+        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/fix/')
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          source: "ci-*.log"
+          target: "/home/opc/arb-ci/${{ github.sha }}/"
+          command_timeout: 2m
 
   # --- 0.1 Lint и аудит зависимостей (НЕ блокирует деплой) ---
   lint:

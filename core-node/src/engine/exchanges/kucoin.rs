@@ -11,6 +11,74 @@ pub struct KucoinConnector;
 
 #[async_trait]
 impl ExchangeConnector for KucoinConnector {
+    async fn funding_events(
+        &self,
+        _http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<crate::engine::orders::FundingEvent>, String> {
+        use crate::engine::orders::{identity, number, FundingEvent};
+        let symbol = managed_kucoin_symbol(pair);
+        let mut windows = vec![(from, to)];
+        let mut out = Vec::new();
+        let mut requests = 0;
+        while let Some((start, end)) = windows.pop() {
+            requests += 1;
+            if requests > 100 {
+                return Err("KuCoin funding pagination incomplete".into());
+            }
+            let path = format!(
+                "/api/v1/funding-history?symbol={symbol}&startAt={start}&endAt={end}&maxCount=100"
+            );
+            let v = super::ws_kucoin::send_kucoin_request(
+                &keys.kucoin_key,
+                &keys.kucoin_secret,
+                &keys.kucoin_passphrase,
+                "GET",
+                &path,
+                "",
+                3000,
+            )
+            .await?;
+            if v["code"].as_str() != Some("200000") {
+                return Err("KuCoin funding request failed".into());
+            }
+            let more = v["data"]["hasMore"]
+                .as_bool()
+                .ok_or("Missing KuCoin funding pagination")?;
+            if more {
+                if end <= start {
+                    return Err("Ambiguous KuCoin funding page boundary".into());
+                }
+                let mid = start + (end - start) / 2;
+                windows.push((start, mid));
+                windows.push((mid + 1, end));
+                continue;
+            }
+            let rows = v["data"]["dataList"]
+                .as_array()
+                .ok_or("Invalid KuCoin funding ledger")?;
+            for r in rows {
+                if r["symbol"].as_str() != Some(symbol.as_str())
+                    || r["settleCurrency"].as_str() != Some("USDT")
+                {
+                    return Err("KuCoin funding attribution mismatch".into());
+                }
+                let time_ms = number(r, "timePoint")? as i64;
+                if time_ms < start || time_ms > end {
+                    return Err("KuCoin funding outside requested range".into());
+                }
+                out.push(FundingEvent {
+                    id: identity(r, "id").ok_or("Missing KuCoin funding identity")?,
+                    time_ms,
+                    cost: -number(r, "funding")?,
+                });
+            }
+        }
+        Ok(out)
+    }
     fn supports_managed_orders(&self) -> bool {
         true
     }
@@ -44,7 +112,31 @@ impl ExchangeConnector for KucoinConnector {
         )
         .await?;
         if v["code"].as_str() != Some("200000") {
-            return Err(format!("KuCoin submission code={}", v["code"]));
+            if matches!(
+                v["code"].as_str(),
+                Some(
+                    "400001"
+                        | "400002"
+                        | "400003"
+                        | "400004"
+                        | "400005"
+                        | "400006"
+                        | "400007"
+                        | "100001"
+                        | "300003"
+                        | "300004"
+                        | "300005"
+                        | "300009"
+                        | "300011"
+                        | "300012"
+                )
+            ) {
+                return Ok(crate::engine::orders::OrderObservation::rejected());
+            }
+            return Err(format!(
+                "KuCoin submission outcome unknown code={}",
+                v["code"]
+            ));
         }
         Ok(crate::engine::orders::OrderObservation::pending(
             crate::engine::orders::identity(&v["data"], "orderId"),

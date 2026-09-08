@@ -73,6 +73,19 @@ pub trait ExchangeConnector: Send + Sync {
         Err("Managed order reconciliation unsupported".into())
     }
 
+    /// Return the complete funding ledger for this symbol and inclusive time range.
+    /// An incomplete page or unsupported ledger is an error, never an empty success.
+    async fn funding_events(
+        &self,
+        _http: &Client,
+        _keys: &ExchangeKeys,
+        _pair: &str,
+        _from: i64,
+        _to: i64,
+    ) -> Result<Vec<crate::engine::orders::FundingEvent>, String> {
+        Err("Funding ledger unsupported".into())
+    }
+
     /// Returns the exchange name
     fn name(&self) -> &'static str;
 

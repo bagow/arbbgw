@@ -1777,7 +1777,7 @@ function renderActiveTable(profileId, active) {
                             <div class="td-line"><span>Comm. Cost:</span> <strong style="color:var(--red)">${fmtCost(t.commission_cost)}</strong></div>
                             <div class="td-line"><span>Entry Slip:</span> <strong style="color:var(--red)">${fmtCost(t.slippage_cost)}</strong></div>
                             <div class="td-line"><span>Funding In:</span> <strong class="funding-countdown" data-next="${fundNextTs}" style="font-family:'Roboto Mono',monospace; font-variant-numeric:tabular-nums; color:var(--text-sub)">--:--:--</strong></div>
-                            <div class="td-total-pnl">Net PnL: ${livePnLStr} <span class="text-sub" style="font-weight:400;font-size:.8rem;">(${fmtDuration(Date.now()-t.entry_time)})</span></div>
+                            <div class="td-total-pnl">Estimated exit net: ${livePnLStr} <span class="text-sub" style="font-weight:400;font-size:.8rem;">(${fmtDuration(Date.now()-t.entry_time)})</span></div>
                             <div style="margin-top:12px; display:flex; gap:8px;">
                                 <button type="button" class="trading-save-btn outline-btn" style="margin:0;flex:1;padding:8px;font-size:12px;" onclick='openModal({pair:"${t.pair}",exchangeA:"${t.exchange_a}",exchangeB:"${t.exchange_b}",priceA:${t.entry_price_a},priceB:${t.entry_price_b},spread:${t.entry_spread},volA:0,volB:0,direction:"${t.direction}",entryTime:${t.entry_time},exitTime:null})'>📊 View Chart</button>
                                 <button type="button" class="trading-save-btn outline-btn" style="margin:0;flex:1;padding:8px;font-size:12px;color:var(--red);border-color:var(--red);" onclick="marketCloseTrade('${profileId}', ${t.id}, event)">❌ Market Close</button>
@@ -1889,11 +1889,11 @@ function renderHistoryTable(profileId, history) {
     }
     tbody.innerHTML = history.map(t => {
         const time = t.exit_time ? new Date(t.exit_time).toLocaleString('en-GB', { timeZone: 'Europe/Kyiv' }) : '—';
-        const pnl = t.pnl !== null && t.pnl !== undefined 
-            ? t.pnl 
-            : ((t.gross_pnl ?? ((t.pnl_a ?? 0) + (t.pnl_b ?? 0))) - (t.commission_cost ?? 0) - (t.funding_cost ?? 0));
-        const pnlColor = pnl > 0 ? 'var(--green)' : 'var(--red)';
-        const pnlStr = fmtPnL(pnl);
+        const pnl = t.pnl == null ? null : Number(t.pnl);
+        const pnlColor = pnl == null ? 'var(--text-sub)' : pnl > 0 ? 'var(--green)' : 'var(--red)';
+        const accounting = t.accounting_status || 'LEGACY_UNVERIFIED';
+        const accountingLabel = accounting === 'VERIFIED' ? 'Reconciled' : accounting === 'LEGACY_UNVERIFIED' ? 'Legacy: unverified' : 'Reconciliation pending';
+        const pnlStr = (pnl == null ? '—' : fmtPnL(pnl)) + `<div class="text-sub" style="font-size:.7rem">${accountingLabel}</div>`;
         const rowKey = `${profileId}_h_${t.id}`;
         const isExpanded = expandedRows[profileId]?.has('h_' + t.id);
         const isAHigher = t.direction.startsWith(t.exchange_a);

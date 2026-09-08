@@ -356,6 +356,18 @@ pub fn row_to_trade(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trade> {
         last_price_b: row.get("last_price_b").unwrap_or(None),
         last_spread: row.get("last_spread").unwrap_or(None),
         curr_gross_pnl: row.get("curr_gross_pnl").unwrap_or(None),
+        accounting_status: row
+            .get("accounting_status")
+            .unwrap_or_else(|_| "LEGACY_UNVERIFIED".into()),
+        accounting_error: row.get("accounting_error").unwrap_or(None),
+        current_net_estimate: row.get("current_net_estimate").unwrap_or(None),
+        valuation_ms: row.get("valuation_ms").unwrap_or(None),
+        net_pnl_a: row.get("net_pnl_a").unwrap_or(None),
+        net_pnl_b: row.get("net_pnl_b").unwrap_or(None),
+        opened_qty_a: row.get("opened_qty_a").unwrap_or(None),
+        opened_qty_b: row.get("opened_qty_b").unwrap_or(None),
+        closed_qty_a: row.get("closed_qty_a").unwrap_or(None),
+        closed_qty_b: row.get("closed_qty_b").unwrap_or(None),
         pnl_a: row.get("pnl_a").unwrap_or(None),
         pnl_b: row.get("pnl_b").unwrap_or(None),
         close_reason: row.get("close_reason").unwrap_or(None),

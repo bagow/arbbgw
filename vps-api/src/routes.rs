@@ -156,14 +156,7 @@ pub async fn handle_get_logs(
     let mode = query.mode.unwrap_or_default();
     let n_lines = if mode == "trade" { "1000" } else { "1500" };
     let child = tokio::process::Command::new("journalctl")
-        .args([
-            "-u",
-            "core-node",
-            "-n",
-            n_lines,
-            "-r",
-            "--no-pager",
-        ])
+        .args(["-u", "core-node", "-n", n_lines, "-r", "--no-pager"])
         .output();
 
     let result = tokio::time::timeout(std::time::Duration::from_millis(2000), child).await;
@@ -172,7 +165,10 @@ pub async fn handle_get_logs(
         Ok(Ok(out)) => {
             let mut s = String::from_utf8_lossy(&out.stdout).to_string();
             if s.trim().is_empty() {
-                s = format!("No logs available yet from core-node.\nStderr: {}", String::from_utf8_lossy(&out.stderr));
+                s = format!(
+                    "No logs available yet from core-node.\nStderr: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
             if let Ok(mut guard) = cache.lock() {
                 *guard = Some((Instant::now(), s.clone()));
@@ -180,13 +176,19 @@ pub async fn handle_get_logs(
             (StatusCode::OK, s).into_response()
         }
         Ok(Err(e)) => {
-            let fallback = cache.lock().ok().and_then(|g| g.as_ref().map(|(_, s)| s.clone()))
+            let fallback = cache
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|(_, s)| s.clone()))
                 .unwrap_or_else(|| format!("Log read error: {}", e));
             (StatusCode::OK, fallback).into_response()
         }
         Err(_) => {
             // Timeout — return cached if available or friendly message
-            let fallback = cache.lock().ok().and_then(|g| g.as_ref().map(|(_, s)| s.clone()))
+            let fallback = cache
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|(_, s)| s.clone()))
                 .unwrap_or_else(|| "⏳ Journal busy, refreshing in next cycle…".to_string());
             (StatusCode::OK, fallback).into_response()
         }
@@ -307,7 +309,7 @@ pub async fn handle_get_unified(
                     )
                 ), 0.0)
                  FROM trades
-                 WHERE status IN ('OPEN','CLOSING')",
+                 WHERE status IN ('ENTRY','RECONCILING','OPEN','CLOSING')",
             )?;
             let v: f64 = stmt.query_row([], |r| r.get(0))?;
             Ok::<f64, tokio_rusqlite::Error>(v)
@@ -326,7 +328,7 @@ pub async fn handle_get_unified(
                             - COALESCE(funding_cost,0.0)
                         ) as net_live
                  FROM trades
-                 WHERE status IN ('OPEN','CLOSING')",
+                 WHERE status IN ('ENTRY','RECONCILING','OPEN','CLOSING')",
             )?;
             let rows: Vec<(String, String, f64)> = stmt
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
@@ -358,22 +360,11 @@ pub async fn handle_get_unified(
             .get("positions_ts")
             .and_then(|v| v.as_i64())
             .or(snapshot_ts);
-        let fees_ts = obj
-            .get("fees_ts")
-            .and_then(|v| v.as_i64())
-            .or(snapshot_ts);
-        let snapshot_age_ms = snapshot_ts
-            .map(|ts| (now_ms - ts).max(0))
-            .unwrap_or(-1);
-        let balances_age_ms = balances_ts
-            .map(|ts| (now_ms - ts).max(0))
-            .unwrap_or(-1);
-        let positions_age_ms = positions_ts
-            .map(|ts| (now_ms - ts).max(0))
-            .unwrap_or(-1);
-        let fees_age_ms = fees_ts
-            .map(|ts| (now_ms - ts).max(0))
-            .unwrap_or(-1);
+        let fees_ts = obj.get("fees_ts").and_then(|v| v.as_i64()).or(snapshot_ts);
+        let snapshot_age_ms = snapshot_ts.map(|ts| (now_ms - ts).max(0)).unwrap_or(-1);
+        let balances_age_ms = balances_ts.map(|ts| (now_ms - ts).max(0)).unwrap_or(-1);
+        let positions_age_ms = positions_ts.map(|ts| (now_ms - ts).max(0)).unwrap_or(-1);
+        let fees_age_ms = fees_ts.map(|ts| (now_ms - ts).max(0)).unwrap_or(-1);
         let current_balances: HashMap<String, f64> = balances
             .map(|bals| {
                 bals.iter()
@@ -484,7 +475,10 @@ pub async fn handle_get_unified(
         obj.insert("snapshot_age_ms".to_string(), json!(snapshot_age_ms));
         obj.insert("snapshot_ts".to_string(), json!(snapshot_ts.unwrap_or(-1)));
         obj.insert("balances_ts".to_string(), json!(balances_ts.unwrap_or(-1)));
-        obj.insert("positions_ts".to_string(), json!(positions_ts.unwrap_or(-1)));
+        obj.insert(
+            "positions_ts".to_string(),
+            json!(positions_ts.unwrap_or(-1)),
+        );
         obj.insert("fees_ts".to_string(), json!(fees_ts.unwrap_or(-1)));
         obj.insert("balances_age_ms".to_string(), json!(balances_age_ms));
         obj.insert("positions_age_ms".to_string(), json!(positions_age_ms));
@@ -526,14 +520,23 @@ pub async fn handle_get_unified(
         let mut cex_vs_db_expected_by_exchange = serde_json::Map::new();
         for (ex, cex_delta_val) in &cex_balance_delta_today {
             let cex_delta = cex_delta_val.as_f64().unwrap_or(0.0);
-            let db_closed = daily_pnl_map.get(ex).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let db_closed = daily_pnl_map
+                .get(ex)
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
             let db_open_live = db_open_live_pnl_by_exchange.get(ex).copied().unwrap_or(0.0);
             let db_expected = db_closed + db_open_live;
             db_expected_delta_by_exchange.insert(ex.clone(), json!(db_expected));
             cex_vs_db_expected_by_exchange.insert(ex.clone(), json!(cex_delta - db_expected));
         }
-        obj.insert("cex_balance_current".to_string(), json!(cex_balance_current));
-        obj.insert("cex_balance_baseline_today".to_string(), json!(cex_balance_baseline));
+        obj.insert(
+            "cex_balance_current".to_string(),
+            json!(cex_balance_current),
+        );
+        obj.insert(
+            "cex_balance_baseline_today".to_string(),
+            json!(cex_balance_baseline),
+        );
         obj.insert("cex_baseline_ts_ms".to_string(), json!(baseline_ts_ms));
         obj.insert(
             "db_open_live_pnl_by_exchange".to_string(),
@@ -569,7 +572,7 @@ pub async fn handle_get_unified(
     let active_trades = trade_db
         .call(|conn| {
             let mut stmt =
-                conn.prepare("SELECT * FROM trades WHERE status IN ('OPEN','CLOSING') ORDER BY entry_time DESC")?;
+                conn.prepare("SELECT * FROM trades WHERE status IN ('ENTRY','RECONCILING','OPEN','CLOSING') ORDER BY entry_time DESC")?;
             let items: Vec<_> = stmt
                 .query_map([], row_to_trade)?
                 .filter_map(|r| r.ok())
@@ -597,17 +600,20 @@ pub async fn handle_get_unified(
                     json!(t.last_price_b.unwrap_or(t.entry_price_b)),
                 );
                 obj.insert("current_spread".into(), json!(t.last_spread.unwrap_or(0.0)));
-                let db_pnl_a = t.pnl_a.unwrap_or(0.0);
-                let db_pnl_b = t.pnl_b.unwrap_or(0.0);
-                let actual_gross = db_pnl_a + db_pnl_b;
-                obj.insert("gross_pnl".into(), json!(actual_gross));
-                obj.insert("pnl_a".into(), json!(db_pnl_a));
-                obj.insert("pnl_b".into(), json!(db_pnl_b));
-                // Net PnL: trust curr_gross_pnl from DB
+                obj.insert("gross_pnl".into(), json!(t.curr_gross_pnl));
+                let valuation_fresh = t
+                    .valuation_ms
+                    .map(|at| now_ms >= at && now_ms - at <= 5000)
+                    .unwrap_or(false);
                 obj.insert(
                     "current_pnl".into(),
-                    json!(t.curr_gross_pnl.unwrap_or(actual_gross)),
+                    json!(if valuation_fresh {
+                        t.current_net_estimate
+                    } else {
+                        None
+                    }),
                 );
+                obj.insert("valuation_fresh".into(), json!(valuation_fresh));
                 // Costs: directly from DB
                 obj.insert(
                     "commission_cost".into(),
@@ -629,16 +635,24 @@ pub async fn handle_get_unified(
         })
         .collect();
 
-    let history_trades_raw = trade_db.call(|conn| {
-        let mut stmt = conn.prepare("SELECT * FROM trades WHERE status='CLOSED' ORDER BY exit_time DESC LIMIT 50")?;
-        let items: Vec<_> = stmt.query_map([], row_to_trade)?.filter_map(|r| {
-            if let Err(e) = &r {
-                tracing::error!("row_to_trade parse error: {:?}", e);
-            }
-            r.ok()
-        }).collect();
-        Ok(items)
-    }).await.unwrap_or_else(|_| vec![]);
+    let history_trades_raw = trade_db
+        .call(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT * FROM trades WHERE status='CLOSED' ORDER BY exit_time DESC LIMIT 50",
+            )?;
+            let items: Vec<_> = stmt
+                .query_map([], row_to_trade)?
+                .filter_map(|r| {
+                    if let Err(e) = &r {
+                        tracing::error!("row_to_trade parse error: {:?}", e);
+                    }
+                    r.ok()
+                })
+                .collect();
+            Ok(items)
+        })
+        .await
+        .unwrap_or_else(|_| vec![]);
 
     let history_trades: Vec<serde_json::Value> = history_trades_raw
         .into_iter()
@@ -652,11 +666,16 @@ pub async fn handle_get_unified(
                 // Entry slippage (IOC target vs fill)
                 obj.insert("slippage_cost".into(), json!(display_slip));
                 // Exit slippage (separate for display)
-                obj.insert("exit_slippage_cost".into(), json!(t.exit_slippage_cost.unwrap_or(0.0)));
+                obj.insert(
+                    "exit_slippage_cost".into(),
+                    json!(t.exit_slippage_cost.unwrap_or(0.0)),
+                );
                 let fund_cost = t.funding_cost.unwrap_or(0.0);
                 obj.insert("funding_cost".into(), json!(fund_cost));
                 // Gross PnL: actual fill-based PnL (slippage already baked in)
-                let actual_gross = t.gross_pnl.unwrap_or_else(|| t.pnl_a.unwrap_or(0.0) + t.pnl_b.unwrap_or(0.0));
+                let actual_gross = t
+                    .gross_pnl
+                    .unwrap_or_else(|| t.pnl_a.unwrap_or(0.0) + t.pnl_b.unwrap_or(0.0));
                 let calculated_net_pnl = t.pnl.unwrap_or(actual_gross - display_comm - fund_cost);
                 obj.insert("gross_pnl".into(), json!(actual_gross));
                 obj.insert("pnl".into(), json!(calculated_net_pnl));
@@ -695,13 +714,13 @@ pub async fn handle_get_unified(
                 total_duration: r.get(3)?,
                 closed_count: r.get(4)?
             }))?;
-            
+
             let total_trades = agg.count;
             let total_pnl = agg.pnl.unwrap_or(0.0);
             let wins = agg.wins.unwrap_or(0);
             let losses = total_trades - wins;
             let avg_pnl = if total_trades > 0 { total_pnl / total_trades as f64 } else { 0.0 };
-            
+
             let avg_duration = if let (Some(td), Some(cc)) = (agg.total_duration, agg.closed_count) {
                 if cc > 0 { td / cc } else { 0 }
             } else { 0 };
@@ -726,10 +745,10 @@ pub async fn handle_get_unified(
             // PnL by Exchange and Best Exchange Pairs
             let mut stmt = conn.prepare("SELECT exchange_a, exchange_b, SUM(pnl) FROM trades WHERE status='CLOSED' AND profile_id=? GROUP BY exchange_a, exchange_b")?;
             let rows: Vec<(String, String, f64)> = stmt.query_map([p.clone()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.filter_map(|r| r.ok()).collect();
-            
+
             let mut pnl_by_exchange: HashMap<String, f64> = HashMap::new();
             let mut exchange_pairs: HashMap<String, f64> = HashMap::new();
-            
+
             for (ex_a, ex_b, pnl) in rows {
                 *pnl_by_exchange.entry(ex_a.clone()).or_insert(0.0) += pnl / 2.0;
                 *pnl_by_exchange.entry(ex_b.clone()).or_insert(0.0) += pnl / 2.0;
@@ -784,14 +803,18 @@ pub async fn handle_get_unified(
     };
 
     // 5. Check kill-switch status from server_cache
-    let kill_switch_active = state.db.call(|conn| {
-        let val: Result<String, _> = conn.query_row(
-            "SELECT value FROM server_cache WHERE key = 'kill_switch_active'",
-            [],
-            |r| r.get(0),
-        );
-        Ok::<bool, tokio_rusqlite::Error>(val.unwrap_or_else(|_| "0".to_string()) == "1")
-    }).await.unwrap_or(false);
+    let kill_switch_active = state
+        .db
+        .call(|conn| {
+            let val: Result<String, _> = conn.query_row(
+                "SELECT value FROM server_cache WHERE key = 'kill_switch_active'",
+                [],
+                |r| r.get(0),
+            );
+            Ok::<bool, tokio_rusqlite::Error>(val.unwrap_or_else(|_| "0".to_string()) == "1")
+        })
+        .await
+        .unwrap_or(false);
 
     // Return payload matching frontend expectations
     (
@@ -823,21 +846,27 @@ pub async fn handle_kill_switch_reset(
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
     }
 
-    let result = state.db.call(|conn| {
-        conn.execute(
+    let result = state
+        .db
+        .call(|conn| {
+            conn.execute(
             "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','0',0) \
              ON CONFLICT(key) DO UPDATE SET value='0'",
             [],
         )?;
-        Ok(())
-    }).await;
+            Ok(())
+        })
+        .await;
 
     match result {
         Ok(_) => {
             tracing::info!("[api] Kill-switch reset requested by user");
             (StatusCode::OK, Json(json!({"ok": true, "message": "Kill-switch reset. Engine will resume within 2 seconds."}))).into_response()
         }
-        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("DB error: {}", e)),
+        Err(e) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("DB error: {}", e),
+        ),
     }
 }
 
@@ -1018,7 +1047,11 @@ pub async fn handle_patch_profile(
                         params_vec.push(rusqlite::types::Value::Real(f));
                     }
                 }
-                "max_active_trades" | "collector_interval_secs" | "leverage" | "hft_timeout_ms" | "max_holding_time_ms" => {
+                "max_active_trades"
+                | "collector_interval_secs"
+                | "leverage"
+                | "hft_timeout_ms"
+                | "max_holding_time_ms" => {
                     if let Some(i) = v.as_i64() {
                         sets.push(format!("{}=?", k));
                         params_vec.push(rusqlite::types::Value::Integer(i));
@@ -1173,7 +1206,7 @@ pub async fn handle_market_close_all(
     }
 
     let r1 = state.real_db.call(move |conn| {
-        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE status IN ('OPEN','CLOSING')", params![])?;
+        conn.execute("UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE status IN ('ENTRY','RECONCILING','OPEN','CLOSING')", params![])?;
         Ok(())
     }).await;
 
@@ -1198,7 +1231,7 @@ pub async fn handle_market_close_trade(
         .real_db
         .call(move |conn| {
             conn.execute(
-                "UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status IN ('OPEN','CLOSING')",
+                "UPDATE trades SET close_reason='MANUAL_CLOSE' WHERE id=? AND status IN ('ENTRY','RECONCILING','OPEN','CLOSING')",
                 params![trade_id],
             )?;
             Ok(())
@@ -1307,15 +1340,24 @@ pub async fn handle_close_exchange_position(
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             if status.is_success() {
-                (axum::http::StatusCode::OK, axum::Json(serde_json::json!({ "success": true, "message": body }))).into_response()
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({ "success": true, "message": body })),
+                )
+                    .into_response()
             } else {
-                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({ "error": body }))).into_response()
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({ "error": body })),
+                )
+                    .into_response()
             }
         }
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(serde_json::json!({ "error": format!("core-node unreachable: {}", e) })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -1380,102 +1422,157 @@ struct Kline {
 }
 
 async fn fetch_binance_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     let mut url = format!(
         "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval={}&limit={}",
         pair, interval, limit
     );
-    if let Some(et) = end_time { url.push_str(&format!("&endTime={}", et)); }
+    if let Some(et) = end_time {
+        url.push_str(&format!("&endTime={}", et));
+    }
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     let data: Vec<Vec<Value>> = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(data.iter().filter_map(|c| {
-        Some(Kline {
-            ts: c.get(0)?.as_i64()?,
-            open: c.get(1)?.as_str()?.parse().ok()?,
-            high: c.get(2)?.as_str()?.parse().ok()?,
-            low: c.get(3)?.as_str()?.parse().ok()?,
-            close: c.get(4)?.as_str()?.parse().ok()?,
-            volume: c.get(5)?.as_str()?.parse().ok()?,
+    Ok(data
+        .iter()
+        .filter_map(|c| {
+            Some(Kline {
+                ts: c.get(0)?.as_i64()?,
+                open: c.get(1)?.as_str()?.parse().ok()?,
+                high: c.get(2)?.as_str()?.parse().ok()?,
+                low: c.get(3)?.as_str()?.parse().ok()?,
+                close: c.get(4)?.as_str()?.parse().ok()?,
+                volume: c.get(5)?.as_str()?.parse().ok()?,
+            })
         })
-    }).collect())
+        .collect())
 }
 
 async fn fetch_bybit_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     let bybit_iv = match interval {
-        "1m" => "1", "3m" => "3", "5m" => "5", "15m" => "15", "1h" => "60",
+        "1m" => "1",
+        "3m" => "3",
+        "5m" => "5",
+        "15m" => "15",
+        "1h" => "60",
         _ => "1",
     };
     let mut url = format!(
         "https://api.bybit.com/v5/market/kline?category=linear&symbol={}&interval={}&limit={}",
         pair, bybit_iv, limit
     );
-    if let Some(et) = end_time { url.push_str(&format!("&end={}", et)); }
+    if let Some(et) = end_time {
+        url.push_str(&format!("&end={}", et));
+    }
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     let data: Value = resp.json().await.map_err(|e| e.to_string())?;
-    let list = data["result"]["list"].as_array().cloned().unwrap_or_default();
-    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
-        let arr = c.as_array()?;
-        Some(Kline {
-            ts: arr.get(0)?.as_str()?.parse().ok()?,
-            open: arr.get(1)?.as_str()?.parse().ok()?,
-            high: arr.get(2)?.as_str()?.parse().ok()?,
-            low: arr.get(3)?.as_str()?.parse().ok()?,
-            close: arr.get(4)?.as_str()?.parse().ok()?,
-            volume: arr.get(5)?.as_str()?.parse().ok()?,
+    let list = data["result"]["list"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut klines: Vec<Kline> = list
+        .iter()
+        .filter_map(|c| {
+            let arr = c.as_array()?;
+            Some(Kline {
+                ts: arr.get(0)?.as_str()?.parse().ok()?,
+                open: arr.get(1)?.as_str()?.parse().ok()?,
+                high: arr.get(2)?.as_str()?.parse().ok()?,
+                low: arr.get(3)?.as_str()?.parse().ok()?,
+                close: arr.get(4)?.as_str()?.parse().ok()?,
+                volume: arr.get(5)?.as_str()?.parse().ok()?,
+            })
         })
-    }).collect();
+        .collect();
     klines.sort_by_key(|k| k.ts);
     Ok(klines)
 }
 
 async fn fetch_gate_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     // Gate uses underscore format: BTC_USDT
     let gate_pair = if pair.ends_with("USDT") {
-        format!("{}_USDT", &pair[..pair.len()-4])
+        format!("{}_USDT", &pair[..pair.len() - 4])
     } else {
         pair.to_string()
     };
     let gate_iv = match interval {
-        "1m" => "1m", "3m" => "3m", "5m" => "5m", "15m" => "15m", "1h" => "1h",
+        "1m" => "1m",
+        "3m" => "3m",
+        "5m" => "5m",
+        "15m" => "15m",
+        "1h" => "1h",
         _ => "1m",
     };
     let mut url = format!(
         "https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={}&interval={}&limit={}",
         gate_pair, gate_iv, limit
     );
-    if let Some(et) = end_time { url.push_str(&format!("&to={}", et / 1000)); }
+    if let Some(et) = end_time {
+        url.push_str(&format!("&to={}", et / 1000));
+    }
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     let data: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(data.iter().filter_map(|c| {
-        Some(Kline {
-            ts: c["t"].as_f64().or_else(|| c["t"].as_i64().map(|v| v as f64))? as i64 * 1000,
-            open: c["o"].as_str()?.parse().ok()?,
-            high: c["h"].as_str()?.parse().ok()?,
-            low: c["l"].as_str()?.parse().ok()?,
-            close: c["c"].as_str()?.parse().ok()?,
-            volume: c["v"].as_f64().or_else(|| c["v"].as_i64().map(|v| v as f64)).unwrap_or(0.0),
+    Ok(data
+        .iter()
+        .filter_map(|c| {
+            Some(Kline {
+                ts: c["t"]
+                    .as_f64()
+                    .or_else(|| c["t"].as_i64().map(|v| v as f64))? as i64
+                    * 1000,
+                open: c["o"].as_str()?.parse().ok()?,
+                high: c["h"].as_str()?.parse().ok()?,
+                low: c["l"].as_str()?.parse().ok()?,
+                close: c["c"].as_str()?.parse().ok()?,
+                volume: c["v"]
+                    .as_f64()
+                    .or_else(|| c["v"].as_i64().map(|v| v as f64))
+                    .unwrap_or(0.0),
+            })
         })
-    }).collect())
+        .collect())
 }
 
 async fn fetch_kucoin_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     let kc_pair = if pair.ends_with("USDT") {
-        format!("{}USDTM", &pair[..pair.len()-4])
+        format!("{}USDTM", &pair[..pair.len() - 4])
     } else {
         pair.to_string()
     };
     let kc_iv = match interval {
-        "1m" => "1", "3m" => "3", "5m" => "5", "15m" => "15", "1h" => "60",
+        "1m" => "1",
+        "3m" => "3",
+        "5m" => "5",
+        "15m" => "15",
+        "1h" => "60",
         _ => "1",
     };
-    let now_s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let now_s = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
     let granularity_min: i64 = kc_iv.parse().unwrap_or(1);
     let interval_ms = granularity_min * 60 * 1000;
 
@@ -1486,7 +1583,9 @@ async fn fetch_kucoin_klines(
     let max_pages = 3; // max 3 pages = 600 candles
 
     for _ in 0..max_pages {
-        if remaining <= 0 { break; }
+        if remaining <= 0 {
+            break;
+        }
         let batch = remaining.min(200);
         let cursor_start_ms = cursor_end_ms - (batch as i64 * interval_ms);
         let url = format!(
@@ -1496,19 +1595,28 @@ async fn fetch_kucoin_klines(
         let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
         let data: Value = resp.json().await.map_err(|e| e.to_string())?;
         let list = data["data"].as_array().cloned().unwrap_or_default();
-        if list.is_empty() { break; }
+        if list.is_empty() {
+            break;
+        }
 
-        let batch_klines: Vec<Kline> = list.iter().filter_map(|c| {
-            let arr = c.as_array()?;
-            Some(Kline {
-                ts: arr.get(0)?.as_f64().or_else(|| arr.get(0)?.as_i64().map(|v| v as f64))? as i64,
-                open: arr.get(1)?.as_f64()?,
-                high: arr.get(2)?.as_f64()?,
-                low: arr.get(3)?.as_f64()?,
-                close: arr.get(4)?.as_f64()?,
-                volume: arr.get(5)?.as_f64().unwrap_or(0.0),
+        let batch_klines: Vec<Kline> = list
+            .iter()
+            .filter_map(|c| {
+                let arr = c.as_array()?;
+                Some(Kline {
+                    ts: arr
+                        .get(0)?
+                        .as_f64()
+                        .or_else(|| arr.get(0)?.as_i64().map(|v| v as f64))?
+                        as i64,
+                    open: arr.get(1)?.as_f64()?,
+                    high: arr.get(2)?.as_f64()?,
+                    low: arr.get(3)?.as_f64()?,
+                    close: arr.get(4)?.as_f64()?,
+                    volume: arr.get(5)?.as_f64().unwrap_or(0.0),
+                })
             })
-        }).collect();
+            .collect();
 
         remaining -= batch_klines.len() as i32;
         cursor_end_ms = cursor_start_ms; // next page ends where this one started
@@ -1521,43 +1629,62 @@ async fn fetch_kucoin_klines(
 }
 
 async fn fetch_okx_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     // OKX uses format: BTC-USDT-SWAP
     let okx_pair = if pair.ends_with("USDT") {
-        format!("{}-USDT-SWAP", &pair[..pair.len()-4])
+        format!("{}-USDT-SWAP", &pair[..pair.len() - 4])
     } else {
         pair.to_string()
     };
     let mut url = format!(
         "https://www.okx.com/api/v5/market/candles?instId={}&bar={}&limit={}",
-        okx_pair, interval, limit.min(300)
+        okx_pair,
+        interval,
+        limit.min(300)
     );
-    if let Some(et) = end_time { url.push_str(&format!("&after={}", et)); }
+    if let Some(et) = end_time {
+        url.push_str(&format!("&after={}", et));
+    }
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     let data: Value = resp.json().await.map_err(|e| e.to_string())?;
     let list = data["data"].as_array().cloned().unwrap_or_default();
-    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
-        let arr = c.as_array()?;
-        Some(Kline {
-            ts: arr.get(0)?.as_str()?.parse().ok()?,
-            open: arr.get(1)?.as_str()?.parse().ok()?,
-            high: arr.get(2)?.as_str()?.parse().ok()?,
-            low: arr.get(3)?.as_str()?.parse().ok()?,
-            close: arr.get(4)?.as_str()?.parse().ok()?,
-            volume: arr.get(5)?.as_str()?.parse().unwrap_or(0.0),
+    let mut klines: Vec<Kline> = list
+        .iter()
+        .filter_map(|c| {
+            let arr = c.as_array()?;
+            Some(Kline {
+                ts: arr.get(0)?.as_str()?.parse().ok()?,
+                open: arr.get(1)?.as_str()?.parse().ok()?,
+                high: arr.get(2)?.as_str()?.parse().ok()?,
+                low: arr.get(3)?.as_str()?.parse().ok()?,
+                close: arr.get(4)?.as_str()?.parse().ok()?,
+                volume: arr.get(5)?.as_str()?.parse().unwrap_or(0.0),
+            })
         })
-    }).collect();
+        .collect();
     klines.sort_by_key(|k| k.ts);
     Ok(klines)
 }
 
 async fn fetch_htx_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, _end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    _end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     let htx_pair = pair.to_lowercase();
     let htx_iv = match interval {
-        "1m" => "1min", "3m" => "3min", "5m" => "5min", "15m" => "15min", "1h" => "60min",
+        "1m" => "1min",
+        "3m" => "3min",
+        "5m" => "5min",
+        "15m" => "15min",
+        "1h" => "60min",
         _ => "1min",
     };
     let url = format!(
@@ -1567,182 +1694,290 @@ async fn fetch_htx_klines(
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     let data: Value = resp.json().await.map_err(|e| e.to_string())?;
     let list = data["data"].as_array().cloned().unwrap_or_default();
-    Ok(list.iter().filter_map(|c| {
-        Some(Kline {
-            ts: c["id"].as_i64()? * 1000,
-            open: c["open"].as_f64()?,
-            high: c["high"].as_f64()?,
-            low: c["low"].as_f64()?,
-            close: c["close"].as_f64()?,
-            volume: c["vol"].as_f64().unwrap_or(0.0),
+    Ok(list
+        .iter()
+        .filter_map(|c| {
+            Some(Kline {
+                ts: c["id"].as_i64()? * 1000,
+                open: c["open"].as_f64()?,
+                high: c["high"].as_f64()?,
+                low: c["low"].as_f64()?,
+                close: c["close"].as_f64()?,
+                volume: c["vol"].as_f64().unwrap_or(0.0),
+            })
         })
-    }).collect())
+        .collect())
 }
 
 async fn fetch_bingx_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     // BingX uses format: BTC-USDT
     let bingx_pair = if pair.ends_with("USDT") {
-        format!("{}-USDT", &pair[..pair.len()-4])
+        format!("{}-USDT", &pair[..pair.len() - 4])
     } else {
         pair.to_string()
     };
     let bingx_iv = match interval {
-        "1m" => "1m", "3m" => "3m", "5m" => "5m", "15m" => "15m", "1h" => "1h",
+        "1m" => "1m",
+        "3m" => "3m",
+        "5m" => "5m",
+        "15m" => "15m",
+        "1h" => "1h",
         _ => "1m",
     };
-    let mut url = format!(
+    let mut url =
+        format!(
         "https://open-api.bingx.com/openApi/swap/v3/quote/klines?symbol={}&interval={}&limit={}",
         bingx_pair, bingx_iv, limit.min(1440)
     );
-    if let Some(et) = end_time { url.push_str(&format!("&endTime={}", et)); }
+    if let Some(et) = end_time {
+        url.push_str(&format!("&endTime={}", et));
+    }
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     let data: Value = resp.json().await.map_err(|e| e.to_string())?;
     let list = data.as_array().cloned().unwrap_or_default();
-    Ok(list.iter().filter_map(|c| {
-        Some(Kline {
-            ts: c["time"].as_i64()?,
-            open: c["open"].as_str()?.parse().ok()?,
-            high: c["high"].as_str()?.parse().ok()?,
-            low: c["low"].as_str()?.parse().ok()?,
-            close: c["close"].as_str()?.parse().ok()?,
-            volume: c["volume"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+    Ok(list
+        .iter()
+        .filter_map(|c| {
+            Some(Kline {
+                ts: c["time"].as_i64()?,
+                open: c["open"].as_str()?.parse().ok()?,
+                high: c["high"].as_str()?.parse().ok()?,
+                low: c["low"].as_str()?.parse().ok()?,
+                close: c["close"].as_str()?.parse().ok()?,
+                volume: c["volume"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0),
+            })
         })
-    }).collect())
+        .collect())
 }
 
 async fn fetch_xt_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     // XT uses lowercase with underscore: btc_usdt
     let xt_pair = if pair.ends_with("USDT") {
-        format!("{}_usdt", pair[..pair.len()-4].to_lowercase())
+        format!("{}_usdt", pair[..pair.len() - 4].to_lowercase())
     } else {
         pair.to_lowercase()
     };
     let xt_iv = match interval {
-        "1m" => "1m", "3m" => "3m", "5m" => "5m", "15m" => "15m", "1h" => "1h",
+        "1m" => "1m",
+        "3m" => "3m",
+        "5m" => "5m",
+        "15m" => "15m",
+        "1h" => "1h",
         _ => "1m",
     };
     let mut url = format!(
         "https://fapi.xt.com/future/market/v1/public/q/kline?symbol={}&interval={}&limit={}",
-        xt_pair, xt_iv, limit.min(200)
+        xt_pair,
+        xt_iv,
+        limit.min(200)
     );
-    if let Some(et) = end_time { url.push_str(&format!("&endTime={}", et)); }
+    if let Some(et) = end_time {
+        url.push_str(&format!("&endTime={}", et));
+    }
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     let data: Value = resp.json().await.map_err(|e| e.to_string())?;
     let list = data["result"].as_array().cloned().unwrap_or_default();
-    Ok(list.iter().filter_map(|c| {
-        Some(Kline {
-            ts: c["t"].as_i64()?,
-            open: c["o"].as_str().and_then(|s| s.parse().ok()).or_else(|| c["o"].as_f64())?,
-            high: c["h"].as_str().and_then(|s| s.parse().ok()).or_else(|| c["h"].as_f64())?,
-            low: c["l"].as_str().and_then(|s| s.parse().ok()).or_else(|| c["l"].as_f64())?,
-            close: c["c"].as_str().and_then(|s| s.parse().ok()).or_else(|| c["c"].as_f64())?,
-            volume: c["v"].as_str().and_then(|s| s.parse().ok()).or_else(|| c["v"].as_f64()).unwrap_or(0.0),
+    Ok(list
+        .iter()
+        .filter_map(|c| {
+            Some(Kline {
+                ts: c["t"].as_i64()?,
+                open: c["o"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| c["o"].as_f64())?,
+                high: c["h"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| c["h"].as_f64())?,
+                low: c["l"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| c["l"].as_f64())?,
+                close: c["c"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| c["c"].as_f64())?,
+                volume: c["v"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| c["v"].as_f64())
+                    .unwrap_or(0.0),
+            })
         })
-    }).collect())
+        .collect())
 }
 
 async fn fetch_bitget_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     // Bitget uses format: BTCUSDT (same as input)
     let bg_iv = match interval {
-        "1m" => "1m", "3m" => "3m", "5m" => "5m", "15m" => "15m", "1h" => "1H",
+        "1m" => "1m",
+        "3m" => "3m",
+        "5m" => "5m",
+        "15m" => "15m",
+        "1h" => "1H",
         _ => "1m",
     };
     let mut url = format!(
         "https://api.bitget.com/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol={}&granularity={}&limit={}",
         pair, bg_iv, limit.min(1000)
     );
-    if let Some(et) = end_time { url.push_str(&format!("&endTime={}", et)); }
+    if let Some(et) = end_time {
+        url.push_str(&format!("&endTime={}", et));
+    }
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     let data: Value = resp.json().await.map_err(|e| e.to_string())?;
     let list = data["data"].as_array().cloned().unwrap_or_default();
-    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
-        let arr = c.as_array()?;
-        Some(Kline {
-            ts: arr.get(0)?.as_str()?.parse().ok()?,
-            open: arr.get(1)?.as_str()?.parse().ok()?,
-            high: arr.get(2)?.as_str()?.parse().ok()?,
-            low: arr.get(3)?.as_str()?.parse().ok()?,
-            close: arr.get(4)?.as_str()?.parse().ok()?,
-            volume: arr.get(5)?.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+    let mut klines: Vec<Kline> = list
+        .iter()
+        .filter_map(|c| {
+            let arr = c.as_array()?;
+            Some(Kline {
+                ts: arr.get(0)?.as_str()?.parse().ok()?,
+                open: arr.get(1)?.as_str()?.parse().ok()?,
+                high: arr.get(2)?.as_str()?.parse().ok()?,
+                low: arr.get(3)?.as_str()?.parse().ok()?,
+                close: arr.get(4)?.as_str()?.parse().ok()?,
+                volume: arr
+                    .get(5)?
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0),
+            })
         })
-    }).collect();
+        .collect();
     klines.sort_by_key(|k| k.ts);
     Ok(klines)
 }
 
 async fn fetch_toobit_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     let mut url = format!(
         "https://api.toobit.com/api/v1/klines?symbol={}&interval={}&limit={}",
-        pair, interval, limit.min(1000)
+        pair,
+        interval,
+        limit.min(1000)
     );
-    if let Some(et) = end_time { url.push_str(&format!("&endTime={}", et)); }
+    if let Some(et) = end_time {
+        url.push_str(&format!("&endTime={}", et));
+    }
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     let data: Value = resp.json().await.map_err(|e| e.to_string())?;
     let list = data.as_array().cloned().unwrap_or_default();
-    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
-        let arr = c.as_array()?;
-        Some(Kline {
-            ts: arr.get(0)?.as_i64()?,
-            open: arr.get(1)?.as_str()?.parse().ok()?,
-            high: arr.get(2)?.as_str()?.parse().ok()?,
-            low: arr.get(3)?.as_str()?.parse().ok()?,
-            close: arr.get(4)?.as_str()?.parse().ok()?,
-            volume: arr.get(5)?.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+    let mut klines: Vec<Kline> = list
+        .iter()
+        .filter_map(|c| {
+            let arr = c.as_array()?;
+            Some(Kline {
+                ts: arr.get(0)?.as_i64()?,
+                open: arr.get(1)?.as_str()?.parse().ok()?,
+                high: arr.get(2)?.as_str()?.parse().ok()?,
+                low: arr.get(3)?.as_str()?.parse().ok()?,
+                close: arr.get(4)?.as_str()?.parse().ok()?,
+                volume: arr
+                    .get(5)?
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0),
+            })
         })
-    }).collect();
+        .collect();
     klines.sort_by_key(|k| k.ts);
     Ok(klines)
 }
 
 async fn fetch_ascendex_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     let asc_pair = if pair.ends_with("USDT") {
-        format!("{}-PERP", &pair[..pair.len()-4])
+        format!("{}-PERP", &pair[..pair.len() - 4])
     } else {
         pair.to_string()
     };
     let asc_iv = match interval {
-        "1m" => "1", "3m" => "3", "5m" => "5", "15m" => "15", "1h" => "60",
+        "1m" => "1",
+        "3m" => "3",
+        "5m" => "5",
+        "15m" => "15",
+        "1h" => "60",
         _ => "1",
     };
     let mut url = format!(
         "https://ascendex.com/api/pro/v1/futures/barhist?symbol={}&interval={}&n={}",
-        asc_pair, asc_iv, limit.min(500)
+        asc_pair,
+        asc_iv,
+        limit.min(500)
     );
-    if let Some(et) = end_time { url.push_str(&format!("&to={}", et)); }
+    if let Some(et) = end_time {
+        url.push_str(&format!("&to={}", et));
+    }
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     let data: Value = resp.json().await.map_err(|e| e.to_string())?;
     let list = data["data"].as_array().cloned().unwrap_or_default();
-    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
-        let item = &c["data"];
-        Some(Kline {
-            ts: item["ts"].as_i64()?,
-            open: item["o"].as_str()?.parse().ok()?,
-            high: item["h"].as_str()?.parse().ok()?,
-            low: item["l"].as_str()?.parse().ok()?,
-            close: item["c"].as_str()?.parse().ok()?,
-            volume: item["v"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+    let mut klines: Vec<Kline> = list
+        .iter()
+        .filter_map(|c| {
+            let item = &c["data"];
+            Some(Kline {
+                ts: item["ts"].as_i64()?,
+                open: item["o"].as_str()?.parse().ok()?,
+                high: item["h"].as_str()?.parse().ok()?,
+                low: item["l"].as_str()?.parse().ok()?,
+                close: item["c"].as_str()?.parse().ok()?,
+                volume: item["v"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0),
+            })
         })
-    }).collect();
+        .collect();
     klines.sort_by_key(|k| k.ts);
     Ok(klines)
 }
 
 async fn fetch_bitmex_klines(
-    client: &reqwest::Client, pair: &str, interval: &str, limit: i32, end_time: Option<i64>,
+    client: &reqwest::Client,
+    pair: &str,
+    interval: &str,
+    limit: i32,
+    end_time: Option<i64>,
 ) -> Result<Vec<Kline>, String> {
     let bm_pair = if pair == "BTCUSDT" { "XBTUSDT" } else { pair };
     let bm_iv = match interval {
-        "1m" => "1m", "5m" => "5m", "1h" => "1h", "1d" => "1d",
+        "1m" => "1m",
+        "5m" => "5m",
+        "1h" => "1h",
+        "1d" => "1d",
         _ => "1m",
     };
     let mut url = format!(
@@ -1756,18 +1991,21 @@ async fn fetch_bitmex_klines(
     }
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     let list: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
-    let mut klines: Vec<Kline> = list.iter().filter_map(|c| {
-        let ts_str = c["timestamp"].as_str()?;
-        let dt = chrono::DateTime::parse_from_rfc3339(ts_str).ok()?;
-        Some(Kline {
-            ts: dt.timestamp_millis(),
-            open: c["open"].as_f64()?,
-            high: c["high"].as_f64()?,
-            low: c["low"].as_f64()?,
-            close: c["close"].as_f64()?,
-            volume: c["volume"].as_f64().unwrap_or(0.0),
+    let mut klines: Vec<Kline> = list
+        .iter()
+        .filter_map(|c| {
+            let ts_str = c["timestamp"].as_str()?;
+            let dt = chrono::DateTime::parse_from_rfc3339(ts_str).ok()?;
+            Some(Kline {
+                ts: dt.timestamp_millis(),
+                open: c["open"].as_f64()?,
+                high: c["high"].as_f64()?,
+                low: c["low"].as_f64()?,
+                close: c["close"].as_f64()?,
+                volume: c["volume"].as_f64().unwrap_or(0.0),
+            })
         })
-    }).collect();
+        .collect();
     klines.sort_by_key(|k| k.ts);
     Ok(klines)
 }
@@ -1858,16 +2096,28 @@ fn read_ram_metrics() -> (f64, f64, f64, f64) {
 
     for line in content.lines() {
         if line.starts_with("MemTotal:") {
-            total_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            total_kb = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
         } else if line.starts_with("MemAvailable:") {
-            avail_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            avail_kb = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
         }
     }
 
     let total_mb = total_kb / 1024.0;
     let free_mb = avail_kb / 1024.0;
     let used_mb = (total_mb - free_mb).max(0.0);
-    let used_pct = if total_mb > 0.0 { (used_mb / total_mb) * 100.0 } else { 0.0 };
+    let used_pct = if total_mb > 0.0 {
+        (used_mb / total_mb) * 100.0
+    } else {
+        0.0
+    };
 
     (total_mb, used_mb, free_mb, used_pct)
 }
@@ -1890,7 +2140,11 @@ async fn read_disk_metrics() -> (f64, f64, f64, f64) {
                 let total_gb = total_kb / (1024.0 * 1024.0);
                 let used_gb = used_kb / (1024.0 * 1024.0);
                 let free_gb = avail_kb / (1024.0 * 1024.0);
-                let used_pct = if total_gb > 0.0 { (used_gb / total_gb) * 100.0 } else { 0.0 };
+                let used_pct = if total_gb > 0.0 {
+                    (used_gb / total_gb) * 100.0
+                } else {
+                    0.0
+                };
 
                 return (total_gb, used_gb, free_gb, used_pct);
             }
@@ -1946,4 +2200,3 @@ pub async fn handle_get_system_metrics(
 
     (StatusCode::OK, Json(res)).into_response()
 }
-
