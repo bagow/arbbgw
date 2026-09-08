@@ -1295,6 +1295,22 @@ pub async fn handle_market_close_trade(
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
 
+fn legacy_execution_setting(key: &str) -> bool {
+    matches!(
+        key,
+        "entry_verify_retries"
+            | "entry_verify_delay_ms"
+            | "close_verify_retries"
+            | "close_verify_delay_ms"
+            | "emergency_close_retries"
+            | "exit_sanity_pct"
+            | "balance_refresh_secs"
+            | "multiplier_refresh_secs"
+            | "funding_cache_secs"
+            | "live_update_throttle_ms"
+    )
+}
+
 // ─── GET /api/technical-settings ───
 pub async fn handle_get_technical_settings(
     State(state): State<AppState>,
@@ -1317,6 +1333,10 @@ pub async fn handle_get_technical_settings(
         Ok(rows)
     }).await.unwrap_or_default();
 
+    let settings: Vec<_> = settings
+        .into_iter()
+        .filter(|s| !legacy_execution_setting(s["key"].as_str().unwrap_or("")))
+        .collect();
     (StatusCode::OK, Json(json!(settings))).into_response()
 }
 
@@ -1344,7 +1364,7 @@ pub async fn handle_patch_technical_settings(
         .expect("Static technical defaults");
     for (key, value) in &obj {
         let default = defaults.get(key);
-        if default.is_none() {
+        if default.is_none() || legacy_execution_setting(key) {
             return json_err(
                 StatusCode::BAD_REQUEST,
                 &format!("Unsupported setting {key}"),

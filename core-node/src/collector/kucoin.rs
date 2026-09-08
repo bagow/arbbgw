@@ -115,7 +115,7 @@ async fn handler(
     // 150 symbols * 2 topics (L1 + L2) = 300 topics per connection
 
     let sym_map = std::sync::Arc::new(sym_map);
-    let mut join_handles = Vec::new();
+    let mut children = tokio::task::JoinSet::new();
 
     for (idx, chunk) in symbols.chunks(60).enumerate() {
         let chunk_symbols = chunk.to_vec();
@@ -124,7 +124,7 @@ async fn handler(
         let l2 = l2_books.clone();
         let s_map = sym_map.clone();
 
-        join_handles.push(tokio::spawn(async move {
+        children.spawn(async move {
             let mut backoff = tokio::time::Duration::from_secs(1);
             loop {
                 if let Err(e) = run_ws(idx, &chunk_symbols, &p_map, &sig, &l2, &*s_map).await {
@@ -140,10 +140,14 @@ async fn handler(
                     backoff = tokio::time::Duration::from_secs(1);
                 }
             }
-        }));
+        });
     }
 
-    futures_util::future::join_all(join_handles).await;
+    tokio::select! {
+        _ = children.join_next() => {},
+        _ = tokio::time::sleep(Duration::from_secs(1800)) => {},
+    }
+    // Dropping JoinSet aborts all children before reloading the instrument universe.
     Ok(())
 }
 
@@ -186,6 +190,13 @@ async fn run_ws(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    // Futures depth5 uses one symbol per topic. Every shard owns both streams.
+    for symbol in symbols {
+        let topic = format!("/contractMarket/level2Depth5:{symbol}");
+        ws.send(Message::Text(json!({"id":uuid::Uuid::new_v4().to_string(),"type":"subscribe","topic":topic,"privateChannel":false,"response":true}).to_string().into())).await?;
+        tokio::time::sleep(Duration::from_millis(110)).await;
+    }
+
     // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
     let conn_start = std::time::Instant::now();
     let max_conn_age = Duration::from_secs(1800);
@@ -201,6 +212,9 @@ async fn run_ws(
 
     #[derive(Deserialize)]
     struct KucoinData<'a> {
+        timestamp: Option<i64>,
+        ts: Option<i64>,
+        sequence: Option<i64>,
         bids: Option<Vec<Vec<serde_json::Value>>>,
         asks: Option<Vec<Vec<serde_json::Value>>>,
         symbol: Option<&'a str>,
@@ -253,7 +267,7 @@ async fn run_ws(
     price_map.entry("kucoin".to_string()).or_default();
 
     let mut ping = tokio::time::interval(Duration::from_secs(12));
-    // Heartbeat: refresh L2 timestamps every 500ms for static books
+    let mut sequences: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     loop {
         // Reconnect periodically to refresh L2 subscriptions (new pairs may appear)
         if conn_start.elapsed() > max_conn_age {
@@ -264,6 +278,7 @@ async fn run_ws(
             msg = ws.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(v) = serde_json::from_str::<KucoinMsg>(&text) {
+                        if v.msg_type == "error" { anyhow::bail!("KuCoin subscription rejected"); }
                         if v.msg_type != "message" { continue; }
                         let topic = v.topic.as_deref().unwrap_or("");
                         let raw_sym_from_topic = topic.split(':').nth(1);
@@ -272,6 +287,14 @@ async fn run_ws(
                             let raw_sym = d.symbol.or(raw_sym_from_topic);
                             if let Some(raw_sym) = raw_sym {
                                 if let Some((sym, mult)) = sym_map.get(raw_sym) {
+                                    let now_ms = crate::engine::utils::now_ms();
+                                    let depth = topic.starts_with("/contractMarket/level2Depth5:");
+                                    let source_ms = if depth {d.timestamp.or(d.ts)} else {d.ts.map(|n|n/1_000_000)};
+                                    let Some(source_ms) = source_ms.filter(|t|(0..=750).contains(&(now_ms-*t))) else {continue;};
+                                    if let Some(seq) = d.sequence {
+                                        if sequences.get(topic).map(|old|seq<=*old).unwrap_or(false) {continue;}
+                                        sequences.insert(topic.to_owned(),seq);
+                                    } else {continue;}
                                     if v.topic.as_deref().unwrap_or("").starts_with("/contractMarket/level2Depth5:") {
                                         let parse_level = |arr: &Vec<Vec<serde_json::Value>>| -> Vec<(f64, f64)> {
                                             arr.iter().filter_map(|x| {
@@ -283,19 +306,20 @@ async fn run_ws(
                                         let bids = d.bids.as_ref().map(parse_level).unwrap_or_default();
                                         let asks = d.asks.as_ref().map(parse_level).unwrap_or_default();
                                         if !bids.is_empty() || !asks.is_empty() {
-                                            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-                                            l2_books.insert(format!("kucoin:{}", sym), crate::state::L2Snapshot { bids, asks, updated_ms: now_ms });
+                                            l2_books.insert(format!("kucoin:{}", sym), crate::state::L2Snapshot { bids, asks, updated_ms: source_ms });
+                                            signal.notify_one();
                                         }
                                         continue;
                                     }
-                                    let bid: f64 = match d.bid { Some(v) if v > 0.0 => v, _ => continue };
-                                    let ask: f64 = match d.ask { Some(v) if v > 0.0 => v, _ => continue };
+                                    let bid: f64 = match d.bid { Some(v) if v.is_finite() && v > 0.0 => v, _ => continue };
+                                    let ask: f64 = match d.ask { Some(v) if v.is_finite() && v > 0.0 => v, _ => continue };
+                                    if bid >= ask { continue; }
                                     let bid_qty = d.bid_qty.unwrap_or(0.0);
                                     let ask_qty = d.ask_qty.unwrap_or(0.0);
                                     let price = d.price.unwrap_or((bid+ask)/2.0);
 
                                     if let Some(mut ex_map) = price_map.get_mut("kucoin") {
-                                        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                        let ts = (source_ms / 1000) as u64;
                                         if let Some(entry) = ex_map.get_mut(sym) {
                                             entry.bid = bid;
                                             entry.ask = ask;

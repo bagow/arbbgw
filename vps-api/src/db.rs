@@ -135,7 +135,7 @@ pub async fn init_db(db: &Connection) -> Result<()> {
 
             // ── Order execution ──
             ("entry_order_type",       "ioc",
-             "How entry orders are placed. 'market' = Market orders with guaranteed fill on both legs (no asymmetric risk, but possible slippage). 'ioc' = IOC Limit orders with price tolerance from slippage_percent settings (slippage-protected, but risk of one leg not filling → emergency close at loss).",
+             "Bounded IOC only. Unknown outcomes are queried by their original identity; acknowledgements do not prove fills.",
              "execution"),
             ("api_timeout_ms",         "2000",
              "Network timeout in milliseconds for placing entry and exit orders. Lower = faster cancellation of hanging legs on failed exchanges (avoids asymmetric risks), but increases risk of dropping a slow-but-successful exchange fill. Recommended: 1500-2500ms.",
@@ -147,16 +147,16 @@ pub async fn init_db(db: &Connection) -> Result<()> {
              "Delay in milliseconds between fill verification retries for entry orders. Keep low for fast confirmation. Formula: total_verify_time ≤ fill_verify_retries × fill_verify_delay_ms. 15ms is optimal for exchange API response times.",
              "execution"),
             ("close_verify_retries",   "20",
-             "Number of API polling attempts to verify a close/exit order and get the real exit price for accurate PnL. More retries than entry because accurate exit price is critical for PnL reporting. Formula: for _ in 0..close_verify_retries { poll; sleep(close_verify_delay_ms) }. 20 × 25ms = 500ms max.",
+             "Legacy setting; not used by the managed execution supervisor.",
              "execution"),
             ("close_verify_delay_ms",  "25",
-             "Delay in milliseconds between close verification retries. Slightly longer than entry—exit prices are less time-sensitive since the position is already closed. Formula: total_close_verify ≤ close_verify_retries × close_verify_delay_ms.",
+             "Legacy setting; not used by the managed execution supervisor.",
              "execution"),
             ("emergency_close_retries","3",
-             "Number of retry attempts for emergency market close when an asymmetric fill occurs (one leg filled, other didn't). Each retry uses market order (price=0) to guarantee closure. Delay doubles each attempt: 50ms, 100ms, 150ms. Critical for preventing orphaned positions.",
+             "Legacy setting; not used by the managed execution supervisor.",
              "execution"),
             ("exit_sanity_pct",        "0.20",
-             "Maximum allowed price deviation between entry and exit price, as a fraction. Protects against API returning garbage exit prices that would corrupt PnL. Formula: if |exit - entry| / entry > exit_sanity_pct, the reported exit price is discarded and the entry price is used instead. 0.20 = max 20% price change between entry and exit is considered valid.",
+             "Legacy setting; not used by the managed execution supervisor.",
              "execution"),
 
             // ── Intervals ──
@@ -178,7 +178,7 @@ pub async fn init_db(db: &Connection) -> Result<()> {
         ];
         for (key, value, desc, cat) in tech_defaults {
             conn.execute(
-                "INSERT OR IGNORE INTO technical_settings (key, value, description, category) VALUES (?, ?, ?, ?)",
+                "INSERT INTO technical_settings (key, value, description, category) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET description=excluded.description,category=excluded.category",
                 params![key, value, desc, cat],
             )?;
         }
