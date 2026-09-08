@@ -124,6 +124,7 @@ jobs:
         with:
           filters: |
             vps_api:
+              - '.github/workflows/deploy.yml'
               - 'vps-api/**'
               - 'vps-api.service'
               - '.github/scripts/migrate-vps-env.py'
@@ -131,6 +132,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
             core:
+              - '.github/workflows/deploy.yml'
               - 'core-node/**'
               - 'core-node.service'
               - 'shared/**'
@@ -139,6 +141,7 @@ jobs:
             cloudflared:
               - 'cloudflared.service'
             cloudflare:
+              - '.github/workflows/deploy.yml'
               - 'src/**'
               - 'public/**'
               - 'wrangler.toml'
