@@ -431,6 +431,19 @@ fn format_binance_price(price: f64, tick_size: f64) -> String {
 
 #[async_trait]
 impl ExchangeConnector for BinanceConnector {
+    async fn symbol_has_no_open_orders(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+    ) -> Result<bool, String> {
+        let qs = format!("symbol={pair}&timestamp={}", now_ms());
+        let v = managed_binance_get(http, keys, "/fapi/v1/openOrders", &qs).await?;
+        Ok(v.as_array()
+            .ok_or("Invalid Binance open orders")?
+            .is_empty())
+    }
+
     async fn funding_events(
         &self,
         http: &Client,

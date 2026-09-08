@@ -166,6 +166,22 @@ fn format_gate_price(price: f64, tick_size: f64) -> String {
 
 #[async_trait]
 impl ExchangeConnector for GateConnector {
+    async fn symbol_has_no_open_orders(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+    ) -> Result<bool, String> {
+        let contract = pair.replace("USDT", "_USDT");
+        let v = managed_gate_get(
+            http,
+            keys,
+            &format!("/api/v4/futures/usdt/orders?contract={contract}&status=open&limit=1"),
+        )
+        .await?;
+        Ok(v.as_array().ok_or("Invalid Gate open orders")?.is_empty())
+    }
+
     async fn funding_events(
         &self,
         http: &Client,

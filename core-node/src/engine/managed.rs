@@ -294,6 +294,13 @@ async fn enter(
         {
             continue;
         }
+        let (idle_a, idle_b) = tokio::join!(
+            ca.symbol_has_no_open_orders(http, keys, &s.pair),
+            cb.symbol_has_no_open_orders(http, keys, &s.pair)
+        );
+        if !matches!(idle_a, Ok(true)) || !matches!(idle_b, Ok(true)) {
+            continue;
+        }
         let (ba, bb) = tokio::join!(ca.fetch_balances(http, keys), cb.fetch_balances(http, keys));
         let (available_a, available_b) = match (ba, bb) {
             (Ok((_, a)), Ok((_, b))) if a.is_finite() && b.is_finite() => (a, b),

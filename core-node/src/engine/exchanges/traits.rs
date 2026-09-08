@@ -51,6 +51,15 @@ pub struct TradeAuditResult {
 
 #[async_trait]
 pub trait ExchangeConnector: Send + Sync {
+    /// Refuse to mix new managed exposure with resting orders owned elsewhere.
+    async fn symbol_has_no_open_orders(
+        &self,
+        _http: &Client,
+        _keys: &ExchangeKeys,
+        _pair: &str,
+    ) -> Result<bool, String> {
+        Err("Open order preflight unsupported".into())
+    }
     /// Only connectors implementing idempotent identity lookup may open managed trades.
     fn supports_managed_orders(&self) -> bool {
         false

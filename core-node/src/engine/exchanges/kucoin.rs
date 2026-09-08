@@ -11,6 +11,29 @@ pub struct KucoinConnector;
 
 #[async_trait]
 impl ExchangeConnector for KucoinConnector {
+    async fn symbol_has_no_open_orders(
+        &self,
+        _http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+    ) -> Result<bool, String> {
+        let data = kucoin_managed_call(
+            keys,
+            "GET",
+            &format!(
+                "/api/v1/orders?status=active&symbol={}&pageSize=1",
+                managed_kucoin_symbol(pair)
+            ),
+            "",
+        )
+        .await?;
+        Ok(data["items"]
+            .as_array()
+            .ok_or("Invalid KuCoin open orders")?
+            .is_empty()
+            && data["totalNum"].as_i64() == Some(0))
+    }
+
     async fn funding_events(
         &self,
         _http: &Client,
@@ -946,12 +969,62 @@ impl ExchangeConnector for KucoinConnector {
 
     async fn ensure_leverage(
         &self,
-        __http: &Client,
-        _keys: &ExchangeKeys,
-        _pair: &str,
-        _leverage: f64,
+        _http: &Client,
+        keys: &ExchangeKeys,
+        pair: &str,
+        leverage: f64,
     ) -> Result<(), String> {
-        // KuCoin leverage is set directly in the order payload.
+        let symbol = managed_kucoin_symbol(pair);
+        let position_mode =
+            kucoin_managed_call(keys, "GET", "/api/v2/position/getPositionMode", "").await?;
+        if position_mode["positionMode"].as_i64() != Some(0) {
+            return Err("Managed execution requires KuCoin one-way mode".into());
+        }
+        let mode = kucoin_managed_call(
+            keys,
+            "GET",
+            &format!("/api/v2/position/getMarginMode?symbol={symbol}"),
+            "",
+        )
+        .await?;
+        if mode["symbol"].as_str() != Some(symbol.as_str()) {
+            return Err("KuCoin margin symbol mismatch".into());
+        }
+        if !matches!(mode["marginMode"].as_str(), Some("CROSS" | "ISOLATED")) {
+            return Err("Unknown KuCoin margin mode".into());
+        }
+        if mode["marginMode"].as_str() != Some("CROSS") {
+            let changed = kucoin_managed_call(
+                keys,
+                "POST",
+                "/api/v2/position/changeMarginMode",
+                &json!({"symbol":symbol,"marginMode":"CROSS"}).to_string(),
+            )
+            .await?;
+            if changed["symbol"].as_str() != Some(symbol.as_str())
+                || changed["marginMode"].as_str() != Some("CROSS")
+            {
+                return Err("KuCoin cross margin not confirmed".into());
+            }
+        }
+        let path = format!("/api/v2/getCrossUserLeverage?symbol={symbol}");
+        let current = kucoin_managed_call(keys, "GET", &path, "").await?;
+        if !kucoin_leverage_matches(&current, &symbol, leverage) {
+            let changed = kucoin_managed_call(
+                keys,
+                "POST",
+                "/api/v2/changeCrossUserLeverage",
+                &json!({"symbol":symbol,"leverage":leverage.to_string()}).to_string(),
+            )
+            .await?;
+            if changed.as_bool() != Some(true) {
+                return Err("KuCoin leverage change not acknowledged".into());
+            }
+            let confirmed = kucoin_managed_call(keys, "GET", &path, "").await?;
+            if !kucoin_leverage_matches(&confirmed, &symbol, leverage) {
+                return Err("KuCoin cross leverage not confirmed".into());
+            }
+        }
         Ok(())
     }
 
@@ -1161,4 +1234,59 @@ fn parse_managed_kucoin(
         },
         fee,
     })
+}
+
+async fn kucoin_managed_call(
+    keys: &ExchangeKeys,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> Result<Value, String> {
+    let v = super::ws_kucoin::send_kucoin_request(
+        &keys.kucoin_key,
+        &keys.kucoin_secret,
+        &keys.kucoin_passphrase,
+        method,
+        path,
+        body,
+        3000,
+    )
+    .await?;
+    if v["code"].as_str() != Some("200000") || v.get("data").is_none() {
+        return Err("KuCoin preflight query rejected".into());
+    }
+    Ok(v["data"].clone())
+}
+fn kucoin_leverage_matches(data: &Value, symbol: &str, leverage: f64) -> bool {
+    data["symbol"].as_str() == Some(symbol)
+        && crate::engine::orders::number(data, "leverage")
+            .map(|n| (n - leverage).abs() < 1e-8)
+            .unwrap_or(false)
+}
+#[cfg(test)]
+mod cross_leverage_tests {
+    use super::*;
+    #[test]
+    fn leverage_requires_matching_symbol_and_authoritative_value() {
+        assert!(kucoin_leverage_matches(
+            &json!({"symbol":"XBTUSDTM","leverage":"10"}),
+            "XBTUSDTM",
+            10.0
+        ));
+        assert!(!kucoin_leverage_matches(
+            &json!({"symbol":"XBTUSDTM","leverage":"3"}),
+            "XBTUSDTM",
+            10.0
+        ));
+        assert!(!kucoin_leverage_matches(
+            &json!({"symbol":"ETHUSDTM","leverage":"10"}),
+            "XBTUSDTM",
+            10.0
+        ));
+        assert!(!kucoin_leverage_matches(
+            &json!({"symbol":"XBTUSDTM"}),
+            "XBTUSDTM",
+            10.0
+        ));
+    }
 }
