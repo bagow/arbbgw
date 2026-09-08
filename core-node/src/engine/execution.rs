@@ -178,18 +178,12 @@ pub struct MatchedVolume {
 ///
 /// Returns the matched physical quantity and any deltas that need trimming.
 pub fn match_volumes(phys_a: f64, phys_b: f64, mult_a: f64, mult_b: f64) -> MatchedVolume {
-    let min_phys = phys_a.min(phys_b);
-    let step_a = mult_a.max(1e-12);
-    let step_b = mult_b.max(1e-12);
-    let valid_a = (min_phys / step_a).floor() * step_a;
-    let valid_b = (min_phys / step_b).floor() * step_b;
-    let matched_phys = valid_a.min(valid_b);
+    let min_phys = phys_a.min(phys_b).max(0.0);
+    let matched_phys = crate::engine::scanner_common::common_quantity_step(mult_a, mult_b)
+        .map(|step| ((min_phys / step + 1e-10).floor() * step).min(min_phys))
+        .unwrap_or(0.0);
+    MatchedVolume { matched_phys, delta_a: (phys_a - matched_phys).max(0.0), delta_b: (phys_b - matched_phys).max(0.0) }
 
-    MatchedVolume {
-        matched_phys,
-        delta_a: phys_a - matched_phys,
-        delta_b: phys_b - matched_phys,
-    }
 }
 
 // ─── ENTRY SPREAD CALCULATION ────────────────────────────────────────────────
@@ -354,8 +348,9 @@ pub fn verify_l2_vwap(
     book_res: Result<(Vec<(f64, f64)>, Vec<(f64, f64)>), String>,
     is_buy: bool,
     required_coins: f64,
-    multiplier: f64,
+    _multiplier: f64,
 ) -> Option<f64> {
+    if !required_coins.is_finite() || required_coins <= 0.0 { return None; }
     if let Ok((bids, asks)) = book_res {
         let levels = if is_buy { asks } else { bids };
         let mut cum_vol = 0.0;
@@ -364,7 +359,8 @@ pub fn verify_l2_vwap(
         for (px, sz) in levels {
             // Some connectors might need multiplier adjustment here, depending on how they store L2 cache.
             // In the current codebase, we pass multiplier to handle cases where sizes aren't in coins.
-            let base_sz = if multiplier > 0.0 && multiplier != 1.0 { sz * multiplier } else { sz };
+            if !px.is_finite() || !sz.is_finite() || px <= 0.0 || sz < 0.0 { return None; }
+            let base_sz = sz;
             let remaining = required_coins - cum_vol;
             if remaining <= 0.0 { break; }
             
@@ -374,7 +370,7 @@ pub fn verify_l2_vwap(
         }
         
         // We tolerate a tiny floating point gap (1%) for full fill check
-        if cum_vol >= required_coins * 0.99 { 
+        if cum_vol + required_coins * 1e-10 >= required_coins {
             Some(cum_cost / cum_vol)
         } else {
             None 

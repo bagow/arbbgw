@@ -2,6 +2,8 @@ name: Deploy Crypto Arbitrage Stack
 
 on:
   push:
+    branches: [ main, "fix/**" ]
+  pull_request:
     branches: [ main ]
   workflow_dispatch:
     inputs:
@@ -101,7 +103,7 @@ jobs:
     needs: [check, changes]
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_vps_api == 'true' ||
-      github.event_name == 'push' && needs.changes.outputs.vps_api == 'true'
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.vps_api == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -159,7 +161,7 @@ jobs:
     needs: [check, changes]
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_core == 'true' ||
-      github.event_name == 'push' && needs.changes.outputs.core == 'true'
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.core == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -239,7 +241,7 @@ jobs:
     needs: [check, changes]
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_cloudflared == 'true' ||
-      github.event_name == 'push' && needs.changes.outputs.cloudflared == 'true'
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.cloudflared == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -272,7 +274,7 @@ jobs:
     needs: [check, changes]
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_cloudflare == 'true' ||
-      github.event_name == 'push' && needs.changes.outputs.cloudflare == 'true'
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.cloudflare == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

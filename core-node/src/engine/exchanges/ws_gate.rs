@@ -1,178 +1,173 @@
-//! Gate.io Futures WebSocket Trading API (v4)
-//!
-//! Persistent WS connection for order execution.
-//! URL: wss://fx-ws.gateio.ws/v4/ws/usdt
-//! Auth: HMAC-SHA512 of "channel=<ch>&event=<ev>&time=<ts>"
-//! Orders: {"time":..,"channel":"futures.order_place","event":"api","auth":{..},"payload":[{..}]}
-//! Response correlation via "request_id" field
-
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+//! Gate futures API: authenticated session, correlated final responses, no replay.
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
-use std::sync::OnceLock;
-
+use serde_json::{json, Value};
+use std::{collections::HashMap, sync::OnceLock, time::Duration};
+use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 type ResponseSender = oneshot::Sender<Value>;
-
 static GATE_WS_TX: OnceLock<mpsc::Sender<(Value, ResponseSender)>> = OnceLock::new();
-
-fn gate_ws_sign(secret: &str, channel: &str, event: &str, ts: i64) -> String {
+fn login(key: &str, secret: &str, ts: i64) -> Value {
     use hmac::{Hmac, Mac};
     use sha2::Sha512;
-    type HmacSha512 = Hmac<Sha512>;
-
-    let msg = format!("channel={}&event={}&time={}", channel, event, ts);
-    let mut mac = HmacSha512::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(msg.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    let mut mac = Hmac::<Sha512>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts arbitrary key length");
+    mac.update(format!("api\nfutures.login\n\n{ts}").as_bytes());
+    json!({"time":ts,"channel":"futures.login","event":"api","payload":{
+        "req_id":"login","api_key":key,"signature":hex::encode(mac.finalize().into_bytes()),"timestamp":ts.to_string()}})
 }
-
-pub fn get_or_init_gate_ws(api_key: String, api_secret: String) -> mpsc::Sender<(Value, ResponseSender)> {
-    GATE_WS_TX.get_or_init(|| {
-        let (tx, rx) = mpsc::channel(1000);
-        tokio::spawn(gate_ws_loop(rx, api_key, api_secret));
-        tx
-    }).clone()
+fn request_frame(req: &Value) -> Result<(String, Value), String> {
+    let id = req["request_id"]
+        .as_str()
+        .ok_or("Missing Gate request identity")?
+        .to_string();
+    let channel = req["channel"].as_str().ok_or("Missing Gate channel")?;
+    let raw = &req["payload"];
+    let param = if raw.is_object() {
+        raw.clone()
+    } else if channel == "futures.order_place" {
+        raw.as_array()
+            .and_then(|a| a.first())
+            .filter(|v| v.is_object())
+            .cloned()
+            .ok_or("Invalid Gate order")?
+    } else if channel == "futures.order_cancel" || channel == "futures.order_status" {
+        let a = raw.as_array().ok_or("Invalid Gate query")?;
+        json!({"order_id":a.last().ok_or("Missing Gate order id")?})
+    } else {
+        return Err("Unsupported Gate API envelope".into());
+    };
+    let frame = json!({"time":crate::engine::utils::now_ms()/1000,"channel":channel,"event":"api","payload":{"req_id":id,"req_param":param}});
+    Ok((id, frame))
 }
-
-async fn gate_ws_loop(
-    mut rx: mpsc::Receiver<(Value, ResponseSender)>,
-    api_key: String,
-    api_secret: String,
-) {
+fn response_id(v: &Value) -> Option<&str> {
+    if v["ack"].as_bool() == Some(true) {
+        return None;
+    }
+    v["request_id"]
+        .as_str()
+        .or_else(|| v["header"]["request_id"].as_str())
+}
+pub fn get_or_init_gate_ws(key: String, secret: String) -> mpsc::Sender<(Value, ResponseSender)> {
+    GATE_WS_TX
+        .get_or_init(|| {
+            let (tx, rx) = mpsc::channel(64);
+            tokio::spawn(run(rx, key, secret));
+            tx
+        })
+        .clone()
+}
+async fn run(mut rx: mpsc::Receiver<(Value, ResponseSender)>, key: String, secret: String) {
     loop {
-        let url = "wss://fx-ws.gateio.ws/v4/ws/usdt";
-
-        let (ws_stream, _) = match connect_async(url).await {
-            Ok(res) => res,
-            Err(e) => {
-                tracing::error!("[gate_ws] connection failed: {}. Retrying in 2s...", e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        if rx.is_closed() {
+            return;
+        }
+        let connection = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_async("wss://fx-ws.gateio.ws/v4/ws/usdt"),
+        )
+        .await;
+        let mut ws = match connection {
+            Ok(Ok((ws, _))) => ws,
+            _ => {
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
         };
-
-        tracing::info!("[gate_ws] connected to futures WS v4");
-        crate::engine::utils::record_ws_connected("gate");
-        let (mut write, mut read) = ws_stream.split();
-
-        // Gate doesn't have a separate auth step — each request carries auth inline.
-        // So we go straight to the message loop.
-
-        let pending: Arc<Mutex<HashMap<String, ResponseSender>>> = Arc::new(Mutex::new(HashMap::new()));
-        let pending_clone = pending.clone();
-
-        let reader_handle = tokio::spawn(async move {
-            while let Some(msg) = read.next().await {
-                match msg {
-                    Ok(Message::Text(t)) => {
-                        if let Ok(val) = serde_json::from_str::<Value>(&t) {
-                            // Gate uses "request_id" for correlation — located in val["header"]["request_id"] or root
-                            let id_opt = val["header"]["request_id"].as_str().map(|s| s.to_string())
-                                .or_else(|| val["header"]["request_id"].as_i64().map(|n| n.to_string()))
-                                .or_else(|| val["request_id"].as_str().map(|s| s.to_string()))
-                                .or_else(|| val["request_id"].as_i64().map(|n| n.to_string()))
-                                .or_else(|| val["id"].as_str().map(|s| s.to_string()))
-                                .or_else(|| val["id"].as_i64().map(|n| n.to_string()));
-                            if let Some(id) = id_opt {
-                                if let Some(sender) = pending_clone.lock().await.remove(&id) {
-                                    let _ = sender.send(val);
-                                } else {
-                                    tracing::debug!("[gate_ws] unmatched response id={}: {}", id, &t[..t.len().min(200)]);
-                                }
+        // Login must finish before any queued order can leave this process.
+        let authenticated = tokio::time::timeout(Duration::from_secs(5), async {
+            ws.send(Message::Text(
+                login(&key, &secret, crate::engine::utils::now_ms() / 1000).to_string(),
+            ))
+            .await
+            .ok()?;
+            while let Some(msg) = ws.next().await {
+                match msg.ok()? {
+                    Message::Text(text) => {
+                        let v: Value = serde_json::from_str(&text).ok()?;
+                        if response_id(&v) == Some("login") {
+                            return if v["header"]["status"].as_str() == Some("200") {
+                                Some(())
                             } else {
-                                // Log non-correlated messages (ping/pong responses, errors, etc.)
-                                let channel = val["channel"].as_str().unwrap_or("?");
-                                if channel != "futures.pong" && channel != "futures.ping" {
-                                    tracing::debug!("[gate_ws] non-order msg channel={}: {}", channel, &t[..t.len().min(200)]);
-                                }
-                            }
+                                None
+                            };
                         }
                     }
-                    Ok(Message::Ping(p)) => {
-                        // tungstenite handles pong automatically
-                        let _ = p;
-                    }
-                    Err(e) => {
-                        tracing::error!("[gate_ws] read error: {}", e);
-                        break;
-                    }
+                    Message::Ping(p) => ws.send(Message::Pong(p)).await.ok()?,
+                    Message::Close(_) => return None,
                     _ => {}
                 }
             }
-        });
-
-        // ── PING TASK ── (Gate futures WS requires ping every 10-15s)
-        let (ping_tx, mut ping_rx) = mpsc::channel::<()>(1);
-        let ping_handle = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                if ping_tx.send(()).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        // Store keys for inline auth
-        let key = api_key.clone();
-        let secret = api_secret.clone();
-
+            None
+        })
+        .await;
+        if !matches!(authenticated, Ok(Some(()))) {
+            tracing::warn!("[gate_ws] authentication not confirmed");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+        crate::engine::utils::record_ws_connected("gate");
+        let mut pending: HashMap<String, ResponseSender> = HashMap::new();
+        let mut ping = tokio::time::interval(Duration::from_secs(10));
+        let mut last_received = tokio::time::Instant::now();
         loop {
             tokio::select! {
-                Some((mut req_json, sender)) = rx.recv() => {
-                    let req_id = req_json["request_id"].as_str().unwrap_or("unknown").to_string();
-                    pending.lock().await.insert(req_id.clone(), sender);
-
-                    // Inject auth into the request
-                    let ts = (crate::engine::real::now_ms() / 1000) as i64;
-                    let channel = req_json["channel"].as_str().unwrap_or("futures.order_place").to_string();
-                    let event = "api";
-                    let sign = gate_ws_sign(&secret, &channel, event, ts);
-
-                    if let Some(obj) = req_json.as_object_mut() {
-                        obj.insert("time".to_string(), serde_json::json!(ts));
-                        obj.insert("auth".to_string(), serde_json::json!({
-                            "method": "api_key",
-                            "KEY": key,
-                            "SIGN": sign
-                        }));
+                incoming=ws.next()=>{
+                    last_received=tokio::time::Instant::now();
+                    match incoming {
+                        Some(Ok(Message::Text(text)))=>if let Ok(v)=serde_json::from_str::<Value>(&text){
+                            if let Some(id)=response_id(&v){if let Some(sender)=pending.remove(id){let _=sender.send(v);}}
+                        },
+                        Some(Ok(Message::Ping(p)))=>{if !matches!(tokio::time::timeout(Duration::from_secs(1),ws.send(Message::Pong(p))).await,Ok(Ok(()))){break;}},
+                        Some(Ok(Message::Close(_)))|Some(Err(_))|None=>break,
+                        _=>{}
                     }
-
-                    let msg = Message::Text(req_json.to_string());
-                    if let Err(e) = write.send(msg).await {
-                        tracing::error!("[gate_ws] write error: {}", e);
-                        break;
-                    }
+                },
+                next=rx.recv()=>{
+                    let(req,sender)=match next{Some(x)=>x,None=>return};
+                    // A caller that timed out while disconnected must never send late.
+                    if sender.is_closed(){continue;}
+                    let(id,frame)=match request_frame(&req){Ok(x)=>x,Err(_)=>continue};
+                    pending.insert(id,sender);
+                    if !matches!(tokio::time::timeout(Duration::from_secs(1),ws.send(Message::Text(frame.to_string()))).await,Ok(Ok(()))){break;}
+                },
+                _=ping.tick()=>{
+                    pending.retain(|_,s|!s.is_closed());
+                    if last_received.elapsed()>Duration::from_secs(30){break;}
+                    if !matches!(tokio::time::timeout(Duration::from_secs(1),ws.send(Message::Text(json!({"time":crate::engine::utils::now_ms()/1000,"channel":"futures.ping"}).to_string()))).await,Ok(Ok(()))){break;}
                 }
-                Some(()) = ping_rx.recv() => {
-                    let ping = serde_json::json!({"channel": "futures.ping"});
-                    if let Err(e) = write.send(Message::Text(ping.to_string())).await {
-                        tracing::error!("[gate_ws] ping failed: {}", e);
-                        break;
-                    }
-                }
-                else => break,
             }
         }
-
-        reader_handle.abort();
-        ping_handle.abort();
-        tracing::warn!("[gate_ws] connection dropped. Restarting loop...");
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        // Dropping pending wakes all callers with UNKNOWN, never resends requests.
+        drop(pending);
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
-
 pub async fn send_gate_ws_request(req: Value) -> Result<Value, String> {
     let tx = GATE_WS_TX.get().ok_or("Gate WS trader not initialized")?;
-    let (resp_tx, resp_rx) = oneshot::channel();
-
-    tx.send((req, resp_tx)).await.map_err(|_| "Gate WS channel closed")?;
-
-    match tokio::time::timeout(tokio::time::Duration::from_millis(1000), resp_rx).await {
-        Ok(Ok(val)) => Ok(val),
-        Ok(Err(_)) => Err("Response sender dropped".to_string()),
-        Err(_) => Err("Timeout waiting for Gate WS response".to_string()),
+    let (sender, receiver) = oneshot::channel();
+    tx.try_send((req, sender))
+        .map_err(|_| "Gate WS queue unavailable")?;
+    match tokio::time::timeout(Duration::from_secs(2), receiver).await {
+        Ok(Ok(v)) => Ok(v),
+        _ => Err("Gate order outcome UNKNOWN; query its client identity".into()),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ack_does_not_consume_final_response() {
+        assert_eq!(response_id(&json!({"request_id":"abc","ack":true})), None);
+        assert_eq!(
+            response_id(&json!({"request_id":"abc","ack":false})),
+            Some("abc")
+        );
+    }
+    #[test]
+    fn order_is_wrapped_in_api_payload() {
+        let(_,f)=request_frame(&json!({"request_id":"abc","channel":"futures.order_place","payload":[{"contract":"BTC_USDT","size":1}]})).unwrap();
+        assert_eq!(f["payload"]["req_id"], "abc");
+        assert_eq!(f["payload"]["req_param"]["size"], 1);
+        assert!(f.get("auth").is_none());
     }
 }

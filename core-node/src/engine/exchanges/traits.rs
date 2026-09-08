@@ -51,6 +51,28 @@ pub struct TradeAuditResult {
 
 #[async_trait]
 pub trait ExchangeConnector: Send + Sync {
+    /// Only connectors implementing idempotent identity lookup may open managed trades.
+    fn supports_managed_orders(&self) -> bool {
+        false
+    }
+    async fn submit_managed(
+        &self,
+        _http: &Client,
+        _keys: &ExchangeKeys,
+        _request: &crate::engine::orders::OrderRequest,
+    ) -> Result<crate::engine::orders::OrderObservation, String> {
+        Err("Managed order submission unsupported".into())
+    }
+    async fn query_managed(
+        &self,
+        _http: &Client,
+        _keys: &ExchangeKeys,
+        _request: &crate::engine::orders::OrderRequest,
+        _order_id: Option<&str>,
+    ) -> Result<crate::engine::orders::OrderObservation, String> {
+        Err("Managed order reconciliation unsupported".into())
+    }
+
     /// Returns the exchange name
     fn name(&self) -> &'static str;
 
@@ -138,7 +160,6 @@ pub trait ExchangeConnector: Send + Sync {
         pair: &str,
         leverage: f64,
     ) -> Result<(), String>;
-
 
     /// Fetch all open positions with non-zero size, including accumulated metrics if available.
     async fn fetch_positions(

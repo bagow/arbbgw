@@ -11,6 +11,71 @@ pub struct KucoinConnector;
 
 #[async_trait]
 impl ExchangeConnector for KucoinConnector {
+    fn supports_managed_orders(&self) -> bool {
+        true
+    }
+    async fn submit_managed(
+        &self,
+        _http: &Client,
+        keys: &ExchangeKeys,
+        r: &crate::engine::orders::OrderRequest,
+    ) -> Result<crate::engine::orders::OrderObservation, String> {
+        r.validate()?;
+        let n = r.quantity / r.multiplier;
+        if (n - n.round()).abs() > 1e-8 {
+            return Err("Off-grid KuCoin quantity".into());
+        }
+        let mut body = json!({"clientOid":r.client_id,"symbol":managed_kucoin_symbol(&r.pair),"side":if r.is_buy{"buy"}else{"sell"},"type":if r.limit_price>0.0{"limit"}else{"market"},"size":n.round() as i64,"leverage":r.leverage.to_string(),"marginMode":"CROSS","reduceOnly":r.reduce_only});
+        if r.limit_price > 0.0 {
+            body["price"] = json!(format!(
+                "{:.8}",
+                crate::engine::orders::bounded_price(r.limit_price, r.tick_size, r.is_buy)
+            ));
+            body["timeInForce"] = json!("IOC");
+        }
+        let v = super::ws_kucoin::send_kucoin_request(
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+            "POST",
+            "/api/v1/orders",
+            &body.to_string(),
+            2000,
+        )
+        .await?;
+        if v["code"].as_str() != Some("200000") {
+            return Err(format!("KuCoin submission code={}", v["code"]));
+        }
+        Ok(crate::engine::orders::OrderObservation::pending(
+            crate::engine::orders::identity(&v["data"], "orderId"),
+        ))
+    }
+    async fn query_managed(
+        &self,
+        _http: &Client,
+        keys: &ExchangeKeys,
+        r: &crate::engine::orders::OrderRequest,
+        oid: Option<&str>,
+    ) -> Result<crate::engine::orders::OrderObservation, String> {
+        let path = match oid {
+            Some(id) => format!("/api/v1/orders/{}", id),
+            None => format!("/api/v1/orders/byClientOid?clientOid={}", r.client_id),
+        };
+        let v = super::ws_kucoin::send_kucoin_request(
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+            "GET",
+            &path,
+            "",
+            3000,
+        )
+        .await?;
+        if v["code"].as_str() != Some("200000") {
+            return Err("KuCoin order lookup unresolved".into());
+        }
+        parse_managed_kucoin(&v["data"], r)
+    }
     fn name(&self) -> &'static str {
         "kucoin"
     }
@@ -103,12 +168,23 @@ impl ExchangeConnector for KucoinConnector {
             ));
         }
 
-        super::ws_kucoin_private::ensure_private_ws(&keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase).await;
+        super::ws_kucoin_private::ensure_private_ws(
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+        )
+        .await;
 
         let v = super::ws_kucoin::send_kucoin_request(
-            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
-            "POST", path, &body_str, api_timeout_ms,
-        ).await?;
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+            "POST",
+            path,
+            &body_str,
+            api_timeout_ms,
+        )
+        .await?;
 
         // Diagnostic: log order request and response
         let resp_oid = v["data"]["orderId"].as_str().unwrap_or("none");
@@ -126,15 +202,30 @@ impl ExchangeConnector for KucoinConnector {
             let api_msg = v["msg"].as_str().unwrap_or("");
             // Handle error 300011: "Order price cannot be higher than 92.01."
             if api_code == "300011" {
-                if let Some(clamped_str) = api_msg.split("than ").nth(1).and_then(|s| s.trim_end_matches('.').trim().split_whitespace().next()) {
+                if let Some(clamped_str) = api_msg
+                    .split("than ")
+                    .nth(1)
+                    .and_then(|s| s.trim_end_matches('.').trim().split_whitespace().next())
+                {
                     let mut retry_body = body_json.clone();
                     retry_body["price"] = serde_json::json!(clamped_str);
                     let retry_body_str = retry_body.to_string();
-                    tracing::warn!("[kucoin] ⚠️ Clamping order price to {} due to 300011 filter for {}", clamped_str, pair);
+                    tracing::warn!(
+                        "[kucoin] ⚠️ Clamping order price to {} due to 300011 filter for {}",
+                        clamped_str,
+                        pair
+                    );
                     if let Ok(v_retry) = super::ws_kucoin::send_kucoin_request(
-                        &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
-                        "POST", path, &retry_body_str, api_timeout_ms,
-                    ).await {
+                        &keys.kucoin_key,
+                        &keys.kucoin_secret,
+                        &keys.kucoin_passphrase,
+                        "POST",
+                        path,
+                        &retry_body_str,
+                        api_timeout_ms,
+                    )
+                    .await
+                    {
                         if v_retry["code"].as_str() == Some("200000") {
                             v = v_retry;
                         } else {
@@ -159,7 +250,8 @@ impl ExchangeConnector for KucoinConnector {
             let cache = super::ws_kucoin_private::get_order_cache();
             let mut inline_price = 0.0;
             let mut inline_fee = 0.0;
-            for _wait in 0..5 {  // 5 × 20ms = 100ms max (verify_fill handles the rest)
+            for _wait in 0..5 {
+                // 5 × 20ms = 100ms max (verify_fill handles the rest)
                 if let Some(state) = cache.get(oid_str) {
                     // BUG-FIX: Wait for status="done" before taking final VWAP.
                     // Previously broke on first partial fill (filled_size > 0),
@@ -170,7 +262,9 @@ impl ExchangeConnector for KucoinConnector {
                         // VWAP = deal_value / filled_size = weighted avg per-unit price.
                         inline_price = if state.filled_size > 0.0 {
                             state.deal_value / state.filled_size
-                        } else { 0.0 };
+                        } else {
+                            0.0
+                        };
                         inline_fee = state.fee.abs();
                         tracing::info!(
                             "[kucoin] ⚡ Inline fill {} price={:.6} fee={:.6} size={:.1} raw_deal_value={:.8} raw_filled_size={:.4} mult={}",
@@ -242,7 +336,11 @@ impl ExchangeConnector for KucoinConnector {
             // Fetch mark price via transport layer
             let ticker_path = format!("/api/v1/level1?symbol={}", sym);
             if let Ok(v) = super::ws_kucoin::send_kucoin_public(&ticker_path).await {
-                if let Some(mark) = v["data"]["price"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v["data"]["price"].as_f64()) {
+                if let Some(mark) = v["data"]["price"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .or_else(|| v["data"]["price"].as_f64())
+                {
                     if mark > 0.0 {
                         final_price = if is_buy { mark * 1.05 } else { mark * 0.95 };
                     }
@@ -325,12 +423,23 @@ impl ExchangeConnector for KucoinConnector {
             });
         }
 
-        super::ws_kucoin_private::ensure_private_ws(&keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase).await;
+        super::ws_kucoin_private::ensure_private_ws(
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+        )
+        .await;
 
         let v_resp = super::ws_kucoin::send_kucoin_request(
-            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
-            "POST", path, &body_str, api_timeout_ms,
-        ).await?;
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+            "POST",
+            path,
+            &body_str,
+            api_timeout_ms,
+        )
+        .await?;
 
         if v_resp["code"].as_str() != Some("200000") {
             let api_code = v_resp["code"].as_str().unwrap_or("");
@@ -366,15 +475,23 @@ impl ExchangeConnector for KucoinConnector {
         let mut fb_price_str = "".to_string();
         if final_price > 0.0 {
             // Use the same slippage_percent as the first attempt — do NOT widen to 2%.
-            let p = if is_buy { final_price * (1.0 + slippage_percent / 100.0) } else { final_price * (1.0 - slippage_percent / 100.0) };
+            let p = if is_buy {
+                final_price * (1.0 + slippage_percent / 100.0)
+            } else {
+                final_price * (1.0 - slippage_percent / 100.0)
+            };
             let rp = if is_buy {
                 (p / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
             } else {
                 (p / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
             };
             fb_price_str = format!("{:.8}", rp).trim_end_matches('0').to_string();
-            if fb_price_str.ends_with('.') { fb_price_str.pop(); }
-            if fb_price_str == "0" { fb_price_str = "".to_string(); }
+            if fb_price_str.ends_with('.') {
+                fb_price_str.pop();
+            }
+            if fb_price_str == "0" {
+                fb_price_str = "".to_string();
+            }
         }
 
         let is_fb_market = fb_price_str.is_empty();
@@ -407,9 +524,15 @@ impl ExchangeConnector for KucoinConnector {
         let fb_str = fb_body.to_string();
 
         let v_fb = super::ws_kucoin::send_kucoin_request(
-            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
-            "POST", path, &fb_str, api_timeout_ms,
-        ).await?;
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+            "POST",
+            path,
+            &fb_str,
+            api_timeout_ms,
+        )
+        .await?;
         let oid_fb = v_fb["data"]["orderId"]
             .as_str()
             .map(|s| s.to_string())
@@ -466,9 +589,9 @@ impl ExchangeConnector for KucoinConnector {
             phys_excess,
             dry_run,
             1.0,
-            0.0,              // target_price = 0.0 (triggers aggressive L1 limit fallback)
+            0.0, // target_price = 0.0 (triggers aggressive L1 limit fallback)
             true,
-            0.0,              // slippage_percent (not used when target_price is 0.0)
+            0.0, // slippage_percent (not used when target_price is 0.0)
             multiplier,
             tick_size,
             15,
@@ -519,9 +642,16 @@ impl ExchangeConnector for KucoinConnector {
 
             // REST fallback after 450ms
             match super::ws_kucoin::send_kucoin_request(
-                &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
-                "GET", &path, "", 10000,
-            ).await {
+                &keys.kucoin_key,
+                &keys.kucoin_secret,
+                &keys.kucoin_passphrase,
+                "GET",
+                &path,
+                "",
+                10000,
+            )
+            .await
+            {
                 Ok(v) => {
                     if v["code"].as_str() != Some("200000") {
                         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -531,7 +661,11 @@ impl ExchangeConnector for KucoinConnector {
                         .as_f64()
                         .or_else(|| v["data"]["filledSize"].as_f64())
                         .or_else(|| v["data"]["dealSize"].as_str().and_then(|s| s.parse().ok()))
-                        .or_else(|| v["data"]["filledSize"].as_str().and_then(|s| s.parse().ok()))
+                        .or_else(|| {
+                            v["data"]["filledSize"]
+                                .as_str()
+                                .and_then(|s| s.parse().ok())
+                        })
                         .unwrap_or(0.0);
                     let is_done = v["data"]["status"].as_str() == Some("done");
                     if size > 0.0 {
@@ -561,11 +695,19 @@ impl ExchangeConnector for KucoinConnector {
 
         for fill_attempt in 0..3 {
             match super::ws_kucoin::send_kucoin_request(
-                &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
-                "GET", &path_fills, "", 5000,
-            ).await {
+                &keys.kucoin_key,
+                &keys.kucoin_secret,
+                &keys.kucoin_passphrase,
+                "GET",
+                &path_fills,
+                "",
+                5000,
+            )
+            .await
+            {
                 Ok(v2) => {
-                    if let Some(items) = v2["data"]["data"].as_array()
+                    if let Some(items) = v2["data"]["data"]
+                        .as_array()
                         .or_else(|| v2["data"]["items"].as_array())
                     {
                         if !items.is_empty() {
@@ -573,13 +715,16 @@ impl ExchangeConnector for KucoinConnector {
                             let mut sum_value = 0.0_f64;
                             let mut sum_size = 0.0_f64;
                             for item in items {
-                                let fp = item["price"].as_f64()
+                                let fp = item["price"]
+                                    .as_f64()
                                     .or_else(|| item["price"].as_str().and_then(|s| s.parse().ok()))
                                     .unwrap_or(0.0);
-                                let fs = item["size"].as_f64()
+                                let fs = item["size"]
+                                    .as_f64()
                                     .or_else(|| item["size"].as_str().and_then(|s| s.parse().ok()))
                                     .unwrap_or(0.0);
-                                let ff = item["fee"].as_f64()
+                                let ff = item["fee"]
+                                    .as_f64()
                                     .or_else(|| item["fee"].as_str().and_then(|s| s.parse().ok()))
                                     .unwrap_or(0.0);
                                 sum_value += fp * fs;
@@ -602,7 +747,12 @@ impl ExchangeConnector for KucoinConnector {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("[kucoin] fills API attempt {} failed for {}: {}", fill_attempt, order_id, e);
+                    tracing::warn!(
+                        "[kucoin] fills API attempt {} failed for {}: {}",
+                        fill_attempt,
+                        order_id,
+                        e
+                    );
                 }
             }
             if fill_attempt < 2 {
@@ -619,7 +769,9 @@ impl ExchangeConnector for KucoinConnector {
                     fills_fee = state.fee.abs();
                     tracing::warn!(
                         "[kucoin] 📊 fetch_order {} WS fallback: price={:.8} fee={:.6}",
-                        order_id, fills_price, fills_fee
+                        order_id,
+                        fills_price,
+                        fills_fee
                     );
                     fills_found = true;
                 }
@@ -627,7 +779,11 @@ impl ExchangeConnector for KucoinConnector {
         }
 
         if !fills_found || fills_price <= 0.0 {
-            tracing::error!("[kucoin] ❌ fetch_order {} NO PRICE from fills or WS. deal_size={}", order_id, deal_size);
+            tracing::error!(
+                "[kucoin] ❌ fetch_order {} NO PRICE from fills or WS. deal_size={}",
+                order_id,
+                deal_size
+            );
             return Err(format!("No fill price available for order {}", order_id));
         }
 
@@ -641,24 +797,58 @@ impl ExchangeConnector for KucoinConnector {
         Ok((fills_price, fills_fee, phys_volume))
     }
 
-    async fn fetch_balances(&self, __http: &Client, keys: &ExchangeKeys) -> Result<(f64, f64), String> {
+    async fn fetch_balances(
+        &self,
+        __http: &Client,
+        keys: &ExchangeKeys,
+    ) -> Result<(f64, f64), String> {
         let path = "/api/v1/account-overview?currency=USDT";
         let v = super::ws_kucoin::send_kucoin_request(
-            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
-            "GET", path, "", 10000,
-        ).await?;
-        let avail = v["data"]["availableBalance"].as_f64().or_else(|| v["data"]["availableBalance"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
-        let equity = v["data"]["accountEquity"].as_f64().or_else(|| v["data"]["accountEquity"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+            "GET",
+            path,
+            "",
+            10000,
+        )
+        .await?;
+        let avail = v["data"]["availableBalance"]
+            .as_f64()
+            .or_else(|| {
+                v["data"]["availableBalance"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or(0.0);
+        let equity = v["data"]["accountEquity"]
+            .as_f64()
+            .or_else(|| {
+                v["data"]["accountEquity"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or(0.0);
         Ok((equity, avail))
     }
 
     async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
         let path = "/api/v1/trade-fees?symbol=XBTUSDTM";
         let v = super::ws_kucoin::send_kucoin_request(
-            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
-            "GET", path, "", 10000,
-        ).await?;
-        let taker = v["data"]["takerFeeRate"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["data"]["takerFeeRate"].as_f64()).unwrap_or(0.0006);
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+            "GET",
+            path,
+            "",
+            10000,
+        )
+        .await?;
+        let taker = v["data"]["takerFeeRate"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .or_else(|| v["data"]["takerFeeRate"].as_f64())
+            .unwrap_or(0.0006);
         Ok(taker)
     }
 
@@ -673,29 +863,59 @@ impl ExchangeConnector for KucoinConnector {
         Ok(())
     }
 
-
-    async fn fetch_positions(&self, _http: &Client, keys: &ExchangeKeys) -> Result<Vec<PositionInfo>, String> {
+    async fn fetch_positions(
+        &self,
+        _http: &Client,
+        keys: &ExchangeKeys,
+    ) -> Result<Vec<PositionInfo>, String> {
         let path = "/api/v1/positions";
         let v = super::ws_kucoin::send_kucoin_request(
-            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
-            "GET", path, "", 10000,
-        ).await?;
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+            "GET",
+            path,
+            "",
+            10000,
+        )
+        .await?;
         let code = v["code"].as_str().unwrap_or("");
-        if code != "200000" { return Err(format!("Kucoin API returned error: {}", v)); }
+        if code != "200000" {
+            return Err(format!("Kucoin API returned error: {}", v));
+        }
         let mut positions = Vec::new();
         if let Some(arr) = v["data"].as_array() {
             for p in arr {
-                let qty: f64 = p["currentQty"].as_f64().or_else(|| p["currentQty"].as_i64().map(|i| i as f64)).unwrap_or(0.0);
-                if qty.abs() < 1e-12 { continue; }
+                let qty: f64 = p["currentQty"]
+                    .as_f64()
+                    .or_else(|| p["currentQty"].as_i64().map(|i| i as f64))
+                    .unwrap_or(0.0);
+                if qty.abs() < 1e-12 {
+                    continue;
+                }
                 let raw_sym = p["symbol"].as_str().unwrap_or("");
                 let mut std_sym = raw_sym.replace("USDTM", "USDT").replace("USDM", "USDT");
-                if std_sym == "XBTUSDT" { std_sym = "BTCUSDT".to_string(); }
-                let realized = p["realisedPnl"].as_f64().or_else(|| p["realisedPnl"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+                if std_sym == "XBTUSDT" {
+                    std_sym = "BTCUSDT".to_string();
+                }
+                let realized = p["realisedPnl"]
+                    .as_f64()
+                    .or_else(|| p["realisedPnl"].as_str().and_then(|s| s.parse().ok()))
+                    .unwrap_or(0.0);
                 positions.push(PositionInfo {
-                    symbol: std_sym, size: qty,
-                    entry_price: p["avgEntryPrice"].as_f64().or_else(|| p["avgEntryPrice"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0),
-                    unrealized_pnl: p["unrealisedPnl"].as_f64().or_else(|| p["unrealisedPnl"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0),
-                    realized_pnl: realized, accumulated_fee: 0.0, accumulated_funding: 0.0,
+                    symbol: std_sym,
+                    size: qty,
+                    entry_price: p["avgEntryPrice"]
+                        .as_f64()
+                        .or_else(|| p["avgEntryPrice"].as_str().and_then(|s| s.parse().ok()))
+                        .unwrap_or(0.0),
+                    unrealized_pnl: p["unrealisedPnl"]
+                        .as_f64()
+                        .or_else(|| p["unrealisedPnl"].as_str().and_then(|s| s.parse().ok()))
+                        .unwrap_or(0.0),
+                    realized_pnl: realized,
+                    accumulated_fee: 0.0,
+                    accumulated_funding: 0.0,
                 });
             }
         }
@@ -711,12 +931,27 @@ impl ExchangeConnector for KucoinConnector {
         end_ts: i64,
     ) -> Result<TradeAuditResult, String> {
         let norm = pair.replace('_', "").replace('-', "").to_uppercase();
-        let kucoin_sym = if norm == "BTCUSDT" { "XBTUSDTM".to_string() } else if norm.ends_with("USDT") { format!("{}M", norm) } else { norm };
-        let path = format!("/api/v1/fills?symbol={}&startAt={}&endAt={}", kucoin_sym, start_ts, end_ts);
+        let kucoin_sym = if norm == "BTCUSDT" {
+            "XBTUSDTM".to_string()
+        } else if norm.ends_with("USDT") {
+            format!("{}M", norm)
+        } else {
+            norm
+        };
+        let path = format!(
+            "/api/v1/fills?symbol={}&startAt={}&endAt={}",
+            kucoin_sym, start_ts, end_ts
+        );
         let v = super::ws_kucoin::send_kucoin_request(
-            &keys.kucoin_key, &keys.kucoin_secret, &keys.kucoin_passphrase,
-            "GET", &path, "", 10000,
-        ).await?;
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+            "GET",
+            &path,
+            "",
+            10000,
+        )
+        .await?;
 
         let code = v["code"].as_str().unwrap_or("");
         if code != "200000" {
@@ -729,19 +964,23 @@ impl ExchangeConnector for KucoinConnector {
         let mut sum_qty = 0.0_f64;
 
         let empty_vec = Vec::new();
-        let items = v["data"]["items"].as_array()
+        let items = v["data"]["items"]
+            .as_array()
             .or_else(|| v["data"].as_array())
             .unwrap_or(&empty_vec);
 
         for fill in items {
-            let fee: f64 = fill["fee"].as_f64()
+            let fee: f64 = fill["fee"]
+                .as_f64()
                 .or_else(|| fill["fee"].as_str().and_then(|s| s.parse().ok()))
                 .unwrap_or(0.0);
-            let price: f64 = fill["matchPrice"].as_f64()
+            let price: f64 = fill["matchPrice"]
+                .as_f64()
                 .or_else(|| fill["matchPrice"].as_str().and_then(|s| s.parse().ok()))
                 .or_else(|| fill["price"].as_f64())
                 .unwrap_or(0.0);
-            let size: f64 = fill["size"].as_f64()
+            let size: f64 = fill["size"]
+                .as_f64()
                 .or_else(|| fill["size"].as_str().and_then(|s| s.parse().ok()))
                 .unwrap_or(0.0);
 
@@ -764,5 +1003,69 @@ impl ExchangeConnector for KucoinConnector {
             filled_qty: sum_qty,
         })
     }
+}
 
+fn managed_kucoin_symbol(pair: &str) -> String {
+    if pair == "BTCUSDT" {
+        "XBTUSDTM".into()
+    } else {
+        format!("{}M", pair)
+    }
+}
+fn parse_managed_kucoin(
+    v: &Value,
+    r: &crate::engine::orders::OrderRequest,
+) -> Result<crate::engine::orders::OrderObservation, String> {
+    use crate::engine::orders::{identity, number, OrderObservation, OrderState};
+    if v["symbol"].as_str() != Some(managed_kucoin_symbol(&r.pair).as_str())
+        || v["clientOid"].as_str() != Some(r.client_id.as_str())
+    {
+        return Err("KuCoin identity mismatch".into());
+    }
+    let qty = number(v, "dealSize")? * r.multiplier;
+    let state = match v["isActive"].as_bool() {
+        Some(false) => {
+            if qty + 1e-10 >= r.quantity {
+                OrderState::Filled
+            } else {
+                OrderState::Cancelled
+            }
+        }
+        Some(true) => {
+            if qty > 0.0 {
+                OrderState::PartiallyFilled
+            } else {
+                OrderState::Submitted
+            }
+        }
+        None => match v["status"].as_str() {
+            Some("done") => {
+                if qty + 1e-10 >= r.quantity {
+                    OrderState::Filled
+                } else {
+                    OrderState::Cancelled
+                }
+            }
+            Some("open") => OrderState::Submitted,
+            _ => return Err("Missing KuCoin order state".into()),
+        },
+    };
+    let fee = if qty == 0.0 && state.terminal() {
+        Some(0.0)
+    } else if v["feeCurrency"].as_str() == Some("USDT") {
+        Some(number(v, "fee")?)
+    } else {
+        None
+    };
+    Ok(OrderObservation {
+        order_id: identity(v, "id"),
+        state,
+        filled_quantity: qty,
+        average_price: if qty > 0.0 {
+            Some(number(v, "dealValue")? / qty)
+        } else {
+            None
+        },
+        fee,
+    })
 }

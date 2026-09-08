@@ -20,63 +20,58 @@ pub fn compute_lot_size(
     mult_b: f64,
     vol_tolerance_pct: f64,
 ) -> Option<LotSize> {
-    let big_step = mult_a.max(mult_b);
-    let target_phys = trade_volume / entry_price.max(1e-12);
-    let mut base_steps = (target_phys / big_step).round();
-    if base_steps < 1.0 {
-        base_steps = 1.0;
-    }
-
-    let mut phys_qty = 0.0;
-    let mut found_match = false;
-
-    // Iterate gracefully to find the nearest perfect multiple for BOTH exchanges
-    for delta in 0..=5 {
-        for dir in [1.0, -1.0] {
-            let test_steps = base_steps + (delta as f64) * dir;
-            if test_steps < 1.0 {
-                continue;
-            }
-            let test_phys = test_steps * big_step;
-
-            let c_a = (test_phys / mult_a).round();
-            let c_b = (test_phys / mult_b).round();
-
-            if (c_a * mult_a - test_phys).abs() < 1e-8
-                && (c_b * mult_b - test_phys).abs() < 1e-8
-            {
-                phys_qty = test_phys;
-                found_match = true;
-                break;
-            }
-        }
-        if found_match {
-            break;
-        }
-    }
-
-    if !found_match {
+    if ![trade_volume, entry_price, mult_a, mult_b, vol_tolerance_pct]
+        .iter()
+        .all(|x| x.is_finite())
+        || trade_volume <= 0.0
+        || entry_price <= 0.0
+        || vol_tolerance_pct < 0.0
+    {
         return None;
     }
-
-    let max_v = trade_volume * (1.0 + vol_tolerance_pct / 100.0);
-
-    // Scale down until volumetric match fits inside the max_v limit
-    while phys_qty * entry_price > max_v && phys_qty > big_step {
-        phys_qty -= big_step;
-    }
-    if phys_qty <= 0.0 {
+    let step = common_quantity_step(mult_a, mult_b)?;
+    let max_qty = trade_volume * (1.0 + vol_tolerance_pct / 100.0) / entry_price;
+    let preferred = (trade_volume / entry_price / step).round().max(1.0);
+    let steps = preferred.min((max_qty / step + 1e-10).floor());
+    if steps < 1.0 {
         return None;
     }
-
-    let contracts_a = (phys_qty / mult_a).round();
-    let contracts_b = (phys_qty / mult_b).round();
-
+    let phys_qty = steps * step;
     Some(LotSize {
         phys_qty,
-        contracts_a,
-        contracts_b,
+        contracts_a: phys_qty / mult_a,
+        contracts_b: phys_qty / mult_b,
     })
+}
+
+/// Exact common grid for decimal exchange quantity steps (up to 8 decimals).
+/// Quantity step is not the size of a derivative contract.
+pub fn common_quantity_step(a: f64, b: f64) -> Option<f64> {
+    const SCALE: f64 = 100_000_000.0;
+    fn units(x: f64) -> Option<u64> {
+        let n = x * SCALE;
+        if !x.is_finite()
+            || x <= 0.0
+            || n < 1.0
+            || n > 9_000_000_000_000_000.0
+            || (n - n.round()).abs() > 1e-5
+        {
+            return None;
+        }
+        Some(n.round() as u64)
+    }
+    let (a, b) = (units(a)?, units(b)?);
+    let (mut x, mut y) = (a, b);
+    while y != 0 {
+        let r = x % y;
+        x = y;
+        y = r;
+    }
+    let lcm = (a / x).checked_mul(b)?;
+    if lcm > 9_000_000_000_000_000 {
+        return None;
+    }
+    Some(lcm as f64 / SCALE)
 }
 
 /// Result of lot size computation.
@@ -125,7 +120,10 @@ pub fn check_listing_age(
     }
 
     // 2. Check all other potential exchanges for the absolute oldest listing
-    for ex in ["binance", "bybit", "gate", "kucoin", "bitget", "bingx", "bitmex", "ascendex", "xt", "toobit"] {
+    for ex in [
+        "binance", "bybit", "gate", "kucoin", "bitget", "bingx", "bitmex", "ascendex", "xt",
+        "toobit",
+    ] {
         if ex == exchange_a || ex == exchange_b {
             continue;
         }
@@ -182,19 +180,36 @@ mod tests {
     }
 
     #[test]
-    fn returns_none_when_multipliers_have_no_common_lot() {
-        // Общий лот для mult 1.0 и 0.13 существует только на кратных 13,
-        // а окно поиска (+/- 5 шагов вокруг 20) их не содержит.
-        assert!(compute_lot_size(2000.0, 100.0, 1.0, 0.13, 15.0).is_none());
+    fn non_divisible_steps_preserve_common_grid() {
+        let l = compute_lot_size(10.0, 1.0, 3.0, 2.0, 0.0).unwrap();
+        assert_eq!(l.phys_qty, 6.0);
+        assert_eq!(l.contracts_a * 3.0, l.contracts_b * 2.0);
     }
 
     #[test]
-    fn tiny_volume_falls_back_to_one_minimal_step() {
-        // Объем меньше одного контракта: движок обязан вернуть минимальный лот,
-        // а не ноль контрактов (иначе получим односторонний вход).
-        let lot = compute_lot_size(1.0, 100.0, 1.0, 1.0, 15.0).expect("лот должен найтись");
-        assert!(lot.phys_qty >= 1.0);
-        assert!(lot.contracts_a >= 1.0);
-        assert!(lot.contracts_b >= 1.0);
+    fn small_budget_is_rejected_instead_of_exceeded() {
+        assert!(compute_lot_size(1.0, 100.0, 1.0, 1.0, 15.0).is_none());
+    }
+
+    #[test]
+    fn invalid_steps_fail_closed() {
+        for x in [0.0, -1.0, f64::NAN, f64::INFINITY, 0.000000001] {
+            assert!(common_quantity_step(x, 1.0).is_none());
+        }
+    }
+
+    #[test]
+    fn grid_invariants_across_decimal_steps() {
+        for a in [0.001, 0.02, 0.03, 0.13, 2.0, 3.0] {
+            for b in [0.001, 0.02, 0.03, 0.13, 2.0, 3.0] {
+                for v in [1.0, 10.0, 23.0, 100.0] {
+                    if let Some(l) = compute_lot_size(v, 1.0, a, b, 0.0) {
+                        assert!(l.phys_qty <= v + 1e-9);
+                        assert!((l.contracts_a - l.contracts_a.round()).abs() < 1e-8);
+                        assert!((l.contracts_b - l.contracts_b.round()).abs() < 1e-8);
+                    }
+                }
+            }
+        }
     }
 }

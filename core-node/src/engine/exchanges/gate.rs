@@ -42,62 +42,93 @@ async fn try_gate_ws_order(
     let status = resp["header"]["status"].as_str().unwrap_or("0");
     if status == "200" || status == "201" {
         // Extract order result — could be object or array
-        let result = resp["data"]["result"].as_object()
-            .cloned()
-            .or_else(|| resp["data"]["result"].as_array()
+        let result = resp["data"]["result"].as_object().cloned().or_else(|| {
+            resp["data"]["result"]
+                .as_array()
                 .and_then(|a| a.first())
                 .and_then(|v| v.as_object())
-                .cloned());
-        
+                .cloned()
+        });
+
         if let Some(r) = result {
             if let Some(id) = r.get("id") {
-                let oid = id.as_i64().map(|i| i.to_string())
+                let oid = id
+                    .as_i64()
+                    .map(|i| i.to_string())
                     .or_else(|| id.as_str().map(|s| s.to_string()));
                 if let Some(oid) = oid {
                     // Extract fill_price and fee from the response
-                    let fill_price: f64 = r.get("fill_price")
-                        .and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64()))
+                    let fill_price: f64 = r
+                        .get("fill_price")
+                        .and_then(|v| {
+                            v.as_str()
+                                .and_then(|s| s.parse().ok())
+                                .or_else(|| v.as_f64())
+                        })
                         .unwrap_or(0.0);
-                    let fee: f64 = r.get("fee")
-                        .and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64()))
+                    let fee: f64 = r
+                        .get("fee")
+                        .and_then(|v| {
+                            v.as_str()
+                                .and_then(|s| s.parse().ok())
+                                .or_else(|| v.as_f64())
+                        })
                         .unwrap_or(0.0);
-                    
+
                     let order_status = r.get("status").and_then(|v| v.as_str()).unwrap_or("");
                     let finish_as = r.get("finish_as").and_then(|v| v.as_str()).unwrap_or("");
                     let left = r.get("left").and_then(|v| v.as_i64()).unwrap_or(0);
-                    
+
                     tracing::info!(
                         "[gate] WS order_place response: oid={} status={} finish_as={} fill_price={} fee={} left={}",
                         oid, order_status, finish_as, fill_price, fee, left
                     );
-                    
+
                     return Ok((oid, fill_price, fee.abs()));
                 }
             }
         }
     }
 
-    let errs = resp["data"]["errs"].as_object()
+    let errs = resp["data"]["errs"]
+        .as_object()
         .map(|e| format!("{:?}", e))
         .unwrap_or_else(|| format!("status={}", status));
     Err(format!("Gate WS: {}", errs))
 }
 
-
-async fn fetch_gate_order_fee(http: &Client, keys: &ExchangeKeys, contract: &str, order_id: &str) -> Option<f64> {
-    let path = format!("/api/v4/futures/usdt/my_trades?contract={}&order={}", contract, order_id);
+async fn fetch_gate_order_fee(
+    http: &Client,
+    keys: &ExchangeKeys,
+    contract: &str,
+    order_id: &str,
+) -> Option<f64> {
+    let path = format!(
+        "/api/v4/futures/usdt/my_trades?contract={}&order={}",
+        contract, order_id
+    );
     let url = format!("https://api.gateio.ws{}", path);
     for attempt in 0..3 {
         if attempt > 0 {
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
         let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, "");
-        if let Ok(resp) = http.get(&url).headers(headers).timeout(Duration::from_millis(1500)).send().await {
+        if let Ok(resp) = http
+            .get(&url)
+            .headers(headers)
+            .timeout(Duration::from_millis(1500))
+            .send()
+            .await
+        {
             if let Ok(trades) = resp.json::<Value>().await {
                 if let Some(arr) = trades.as_array() {
                     let mut sum_fee = 0.0;
                     for t in arr {
-                        if let Some(f) = t["fee"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| t["fee"].as_f64()) {
+                        if let Some(f) = t["fee"]
+                            .as_str()
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .or_else(|| t["fee"].as_f64())
+                        {
                             sum_fee += f.abs();
                         }
                     }
@@ -115,7 +146,12 @@ fn format_gate_price(price: f64, tick_size: f64) -> String {
     let tick = tick_size.max(1e-12);
     let precision = if tick < 1.0 {
         let s = format!("{:.8}", tick);
-        let decimals = s.trim_end_matches('0').split('.').nth(1).unwrap_or("").len();
+        let decimals = s
+            .trim_end_matches('0')
+            .split('.')
+            .nth(1)
+            .unwrap_or("")
+            .len();
         decimals.min(8)
     } else {
         0
@@ -130,6 +166,90 @@ fn format_gate_price(price: f64, tick_size: f64) -> String {
 
 #[async_trait]
 impl ExchangeConnector for GateConnector {
+    fn supports_managed_orders(&self) -> bool {
+        true
+    }
+    async fn submit_managed(
+        &self,
+        _http: &Client,
+        keys: &ExchangeKeys,
+        r: &crate::engine::orders::OrderRequest,
+    ) -> Result<crate::engine::orders::OrderObservation, String> {
+        r.validate()?;
+        let size = r.quantity / r.multiplier;
+        if (size - size.round()).abs() > 1e-8 {
+            return Err("Off-grid Gate quantity".into());
+        }
+        let price = if r.limit_price > 0.0 {
+            format_gate_price(
+                crate::engine::orders::bounded_price(r.limit_price, r.tick_size, r.is_buy),
+                r.tick_size,
+            )
+        } else {
+            "0".into()
+        };
+        super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
+        let v=super::ws_gate::send_gate_ws_request(json!({"request_id":Uuid::new_v4().to_string(),"channel":"futures.order_place","event":"api","payload":{"contract":r.pair.replace("USDT","_USDT"),"size":if r.is_buy{size.round() as i64}else{-(size.round() as i64)},"price":price,"tif":"ioc","reduce_only":r.reduce_only,"text":format!("t-{}",r.client_id)}})).await?;
+        if v["header"]["status"].as_str() != Some("200") {
+            return Err("Gate submission not confirmed".into());
+        }
+        parse_managed_gate(&v["data"]["result"], r)
+    }
+    async fn query_managed(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        r: &crate::engine::orders::OrderRequest,
+        oid: Option<&str>,
+    ) -> Result<crate::engine::orders::OrderObservation, String> {
+        let id = oid
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("t-{}", r.client_id));
+        let path = format!("/api/v4/futures/usdt/orders/{}", id);
+        let v = managed_gate_get(http, keys, &path).await?;
+        let mut o = parse_managed_gate(&v, r)?;
+        if o.filled_quantity > 0.0 {
+            let id = o.order_id.as_deref().ok_or("Missing Gate order id")?;
+            let mut qty = 0.0;
+            let mut cost = 0.0;
+            let mut fee = 0.0;
+            let mut seen = std::collections::HashSet::new();
+            for page in 0..10 {
+                let path = format!(
+                    "/api/v4/futures/usdt/my_trades?contract={}&order={}&limit=100&offset={}",
+                    r.pair.replace("USDT", "_USDT"),
+                    id,
+                    page * 100
+                );
+                let fills = managed_gate_get(http, keys, &path).await?;
+                let arr = fills.as_array().ok_or("Invalid Gate fills")?;
+                for f in arr {
+                    if crate::engine::orders::identity(f, "order_id").as_deref() != Some(id) {
+                        continue;
+                    }
+                    let fid = crate::engine::orders::identity(f, "id")
+                        .ok_or("Missing Gate execution id")?;
+                    if !seen.insert(fid) {
+                        continue;
+                    }
+                    let q = crate::engine::orders::number(f, "size")?.abs() * r.multiplier;
+                    qty += q;
+                    cost += q * crate::engine::orders::number(f, "price")?;
+                    fee += crate::engine::orders::number(f, "fee")?;
+                }
+                if arr.len() < 100 {
+                    break;
+                }
+            }
+            if (qty - o.filled_quantity).abs() <= r.quantity * 1e-8 && qty > 0.0 {
+                o.average_price = Some(cost / qty);
+                o.fee = Some(fee);
+            }
+        } else if o.state.terminal() {
+            o.fee = Some(0.0);
+        }
+        Ok(o)
+    }
     fn name(&self) -> &'static str {
         "gate"
     }
@@ -197,21 +317,30 @@ impl ExchangeConnector for GateConnector {
             return Ok((Some(format!("dry_{}", Uuid::new_v4())), target_price, 0.0));
         }
 
-        let _ = super::ws_gate::get_or_init_gate_ws(
-            keys.gate_key.clone(),
-            keys.gate_secret.clone(),
-        );
+        let _ =
+            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
 
         match try_gate_ws_order(keys, &contract, size, &price_str, tif).await {
             Ok((oid, fill_price, fee)) => {
-                tracing::info!("[gate] ✅ place_order {} orderId={} fill_price={:.6} fee={:.6} (WS)", pair, oid, fill_price, fee);
+                tracing::info!(
+                    "[gate] ✅ place_order {} orderId={} fill_price={:.6} fee={:.6} (WS)",
+                    pair,
+                    oid,
+                    fill_price,
+                    fee
+                );
                 Ok((Some(oid), fill_price, fee))
             }
             Err(e) => {
-                tracing::warn!("[gate] place_order {} WS failed ({}). Trying REST fallback...", pair, e);
+                tracing::warn!(
+                    "[gate] place_order {} WS failed ({}). Trying REST fallback...",
+                    pair,
+                    e
+                );
                 let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &body_str);
                 let url = format!("https://api.gateio.ws{}", path);
-                let resp = _http.post(&url)
+                let resp = _http
+                    .post(&url)
                     .headers(headers)
                     .header("Content-Type", "application/json")
                     .body(body_str)
@@ -219,22 +348,47 @@ impl ExchangeConnector for GateConnector {
                     .send()
                     .await
                     .map_err(|e| format!("Gate REST place_order HTTP error: {}", e))?;
-                let v = resp.json::<Value>().await
+                let v = resp
+                    .json::<Value>()
+                    .await
                     .map_err(|e| format!("Gate REST place_order JSON error: {}", e))?;
-                if let Some(oid) = v["id"].as_i64().map(|i| i.to_string()).or_else(|| v["id"].as_str().map(|s| s.to_string())) {
-                    let fill_price: f64 = v["fill_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);
-                    let raw_fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
+                if let Some(oid) = v["id"]
+                    .as_i64()
+                    .map(|i| i.to_string())
+                    .or_else(|| v["id"].as_str().map(|s| s.to_string()))
+                {
+                    let fill_price: f64 = v["fill_price"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                        .or_else(|| v["fill_price"].as_f64())
+                        .unwrap_or(0.0);
+                    let raw_fee: f64 = v["fee"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                        .or_else(|| v["fee"].as_f64())
+                        .unwrap_or(0.0);
                     let fee = if raw_fee.abs() > 0.0 {
                         raw_fee.abs()
-                    } else if let Some(real_fee) = fetch_gate_order_fee(_http, keys, &contract, &oid).await {
+                    } else if let Some(real_fee) =
+                        fetch_gate_order_fee(_http, keys, &contract, &oid).await
+                    {
                         real_fee
                     } else {
                         0.0
                     };
-                    tracing::info!("[gate] ✅ place_order {} orderId={} fill_price={:.6} fee={:.6} (REST)", pair, oid, fill_price, fee);
+                    tracing::info!(
+                        "[gate] ✅ place_order {} orderId={} fill_price={:.6} fee={:.6} (REST)",
+                        pair,
+                        oid,
+                        fill_price,
+                        fee
+                    );
                     Ok((Some(oid), fill_price, fee))
                 } else {
-                    let err = v["label"].as_str().or_else(|| v["message"].as_str()).unwrap_or("Unknown Gate REST error");
+                    let err = v["label"]
+                        .as_str()
+                        .or_else(|| v["message"].as_str())
+                        .unwrap_or("Unknown Gate REST error");
                     Err(format!("Gate REST error: {}", err))
                 }
             }
@@ -262,28 +416,51 @@ impl ExchangeConnector for GateConnector {
         let contract = pair.replace("USDT", "_USDT");
         let size = if multiplier == 0.0 {
             let contracts = phys_amount.round() as i64;
-            let final_contracts = if phys_amount > 1e-12 && contracts == 0 { 1 } else { contracts };
-            if is_buy { final_contracts } else { -final_contracts }
+            let final_contracts = if phys_amount > 1e-12 && contracts == 0 {
+                1
+            } else {
+                contracts
+            };
+            if is_buy {
+                final_contracts
+            } else {
+                -final_contracts
+            }
         } else {
             let contracts = (phys_amount / multiplier.max(1e-12)).round() as i64;
-            let final_contracts = if phys_amount > 1e-12 && contracts == 0 { 1 } else { contracts };
+            let final_contracts = if phys_amount > 1e-12 && contracts == 0 {
+                1
+            } else {
+                contracts
+            };
             if is_buy {
                 final_contracts
             } else {
                 -final_contracts
             }
         };
-        if size == 0 { return Err("Amount too small to close".to_string()); }
+        if size == 0 {
+            return Err("Amount too small to close".to_string());
+        }
 
         if dry_run {
-            return Ok(CloseReceipt { final_price: target_price, total_fee: 0.0, closed_volume: phys_amount });
+            return Ok(CloseReceipt {
+                final_price: target_price,
+                total_fee: 0.0,
+                closed_volume: phys_amount,
+            });
         }
 
         let _ = self.ensure_leverage(http, keys, pair, leverage).await;
-        let _ = super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
+        let _ =
+            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
 
         let price_str = if target_price > 0.0 {
-            let p = if is_buy { target_price * (1.0 + slippage_percent / 100.0) } else { target_price * (1.0 - slippage_percent / 100.0) };
+            let p = if is_buy {
+                target_price * (1.0 + slippage_percent / 100.0)
+            } else {
+                target_price * (1.0 - slippage_percent / 100.0)
+            };
             format_gate_price(p, tick_size)
         } else {
             "0".to_string()
@@ -301,21 +478,53 @@ impl ExchangeConnector for GateConnector {
         if let Ok(resp) = send_gate_ws_request(ws_req).await {
             let status = resp["header"]["status"].as_str().unwrap_or("0");
             if status == "200" || status == "201" {
-                let result = resp["data"]["result"].as_object()
-                    .or_else(|| resp["data"]["result"].as_array().and_then(|a| a.first()).and_then(|v| v.as_object()));
+                let result = resp["data"]["result"].as_object().or_else(|| {
+                    resp["data"]["result"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_object())
+                });
                 if let Some(r) = result {
-                    let fill_price: f64 = r.get("fill_price").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
-                    let raw_fee: f64 = r.get("fee").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
-                    let oid_str = r.get("id").and_then(|v| v.as_i64().map(|i| i.to_string()).or_else(|| v.as_str().map(|s| s.to_string())));
+                    let fill_price: f64 = r
+                        .get("fill_price")
+                        .and_then(|v| {
+                            v.as_str()
+                                .and_then(|s| s.parse().ok())
+                                .or_else(|| v.as_f64())
+                        })
+                        .unwrap_or(0.0);
+                    let raw_fee: f64 = r
+                        .get("fee")
+                        .and_then(|v| {
+                            v.as_str()
+                                .and_then(|s| s.parse().ok())
+                                .or_else(|| v.as_f64())
+                        })
+                        .unwrap_or(0.0);
+                    let oid_str = r.get("id").and_then(|v| {
+                        v.as_i64()
+                            .map(|i| i.to_string())
+                            .or_else(|| v.as_str().map(|s| s.to_string()))
+                    });
                     let fee = if raw_fee.abs() > 0.0 {
                         raw_fee.abs()
                     } else if let Some(oid) = oid_str {
-                        fetch_gate_order_fee(http, keys, &contract, &oid).await.unwrap_or(0.0)
+                        fetch_gate_order_fee(http, keys, &contract, &oid)
+                            .await
+                            .unwrap_or(0.0)
                     } else {
                         0.0
                     };
                     if fill_price > 0.0 || r.get("id").is_some() {
-                        return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee, closed_volume: phys_amount });
+                        return Ok(CloseReceipt {
+                            final_price: if fill_price > 0.0 {
+                                fill_price
+                            } else {
+                                target_price
+                            },
+                            total_fee: fee,
+                            closed_volume: phys_amount,
+                        });
                     }
                 }
             }
@@ -324,11 +533,25 @@ impl ExchangeConnector for GateConnector {
         // Fallback: aggressive WS close with deep slippage price
         tracing::warn!("[gate] fallback close for {} (qty {})", pair, phys_amount);
         let fb_price_str = if target_price > 0.0 {
-            let fb_px = if is_buy { target_price * 1.05 } else { target_price * 0.95 };
-            let rounded = if is_buy { (fb_px / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8) } else { (fb_px / tick_size.max(1e-8)).floor() * tick_size.max(1e-8) };
+            let fb_px = if is_buy {
+                target_price * 1.05
+            } else {
+                target_price * 0.95
+            };
+            let rounded = if is_buy {
+                (fb_px / tick_size.max(1e-8)).ceil() * tick_size.max(1e-8)
+            } else {
+                (fb_px / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
+            };
             let mut s = format!("{:.8}", rounded).trim_end_matches('0').to_string();
-            if s.ends_with('.') { s.pop(); }
-            if s.is_empty() { "0".to_string() } else { s }
+            if s.ends_with('.') {
+                s.pop();
+            }
+            if s.is_empty() {
+                "0".to_string()
+            } else {
+                s
+            }
         } else {
             "0".to_string()
         };
@@ -342,21 +565,53 @@ impl ExchangeConnector for GateConnector {
         if let Ok(fb_resp) = send_gate_ws_request(fb_ws).await {
             let fb_s = fb_resp["header"]["status"].as_str().unwrap_or("0");
             if fb_s == "200" || fb_s == "201" {
-                let result = fb_resp["data"]["result"].as_object()
-                    .or_else(|| fb_resp["data"]["result"].as_array().and_then(|a| a.first()).and_then(|v| v.as_object()));
+                let result = fb_resp["data"]["result"].as_object().or_else(|| {
+                    fb_resp["data"]["result"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_object())
+                });
                 if let Some(r) = result {
-                    let fill_price: f64 = r.get("fill_price").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
-                    let raw_fee: f64 = r.get("fee").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())).unwrap_or(0.0);
-                    let oid_str = r.get("id").and_then(|v| v.as_i64().map(|i| i.to_string()).or_else(|| v.as_str().map(|s| s.to_string())));
+                    let fill_price: f64 = r
+                        .get("fill_price")
+                        .and_then(|v| {
+                            v.as_str()
+                                .and_then(|s| s.parse().ok())
+                                .or_else(|| v.as_f64())
+                        })
+                        .unwrap_or(0.0);
+                    let raw_fee: f64 = r
+                        .get("fee")
+                        .and_then(|v| {
+                            v.as_str()
+                                .and_then(|s| s.parse().ok())
+                                .or_else(|| v.as_f64())
+                        })
+                        .unwrap_or(0.0);
+                    let oid_str = r.get("id").and_then(|v| {
+                        v.as_i64()
+                            .map(|i| i.to_string())
+                            .or_else(|| v.as_str().map(|s| s.to_string()))
+                    });
                     let fee = if raw_fee.abs() > 0.0 {
                         raw_fee.abs()
                     } else if let Some(oid) = oid_str {
-                        fetch_gate_order_fee(http, keys, &contract, &oid).await.unwrap_or(0.0)
+                        fetch_gate_order_fee(http, keys, &contract, &oid)
+                            .await
+                            .unwrap_or(0.0)
                     } else {
                         0.0
                     };
                     if fill_price > 0.0 || r.get("id").is_some() {
-                        return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee, closed_volume: phys_amount });
+                        return Ok(CloseReceipt {
+                            final_price: if fill_price > 0.0 {
+                                fill_price
+                            } else {
+                                target_price
+                            },
+                            total_fee: fee,
+                            closed_volume: phys_amount,
+                        });
                     }
                 }
             }
@@ -371,25 +626,56 @@ impl ExchangeConnector for GateConnector {
             "reduce_only": true,
             "close": false,
             "text": "t-corenode-close-rest"
-        }).to_string();
+        })
+        .to_string();
         let path = "/api/v4/futures/usdt/orders";
         let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "POST", path, &rest_body);
         let url = format!("https://api.gateio.ws{}", path);
         let mut rest_err_detail = String::new();
-        if let Ok(resp) = http.post(&url).headers(headers).header("Content-Type", "application/json").body(rest_body).timeout(Duration::from_millis(2000)).send().await {
+        if let Ok(resp) = http
+            .post(&url)
+            .headers(headers)
+            .header("Content-Type", "application/json")
+            .body(rest_body)
+            .timeout(Duration::from_millis(2000))
+            .send()
+            .await
+        {
             if let Ok(v) = resp.json::<Value>().await {
                 if v.get("id").is_some() {
-                    let fill_price: f64 = v["fill_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);
-                    let raw_fee: f64 = v["fee"].as_str().and_then(|s| s.parse().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
-                    let oid_str = v.get("id").and_then(|v| v.as_i64().map(|i| i.to_string()).or_else(|| v.as_str().map(|s| s.to_string())));
+                    let fill_price: f64 = v["fill_price"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                        .or_else(|| v["fill_price"].as_f64())
+                        .unwrap_or(0.0);
+                    let raw_fee: f64 = v["fee"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                        .or_else(|| v["fee"].as_f64())
+                        .unwrap_or(0.0);
+                    let oid_str = v.get("id").and_then(|v| {
+                        v.as_i64()
+                            .map(|i| i.to_string())
+                            .or_else(|| v.as_str().map(|s| s.to_string()))
+                    });
                     let fee = if raw_fee.abs() > 0.0 {
                         raw_fee.abs()
                     } else if let Some(oid) = oid_str {
-                        fetch_gate_order_fee(http, keys, &contract, &oid).await.unwrap_or(0.0)
+                        fetch_gate_order_fee(http, keys, &contract, &oid)
+                            .await
+                            .unwrap_or(0.0)
                     } else {
                         0.0
                     };
-                    return Ok(CloseReceipt { final_price: if fill_price > 0.0 { fill_price } else { target_price }, total_fee: fee, closed_volume: phys_amount });
+                    return Ok(CloseReceipt {
+                        final_price: if fill_price > 0.0 {
+                            fill_price
+                        } else {
+                            target_price
+                        },
+                        total_fee: fee,
+                        closed_volume: phys_amount,
+                    });
                 } else {
                     tracing::error!("[gate] REST close response error for {}: {:?}", pair, v);
                     let label = v.get("label").and_then(|s| s.as_str()).unwrap_or("");
@@ -400,7 +686,10 @@ impl ExchangeConnector for GateConnector {
         }
 
         if !rest_err_detail.is_empty() {
-            Err(format!("Gate.io close order failed for {}: {}", pair, rest_err_detail))
+            Err(format!(
+                "Gate.io close order failed for {}: {}",
+                pair, rest_err_detail
+            ))
         } else {
             Err(format!("Gate.io close order failed for {}", pair))
         }
@@ -449,7 +738,8 @@ impl ExchangeConnector for GateConnector {
         multiplier: f64,
     ) -> Result<(f64, f64, f64), String> {
         use super::ws_gate::send_gate_ws_request;
-        let _ = super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
+        let _ =
+            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
         let contract = pair.replace("USDT", "_USDT");
         let req_id = uuid::Uuid::new_v4().to_string();
         let ws_req = serde_json::json!({
@@ -464,23 +754,33 @@ impl ExchangeConnector for GateConnector {
             return Err(format!("Gate WS order_status error: {}", resp));
         }
         let v = &resp["data"]["result"];
-        let fill_price = v["fill_price"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v["fill_price"].as_f64()).unwrap_or(0.0);
-        let fee = v["fee"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v["fee"].as_f64()).unwrap_or(0.0);
+        let fill_price = v["fill_price"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| v["fill_price"].as_f64())
+            .unwrap_or(0.0);
+        let fee = v["fee"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| v["fee"].as_f64())
+            .unwrap_or(0.0);
         let status = v["status"].as_str().unwrap_or("");
         let finish_as = v["finish_as"].as_str().unwrap_or("");
         let size = v["size"].as_i64().unwrap_or(0).abs() as f64;
         let left = v["left"].as_i64().unwrap_or(0).abs() as f64;
         let exec_contracts = (size - left).max(0.0);
-        
+
         // Order truly unfilled: finished with 0 executed contracts
         if exec_contracts <= 0.0 {
-            if status == "finished" { return Ok((0.0, 0.0, 0.0)); }
+            if status == "finished" {
+                return Ok((0.0, 0.0, 0.0));
+            }
             return Err("Not filled yet".to_string());
         }
-        
+
         // Order has fills (exec_contracts > 0). If fill_price is available, use it.
         let mut final_price = fill_price;
-        
+
         // Gate IOC can return fill_price=0 even when filled — use REST /my_trades as fallback
         if final_price <= 0.0 {
             tracing::warn!(
@@ -492,10 +792,15 @@ impl ExchangeConnector for GateConnector {
                 order_id, contract
             );
             let headers = crate::engine::real::gate_sign(
-                &keys.gate_key, &keys.gate_secret, "GET", &trades_path, ""
+                &keys.gate_key,
+                &keys.gate_secret,
+                "GET",
+                &trades_path,
+                "",
             );
             let url = format!("https://api.gateio.ws{}", trades_path);
-            if let Ok(resp) = _http.get(&url)
+            if let Ok(resp) = _http
+                .get(&url)
                 .headers(headers)
                 .timeout(Duration::from_secs(5))
                 .send()
@@ -507,11 +812,17 @@ impl ExchangeConnector for GateConnector {
                         let mut sum_size = 0.0_f64;
                         let mut sum_fee = 0.0_f64;
                         for trade in arr {
-                            let tp = trade["price"].as_str().and_then(|s| s.parse::<f64>().ok())
-                                .or_else(|| trade["price"].as_f64()).unwrap_or(0.0);
+                            let tp = trade["price"]
+                                .as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .or_else(|| trade["price"].as_f64())
+                                .unwrap_or(0.0);
                             let ts = trade["size"].as_i64().unwrap_or(0).abs() as f64;
-                            let tf = trade["fee"].as_str().and_then(|s| s.parse::<f64>().ok())
-                                .or_else(|| trade["fee"].as_f64()).unwrap_or(0.0);
+                            let tf = trade["fee"]
+                                .as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .or_else(|| trade["fee"].as_f64())
+                                .unwrap_or(0.0);
                             sum_value += tp * ts;
                             sum_size += ts;
                             sum_fee += tf;
@@ -522,7 +833,11 @@ impl ExchangeConnector for GateConnector {
                                 "[gate] 📊 fetch_order {} REST /my_trades: VWAP={:.8} fee={:.6} trades={}",
                                 order_id, final_price, sum_fee.abs(), arr.len()
                             );
-                            return Ok((final_price, sum_fee.abs(), exec_contracts * multiplier.max(1e-12)));
+                            return Ok((
+                                final_price,
+                                sum_fee.abs(),
+                                exec_contracts * multiplier.max(1e-12),
+                            ));
                         }
                     }
                 }
@@ -531,19 +846,25 @@ impl ExchangeConnector for GateConnector {
             // (verify_fill will handle the 0 price case)
             tracing::error!(
                 "[gate] ⚠️ fetch_order {} has {} filled contracts but no price from any source",
-                order_id, exec_contracts
+                order_id,
+                exec_contracts
             );
         }
-        
+
         let final_fee = if fee.abs() > 0.0 {
             fee.abs()
-        } else if let Some(real_fee) = fetch_gate_order_fee(_http, keys, &contract, order_id).await {
+        } else if let Some(real_fee) = fetch_gate_order_fee(_http, keys, &contract, order_id).await
+        {
             real_fee
         } else {
             0.0
         };
 
-        Ok((final_price, final_fee, exec_contracts * multiplier.max(1e-12)))
+        Ok((
+            final_price,
+            final_fee,
+            exec_contracts * multiplier.max(1e-12),
+        ))
     }
 
     async fn fetch_balances(
@@ -555,22 +876,35 @@ impl ExchangeConnector for GateConnector {
         let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, "");
 
         let url = format!("https://api.gateio.ws{}", path);
-        let resp = http.get(&url)
+        let resp = http
+            .get(&url)
             .headers(headers)
             .timeout(Duration::from_secs(10))
             .send()
             .await
             .map_err(|e| format!("Gate HTTP error: {}", e))?;
 
-        let v: Value = resp.json().await.map_err(|e| format!("Gate JSON error: {}", e))?;
-        let total = v["total"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v["total"].as_f64()).unwrap_or(0.0);
-        let avail = v["available"].as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v["available"].as_f64()).unwrap_or(0.0);
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Gate JSON error: {}", e))?;
+        let total = v["total"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| v["total"].as_f64())
+            .unwrap_or(0.0);
+        let avail = v["available"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| v["available"].as_f64())
+            .unwrap_or(0.0);
         Ok((total, avail))
     }
 
     async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
         use super::ws_gate::send_gate_ws_request;
-        let _ = super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
+        let _ =
+            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
         let req_id = uuid::Uuid::new_v4().to_string();
         let ws_req = serde_json::json!({
             "request_id": req_id,
@@ -579,12 +913,11 @@ impl ExchangeConnector for GateConnector {
             "payload": []
         });
         match send_gate_ws_request(ws_req).await {
-            Ok(resp) => {
-                resp["data"]["result"]["taker_fee"].as_str()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .ok_or_else(|| "Failed to parse Gate fee from WS".to_string())
-            }
-            Err(_) => Ok(0.0005) // Default taker fee if WS fails
+            Ok(resp) => resp["data"]["result"]["taker_fee"]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .ok_or_else(|| "Failed to parse Gate fee from WS".to_string()),
+            Err(_) => Ok(0.0005), // Default taker fee if WS fails
         }
     }
 
@@ -596,7 +929,8 @@ impl ExchangeConnector for GateConnector {
         leverage: f64,
     ) -> Result<(), String> {
         use super::ws_gate::send_gate_ws_request;
-        let _ = super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
+        let _ =
+            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
         let contract = pair.replace("USDT", "_USDT");
         let req_id = uuid::Uuid::new_v4().to_string();
         let ws_req = serde_json::json!({
@@ -609,14 +943,14 @@ impl ExchangeConnector for GateConnector {
         Ok(())
     }
 
-
     async fn fetch_positions(
         &self,
         _http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<Vec<PositionInfo>, String> {
         use super::ws_gate::send_gate_ws_request;
-        let _ = super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
+        let _ =
+            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
         let req_id = uuid::Uuid::new_v4().to_string();
         let ws_req = serde_json::json!({
             "request_id": req_id,
@@ -627,21 +961,25 @@ impl ExchangeConnector for GateConnector {
 
         // Try WS first, fall back to REST on timeout/error
         let result_arr = match send_gate_ws_request(ws_req).await {
-            Ok(resp) => {
-                resp["data"]["result"].as_array().cloned().unwrap_or_default()
-            }
+            Ok(resp) => resp["data"]["result"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
             Err(_e) => {
                 // REST fallback — Gate WS is unreliable for position queries
                 let path = "/api/v4/futures/usdt/positions";
                 let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, "");
                 let url = format!("https://api.gateio.ws{}", path);
-                let resp = _http.get(&url)
+                let resp = _http
+                    .get(&url)
                     .headers(headers)
                     .timeout(Duration::from_secs(15))
                     .send()
                     .await
                     .map_err(|e| format!("Gate REST positions HTTP error: {}", e))?;
-                let body: Value = resp.json().await
+                let body: Value = resp
+                    .json()
+                    .await
                     .map_err(|e| format!("Gate REST positions JSON error: {}", e))?;
                 body.as_array().cloned().unwrap_or_default()
             }
@@ -650,14 +988,28 @@ impl ExchangeConnector for GateConnector {
         let mut positions = Vec::new();
         for p in result_arr {
             let size: f64 = p["size"].as_i64().unwrap_or(0) as f64;
-            if size.abs() < 1e-12 { continue; }
+            if size.abs() < 1e-12 {
+                continue;
+            }
             let contract = p["contract"].as_str().unwrap_or("").replace("_", "");
-            let realized = p["realised_pnl"].as_str().and_then(|s| s.parse().ok()).or_else(|| p["realised_pnl"].as_f64()).unwrap_or(0.0);
+            let realized = p["realised_pnl"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| p["realised_pnl"].as_f64())
+                .unwrap_or(0.0);
             positions.push(PositionInfo {
                 symbol: contract,
                 size,
-                entry_price: p["entry_price"].as_str().and_then(|s| s.parse().ok()).or_else(|| p["entry_price"].as_f64()).unwrap_or(0.0),
-                unrealized_pnl: p["unrealised_pnl"].as_str().and_then(|s| s.parse().ok()).or_else(|| p["unrealised_pnl"].as_f64()).unwrap_or(0.0),
+                entry_price: p["entry_price"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| p["entry_price"].as_f64())
+                    .unwrap_or(0.0),
+                unrealized_pnl: p["unrealised_pnl"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| p["unrealised_pnl"].as_f64())
+                    .unwrap_or(0.0),
                 realized_pnl: realized,
                 accumulated_fee: 0.0,
                 accumulated_funding: 0.0,
@@ -682,10 +1034,8 @@ impl ExchangeConnector for GateConnector {
         _api_timeout_ms: u64,
     ) -> Result<(String, f64), String> {
         use super::ws_gate::send_gate_ws_request;
-        let _ = super::ws_gate::get_or_init_gate_ws(
-            keys.gate_key.clone(),
-            keys.gate_secret.clone(),
-        );
+        let _ =
+            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
 
         let contract = pair.replace("USDT", "_USDT");
         let size = if is_buy {
@@ -694,7 +1044,10 @@ impl ExchangeConnector for GateConnector {
             -((phys_amount / multiplier.max(1e-12)).round() as i64)
         };
         if size == 0 {
-            return Err(format!("Computed maker order size is 0 for amt={} mult={}", phys_amount, multiplier));
+            return Err(format!(
+                "Computed maker order size is 0 for amt={} mult={}",
+                phys_amount, multiplier
+            ));
         }
 
         // Round price to tick_size
@@ -707,8 +1060,12 @@ impl ExchangeConnector for GateConnector {
         let mut price_str = format!("{:.8}", rounded_price)
             .trim_end_matches('0')
             .to_string();
-        if price_str.ends_with('.') { price_str.pop(); }
-        if price_str.is_empty() { price_str = "0".to_string(); }
+        if price_str.ends_with('.') {
+            price_str.pop();
+        }
+        if price_str.is_empty() {
+            price_str = "0".to_string();
+        }
 
         let req_id = uuid::Uuid::new_v4().to_string();
 
@@ -732,16 +1089,19 @@ impl ExchangeConnector for GateConnector {
 
         let status = resp["header"]["status"].as_str().unwrap_or("0");
         if status == "200" || status == "201" {
-            let result = resp["data"]["result"].as_object()
-                .cloned()
-                .or_else(|| resp["data"]["result"].as_array()
+            let result = resp["data"]["result"].as_object().cloned().or_else(|| {
+                resp["data"]["result"]
+                    .as_array()
                     .and_then(|a| a.first())
                     .and_then(|v| v.as_object())
-                    .cloned());
+                    .cloned()
+            });
 
             if let Some(r) = result {
                 if let Some(id) = r.get("id") {
-                    let oid = id.as_i64().map(|i| i.to_string())
+                    let oid = id
+                        .as_i64()
+                        .map(|i| i.to_string())
                         .or_else(|| id.as_str().map(|s| s.to_string()));
                     if let Some(oid) = oid {
                         let order_status = r.get("status").and_then(|v| v.as_str()).unwrap_or("");
@@ -754,7 +1114,8 @@ impl ExchangeConnector for GateConnector {
 
                         // Check if immediately cancelled by Gate (poc rejection = would be taker)
                         if order_status == "finished" && finish_as == "cancelled" {
-                            return Err("Post-Only rejected: would cross spread (poc cancelled)".to_string());
+                            return Err("Post-Only rejected: would cross spread (poc cancelled)"
+                                .to_string());
                         }
 
                         return Ok((oid, rounded_price));
@@ -763,7 +1124,8 @@ impl ExchangeConnector for GateConnector {
             }
         }
 
-        let errs = resp["data"]["errs"].as_object()
+        let errs = resp["data"]["errs"]
+            .as_object()
             .map(|e| format!("{:?}", e))
             .unwrap_or_else(|| format!("status={} body={}", status, resp));
         Err(format!("Gate WS maker order failed: {}", errs))
@@ -777,10 +1139,8 @@ impl ExchangeConnector for GateConnector {
         order_id: &str,
     ) -> Result<bool, String> {
         use super::ws_gate::send_gate_ws_request;
-        let _ = super::ws_gate::get_or_init_gate_ws(
-            keys.gate_key.clone(),
-            keys.gate_secret.clone(),
-        );
+        let _ =
+            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
 
         let contract = pair.replace("USDT", "_USDT");
         let req_id = uuid::Uuid::new_v4().to_string();
@@ -806,13 +1166,18 @@ impl ExchangeConnector for GateConnector {
         }
 
         // Check if already cancelled/filled (not an error)
-        let err_msg = resp["data"]["errs"].as_object()
+        let err_msg = resp["data"]["errs"]
+            .as_object()
             .map(|e| format!("{:?}", e))
             .unwrap_or_else(|| format!("status={}", status));
 
         let err_lower = err_msg.to_lowercase();
         if err_lower.contains("not found") || err_lower.contains("finished") {
-            tracing::info!("[gate] cancel_order {}: already gone ({})", order_id, err_msg);
+            tracing::info!(
+                "[gate] cancel_order {}: already gone ({})",
+                order_id,
+                err_msg
+            );
             return Ok(false);
         }
 
@@ -821,7 +1186,8 @@ impl ExchangeConnector for GateConnector {
 
     async fn fetch_maker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
         use super::ws_gate::send_gate_ws_request;
-        let _ = super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
+        let _ =
+            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
         let req_id = uuid::Uuid::new_v4().to_string();
         let ws_req = serde_json::json!({
             "request_id": req_id,
@@ -830,12 +1196,11 @@ impl ExchangeConnector for GateConnector {
             "payload": []
         });
         match send_gate_ws_request(ws_req).await {
-            Ok(resp) => {
-                resp["data"]["result"]["maker_fee"].as_str()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .ok_or_else(|| "Failed to parse Gate maker_fee from WS".to_string())
-            }
-            Err(_) => Ok(0.00015) // Default maker fee if WS fails
+            Ok(resp) => resp["data"]["result"]["maker_fee"]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .ok_or_else(|| "Failed to parse Gate maker_fee from WS".to_string()),
+            Err(_) => Ok(0.00015), // Default maker fee if WS fails
         }
     }
 
@@ -850,20 +1215,24 @@ impl ExchangeConnector for GateConnector {
         let contract = format!("{}_USDT", pair.trim_end_matches("USDT").replace('_', ""));
         let trades_path = format!(
             "/api/v4/futures/usdt/my_trades?contract={}&from={}&to={}",
-            contract, (start_ts / 1000).max(0), (end_ts / 1000).max(0)
+            contract,
+            (start_ts / 1000).max(0),
+            (end_ts / 1000).max(0)
         );
-        let headers = gate_sign(
-            &keys.gate_key, &keys.gate_secret, "GET", &trades_path, ""
-        );
+        let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &trades_path, "");
         let url = format!("https://api.gateio.ws{}", trades_path);
-        let resp = http.get(&url)
+        let resp = http
+            .get(&url)
             .headers(headers)
             .timeout(Duration::from_secs(5))
             .send()
             .await
             .map_err(|e| format!("Gate my_trades HTTP error: {}", e))?;
 
-        let trades_json: Value = resp.json().await.map_err(|e| format!("Gate my_trades JSON error: {}", e))?;
+        let trades_json: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Gate my_trades JSON error: {}", e))?;
         let arr = match trades_json.as_array() {
             Some(a) => a,
             None => return Ok(TradeAuditResult::default()),
@@ -875,11 +1244,17 @@ impl ExchangeConnector for GateConnector {
         let mut sum_qty = 0.0_f64;
 
         for trade in arr {
-            let tp = trade["price"].as_str().and_then(|s| s.parse::<f64>().ok())
-                .or_else(|| trade["price"].as_f64()).unwrap_or(0.0);
+            let tp = trade["price"]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| trade["price"].as_f64())
+                .unwrap_or(0.0);
             let ts = trade["size"].as_i64().unwrap_or(0).abs() as f64;
-            let tf = trade["fee"].as_str().and_then(|s| s.parse::<f64>().ok())
-                .or_else(|| trade["fee"].as_f64()).unwrap_or(0.0);
+            let tf = trade["fee"]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| trade["fee"].as_f64())
+                .unwrap_or(0.0);
 
             total_fee += tf.abs();
             sum_qty += ts;
@@ -900,5 +1275,65 @@ impl ExchangeConnector for GateConnector {
             filled_qty: sum_qty,
         })
     }
+}
 
+fn parse_managed_gate(
+    v: &Value,
+    r: &crate::engine::orders::OrderRequest,
+) -> Result<crate::engine::orders::OrderObservation, String> {
+    use crate::engine::orders::{identity, number, OrderObservation, OrderState};
+    if v["contract"].as_str() != Some(r.pair.replace("USDT", "_USDT").as_str())
+        || v["text"].as_str() != Some(format!("t-{}", r.client_id).as_str())
+    {
+        return Err("Gate identity mismatch".into());
+    }
+    let qty = (number(v, "size")?.abs() - number(v, "left")?.abs()).max(0.0) * r.multiplier;
+    let state = match v["status"].as_str() {
+        Some("finished") => {
+            if v["finish_as"].as_str() == Some("filled") {
+                OrderState::Filled
+            } else {
+                OrderState::Cancelled
+            }
+        }
+        Some("open") => {
+            if qty > 0.0 {
+                OrderState::PartiallyFilled
+            } else {
+                OrderState::Submitted
+            }
+        }
+        _ => return Err("Unknown Gate order status".into()),
+    };
+    Ok(OrderObservation {
+        order_id: identity(v, "id"),
+        state,
+        filled_quantity: qty,
+        average_price: if qty > 0.0 {
+            Some(number(v, "fill_price")?)
+        } else {
+            None
+        },
+        fee: if qty == 0.0 && state.terminal() {
+            Some(0.0)
+        } else {
+            None
+        },
+    })
+}
+async fn managed_gate_get(http: &Client, keys: &ExchangeKeys, path: &str) -> Result<Value, String> {
+    let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", path, "");
+    let res = http
+        .get(format!("https://api.gateio.ws{}", path))
+        .headers(headers)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|_| "Gate query transport failure")?;
+    if !res.status().is_success() {
+        return Err(format!("Gate query HTTP {}", res.status()));
+    }
+    res.json()
+        .await
+        .map_err(|_| "Gate query invalid JSON".into())
 }

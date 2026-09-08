@@ -1,10 +1,10 @@
 use async_trait::async_trait;
+use dashmap::DashSet;
 use reqwest::Client;
 use serde_json::Value;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
-use std::time::Duration;
 use std::sync::OnceLock;
-use dashmap::DashSet;
+use std::time::Duration;
 
 use super::traits::{CloseReceipt, ExchangeConnector, PositionInfo, TradeAuditResult};
 
@@ -77,7 +77,10 @@ fn record_ws_failure() {
 pub fn reset_ws_failures() {
     let prev = WS_CONSECUTIVE_FAILURES.swap(0, Ordering::Relaxed);
     if prev >= WS_DEAD_THRESHOLD {
-        tracing::info!("[binance] WS failure counter reset (was {}) — REST fallbacks re-enabled", prev);
+        tracing::info!(
+            "[binance] WS failure counter reset (was {}) — REST fallbacks re-enabled",
+            prev
+        );
     }
 }
 use crate::engine::real::{binance_sign, now_ms, ExchangeKeys};
@@ -142,7 +145,9 @@ pub fn check_before_binance_rest() -> Result<(), String> {
         let wait_s = (reset_at - now).max(0) / 1000;
         tracing::warn!(
             "[binance] ⚠️ Weight {}/{} near limit! Blocking. Reset in {}s.",
-            used, WEIGHT_LIMIT, wait_s
+            used,
+            WEIGHT_LIMIT,
+            wait_s
         );
         return Err(format!("Binance weight {}/{} too high", used, WEIGHT_LIMIT));
     }
@@ -159,7 +164,9 @@ pub fn is_binance_banned() -> bool {
 /// PUBLIC: Remaining ban time in seconds (0 if not banned).
 pub fn binance_ban_remaining_secs() -> i64 {
     let until = BINANCE_BANNED_UNTIL_MS.load(Ordering::Relaxed);
-    if until <= 0 { return 0; }
+    if until <= 0 {
+        return 0;
+    }
     ((until - now_ms() as i64) / 1000).max(0)
 }
 
@@ -167,7 +174,9 @@ pub fn binance_ban_remaining_secs() -> i64 {
 pub fn binance_remaining_weight() -> u32 {
     let now = now_ms() as i64;
     let reset_at = WEIGHT_WINDOW_RESET_MS.load(Ordering::Relaxed);
-    if now > reset_at { return WEIGHT_LIMIT; }
+    if now > reset_at {
+        return WEIGHT_LIMIT;
+    }
     WEIGHT_LIMIT.saturating_sub(USED_WEIGHT_1M.load(Ordering::Relaxed))
 }
 
@@ -178,10 +187,7 @@ pub fn set_binance_ban(until_ms: i64) {
 }
 
 /// PUBLIC: Record response from Binance REST. Tracks weight + detects bans.
-pub fn record_binance_response(
-    status: u16,
-    headers: &reqwest::header::HeaderMap,
-) {
+pub fn record_binance_response(status: u16, headers: &reqwest::header::HeaderMap) {
     let now = now_ms() as i64;
 
     // Parse X-MBX-USED-WEIGHT-1M
@@ -201,8 +207,14 @@ pub fn record_binance_response(
     // 429: rate limit
     if status == 429 {
         let ban_count = BAN_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        let base_s: i64 = match ban_count { 1 => 120, 2 => 300, 3 => 600, _ => 1800 };
-        let retry_s = headers.get("Retry-After")
+        let base_s: i64 = match ban_count {
+            1 => 120,
+            2 => 300,
+            3 => 600,
+            _ => 1800,
+        };
+        let retry_s = headers
+            .get("Retry-After")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
@@ -211,15 +223,22 @@ pub fn record_binance_response(
         BINANCE_BANNED_UNTIL_MS.fetch_max(ban_until, Ordering::Relaxed);
         tracing::error!(
             "[binance] 🔴 RATE LIMIT (429)! Ban #{} — backoff {}s.",
-            ban_count, cooldown
+            ban_count,
+            cooldown
         );
     }
 
     // 418: IP auto-ban
     if status == 418 {
         let ban_count = BAN_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        let base_s: i64 = match ban_count { 1 => 600, 2 => 1800, 3 => 7200, _ => 21600 };
-        let retry_s = headers.get("Retry-After")
+        let base_s: i64 = match ban_count {
+            1 => 600,
+            2 => 1800,
+            3 => 7200,
+            _ => 21600,
+        };
+        let retry_s = headers
+            .get("Retry-After")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
@@ -229,7 +248,8 @@ pub fn record_binance_response(
         tracing::error!(
             "[binance] 💀 IP BANNED (418)! Ban #{} — NO requests for {}s! \
              Every request EXTENDS the ban!",
-            ban_count, cooldown
+            ban_count,
+            cooldown
         );
     }
 }
@@ -266,9 +286,15 @@ async fn check_rate_limits(
     // Track weight + ban from headers
     record_binance_response(status.as_u16(), headers);
     // Check body for API-level ban codes
-    if let Some(b) = body { detect_ban_from_response(b); }
-    if status.as_u16() == 429 { return Err("Binance 429 rate limit hit".into()); }
-    if status.as_u16() == 418 { return Err("Binance 418 IP banned".into()); }
+    if let Some(b) = body {
+        detect_ban_from_response(b);
+    }
+    if status.as_u16() == 429 {
+        return Err("Binance 429 rate limit hit".into());
+    }
+    if status.as_u16() == 418 {
+        return Err("Binance 418 IP banned".into());
+    }
     Ok(())
 }
 
@@ -280,14 +306,15 @@ async fn execute_binance_order(
 ) -> Result<Value, String> {
     check_ip_ban()?;
     use crate::engine::exchanges::ws_trader::send_ws_request;
-    
+
     // 1. Build signature for WS (must include apiKey)
     let mut ws_params = params.clone();
     ws_params.insert("apiKey".to_string(), serde_json::json!(keys.binance_key));
-    
+
     let mut ws_sorted_keys: Vec<&String> = ws_params.keys().collect();
     ws_sorted_keys.sort();
-    let ws_qs: String = ws_sorted_keys.iter()
+    let ws_qs: String = ws_sorted_keys
+        .iter()
         .map(|k| {
             let v = &ws_params[k.as_str()];
             let vs = match v {
@@ -299,17 +326,17 @@ async fn execute_binance_order(
         })
         .collect::<Vec<_>>()
         .join("&");
-    
+
     let ws_sig = binance_sign(&keys.binance_secret, &ws_qs);
     ws_params.insert("signature".to_string(), serde_json::json!(ws_sig));
-    
+
     let req_id = uuid::Uuid::new_v4().to_string();
     let ws_req = serde_json::json!({
         "id": req_id,
         "method": "order.place",
         "params": ws_params
     });
-    
+
     match send_ws_request(ws_req).await {
         Ok(v_ws) => {
             if let Some(status) = v_ws.get("status") {
@@ -322,71 +349,27 @@ async fn execute_binance_order(
             if let Some(err) = v_ws.get("error") {
                 detect_ban_from_response(err);
                 tracing::error!("[binance_ws] order error: {}", err);
-                return Err(format!("Binance WS API Error: {}", err["msg"].as_str().unwrap_or("?")));
+                return Err(format!(
+                    "Binance WS API Error: {}",
+                    err["msg"].as_str().unwrap_or("?")
+                ));
             }
             Ok(v_ws.get("result").cloned().unwrap_or(v_ws))
-        },
-        Err(e) => {
-            tracing::warn!("[binance_ws] WS order failed ({}). Trying REST fallback...", e);
-
-            // ── REST FALLBACK ──
-            // CRITICAL: Generate fresh timestamp! The original params timestamp may be
-            // seconds old after a WS timeout, causing Binance -1021 "recvWindow" errors.
-            let mut rest_params = params.clone();
-            rest_params.insert("timestamp".to_string(), serde_json::json!(now_ms()));
-            let mut sorted_keys: Vec<&String> = rest_params.keys().collect();
-            sorted_keys.sort();
-            let qs: String = sorted_keys.iter()
-                .map(|k| {
-                    let v = &rest_params[k.as_str()];
-                    let vs = match v {
-                        Value::String(s) => s.clone(),
-                        Value::Number(n) => n.to_string(),
-                        Value::Bool(b) => b.to_string(),
-                        _ => v.to_string(),
-                    };
-                    format!("{}={}", k, vs)
-                })
-                .collect::<Vec<_>>()
-                .join("&");
-            let sig = binance_sign(&keys.binance_secret, &qs);
-            let full_qs = format!("{}&signature={}", qs, sig);
-
-            let url = format!("https://fapi.binance.com/fapi/v1/order?{}", full_qs);
-            let resp = _http.post(&url)
-                .header("X-MBX-APIKEY", &keys.binance_key)
-                .timeout(Duration::from_millis(_api_timeout_ms.max(1500)))
-                .send()
-                .await
-                .map_err(|e| format!("Binance REST fallback HTTP error: {}", e))?;
-
-            let status = resp.status();
-            let headers = resp.headers().clone();
-            let body: Value = resp.json().await
-                .map_err(|e| format!("Binance REST fallback JSON error: {}", e))?;
-            let _ = check_rate_limits(status, &headers, Some(&body)).await;
-
-            if let Some(code) = body.get("code") {
-                let code_i = code.as_i64().unwrap_or(0);
-                if code_i != 0 && code_i != 200 {
-                    let msg = body["msg"].as_str().unwrap_or("?");
-                    tracing::error!("[binance] REST fallback order error: code={} msg={}", code_i, msg);
-                    return Err(format!("Binance REST API Error: {} (code={})", msg, code_i));
-                }
-            }
-
-            tracing::info!("[binance] ✅ REST fallback order succeeded: {}", body["orderId"]);
-            Ok(body)
         }
+        Err(e) => Err(format!("Binance submit outcome UNKNOWN: {}", e)),
     }
 }
-
 
 fn format_binance_qty(phys_amount: f64, step_size: f64) -> String {
     let step = step_size.max(1e-12);
     let precision = if step < 1.0 {
         let s = format!("{:.8}", step);
-        let decimals = s.trim_end_matches('0').split('.').nth(1).unwrap_or("").len();
+        let decimals = s
+            .trim_end_matches('0')
+            .split('.')
+            .nth(1)
+            .unwrap_or("")
+            .len();
         decimals.min(8)
     } else {
         0
@@ -403,7 +386,12 @@ fn format_binance_price(price: f64, tick_size: f64) -> String {
     let tick = tick_size.max(1e-12);
     let precision = if tick < 1.0 {
         let s = format!("{:.8}", tick);
-        let decimals = s.trim_end_matches('0').split('.').nth(1).unwrap_or("").len();
+        let decimals = s
+            .trim_end_matches('0')
+            .split('.')
+            .nth(1)
+            .unwrap_or("")
+            .len();
         decimals.min(8)
     } else {
         0
@@ -418,6 +406,87 @@ fn format_binance_price(price: f64, tick_size: f64) -> String {
 
 #[async_trait]
 impl ExchangeConnector for BinanceConnector {
+    fn supports_managed_orders(&self) -> bool {
+        true
+    }
+    async fn submit_managed(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        r: &crate::engine::orders::OrderRequest,
+    ) -> Result<crate::engine::orders::OrderObservation, String> {
+        r.validate()?;
+        let mut p=json!({"symbol":r.pair,"side":if r.is_buy{"BUY"}else{"SELL"},"quantity":format_binance_qty(r.quantity,r.multiplier),"newClientOrderId":r.client_id,"timestamp":now_ms(),"newOrderRespType":"RESULT","type":if r.limit_price>0.0{"LIMIT"}else{"MARKET"}}).as_object().unwrap().clone();
+        if r.reduce_only {
+            p.insert("reduceOnly".into(), json!("true"));
+        }
+        if r.limit_price > 0.0 {
+            p.insert(
+                "price".into(),
+                json!(format_binance_price(
+                    crate::engine::orders::bounded_price(r.limit_price, r.tick_size, r.is_buy),
+                    r.tick_size
+                )),
+            );
+            p.insert("timeInForce".into(), json!("IOC"));
+        }
+        let v = execute_binance_order(http, keys, &p, 2000).await?;
+        parse_managed_binance(&v, r)
+    }
+    async fn query_managed(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        r: &crate::engine::orders::OrderRequest,
+        oid: Option<&str>,
+    ) -> Result<crate::engine::orders::OrderObservation, String> {
+        let selector = match oid {
+            Some(id) => format!("orderId={}", id),
+            None => format!("origClientOrderId={}", r.client_id),
+        };
+        let qs = format!("symbol={}&{}&timestamp={}", r.pair, selector, now_ms());
+        let v = managed_binance_get(http, keys, "/fapi/v1/order", &qs).await?;
+        let mut o = parse_managed_binance(&v, r)?;
+        if o.filled_quantity > 0.0 {
+            let id = o.order_id.as_deref().ok_or("Missing exchange order id")?;
+            let qs = format!(
+                "symbol={}&orderId={}&limit=1000&timestamp={}",
+                r.pair,
+                id,
+                now_ms()
+            );
+            if let Ok(fills) = managed_binance_get(http, keys, "/fapi/v1/userTrades", &qs).await {
+                if let Some(arr) = fills.as_array() {
+                    let mut fee = 0.0;
+                    let mut qty = 0.0;
+                    let mut seen = std::collections::HashSet::new();
+                    let mut valid = true;
+                    for f in arr {
+                        if crate::engine::orders::identity(f, "orderId").as_deref() != Some(id) {
+                            continue;
+                        }
+                        let fid =
+                            crate::engine::orders::identity(f, "id").ok_or("Fill has no id")?;
+                        if !seen.insert(fid) {
+                            continue;
+                        }
+                        if f["commissionAsset"].as_str() != Some("USDT") {
+                            valid = false;
+                            break;
+                        }
+                        qty += crate::engine::orders::number(f, "qty")?;
+                        fee += crate::engine::orders::number(f, "commission")?;
+                    }
+                    if valid && (qty - o.filled_quantity).abs() <= r.quantity * 1e-8 {
+                        o.fee = Some(fee);
+                    }
+                }
+            }
+        } else if o.state.terminal() {
+            o.fee = Some(0.0);
+        }
+        Ok(o)
+    }
     fn name(&self) -> &'static str {
         "binance"
     }
@@ -473,7 +542,12 @@ impl ExchangeConnector for BinanceConnector {
         if use_ioc && target_price > 0.0 {
             tracing::info!(
                 "[binance] IOC {} {} target={:.8} slip={}% → sent_price={} tick={}",
-                pair, side, target_price, slippage_percent, price_str, tick_size
+                pair,
+                side,
+                target_price,
+                slippage_percent,
+                price_str,
+                tick_size
             );
             params.insert("type".to_string(), serde_json::json!("LIMIT"));
             params.insert("timeInForce".to_string(), serde_json::json!("IOC"));
@@ -484,7 +558,7 @@ impl ExchangeConnector for BinanceConnector {
         // CRITICAL: Without RESULT, Binance WS returns ACK (status=NEW) with no fill data.
         // With RESULT, the WS response contains the actual execution result inline.
         params.insert("newOrderRespType".to_string(), serde_json::json!("RESULT"));
-        
+
         let v = execute_binance_order(http, keys, &params, api_timeout_ms).await?;
 
         // Diagnostic: log order request and response
@@ -553,7 +627,8 @@ impl ExchangeConnector for BinanceConnector {
                 }
             }
             // If still 0 after cumQuote fallback but order was FILLED, query REST for real avgPrice.
-            if final_avg_price <= 0.0 && exec_qty > 0.0
+            if final_avg_price <= 0.0
+                && exec_qty > 0.0
                 && (order_status == "FILLED" || order_status == "PARTIALLY_FILLED")
             {
                 tracing::warn!(
@@ -562,10 +637,7 @@ impl ExchangeConnector for BinanceConnector {
                 );
                 let oid_str = order_id.as_deref().unwrap_or("0");
                 let rest_ts = now_ms();
-                let rest_qs = format!(
-                    "orderId={}&symbol={}&timestamp={}",
-                    oid_str, pair, rest_ts
-                );
+                let rest_qs = format!("orderId={}&symbol={}&timestamp={}", oid_str, pair, rest_ts);
                 let rest_sig = binance_sign(&keys.binance_secret, &rest_qs);
                 let rest_url = format!(
                     "https://fapi.binance.com/fapi/v1/order?{}&signature={}",
@@ -592,7 +664,8 @@ impl ExchangeConnector for BinanceConnector {
                                 final_avg_price = rest_avg;
                                 tracing::info!(
                                     "[binance] REST fallback avgPrice={:.8} for {}",
-                                    final_avg_price, pair
+                                    final_avg_price,
+                                    pair
                                 );
                             }
                             let rest_fee: f64 = body["cumCommission"]
@@ -613,19 +686,27 @@ impl ExchangeConnector for BinanceConnector {
             }
 
             // For IOC/EXPIRED: if order was cancelled/expired without fill, return immediately (0ms delay)
-            if (order_status == "EXPIRED" || order_status == "CANCELED" || order_status == "REJECTED")
+            if (order_status == "EXPIRED"
+                || order_status == "CANCELED"
+                || order_status == "REJECTED")
                 && exec_qty < 1e-12
             {
                 tracing::warn!(
                     "[binance] place_order {} IOC order {} — NOT FILLED (status={})",
-                    pair, order_id.as_deref().unwrap_or("?"), order_status
+                    pair,
+                    order_id.as_deref().unwrap_or("?"),
+                    order_status
                 );
                 return Ok((None, 0.0, 0.0));
             }
 
             Ok((order_id, final_avg_price, cum_fee))
         } else {
-            tracing::error!("[binance] place_order {} — no orderId in WS response: {:?}", pair, v);
+            tracing::error!(
+                "[binance] place_order {} — no orderId in WS response: {:?}",
+                pair,
+                v
+            );
             Err("Binance failed to return orderId".to_string())
         }
     }
@@ -674,13 +755,17 @@ impl ExchangeConnector for BinanceConnector {
         params.insert("side".to_string(), serde_json::json!(side));
         params.insert("quantity".to_string(), serde_json::json!(qty_str));
         params.insert("reduceOnly".to_string(), serde_json::json!("true"));
-        
+
         let ts = now_ms();
         params.insert("timestamp".to_string(), serde_json::json!(ts));
 
         // Exit always uses IOC limit when target_price is available.
         // use_ioc controls entry order type, not exit — exit must never be a pure market order.
-        let type_str = if target_price > 0.0 { "LIMIT" } else { "MARKET" };
+        let type_str = if target_price > 0.0 {
+            "LIMIT"
+        } else {
+            "MARKET"
+        };
         params.insert("type".to_string(), serde_json::json!(type_str));
 
         if target_price > 0.0 {
@@ -700,16 +785,19 @@ impl ExchangeConnector for BinanceConnector {
         // Extract fill data directly from WS response (no REST needed)
         if let Ok(ref v) = v_resp {
             let exec_qty: f64 = v["executedQty"]
-                .as_str().and_then(|s| s.parse().ok())
+                .as_str()
+                .and_then(|s| s.parse().ok())
                 .or_else(|| v["executedQty"].as_f64())
                 .unwrap_or(0.0);
             let mut avg_price: f64 = v["avgPrice"]
-                .as_str().and_then(|s| s.parse().ok())
+                .as_str()
+                .and_then(|s| s.parse().ok())
                 .or_else(|| v["avgPrice"].as_f64())
                 .unwrap_or(0.0);
             if avg_price <= 0.0 && exec_qty > 1e-12 {
                 let cum_quote: f64 = v["cumQuote"]
-                    .as_str().and_then(|s| s.parse().ok())
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
                     .or_else(|| v["cumQuote"].as_f64())
                     .unwrap_or(0.0);
                 if cum_quote > 0.0 {
@@ -719,14 +807,20 @@ impl ExchangeConnector for BinanceConnector {
                 }
             }
             let cum_fee: f64 = v["cumCommission"]
-                .as_str().and_then(|s| s.parse::<f64>().ok())
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
                 .or_else(|| v["cumCommission"].as_f64())
-                .unwrap_or(0.0).abs();
+                .unwrap_or(0.0)
+                .abs();
             let status = v["status"].as_str().unwrap_or("?");
 
             tracing::info!(
                 "[binance] close {} WS result: status={} execQty={} avgPrice={} fee={}",
-                pair, status, exec_qty, avg_price, cum_fee
+                pair,
+                status,
+                exec_qty,
+                avg_price,
+                cum_fee
             );
 
             if exec_qty > 1e-12 && avg_price > 0.0 {
@@ -757,7 +851,9 @@ impl ExchangeConnector for BinanceConnector {
                 (p / tick_size.max(1e-8)).floor() * tick_size.max(1e-8)
             };
             let mut s = format!("{:.8}", rp).trim_end_matches('0').to_string();
-            if s.ends_with('.') { s.pop(); }
+            if s.ends_with('.') {
+                s.pop();
+            }
             if !s.is_empty() && s != "0" {
                 _fb_price_str = s;
             }
@@ -775,13 +871,16 @@ impl ExchangeConnector for BinanceConnector {
         fb_params.insert("reduceOnly".to_string(), serde_json::json!("true"));
         fb_params.insert("timestamp".to_string(), serde_json::json!(ts_fb));
         fb_params.insert("newOrderRespType".to_string(), serde_json::json!("RESULT"));
-        
+
         let v_fb = match execute_binance_order(http, keys, &fb_params, api_timeout_ms).await {
             Ok(v) => v,
             Err(e) => {
                 // If reduce-only order is rejected, position is already closed (filled by initial order)
                 if e.contains("ReduceOnly Order is rejected") {
-                    tracing::info!("[binance] position already closed (ReduceOnly rejected) for {}", pair);
+                    tracing::info!(
+                        "[binance] position already closed (ReduceOnly rejected) for {}",
+                        pair
+                    );
                     return Ok(CloseReceipt {
                         final_price: target_price,
                         total_fee: 0.0,
@@ -791,20 +890,24 @@ impl ExchangeConnector for BinanceConnector {
                 return Err(format!("Fallback close rejected: {}", e));
             }
         };
-        
+
         // Extract fill from fallback WS response
         let fb_exec_qty: f64 = v_fb["executedQty"]
-            .as_str().and_then(|s| s.parse().ok())
+            .as_str()
+            .and_then(|s| s.parse().ok())
             .or_else(|| v_fb["executedQty"].as_f64())
             .unwrap_or(0.0);
         let fb_avg_price: f64 = v_fb["avgPrice"]
-            .as_str().and_then(|s| s.parse().ok())
+            .as_str()
+            .and_then(|s| s.parse().ok())
             .or_else(|| v_fb["avgPrice"].as_f64())
             .unwrap_or(0.0);
         let fb_fee: f64 = v_fb["cumCommission"]
-            .as_str().and_then(|s| s.parse::<f64>().ok())
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
             .or_else(|| v_fb["cumCommission"].as_f64())
-            .unwrap_or(0.0).abs();
+            .unwrap_or(0.0)
+            .abs();
 
         if fb_exec_qty > 1e-12 && fb_avg_price > 0.0 {
             return Ok(CloseReceipt {
@@ -814,7 +917,10 @@ impl ExchangeConnector for BinanceConnector {
             });
         }
 
-        tracing::warn!("[binance] fallback close unverified for {}. Assuming filled to prevent CLOSING trap.", pair);
+        tracing::warn!(
+            "[binance] fallback close unverified for {}. Assuming filled to prevent CLOSING trap.",
+            pair
+        );
         Ok(CloseReceipt {
             final_price: target_price,
             total_fee: 0.0,
@@ -870,8 +976,13 @@ impl ExchangeConnector for BinanceConnector {
 
         // Step 1: Get order status via WS
         let ts = now_ms();
-        let oid: i64 = order_id.parse().map_err(|_| "Invalid orderId".to_string())?;
-        let qs = format!("apiKey={}&orderId={}&symbol={}&timestamp={}", keys.binance_key, oid, pair, ts);
+        let oid: i64 = order_id
+            .parse()
+            .map_err(|_| "Invalid orderId".to_string())?;
+        let qs = format!(
+            "apiKey={}&orderId={}&symbol={}&timestamp={}",
+            keys.binance_key, oid, pair, ts
+        );
         let sig = binance_sign(&keys.binance_secret, &qs);
         let req_id = uuid::Uuid::new_v4().to_string();
         let ws_req = serde_json::json!({
@@ -891,20 +1002,26 @@ impl ExchangeConnector for BinanceConnector {
                     return Err(format!("Binance WS order.status error: {}", err));
                 }
                 resp["result"].clone()
-            },
+            }
             Err(e) => {
-                tracing::warn!("[binance] WS fetch_order failed ({}). Trying REST fallback...", e);
+                tracing::warn!(
+                    "[binance] WS fetch_order failed ({}). Trying REST fallback...",
+                    e
+                );
                 let rest_qs = format!("orderId={}&symbol={}&timestamp={}", oid, pair, ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
                 let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
                 let url = format!("https://fapi.binance.com/fapi/v1/order?{}", full_qs);
-                let resp = _http.get(&url)
+                let resp = _http
+                    .get(&url)
                     .header("X-MBX-APIKEY", &keys.binance_key)
                     .timeout(std::time::Duration::from_millis(2000))
                     .send()
                     .await
                     .map_err(|e| format!("Binance REST fetch_order HTTP error: {}", e))?;
-                resp.json::<Value>().await.map_err(|e| format!("Binance REST fetch_order JSON error: {}", e))?
+                resp.json::<Value>()
+                    .await
+                    .map_err(|e| format!("Binance REST fetch_order JSON error: {}", e))?
             }
         };
         let v = &v_val;
@@ -919,7 +1036,8 @@ impl ExchangeConnector for BinanceConnector {
             if status == "EXPIRED" || status == "CANCELED" || status == "REJECTED" {
                 tracing::warn!(
                     "[binance] fetch_order {} status={} — definitively unfilled",
-                    order_id, status
+                    order_id,
+                    status
                 );
                 return Ok((0.0, 0.0, 0.0));
             }
@@ -936,7 +1054,10 @@ impl ExchangeConnector for BinanceConnector {
 
         // Step 2: Fetch commission via WS myTrades
         let ts2 = now_ms();
-        let qs2 = format!("apiKey={}&orderId={}&symbol={}&timestamp={}", keys.binance_key, oid, pair, ts2);
+        let qs2 = format!(
+            "apiKey={}&orderId={}&symbol={}&timestamp={}",
+            keys.binance_key, oid, pair, ts2
+        );
         let sig2 = binance_sign(&keys.binance_secret, &qs2);
         let req_id2 = uuid::Uuid::new_v4().to_string();
         let ws_req2 = serde_json::json!({
@@ -951,26 +1072,28 @@ impl ExchangeConnector for BinanceConnector {
             }
         });
         let fee = match send_ws_request(ws_req2).await {
-            Ok(resp2) => {
-                resp2["result"].as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .fold(0.0_f64, |acc, t| {
-                                let comm = t["commission"]
-                                    .as_str()
-                                    .and_then(|s| s.parse::<f64>().ok())
-                                    .unwrap_or(0.0);
-                                let asset = t["commissionAsset"].as_str().unwrap_or("USDT");
-                                acc + match asset {
-                                    "USDT" => comm,
-                                    _ => {
-                                        if price > 0.0 { comm * price } else { comm }
-                                    }
+            Ok(resp2) => resp2["result"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter().fold(0.0_f64, |acc, t| {
+                        let comm = t["commission"]
+                            .as_str()
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or(0.0);
+                        let asset = t["commissionAsset"].as_str().unwrap_or("USDT");
+                        acc + match asset {
+                            "USDT" => comm,
+                            _ => {
+                                if price > 0.0 {
+                                    comm * price
+                                } else {
+                                    comm
                                 }
-                            })
+                            }
+                        }
                     })
-                    .unwrap_or(0.0)
-            }
+                })
+                .unwrap_or(0.0),
             Err(_) => 0.0,
         };
         Ok((price, fee, exec_qty))
@@ -1004,13 +1127,16 @@ impl ExchangeConnector for BinanceConnector {
                     return Err(format!("Binance WS balance error: {}", err));
                 }
                 resp["result"].as_array().cloned().unwrap_or_default()
-            },
+            }
             Err(e) => {
                 record_ws_failure();
                 // Check ban + REST fallback cooldown before making REST request
                 check_ip_ban()?;
                 check_rest_fallback_allowed(&REST_FALLBACK_BALANCE_MS, "balance")?;
-                tracing::warn!("[binance] WS balance fetch failed ({}). Trying REST fallback...", e);
+                tracing::warn!(
+                    "[binance] WS balance fetch failed ({}). Trying REST fallback...",
+                    e
+                );
                 // CRITICAL: use fresh timestamp — the original `ts` may be 5+ seconds stale
                 // after WS timeout, causing Binance -1021 recvWindow errors
                 let fresh_ts = now_ms();
@@ -1018,17 +1144,21 @@ impl ExchangeConnector for BinanceConnector {
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
                 let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
                 let url = format!("https://fapi.binance.com/fapi/v2/balance?{}", full_qs);
-                let resp = _http.get(&url)
+                let resp = _http
+                    .get(&url)
                     .header("X-MBX-APIKEY", &keys.binance_key)
                     .timeout(std::time::Duration::from_millis(5000))
                     .send()
                     .await
                     .map_err(|e| format!("Binance REST balance HTTP error: {}", e))?;
-                
+
                 // Track weight from REST response headers
                 let status = resp.status();
                 let headers = resp.headers().clone();
-                let body: Value = resp.json().await.map_err(|e| format!("Binance REST balance JSON error: {}", e))?;
+                let body: Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Binance REST balance JSON error: {}", e))?;
                 record_binance_response(status.as_u16(), &headers);
                 detect_ban_from_response(&body);
                 if let Some(_code) = body.get("code") {
@@ -1044,11 +1174,13 @@ impl ExchangeConnector for BinanceConnector {
         for item in result_arr {
             let asset = item["asset"].as_str().unwrap_or("");
             if asset == "USDT" {
-                total_balance = item["balance"].as_str()
+                total_balance = item["balance"]
+                    .as_str()
                     .and_then(|s| s.parse::<f64>().ok())
                     .or_else(|| item["balance"].as_f64())
                     .unwrap_or(0.0);
-                available_balance = item["availableBalance"].as_str()
+                available_balance = item["availableBalance"]
+                    .as_str()
                     .and_then(|s| s.parse::<f64>().ok())
                     .or_else(|| item["availableBalance"].as_f64())
                     .unwrap_or(0.0);
@@ -1063,7 +1195,10 @@ impl ExchangeConnector for BinanceConnector {
         check_ip_ban()?;
         use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
-        let qs = format!("apiKey={}&symbol=BTCUSDT&timestamp={}", keys.binance_key, ts);
+        let qs = format!(
+            "apiKey={}&symbol=BTCUSDT&timestamp={}",
+            keys.binance_key, ts
+        );
         let sig = binance_sign(&keys.binance_secret, &qs);
         let req_id = uuid::Uuid::new_v4().to_string();
         let ws_req = serde_json::json!({
@@ -1083,33 +1218,45 @@ impl ExchangeConnector for BinanceConnector {
                     detect_ban_from_response(err);
                     return Err(format!("Binance WS fee error: {}", err));
                 }
-                resp["result"]["takerCommissionRate"].as_str()
+                resp["result"]["takerCommissionRate"]
+                    .as_str()
                     .and_then(|s| s.parse::<f64>().ok())
                     .ok_or_else(|| "Failed to parse Binance fee from WS".to_string())
-            },
+            }
             Err(e) => {
                 record_ws_failure();
                 check_ip_ban()?;
                 check_rest_fallback_allowed(&REST_FALLBACK_FEE_MS, "fee")?;
-                tracing::warn!("[binance] WS fee fetch failed ({}). Trying REST fallback...", e);
+                tracing::warn!(
+                    "[binance] WS fee fetch failed ({}). Trying REST fallback...",
+                    e
+                );
                 let fresh_ts = now_ms();
                 let rest_qs = format!("symbol=BTCUSDT&timestamp={}", fresh_ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
                 let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
-                let url = format!("https://fapi.binance.com/fapi/v1/commissionRate?{}", full_qs);
-                let resp = _http.get(&url)
+                let url = format!(
+                    "https://fapi.binance.com/fapi/v1/commissionRate?{}",
+                    full_qs
+                );
+                let resp = _http
+                    .get(&url)
                     .header("X-MBX-APIKEY", &keys.binance_key)
                     .timeout(std::time::Duration::from_millis(5000))
                     .send()
                     .await
                     .map_err(|e| format!("Binance REST fee HTTP error: {}", e))?;
-                
+
                 let status = resp.status();
                 let headers = resp.headers().clone();
-                let body: Value = resp.json().await.map_err(|e| format!("Binance REST fee JSON error: {}", e))?;
+                let body: Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Binance REST fee JSON error: {}", e))?;
                 record_binance_response(status.as_u16(), &headers);
                 detect_ban_from_response(&body);
-                body["takerCommissionRate"].as_str()
+                body["takerCommissionRate"]
+                    .as_str()
                     .and_then(|s| s.parse::<f64>().ok())
                     .ok_or_else(|| format!("Failed to parse Binance fee from REST: {}", body))
             }
@@ -1131,8 +1278,12 @@ impl ExchangeConnector for BinanceConnector {
             let ts_m = now_ms();
             let qs_m = format!("marginType=CROSSED&symbol={}&timestamp={}", pair, ts_m);
             let sig_m = binance_sign(&keys.binance_secret, &qs_m);
-            let url_m = format!("https://fapi.binance.com/fapi/v1/marginType?{}&signature={}", qs_m, sig_m);
-            if let Ok(resp) = _http.post(&url_m)
+            let url_m = format!(
+                "https://fapi.binance.com/fapi/v1/marginType?{}&signature={}",
+                qs_m, sig_m
+            );
+            if let Ok(resp) = _http
+                .post(&url_m)
                 .header("X-MBX-APIKEY", &keys.binance_key)
                 .timeout(std::time::Duration::from_millis(3000))
                 .send()
@@ -1157,7 +1308,8 @@ impl ExchangeConnector for BinanceConnector {
         let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
         let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
         let url = format!("https://fapi.binance.com/fapi/v1/leverage?{}", full_qs);
-        match _http.post(&url)
+        match _http
+            .post(&url)
             .header("X-MBX-APIKEY", &keys.binance_key)
             .timeout(std::time::Duration::from_millis(3000))
             .send()
@@ -1170,14 +1322,13 @@ impl ExchangeConnector for BinanceConnector {
                 if status.is_success() {
                     leverage_cache().insert(cache_key);
                 }
-            },
+            }
             Err(e) => {
                 tracing::warn!("[binance] Failed to set leverage for {}: {}", pair, e);
             }
         }
         Ok(())
     }
-
 
     async fn fetch_positions(
         &self,
@@ -1207,30 +1358,37 @@ impl ExchangeConnector for BinanceConnector {
                     return Err(format!("Binance WS position error: {}", err));
                 }
                 resp["result"].as_array().cloned().unwrap_or_default()
-            },
+            }
             Err(e) => {
                 record_ws_failure();
                 // Check ban + REST fallback cooldown before making REST request
                 check_ip_ban()?;
                 check_rest_fallback_allowed(&REST_FALLBACK_POSITIONS_MS, "positions")?;
-                tracing::warn!("[binance] WS positions fetch failed ({}). Trying REST fallback...", e);
+                tracing::warn!(
+                    "[binance] WS positions fetch failed ({}). Trying REST fallback...",
+                    e
+                );
                 // CRITICAL: use fresh timestamp to avoid -1021 recvWindow errors
                 let fresh_ts = now_ms();
                 let rest_qs = format!("timestamp={}", fresh_ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
                 let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
                 let url = format!("https://fapi.binance.com/fapi/v2/positionRisk?{}", full_qs);
-                let resp = _http.get(&url)
+                let resp = _http
+                    .get(&url)
                     .header("X-MBX-APIKEY", &keys.binance_key)
                     .timeout(std::time::Duration::from_millis(5000))
                     .send()
                     .await
                     .map_err(|e| format!("Binance REST positions HTTP error: {}", e))?;
-                
+
                 // Track weight from REST response headers
                 let status = resp.status();
                 let headers = resp.headers().clone();
-                let body: Value = resp.json().await.map_err(|e| format!("Binance REST positions JSON error: {}", e))?;
+                let body: Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Binance REST positions JSON error: {}", e))?;
                 record_binance_response(status.as_u16(), &headers);
                 detect_ban_from_response(&body);
                 if let Some(_code) = body.get("code") {
@@ -1281,18 +1439,28 @@ impl ExchangeConnector for BinanceConnector {
     ) -> Result<TradeAuditResult, String> {
         let ts = now_ms();
         let sym = pair.replace('_', "").replace('-', "").to_uppercase();
-        let rest_qs = format!("symbol={}&startTime={}&endTime={}&timestamp={}", sym, start_ts, end_ts, ts);
+        let rest_qs = format!(
+            "symbol={}&startTime={}&endTime={}&timestamp={}",
+            sym, start_ts, end_ts, ts
+        );
         let sig = binance_sign(&keys.binance_secret, &rest_qs);
-        let url = format!("https://fapi.binance.com/fapi/v1/userTrades?{}&signature={}", rest_qs, sig);
+        let url = format!(
+            "https://fapi.binance.com/fapi/v1/userTrades?{}&signature={}",
+            rest_qs, sig
+        );
 
-        let resp = http.get(&url)
+        let resp = http
+            .get(&url)
             .header("X-MBX-APIKEY", &keys.binance_key)
             .timeout(std::time::Duration::from_millis(5000))
             .send()
             .await
             .map_err(|e| format!("Binance audit userTrades HTTP error: {}", e))?;
 
-        let body: Value = resp.json().await.map_err(|e| format!("Binance audit userTrades JSON error: {}", e))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Binance audit userTrades JSON error: {}", e))?;
         let trades = match body.as_array() {
             Some(arr) => arr,
             None => return Ok(TradeAuditResult::default()),
@@ -1310,19 +1478,23 @@ impl ExchangeConnector for BinanceConnector {
 
         for t in trades {
             let comm: f64 = t["commission"]
-                .as_str().and_then(|s| s.parse().ok())
+                .as_str()
+                .and_then(|s| s.parse().ok())
                 .or_else(|| t["commission"].as_f64())
                 .unwrap_or(0.0);
             let pnl: f64 = t["realizedPnl"]
-                .as_str().and_then(|s| s.parse().ok())
+                .as_str()
+                .and_then(|s| s.parse().ok())
                 .or_else(|| t["realizedPnl"].as_f64())
                 .unwrap_or(0.0);
             let price: f64 = t["price"]
-                .as_str().and_then(|s| s.parse().ok())
+                .as_str()
+                .and_then(|s| s.parse().ok())
                 .or_else(|| t["price"].as_f64())
                 .unwrap_or(0.0);
             let qty: f64 = t["qty"]
-                .as_str().and_then(|s| s.parse().ok())
+                .as_str()
+                .and_then(|s| s.parse().ok())
                 .or_else(|| t["qty"].as_f64())
                 .unwrap_or(0.0);
 
@@ -1340,14 +1512,30 @@ impl ExchangeConnector for BinanceConnector {
 
         // Also fetch funding income for the symbol in this time range
         let mut funding_cost = 0.0_f64;
-        let income_qs = format!("symbol={}&incomeType=FUNDING_FEE&startTime={}&endTime={}&timestamp={}", sym, start_ts, end_ts, ts);
+        let income_qs = format!(
+            "symbol={}&incomeType=FUNDING_FEE&startTime={}&endTime={}&timestamp={}",
+            sym, start_ts, end_ts, ts
+        );
         let income_sig = binance_sign(&keys.binance_secret, &income_qs);
-        let income_url = format!("https://fapi.binance.com/fapi/v1/income?{}&signature={}", income_qs, income_sig);
-        if let Ok(inc_resp) = http.get(&income_url).header("X-MBX-APIKEY", &keys.binance_key).timeout(std::time::Duration::from_millis(4000)).send().await {
+        let income_url = format!(
+            "https://fapi.binance.com/fapi/v1/income?{}&signature={}",
+            income_qs, income_sig
+        );
+        if let Ok(inc_resp) = http
+            .get(&income_url)
+            .header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(std::time::Duration::from_millis(4000))
+            .send()
+            .await
+        {
             if let Ok(inc_arr) = inc_resp.json::<Value>().await {
                 if let Some(arr) = inc_arr.as_array() {
                     for inc in arr {
-                        let amt: f64 = inc["income"].as_str().and_then(|s| s.parse().ok()).or_else(|| inc["income"].as_f64()).unwrap_or(0.0);
+                        let amt: f64 = inc["income"]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .or_else(|| inc["income"].as_f64())
+                            .unwrap_or(0.0);
                         funding_cost -= amt; // negative income is cost paid
                     }
                 }
@@ -1363,5 +1551,73 @@ impl ExchangeConnector for BinanceConnector {
             filled_qty: sum_qty,
         })
     }
+}
 
+fn parse_managed_binance(
+    v: &Value,
+    r: &crate::engine::orders::OrderRequest,
+) -> Result<crate::engine::orders::OrderObservation, String> {
+    use crate::engine::orders::{identity, number, OrderObservation, OrderState};
+    if v["symbol"].as_str() != Some(r.pair.as_str())
+        || v["clientOrderId"].as_str() != Some(r.client_id.as_str())
+    {
+        return Err("Order identity mismatch".into());
+    }
+    let qty = number(v, "executedQty")?;
+    let state = match v["status"].as_str() {
+        Some("FILLED") => OrderState::Filled,
+        Some("CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH") => OrderState::Cancelled,
+        Some("REJECTED") => OrderState::Rejected,
+        Some("PARTIALLY_FILLED") => OrderState::PartiallyFilled,
+        Some("NEW") => OrderState::Submitted,
+        _ => return Err("Unknown Binance order status".into()),
+    };
+    let price = if qty > 0.0 {
+        let p = number(v, "avgPrice").unwrap_or(0.0);
+        Some(if p > 0.0 {
+            p
+        } else {
+            number(v, "cumQuote")? / qty
+        })
+    } else {
+        None
+    };
+    Ok(OrderObservation {
+        order_id: identity(v, "orderId"),
+        state,
+        filled_quantity: qty,
+        average_price: price,
+        fee: if qty == 0.0 && state.terminal() {
+            Some(0.0)
+        } else {
+            None
+        },
+    })
+}
+async fn managed_binance_get(
+    http: &Client,
+    keys: &ExchangeKeys,
+    path: &str,
+    qs: &str,
+) -> Result<Value, String> {
+    check_ip_ban()?;
+    let sig = binance_sign(&keys.binance_secret, qs);
+    let res = http
+        .get(format!(
+            "https://fapi.binance.com{}?{}&signature={}",
+            path, qs, sig
+        ))
+        .header("X-MBX-APIKEY", &keys.binance_key)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|_| "Binance query transport failure")?;
+    let status = res.status();
+    let headers = res.headers().clone();
+    let v: Value = res.json().await.map_err(|_| "Binance query invalid JSON")?;
+    let _ = check_rate_limits(status, &headers, Some(&v)).await;
+    if !status.is_success() {
+        return Err(format!("Binance query rejected code={}", v["code"]));
+    }
+    Ok(v)
 }

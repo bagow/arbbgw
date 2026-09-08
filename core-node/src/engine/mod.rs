@@ -14,3 +14,7 @@ pub mod entry_manager;
 pub mod execution;
 pub mod maker_manager;
 pub mod workers;
+
+pub mod orders;
+pub mod journal;
+pub mod managed;
