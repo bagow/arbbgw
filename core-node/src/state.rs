@@ -37,8 +37,8 @@ pub type UpdateSignal = Arc<Notify>;
 
 #[derive(Clone, Debug)]
 pub struct FundingInfo {
-    pub rate: f64,       // current funding rate (e.g. 0.0001 = 0.01%)
-    pub next_ts: i64,    // unix timestamp (ms) of next funding apply
+    pub rate: f64,    // current funding rate (e.g. 0.0001 = 0.01%)
+    pub next_ts: i64, // unix timestamp (ms) of next funding apply
     #[allow(dead_code)]
     pub fetched_at: i64, // when this was cached
 }
@@ -64,6 +64,7 @@ pub struct EngineContext {
     /// Guard against parallel close attempts on the same trade_id.
     /// Set to true when a close is in-flight; cleared when the spawn finishes.
     pub closing_in_flight: Arc<DashMap<i64, bool>>,
+    pub owned_l2_wanted: Arc<tokio::sync::RwLock<Vec<String>>>,
     /// Risk Kill-Switch: Number of consecutive delta trims. Reset on successful symmetric execution.
     pub consecutive_trims: Arc<std::sync::atomic::AtomicU32>,
     /// Risk Kill-Switch: Number of consecutive entry failures. Reset on successful entry.
@@ -126,6 +127,7 @@ impl Default for EngineContext {
             margin_balances: Arc::new(DashMap::new()),
             positions: Arc::new(DashMap::new()),
             closing_in_flight: Arc::new(DashMap::new()),
+            owned_l2_wanted: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             consecutive_trims: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             consecutive_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             is_killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),

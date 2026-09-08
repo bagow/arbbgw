@@ -5,11 +5,7 @@ mod settings;
 mod spreads;
 mod state;
 
-use std::{
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
 use anyhow::{Context, Result};
@@ -30,16 +26,16 @@ use spreads::compute_spreads;
 use state::{PriceMap, UpdateSignal};
 
 mod collector {
+    pub mod ascendex;
     pub mod binance;
+    pub mod bingx;
+    pub mod bitget;
+    pub mod bitmex;
     pub mod bybit;
     pub mod gate;
     pub mod kucoin;
-    pub mod bitget;
-    pub mod bingx;
-    pub mod bitmex;
-    pub mod ascendex;
-    pub mod xt;
     pub mod toobit;
+    pub mod xt;
 }
 
 mod engine;
@@ -89,7 +85,6 @@ async fn main() -> Result<()> {
                 [],
             );
             let _ = conn.execute_batch("CREATE TABLE IF NOT EXISTS server_cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);");
-            let _ = conn.execute("UPDATE server_cache SET value = '0' WHERE key = 'kill_switch_active'", []);
             Ok(())
         })
         .await;
@@ -97,6 +92,20 @@ async fn main() -> Result<()> {
     // ── Engine context (created after profiles_db so kill-switch can persist state) ──
     let mut ctx_default = crate::state::EngineContext::default();
     ctx_default.profiles_db = Some(profiles_db.clone());
+    let persisted_kill: bool = profiles_db
+        .call(|c| {
+            let active: i64 = c.query_row(
+                "SELECT COUNT(*) FROM server_cache WHERE key='kill_switch_active' AND value='1'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(active != 0)
+        })
+        .await
+        .context("Cannot read persisted kill switch")?;
+    ctx_default
+        .is_killed
+        .store(persisted_kill, std::sync::atomic::Ordering::Release);
     let engine_ctx = Arc::new(ctx_default);
 
     // ── Price map and signal ─────────────────────────────────────────────────
@@ -110,6 +119,21 @@ async fn main() -> Result<()> {
         .await
         .context(format!("Cannot open real-trader DB: {}", real_db_path))?;
     engine::startup::init_trades_db(&real_db).await?;
+    let journal = engine::journal::Journal {
+        db: real_db.clone(),
+    };
+    journal.init().await?;
+    let legacy_active = real_db.call(|c| {
+        c.query_row("SELECT COUNT(*) FROM trades t LEFT JOIN execution_plans p ON p.trade_id=t.id WHERE t.status NOT IN ('CLOSED','CANCELLED') AND p.trade_id IS NULL", [], |r| r.get::<_,i64>(0)).map_err(Into::into)
+    }).await?;
+    if legacy_active > 0 {
+        engine::managed::kill(
+            &engine_ctx,
+            &journal,
+            format!("{legacy_active} legacy positions require exchange reconciliation"),
+        )
+        .await;
+    }
 
     info!("Profiles DB path: {}", profiles_db_path);
     info!("Real DB path:     {}", real_db_path);
@@ -209,7 +233,8 @@ async fn main() -> Result<()> {
             &exchange_keys.kucoin_key,
             &exchange_keys.kucoin_secret,
             &exchange_keys.kucoin_passphrase,
-        ).await;
+        )
+        .await;
         // Give WS time to connect and subscribe before first trade
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         info!("[startup] KuCoin Private WS ready.");
@@ -219,12 +244,15 @@ async fn main() -> Result<()> {
     if exchange_keys.supports("gate") {
         info!("[startup] Pre-initializing Gate Private WS for order fills...");
         // Wire up pending_makers and notify references so WS loop can trigger maker_manager
-        engine::exchanges::ws_gate_private::set_pending_makers_ref(engine_ctx.pending_makers.clone());
+        engine::exchanges::ws_gate_private::set_pending_makers_ref(
+            engine_ctx.pending_makers.clone(),
+        );
         engine::exchanges::ws_gate_private::set_maker_notify(engine_ctx.maker_fill_notify.clone());
         engine::exchanges::ws_gate_private::ensure_private_ws(
             &exchange_keys.gate_key,
             &exchange_keys.gate_secret,
-        ).await;
+        )
+        .await;
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         info!("[startup] Gate Private WS ready.");
     }
@@ -245,21 +273,13 @@ async fn main() -> Result<()> {
     // ── Spawn collectors ─────────────────────────────────────────────────────
     engine::startup::spawn_collectors(&prices, &signal, &engine_ctx, &real_settings_cache);
 
-    // ── Position sync — enabled with symbol normalization in real.rs ───────────
-    // Detects externally closed/liquidated legs and emergency-closes the remaining leg.
-    engine::workers::position_sync::start_position_sync(
+    // Independent of market ticks and entry eligibility, including while entries are halted.
+    engine::managed::supervise(
+        journal.clone(),
         http.clone(),
         exchange_keys.clone(),
-        real_db.clone(),
+        prices.clone(),
         engine_ctx.clone(),
-    );
-
-    // ── Trade Auditor — async background worker for exact exchange numbers ───
-    // Backfills real commissions, real exit prices, and real funding from exchange trade history.
-    engine::workers::trade_auditor::start_trade_auditor(
-        http.clone(),
-        exchange_keys.clone(),
-        real_db.clone(),
     );
 
     // ── Pre-warm HTTP connections to exchange APIs ─────────────────────────
@@ -270,7 +290,7 @@ async fn main() -> Result<()> {
         let prices = prices.clone();
         let signal = signal.clone();
         let http = http.clone();
-        let real_db = real_db.clone();
+        let journal = journal.clone();
         let real_cache = real_settings_cache.clone();
         let keys = exchange_keys.clone();
         let ts_cache = tech_settings_cache.clone();
@@ -293,7 +313,7 @@ async fn main() -> Result<()> {
                 let t_real_cache = real_cache.clone();
                 let t_ts_cache = ts_cache.clone();
                 let t_http = http.clone();
-                let t_real_db = real_db.clone();
+                let t_journal = journal.clone();
                 let t_keys = keys.clone();
                 let t_e_ctx = e_ctx.clone();
                 let t_profiles_db = profiles_db_engine.clone();
@@ -336,9 +356,6 @@ async fn main() -> Result<()> {
                         });
                     }
 
-                    if spreads.is_empty() {
-                        return;
-                    }
 
                     // ── BACKGROUND LEVERAGE WARMUP ──
                     crate::engine::real::warmup_leverages(
@@ -351,6 +368,7 @@ async fn main() -> Result<()> {
                     // ── UPDATE L2 WANTED SET (demand-driven subscriptions) ──
                     {
                         t_e_ctx.l2_wanted.clear();
+                        for key in t_e_ctx.owned_l2_wanted.read().await.iter() {t_e_ctx.l2_wanted.insert(key.clone());}
                         for row in spreads.iter().take(200) {
                             t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_a, row.pair));
                             t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_b, row.pair));
@@ -367,20 +385,7 @@ async fn main() -> Result<()> {
                         &ts,
                     );
 
-                    for profile in &real_profiles {
-                        engine::cycle::run_cycle(
-                            signals.clone(),
-                            spreads.clone(),
-                            t_prices.clone(),
-                            profile.clone(),
-                            t_http.clone(),
-                            t_real_db.clone(),
-                            t_keys.clone(),
-                            &ts,
-                            t_e_ctx.clone(),
-                        )
-                        .await;
-                    }
+                    engine::managed::propose(signals, real_profiles, t_prices, t_http, t_keys, t_journal, t_e_ctx, ts);
                 }).await;
 
                 if let Err(e) = tick_result {
@@ -418,14 +423,14 @@ async fn main() -> Result<()> {
         )
         .allow_methods(Any)
         .allow_headers(Any);
-    let app_state = (http.clone(), exchange_keys.clone());
+    let app_state = journal.clone();
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/api/positions/close", post(handle_close_position))
         .with_state(app_state)
         .layer(cors);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr).await.context("HTTP bind failed")?;
     info!("core-node listening on {}", addr);
     axum::serve(listener, app)
@@ -435,7 +440,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-
 #[derive(Deserialize)]
 pub struct CloseReq {
     pub exchange: String,
@@ -444,45 +448,31 @@ pub struct CloseReq {
 }
 
 async fn handle_close_position(
-    State((http, keys)): State<(Client, Arc<crate::engine::real::ExchangeKeys>)>,
+    State(journal): State<engine::journal::Journal>,
     Json(req): Json<CloseReq>,
-) -> Result<&'static str, (axum::http::StatusCode, String)> {
-    let conn = crate::engine::exchanges::get_connector(&req.exchange).ok_or((
-        axum::http::StatusCode::BAD_REQUEST,
-        "Unknown exchange".into(),
-    ))?;
-
-    let is_buy = req.size < 0.0;
-    let size = req.size.abs();
-
-    match conn
-        .close_position(
-            &http,
-            &keys,
-            &req.symbol,
-            is_buy,
-            size,
-            false,
-            10.0,
-            0.0,
-            false,
-            0.0,
-            0.0,
-            0.000001,
-            5,
-            20,
-            5000,
-        )
+) -> Result<(axum::http::StatusCode, &'static str), (axum::http::StatusCode, String)> {
+    let trades = journal
+        .active()
         .await
-    {
-        Ok(_) => Ok("ok"),
-        Err(e) => {
-            tracing::error!(
-                "[api] handle_close_position failed for {}: {}",
-                req.symbol,
-                e
-            );
-            Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
-        }
-    }
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let trade = trades
+        .iter()
+        .find(|t| {
+            let s = &t.plan.signal;
+            engine::utils::symbols_match(&s.pair, &req.symbol)
+                && (s.exchange_a == req.exchange || s.exchange_b == req.exchange)
+        })
+        .ok_or((
+            axum::http::StatusCode::CONFLICT,
+            "Position ownership is not established; exchange reconciliation required".into(),
+        ))?;
+    // Never trust a browser's cached position size. The supervisor closes both owned residuals.
+    journal
+        .request_close(trade.id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok((
+        axum::http::StatusCode::ACCEPTED,
+        "Close requested; execution is being reconciled",
+    ))
 }

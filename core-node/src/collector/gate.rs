@@ -75,7 +75,11 @@ pub async fn run(
 /// Fetches symbol list + seeds tickers from REST, then spawns N parallel WS
 /// connections (each handling ~100 symbols). If ANY connection dies, all are
 /// cancelled and the whole orchestrator returns (triggering full reconnect).
-async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
+async fn orchestrator(
+    price_map: &PriceMap,
+    signal: &UpdateSignal,
+    l2_books: &L2OrderbookMap,
+) -> Result<()> {
     let client = reqwest::Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
     let res = client
         .get("https://api.gateio.ws/api/v4/futures/usdt/contracts")
@@ -176,7 +180,10 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2
                         backoff = Duration::from_secs(1);
                     }
                     Err(e) => {
-                        warn!("[gate] Shard {} WS disconnected: {}. Reconnecting in {:?}", idx, e, backoff);
+                        warn!(
+                            "[gate] Shard {} WS disconnected: {}. Reconnecting in {:?}",
+                            idx, e, backoff
+                        );
                     }
                 }
                 tokio::time::sleep(backoff).await;
@@ -235,8 +242,6 @@ async fn orchestrator(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2
     Ok(())
 }
 
-
-
 /// A single WS shard handling a subset of symbols.
 async fn ws_shard(
     idx: usize,
@@ -258,8 +263,16 @@ async fn ws_shard(
     );
 
     // Send initial ping immediately to establish keepalive
-    let ts0 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    ws.send(Message::Text(json!({"time":ts0, "channel":"futures.ping"}).to_string().into())).await?;
+    let ts0 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    ws.send(Message::Text(
+        json!({"time":ts0, "channel":"futures.ping"})
+            .to_string()
+            .into(),
+    ))
+    .await?;
 
     // Subscribe to L1 book_ticker for all symbols in this shard
     for chunk in symbols.chunks(50) {
@@ -275,7 +288,11 @@ async fn ws_shard(
         .await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    info!("[gate] Shard {} subscribed L1 OK ({} symbols)", idx, symbols.len());
+    info!(
+        "[gate] Shard {} subscribed L1 OK ({} symbols)",
+        idx,
+        symbols.len()
+    );
 
     // Ensure gate map exists for mutably getting later
     price_map.entry("gate".to_string()).or_default();
@@ -356,16 +373,11 @@ fn upsert_tickers(
     vol: f64,
     funding: f64,
 ) {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
     if let Some(mut gate_map) = price_map.get_mut("gate") {
         if let Some(entry) = gate_map.get_mut(&sym) {
             entry.price = price;
             entry.vol = vol;
             entry.funding_rate = funding;
-            entry.last_updated = ts;
         }
     }
     signal.notify_one();

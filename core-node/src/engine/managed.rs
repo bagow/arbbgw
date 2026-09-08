@@ -52,7 +52,7 @@ pub async fn kill(ctx: &EngineContext, j: &Journal, reason: String) {
     }
 }
 
-/// An exact fresh book (or a fully sufficient measured best level), in base quantities.
+/// A fresh, uncrossed book with full depth coverage, in base quantities.
 pub fn executable(
     prices: &PriceMap,
     ctx: &EngineContext,
@@ -61,6 +61,9 @@ pub fn executable(
     buy: bool,
     qty: f64,
 ) -> Option<f64> {
+    if !qty.is_finite() || qty <= 0.0 {
+        return None;
+    }
     let now = now_ms();
     let d = prices.get(ex).and_then(|m| m.get(pair).cloned())?;
     if d.last_updated == 0
@@ -71,6 +74,11 @@ pub fn executable(
     }
     if let Some(book) = ctx.l2_books.get(&format!("{}:{}", ex, pair)) {
         if now >= book.updated_ms && now - book.updated_ms <= 750 {
+            let bid = book.bids.first()?.0;
+            let ask = book.asks.first()?.0;
+            if !bid.is_finite() || !ask.is_finite() || bid <= 0.0 || bid >= ask {
+                return None;
+            }
             return super::execution::verify_l2_vwap(
                 Ok((book.bids.clone(), book.asks.clone())),
                 buy,
@@ -79,17 +87,7 @@ pub fn executable(
             );
         }
     }
-    // L1 is sufficient only if its measured available quantity covers this entire order.
-    let (px, usd) = if buy {
-        (d.ask, d.ask_size)
-    } else {
-        (d.bid, d.bid_size)
-    };
-    if px.is_finite() && usd.is_finite() && px > 0.0 && usd >= px * qty * 2.5 {
-        Some(px)
-    } else {
-        None
-    }
+    None
 }
 
 fn request(t: &ManagedTrade, leg: &str, qty: f64, price: f64, reduce: bool) -> JournalOrder {
@@ -201,6 +199,9 @@ async fn enter(
 ) -> anyhow::Result<()> {
     // Existing unowned positions must be reconciled, not silently absorbed by a new trade.
     for s in signals {
+        if ctx.is_killed.load(Ordering::Acquire) {
+            break;
+        }
         let p = match settings
             .iter()
             .find(|p| p.id == s.profile_id && p.is_active)
@@ -211,8 +212,10 @@ async fn enter(
         if ts.entry_order_type != "ioc" || p.strategy_type != "ema" {
             continue;
         }
-        let ca = get_connector(&s.exchange_a).unwrap();
-        let cb = get_connector(&s.exchange_b).unwrap();
+        let (ca, cb) = match (get_connector(&s.exchange_a), get_connector(&s.exchange_b)) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
         if !ca.supports_managed_orders() || !cb.supports_managed_orders() {
             continue;
         }
@@ -403,6 +406,15 @@ pub fn supervise(
             timer.tick().await;
             match j.active().await {
                 Ok(trades) => {
+                    *ctx.owned_l2_wanted.write().await = trades
+                        .iter()
+                        .flat_map(|t| {
+                            [
+                                format!("{}:{}", t.plan.signal.exchange_a, t.plan.signal.pair),
+                                format!("{}:{}", t.plan.signal.exchange_b, t.plan.signal.pair),
+                            ]
+                        })
+                        .collect();
                     for t in trades {
                         if let Some(guard) = claim(&ctx, t.id) {
                             let (j, h, k, p, c) = (
@@ -451,13 +463,22 @@ async fn manage(
     if orders.iter().any(|o| !o.observation.state.terminal()) {
         j.state(t.id, "RECONCILING", "ORDER_OUTCOME_UNKNOWN")
             .await?;
+        if now_ms() - t.created_ms > 10_000 && !ctx.is_killed.load(Ordering::Acquire) {
+            kill(
+                ctx,
+                j,
+                format!("Trade {} has an unresolved order; entries paused", t.id),
+            )
+            .await;
+        }
         // Existing owned exposure remains tracked. Do not retry or invent a zero fill.
         return Ok(());
     }
     let s = &t.plan.signal;
     let a = aggregate(&orders, "A");
     let b = aggregate(&orders, "B");
-    let closing = t.state != "OPEN" || t.reason.as_deref() == Some("MANUAL_CLOSE");
+    let manual = j.close_requested(t.id).await?;
+    let closing = t.state != "OPEN" || manual;
     let elapsed = now_ms() - t.created_ms;
     let timed =
         t.plan.settings.max_holding_time_ms > 0 && elapsed > t.plan.settings.max_holding_time_ms;
@@ -495,15 +516,30 @@ async fn manage(
         let reserve =
             a.remaining() * pa * super::utils::get_exchange_fee(&s.exchange_a, 0.001, ctx)
                 + b.remaining() * pb * super::utils::get_exchange_fee(&s.exchange_b, 0.001, ctx);
-        let percent = (pnl - a.fee - b.fee - reserve) / a.entry_value.max(1e-12) * 100.0;
+        let known_entry_fees = orders
+            .iter()
+            .filter(|o| !o.request.reduce_only)
+            .all(|o| o.observation.fee.is_some());
+        let entry_fees = if known_entry_fees {
+            a.fee + b.fee
+        } else {
+            (a.fee + b.fee).max(
+                a.entry_value * super::utils::get_exchange_fee(&s.exchange_a, 0.001, ctx)
+                    + b.entry_value * super::utils::get_exchange_fee(&s.exchange_b, 0.001, ctx),
+            )
+        };
+        let percent = (pnl - entry_fees - reserve) / a.entry_value.max(1e-12) * 100.0;
+        let peak = j.mark_to_market(t.id, pa, pb, pnl, percent).await?;
         profit = percent >= t.plan.settings.take_profit_percent.max(0.05);
         stop = t.plan.settings.trailing_stop_percent > 0.0
-            && percent <= -t.plan.settings.trailing_stop_percent;
+            && percent <= peak - t.plan.settings.trailing_stop_percent;
     }
     if !closing && !timed && !profit && !stop {
         return Ok(());
     }
-    let reason = if closing {
+    let reason = if manual {
+        "MANUAL_CLOSE"
+    } else if closing {
         t.reason
             .as_deref()
             .filter(|s| !s.is_empty())
@@ -531,7 +567,13 @@ async fn manage(
     }
     let updated = j.orders(t.id).await?;
     j.project(&t, &updated, true).await?;
-    if !profit && a.opened + b.opened > 0.0 {
+    let flat = aggregate(&updated, "A").remaining() <= 1e-9
+        && aggregate(&updated, "B").remaining() <= 1e-9
+        && updated.iter().all(|o| o.observation.state.terminal());
+    if flat {
+        ctx.pair_cooldown.insert(s.pair.clone(), now_ms() + 60_000);
+    }
+    if flat && !matches!(reason, "TP" | "MANUAL_CLOSE") && a.opened + b.opened > 0.0 {
         let n = ctx.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
         if n >= 5 {
             kill(

@@ -42,7 +42,10 @@ pub async fn run(
         // CRITICAL: Do NOT send ANY HTTP request while banned — it extends the ban!
         if crate::engine::exchanges::binance::is_binance_banned() {
             let remaining = crate::engine::exchanges::binance::binance_ban_remaining_secs();
-            error!("[binance] IP still banned ({}s remaining). NO requests sent. Waiting...", remaining);
+            error!(
+                "[binance] IP still banned ({}s remaining). NO requests sent. Waiting...",
+                remaining
+            );
             // Wait ban duration + 30s safety margin, capped at 15 min
             let wait = (remaining as u64 + 30).min(900);
             tokio::time::sleep(Duration::from_secs(wait)).await;
@@ -52,10 +55,13 @@ pub async fn run(
         // Ban is cleared — do a lightweight ping to confirm connectivity
         let http_check = Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            .build().unwrap();
-        match http_check.get("https://fapi.binance.com/fapi/v1/ping")
+            .build()
+            .unwrap();
+        match http_check
+            .get("https://fapi.binance.com/fapi/v1/ping")
             .timeout(Duration::from_secs(10))
-            .send().await
+            .send()
+            .await
         {
             Ok(resp) => {
                 let status = resp.status().as_u16();
@@ -63,7 +69,10 @@ pub async fn run(
                 // Record response for weight tracking + ban detection
                 crate::engine::exchanges::binance::record_binance_response(status, &headers);
                 if status == 418 || status == 429 || status == 403 {
-                    error!("[binance] Ping returned HTTP {}. Ban recorded by guard.", status);
+                    error!(
+                        "[binance] Ping returned HTTP {}. Ban recorded by guard.",
+                        status
+                    );
                     // Guard already set the ban duration — just loop back
                     tokio::time::sleep(Duration::from_secs(10)).await;
                     continue;
@@ -84,9 +93,16 @@ pub async fn run(
             let l2_books_for_depth = l2_books.clone();
             let prices_for_depth = prices.clone();
             let l2_wanted_for_depth = l2_wanted.clone();
+            let signal_for_depth = signal.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(20)).await;
-                run_l2_depth_stream(l2_books_for_depth, prices_for_depth, l2_wanted_for_depth).await;
+                run_l2_depth_stream(
+                    l2_books_for_depth,
+                    prices_for_depth,
+                    l2_wanted_for_depth,
+                    signal_for_depth,
+                )
+                .await;
             });
         }
 
@@ -122,21 +138,36 @@ pub async fn run(
     }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2OrderbookMap) -> Result<()> {
+async fn handler(
+    price_map: &PriceMap,
+    signal: &UpdateSignal,
+    _l2_books: &L2OrderbookMap,
+) -> Result<()> {
     // Seed 24h volume from REST miniTicker snapshot
     // Check ban before REST call (weight=40 for ticker/24hr!)
     if crate::engine::exchanges::binance::check_before_binance_rest().is_ok() {
         let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
         let mut target_url = "https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
-        let mut resp = http.get(&target_url).timeout(Duration::from_secs(15)).send().await;
+        let mut resp = http
+            .get(&target_url)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await;
 
         if let Ok(ref r) = resp {
             let status = r.status().as_u16();
             crate::engine::exchanges::binance::record_binance_response(status, r.headers());
             if status == 403 || status == 418 || status == 429 {
                 target_url = "https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/ticker/24hr".to_string();
-                tracing::warn!("[binance] Using proxy fallback for volume due to HTTP {}", status);
-                resp = http.get(&target_url).timeout(Duration::from_secs(15)).send().await;
+                tracing::warn!(
+                    "[binance] Using proxy fallback for volume due to HTTP {}",
+                    status
+                );
+                resp = http
+                    .get(&target_url)
+                    .timeout(Duration::from_secs(15))
+                    .send()
+                    .await;
             }
         }
 
@@ -232,7 +263,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                         entry.ask_size = ask_qty * mid;
                         entry.last_updated = ts;
                         if entry.vol == 0.0 {
-                            entry.vol = 100_000_000.0; // Fallback volume
+                            // Unknown volume stays zero until a real ticker is received.
                         }
                     } else {
                         ex_map.insert(
@@ -241,7 +272,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                                 bid,
                                 ask,
                                 price: mid,
-                                vol: 100_000_000.0, // Fallback volume
+                                vol: 0.0, // Unknown volume cannot pass the liquidity filter
                                 funding_rate: 0.0,
                                 bid_size: bid_qty * mid,
                                 ask_size: ask_qty * mid,
@@ -259,24 +290,84 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
 
 /// Separate L2 depth stream for top-volume pairs (dynamic, top 200 by volume).
 /// Rebuilds symbol list from price_map on each reconnect — handles REST seed failures.
-async fn run_l2_depth_stream(l2_books: L2OrderbookMap, _price_map: crate::state::PriceMap, l2_wanted: std::sync::Arc<dashmap::DashSet<String>>) {
+async fn run_l2_depth_stream(
+    l2_books: L2OrderbookMap,
+    price_map: crate::state::PriceMap,
+    l2_wanted: std::sync::Arc<dashmap::DashSet<String>>,
+    signal: UpdateSignal,
+) {
     // Hardcoded fallback covers common pairs when REST/price_map is empty
     const FALLBACK: &[&str] = &[
-        "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","DOGEUSDT","XRPUSDT","PEPEUSDT",
-        "SUIUSDT","ADAUSDT","TRXUSDT","AVAXUSDT","LINKUSDT","DOTUSDT","LTCUSDT",
-        "MATICUSDT","ARBUSDT","OPUSDT","APTUSDT","NEARUSDT","FILUSDT","WIFUSDT",
-        "SHIBUSDT","BONKUSDT","FLOKIUSDT","WLDUSDT","ORDIUSDT","TIAUSDT","SEIUSDT",
-        "INJUSDT","FETUSDT","RUNEUSDT","JUPUSDT","ENAUSDT","ONDOUSDT","RENDERUSDT",
-        "AAVEUSDT","MKRUSDT","LDOUSDT","PENDLEUSDT","TONUSDT","NOTUSDT","STXUSDT",
-        "KATUSDT","SPKUSDT","HYPEUSDT","VIRTUSDT","BOMEUSDT","JUPUSDT","WUSDT",
-        "APEUSDT","GMTUSDT","GALAUSDT","FTMUSDT","HBARUSDT","FLOWUSDT","ICPUSDT",
-        "SANDUSDT","MANAUSDT","AXSUSDT","CRVUSDT","SNXUSDT","ATOMUSDT","XLMUSDT",
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "BNBUSDT",
+        "DOGEUSDT",
+        "XRPUSDT",
+        "PEPEUSDT",
+        "SUIUSDT",
+        "ADAUSDT",
+        "TRXUSDT",
+        "AVAXUSDT",
+        "LINKUSDT",
+        "DOTUSDT",
+        "LTCUSDT",
+        "MATICUSDT",
+        "ARBUSDT",
+        "OPUSDT",
+        "APTUSDT",
+        "NEARUSDT",
+        "FILUSDT",
+        "WIFUSDT",
+        "SHIBUSDT",
+        "BONKUSDT",
+        "FLOKIUSDT",
+        "WLDUSDT",
+        "ORDIUSDT",
+        "TIAUSDT",
+        "SEIUSDT",
+        "INJUSDT",
+        "FETUSDT",
+        "RUNEUSDT",
+        "JUPUSDT",
+        "ENAUSDT",
+        "ONDOUSDT",
+        "RENDERUSDT",
+        "AAVEUSDT",
+        "MKRUSDT",
+        "LDOUSDT",
+        "PENDLEUSDT",
+        "TONUSDT",
+        "NOTUSDT",
+        "STXUSDT",
+        "KATUSDT",
+        "SPKUSDT",
+        "HYPEUSDT",
+        "VIRTUSDT",
+        "BOMEUSDT",
+        "JUPUSDT",
+        "WUSDT",
+        "APEUSDT",
+        "GMTUSDT",
+        "GALAUSDT",
+        "FTMUSDT",
+        "HBARUSDT",
+        "FLOWUSDT",
+        "ICPUSDT",
+        "SANDUSDT",
+        "MANAUSDT",
+        "AXSUSDT",
+        "CRVUSDT",
+        "SNXUSDT",
+        "ATOMUSDT",
+        "XLMUSDT",
     ];
 
     let _backoff = Duration::from_secs(1);
     loop {
         // Build symbol list from l2_wanted (demand-driven) + fallback
-        let wanted_syms: std::collections::HashSet<String> = l2_wanted.iter()
+        let wanted_syms: std::collections::HashSet<String> = l2_wanted
+            .iter()
             .filter(|k| k.starts_with("binance:"))
             .map(|k| k[8..].to_string())
             .collect();
@@ -287,72 +378,128 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, _price_map: crate::state:
             wanted_syms.into_iter().collect()
         };
 
-        info!("[binance_l2] Starting L2 subscriptions for {} symbols (requires {} connections)", symbols.len(), (symbols.len() + 199) / 200);
+        info!(
+            "[binance_l2] Starting L2 subscriptions for {} symbols (requires {} connections)",
+            symbols.len(),
+            (symbols.len() + 199) / 200
+        );
 
         let mut handles = Vec::new();
 
         for chunk in symbols.chunks(200) {
             let chunk_symbols = chunk.to_vec();
             let l2_books_clone = l2_books.clone();
+            let prices = price_map.clone();
+            let signal = signal.clone();
 
             let handle = tokio::spawn(async move {
                 let mut backoff = Duration::from_secs(1);
                 let max_age = Duration::from_secs(1800);
                 let conn_start = std::time::Instant::now();
-                
+
                 loop {
                     if conn_start.elapsed() > max_age {
                         break;
                     }
-                    
-                    match connect_async_tls_with_config("wss://fstream.binance.com/ws", None, false, None).await {
+
+                    match connect_async_tls_with_config(
+                        "wss://fstream.binance.com/ws",
+                        None,
+                        false,
+                        None,
+                    )
+                    .await
+                    {
                         Ok((mut ws, _)) => {
                             use futures_util::SinkExt;
-                            let streams: Vec<String> = chunk_symbols.iter().map(|s| format!("{}@depth5@100ms", s.to_lowercase())).collect();
+                            let streams: Vec<String> = chunk_symbols
+                                .iter()
+                                .map(|s| format!("{}@depth5@100ms", s.to_lowercase()))
+                                .collect();
                             let msg = serde_json::json!({
                                 "method": "SUBSCRIBE",
                                 "params": streams,
                                 "id": 1
                             });
-                            
-                            if let Err(e) = ws.send(tokio_tungstenite::tungstenite::Message::Text(msg.to_string().into())).await {
+
+                            if let Err(e) = ws
+                                .send(tokio_tungstenite::tungstenite::Message::Text(
+                                    msg.to_string().into(),
+                                ))
+                                .await
+                            {
                                 error!("[binance_l2_chunk] Subscribe failed: {}", e);
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                                 continue;
                             }
-                            
+
                             backoff = Duration::from_secs(1);
 
-                            while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+                            while let Ok(Some(msg)) =
+                                tokio::time::timeout(Duration::from_secs(30), ws.next()).await
+                            {
                                 if conn_start.elapsed() > max_age {
                                     break;
                                 }
                                 if let Ok(Message::Text(text)) = msg {
                                     if let Ok(data) = serde_json::from_str::<Value>(&text) {
-                                        let (sym_str, depth_data) = if let Some(stream) = data["stream"].as_str() {
-                                            let sym = stream.split('@').next().unwrap_or("").to_uppercase();
-                                            (sym, data["data"].clone())
-                                        } else if let Some(s) = data["s"].as_str() {
-                                            (s.to_uppercase(), data.clone())
-                                        } else {
-                                            continue;
-                                        };
+                                        let (sym_str, depth_data) =
+                                            if let Some(stream) = data["stream"].as_str() {
+                                                let sym = stream
+                                                    .split('@')
+                                                    .next()
+                                                    .unwrap_or("")
+                                                    .to_uppercase();
+                                                (sym, data["data"].clone())
+                                            } else if let Some(s) = data["s"].as_str() {
+                                                (s.to_uppercase(), data.clone())
+                                            } else {
+                                                continue;
+                                            };
 
-                                        if sym_str.is_empty() || !sym_str.ends_with("USDT") { continue; }
+                                        if sym_str.is_empty() || !sym_str.ends_with("USDT") {
+                                            continue;
+                                        }
 
                                         let mut bids = parse_levels(&depth_data, "bids");
-                                        if bids.is_empty() { bids = parse_levels(&depth_data, "b"); }
+                                        if bids.is_empty() {
+                                            bids = parse_levels(&depth_data, "b");
+                                        }
                                         let mut asks = parse_levels(&depth_data, "asks");
-                                        if asks.is_empty() { asks = parse_levels(&depth_data, "a"); }
+                                        if asks.is_empty() {
+                                            asks = parse_levels(&depth_data, "a");
+                                        }
 
-                                        if !bids.is_empty() || !asks.is_empty() {
+                                        if !bids.is_empty() && !asks.is_empty() {
                                             let now_ms = std::time::SystemTime::now()
                                                 .duration_since(std::time::UNIX_EPOCH)
                                                 .unwrap_or_default()
-                                                .as_millis() as i64;
+                                                .as_millis()
+                                                as i64;
+                                            let exchange_ms = depth_data["E"].as_i64().unwrap_or(0);
+                                            if exchange_ms <= 0
+                                                || exchange_ms > now_ms + 250
+                                                || now_ms - exchange_ms > 1000
+                                            {
+                                                continue;
+                                            }
+                                            if let Some(mut venue) = prices.get_mut("binance") {
+                                                if let Some(t) = venue.get_mut(&sym_str) {
+                                                    t.bid = bids[0].0;
+                                                    t.ask = asks[0].0;
+                                                    t.bid_size = bids[0].0 * bids[0].1;
+                                                    t.ask_size = asks[0].0 * asks[0].1;
+                                                    t.last_updated = (now_ms / 1000) as u64;
+                                                }
+                                            }
+                                            signal.notify_one();
                                             l2_books_clone.insert(
                                                 format!("binance:{}", sym_str),
-                                                L2Snapshot { bids, asks, updated_ms: now_ms },
+                                                L2Snapshot {
+                                                    bids,
+                                                    asks,
+                                                    updated_ms: now_ms,
+                                                },
                                             );
                                         }
                                     }
@@ -360,7 +507,10 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, _price_map: crate::state:
                             }
                         }
                         Err(e) => {
-                            error!("[binance_l2_chunk] Connect failed: {}. Retry in {:?}", e, backoff);
+                            error!(
+                                "[binance_l2_chunk] Connect failed: {}. Retry in {:?}",
+                                e, backoff
+                            );
                             tokio::time::sleep(backoff).await;
                             backoff = (backoff * 2).min(Duration::from_secs(60));
                         }
@@ -371,9 +521,22 @@ async fn run_l2_depth_stream(l2_books: L2OrderbookMap, _price_map: crate::state:
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // Wait 30 minutes, then kill all handles and restart the main loop to refresh symbols
-        tokio::time::sleep(Duration::from_secs(1800)).await;
-        info!("[binance_l2] 30m elapsed. Refreshing all L2 subscriptions...");
+        // Rebuild only when demand changes; do not hold obsolete subscriptions for 30 minutes.
+        let subscribed: std::collections::HashSet<_> = symbols.into_iter().collect();
+        let started = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let desired: std::collections::HashSet<String> = l2_wanted
+                .iter()
+                .filter(|k| k.starts_with("binance:"))
+                .map(|k| k[8..].to_string())
+                .collect();
+            if started.elapsed() > Duration::from_secs(1800)
+                || (!desired.is_empty() && desired != subscribed)
+            {
+                break;
+            }
+        }
         for h in handles {
             h.abort();
         }
@@ -389,7 +552,11 @@ fn parse_levels(data: &Value, key: &str) -> Vec<(f64, f64)> {
                 .filter_map(|level| {
                     let px: f64 = level[0].as_str()?.parse().ok()?;
                     let sz: f64 = level[1].as_str()?.parse().ok()?;
-                    if px > 0.0 && sz > 0.0 { Some((px, sz)) } else { None }
+                    if px > 0.0 && sz > 0.0 {
+                        Some((px, sz))
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         })

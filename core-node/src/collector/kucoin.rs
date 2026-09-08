@@ -68,7 +68,11 @@ pub async fn run(
     }
 }
 
-async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2OrderbookMap) -> Result<()> {
+async fn handler(
+    price_map: &PriceMap,
+    signal: &UpdateSignal,
+    l2_books: &L2OrderbookMap,
+) -> Result<()> {
     let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
     let contracts: Value = http
         .get("https://api-futures.kucoin.com/api/v1/contracts/active")
@@ -107,14 +111,12 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
         symbols.len()
     );
 
-
-
     // Split symbols into chunks of 150 to stay under Kucoin's 400 topics per WS limit
     // 150 symbols * 2 topics (L1 + L2) = 300 topics per connection
-    
+
     let sym_map = std::sync::Arc::new(sym_map);
     let mut join_handles = Vec::new();
-    
+
     for (idx, chunk) in symbols.chunks(60).enumerate() {
         let chunk_symbols = chunk.to_vec();
         let p_map = price_map.clone();
@@ -126,7 +128,12 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             let mut backoff = tokio::time::Duration::from_secs(1);
             loop {
                 if let Err(e) = run_ws(idx, &chunk_symbols, &p_map, &sig, &l2, &*s_map).await {
-                    tracing::warn!("[kucoin] Shard {} WS error: {}. Reconnecting in {:?}...", idx, e, backoff);
+                    tracing::warn!(
+                        "[kucoin] Shard {} WS error: {}. Reconnecting in {:?}...",
+                        idx,
+                        e,
+                        backoff
+                    );
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(tokio::time::Duration::from_secs(5));
                 } else {
@@ -135,7 +142,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
             }
         }));
     }
-    
+
     futures_util::future::join_all(join_handles).await;
     Ok(())
 }
@@ -170,7 +177,7 @@ async fn run_ws(
     )
     .await
     .context("KuCoin WS connect failed")?;
-    
+
     // Subscribe to L1 ticker stream for this shard's symbols
     for chunk in symbols.chunks(50) {
         let topic = format!("/contractMarket/tickerV2:{}", chunk.join(","));
@@ -247,8 +254,6 @@ async fn run_ws(
 
     let mut ping = tokio::time::interval(Duration::from_secs(12));
     // Heartbeat: refresh L2 timestamps every 500ms for static books
-    let mut heartbeat = tokio::time::interval(Duration::from_millis(500));
-    heartbeat.tick().await; // skip immediate
     loop {
         // Reconnect periodically to refresh L2 subscriptions (new pairs may appear)
         if conn_start.elapsed() > max_conn_age {
@@ -262,7 +267,7 @@ async fn run_ws(
                         if v.msg_type != "message" { continue; }
                         let topic = v.topic.as_deref().unwrap_or("");
                         let raw_sym_from_topic = topic.split(':').nth(1);
-                        
+
                         if let Some(d) = v.data {
                             let raw_sym = d.symbol.or(raw_sym_from_topic);
                             if let Some(raw_sym) = raw_sym {
@@ -320,17 +325,7 @@ async fn run_ws(
                 let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
                 ws.send(Message::Text(json!({"id": format!("{}", ts), "type": "ping"}).to_string().into())).await?;
             }
-            _ = heartbeat.tick() => {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-                for mut entry in l2_books.iter_mut() {
-                    if entry.key().starts_with("kucoin:") {
-                        entry.value_mut().updated_ms = now_ms;
-                    }
-                }
-            }
+
         }
     }
     Ok(())
