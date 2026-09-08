@@ -240,23 +240,6 @@ async fn main() -> Result<()> {
         info!("[startup] KuCoin Private WS ready.");
     }
 
-    // ── Pre-init Gate Private WS for maker order fill detection ──────────────
-    if exchange_keys.supports("gate") {
-        info!("[startup] Pre-initializing Gate Private WS for order fills...");
-        // Wire up pending_makers and notify references so WS loop can trigger maker_manager
-        engine::exchanges::ws_gate_private::set_pending_makers_ref(
-            engine_ctx.pending_makers.clone(),
-        );
-        engine::exchanges::ws_gate_private::set_maker_notify(engine_ctx.maker_fill_notify.clone());
-        engine::exchanges::ws_gate_private::ensure_private_ws(
-            &exchange_keys.gate_key,
-            &exchange_keys.gate_secret,
-        )
-        .await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        info!("[startup] Gate Private WS ready.");
-    }
-
     // ── Pre-init Trading WebSockets (Binance + Gate) ─────────────────────────
     if exchange_keys.supports("binance") {
         info!("[startup] Pre-initializing Binance WS trading API...");
@@ -282,6 +265,12 @@ async fn main() -> Result<()> {
         engine_ctx.clone(),
     );
 
+    engine::account_monitor::start(
+        journal.clone(),
+        http.clone(),
+        exchange_keys.clone(),
+        engine_ctx.clone(),
+    );
     engine::settlement::start(journal.clone(), http.clone(), exchange_keys.clone());
 
     // ── Pre-warm HTTP connections to exchange APIs ─────────────────────────
@@ -417,9 +406,9 @@ async fn main() -> Result<()> {
         )
         .allow_methods(Any)
         .allow_headers(Any);
-    let app_state = journal.clone();
+    let app_state = (journal.clone(), engine_ctx.clone());
     let app = Router::new()
-        .route("/health", get(|| async { "ok" }))
+        .route("/health", get(handle_health))
         .route("/api/positions/close", post(handle_close_position))
         .with_state(app_state)
         .layer(cors);
@@ -442,7 +431,7 @@ pub struct CloseReq {
 }
 
 async fn handle_close_position(
-    State(journal): State<engine::journal::Journal>,
+    State((journal, _ctx)): State<(engine::journal::Journal, Arc<state::EngineContext>)>,
     Json(req): Json<CloseReq>,
 ) -> Result<(axum::http::StatusCode, &'static str), (axum::http::StatusCode, String)> {
     let trades = journal
@@ -469,4 +458,25 @@ async fn handle_close_position(
         axum::http::StatusCode::ACCEPTED,
         "Close requested; execution is being reconciled",
     ))
+}
+
+async fn handle_health(
+    State((journal, ctx)): State<(engine::journal::Journal, Arc<state::EngineContext>)>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let age = engine::utils::now_ms()
+        - ctx
+            .supervisor_tick_ms
+            .load(std::sync::atomic::Ordering::Acquire);
+    let active = journal.active().await;
+    let healthy = active.is_ok() && age >= 0 && age < 5000;
+    (
+        if healthy {
+            axum::http::StatusCode::OK
+        } else {
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(
+            serde_json::json!({"healthy":healthy,"build_sha":option_env!("BUILD_SHA").unwrap_or("unknown"),"entries_halted":ctx.is_killed.load(std::sync::atomic::Ordering::Acquire),"supervisor_age_ms":age,"active_trades":active.ok().map(|v|v.len())}),
+        ),
+    )
 }

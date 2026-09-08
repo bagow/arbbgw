@@ -311,8 +311,9 @@ impl Journal {
             0.0
         };
         self.db.call(move |c| {
-            c.execute("UPDATE trades SET fee_a=?,fee_b=?,order_id_a=?,order_id_b=?,entry_spread=? WHERE id=?",params![a.fee,b.fee,id_a,id_b,spread,id])?;
-            c.execute("UPDATE trades SET status=?,entry_price_a=?,entry_price_b=?,exit_price_a=?,exit_price_b=?,opened_qty_a=?,opened_qty_b=?,closed_qty_a=?,closed_qty_b=?,contracts_a=?,contracts_b=?,volume=?,commission_cost=?,gross_pnl=?,pnl_a=?,pnl_b=?,pnl=NULL,accounting_status=?,exit_time=CASE WHEN ? THEN COALESCE(exit_time,?) ELSE exit_time END WHERE id=?",params![status,a.entry_price(),b.entry_price(),a.exit_price(),b.exit_price(),a.opened,b.opened,a.closed,b.closed,a.opened/multa,b.opened/multb,a.entry_value.max(b.entry_value),fees,gross,if flat {Some(pa)}else{None},if flat {Some(pb)}else{None},accounting,flat,now,id])?;Ok(())
+            let tx=c.transaction()?;
+            tx.execute("UPDATE trades SET fee_a=?,fee_b=?,order_id_a=?,order_id_b=?,entry_spread=? WHERE id=?",params![a.fee,b.fee,id_a,id_b,spread,id])?;
+            tx.execute("UPDATE trades SET status=?,entry_price_a=?,entry_price_b=?,exit_price_a=?,exit_price_b=?,opened_qty_a=?,opened_qty_b=?,closed_qty_a=?,closed_qty_b=?,contracts_a=?,contracts_b=?,volume=?,commission_cost=?,gross_pnl=?,pnl_a=?,pnl_b=?,pnl=NULL,accounting_status=?,exit_time=CASE WHEN ? THEN COALESCE(exit_time,?) ELSE exit_time END WHERE id=?",params![status,a.entry_price(),b.entry_price(),a.exit_price(),b.exit_price(),a.opened,b.opened,a.closed,b.closed,a.opened/multa,b.opened/multb,a.entry_value.max(b.entry_value),fees,gross,if flat {Some(pa)}else{None},if flat {Some(pb)}else{None},accounting,flat,now,id])?;tx.commit()?;Ok(())
         }).await?;
         Ok(())
     }

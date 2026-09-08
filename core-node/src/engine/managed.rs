@@ -80,12 +80,7 @@ pub fn executable(
             if !bid.is_finite() || !ask.is_finite() || bid <= 0.0 || bid >= ask {
                 return None;
             }
-            return super::execution::verify_l2_vwap(
-                Ok((book.bids.clone(), book.asks.clone())),
-                buy,
-                qty,
-                1.0,
-            );
+            return super::book::vwap(&book.bids, &book.asks, buy, qty);
         }
     }
     None
@@ -459,6 +454,7 @@ pub fn supervise(
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             timer.tick().await;
+            ctx.supervisor_tick_ms.store(now_ms(), Ordering::Release);
             match j.active().await {
                 Ok(trades) => {
                     *ctx.owned_l2_wanted.write().await = trades
@@ -610,6 +606,20 @@ async fn manage(
     // Exit starts only once. Partial closes remain journaled and only residuals are submitted.
     let emergency = closing || timed || stop;
     for (leg, qty, px) in [("A", a.remaining(), pxa), ("B", b.remaining(), pxb)] {
+        let a_leg = leg == "A";
+        let observed = if now_ms() - t.created_ms >= 10_000 {
+            super::account_monitor::observed_remaining(
+                ctx,
+                if a_leg { &s.exchange_a } else { &s.exchange_b },
+                &s.pair,
+                if a_leg { s.mult_a } else { s.mult_b },
+                if a_leg { !s.is_a_higher } else { s.is_a_higher },
+                t.created_ms + 10_000,
+            )
+        } else {
+            None
+        };
+        let qty = observed.map(|actual| actual.min(qty)).unwrap_or(qty);
         if qty <= 1e-9 {
             continue;
         }

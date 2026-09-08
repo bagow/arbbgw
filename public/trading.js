@@ -1419,9 +1419,9 @@ function renderDashboardHTML(profileId) {
             <!-- KPI row -->
             <div id="dash-kpi-${pid}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;"></div>
             
-            <!-- Balance Analysis (Stacked) -->
+            <!-- Latest Reported Balances (Stacked) -->
             <div class="chart-card">
-                <div class="chart-card-title">Balance Analysis</div>
+                <div class="chart-card-title">Latest Reported Balances</div>
                 <div style="position:relative;height:320px;width:100%;">
                     <canvas id="dash-balance-${pid}"></canvas>
                 </div>
@@ -1482,7 +1482,8 @@ function renderKPICards(pid, stats, exchanges) {
     const totalPnl = stats.total_pnl || 0;
     const totalTrades = stats.total_trades || 0;
     const wins = stats.wins || 0;
-    const winRate = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(1) : '0.0';
+    const recordedTrades = totalTrades - (stats.pending_count || 0);
+    const winRate = recordedTrades > 0 ? (wins / recordedTrades * 100).toFixed(1) : '—';
     const avgPnl = stats.avg_pnl || 0;
     const avgDuration = stats.avg_duration || 0;
     const realBalances = (exchanges && exchanges.balances) || {};
@@ -1492,7 +1493,7 @@ function renderKPICards(pid, stats, exchanges) {
         ['💰', 'Total Balance', `$${totalBalance.toFixed(2)}`, 'var(--text)'],
         ['📈', 'Total PnL', fmtPnL(totalPnl), totalPnl >= 0 ? 'var(--green)' : 'var(--red)'],
         ['📊', 'Trades', totalTrades, 'var(--text)'],
-        ['🎯', 'Win Rate', `${winRate}%`, wins / (totalTrades || 1) >= 0.5 ? 'var(--green)' : 'var(--red)'],
+        ['🎯', 'Win Rate (recorded)', recordedTrades ? `${winRate}%` : '—', wins / (recordedTrades || 1) >= 0.5 ? 'var(--green)' : 'var(--red)'],
         ['⚡', 'Avg PnL', fmtPnL(avgPnl), avgPnl >= 0 ? 'var(--green)' : 'var(--red)'],
         ['⏱', 'Avg Duration', typeof fmtDuration === 'function' ? fmtDuration(avgDuration) : avgDuration + 'ms', 'var(--text)'],
     ];
@@ -1560,92 +1561,23 @@ function renderDashboardCharts(profileId, stats, exchanges) {
     Chart.defaults.color = '#94a3b8';
     Chart.defaults.borderColor = '#1c2235';
 
-    // Balance Analysis Chart
+    // Current account snapshots do not establish historical account equity.
     const balCtx = document.getElementById(`dash-balance-${pid}`);
     if (balCtx) {
-        const curve = stats.equity_curve || [];
-        const labels = [];
-        
-        const exBalances = {};
-        const exKeys = new Set();
-        curve.forEach(p => { if(p.ex_a) exKeys.add(p.ex_a); if(p.ex_b) exKeys.add(p.ex_b); });
-        if (exKeys.size === 0) exKeys.add('Capital');
-
-        // Use real exchange balances as starting capital (fallback to $0)
-        const realBal = (exchanges && exchanges.balances) || {};
-        const colors = ['#60a5fa', '#f43f5e', '#34d399', '#c084fc', '#fbbf24', '#fb923c'];
-        let cIdx = 0;
-        const colorMap = {};
-        exKeys.forEach(ex => {
-            exBalances[ex] = realBal[ex] || 0;
-            colorMap[ex] = colors[cIdx % colors.length];
-            cIdx++;
-        });
-
-        const historyByEx = {};
-        exKeys.forEach(ex => historyByEx[ex] = []);
-        const historyTotal = [];
-
-        curve.forEach((p, i) => {
-            if (p.ex_a) exBalances[p.ex_a] += (p.pnl || 0) / 2;
-            else if (exKeys.has('Capital')) exBalances['Capital'] += (p.pnl || 0) / 2;
-            
-            if (p.ex_b) exBalances[p.ex_b] += (p.pnl || 0) / 2;
-            else if (exKeys.has('Capital')) exBalances['Capital'] += (p.pnl || 0) / 2;
-            
-            if (curve.length <= 150 || i % Math.ceil(curve.length / 100) === 0 || i === curve.length - 1) {
-                labels.push(`#${i + 1}`);
-                let total = 0;
-                exKeys.forEach(ex => {
-                    historyByEx[ex].push(parseFloat(exBalances[ex].toFixed(2)));
-                    total += exBalances[ex];
-                });
-                historyTotal.push(parseFloat(total.toFixed(2)));
-            }
-        });
-
-        const datasets = [];
-        exKeys.forEach(ex => {
-            datasets.push({
-                label: ex,
-                data: historyByEx[ex],
-                borderColor: colorMap[ex],
-                backgroundColor: colorMap[ex] + '33', // 20% opacity
-                fill: true,
-                tension: 0.1,
-                stack: 'exchanges',
-                pointRadius: curve.length > 50 ? 0 : 2
-            });
-        });
-
-        datasets.push({
-            label: 'Total Capitalization',
-            data: historyTotal,
-            borderColor: '#fbbf24',
-            borderDash: [5, 5],
-            borderWidth: 2,
-            backgroundColor: 'transparent',
-            fill: false,
-            tension: 0.1,
-            stack: 'total', // separate stack so it overlays and doesn't compound
-            pointRadius: curve.length > 50 ? 0 : 3
-        });
-
+        const balances = (exchanges && exchanges.balances) || {};
+        const labels = Object.keys(balances).filter(ex => Number.isFinite(balances[ex]));
         chartInstances[pid].balance = new Chart(balCtx, {
-            type: 'line',
-            data: { labels, datasets },
+            type: 'bar',
+            data: { labels, datasets: [{
+                label: 'Latest reported balance (USDT)',
+                data: labels.map(ex => balances[ex]),
+                backgroundColor: '#60a5fa88'
+            }] },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
-                interaction: { mode: 'index', intersect: false },
-                plugins: {
-                    legend: { position: 'top', align: 'end' },
-                    tooltip: { callbacks: { label: function(c) { return c.dataset.label + ': $' + c.raw.toLocaleString(); } } }
-                },
-                scales: {
-                    x: { grid: { color: '#1f2937' } },
-                    y: { stacked: true, grid: { color: '#1f2937' } }
-                }
+                plugins: { legend: { position: 'top' } },
+                scales: { y: { beginAtZero: true } }
             }
         });
     }

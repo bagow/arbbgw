@@ -22,7 +22,7 @@ fn check_auth(headers: &HeaderMap, secret: &str) -> bool {
     headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v == format!("Bearer {}", secret) || v == "Bearer local_dev")
+        .map(|v| !secret.is_empty() && v == format!("Bearer {}", secret))
         .unwrap_or(false)
 }
 
@@ -1150,61 +1150,68 @@ pub async fn handle_delete_profile(
         return json_err(StatusCode::BAD_REQUEST, "Cannot delete default profiles");
     }
 
-    let _id2 = id.clone();
-    let id3 = id.clone();
-    let _ = state
-        .db
-        .call(move |conn| {
-            conn.execute(
-                "DELETE FROM trading_profiles WHERE id=? AND owner=?",
-                params![id.clone(), username],
-            )?;
-            Ok(())
-        })
-        .await;
-    // Clear trades from DB
-    let _ = state
+    // A profile with a ledger must remain addressable for recovery and audit.
+    let profile_id = id.clone();
+    let has_trades = state
         .real_db
         .call(move |conn| {
-            conn.execute("DELETE FROM trades WHERE profile_id=?", params![id3])?;
-            Ok(())
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM trades WHERE profile_id=?)",
+                [profile_id],
+                |r| r.get::<_, bool>(0),
+            )?)
         })
         .await;
-
-    (StatusCode::OK, Json(json!({ "success": true }))).into_response()
+    match has_trades {
+        Ok(false) => {}
+        Ok(true) => {
+            return json_err(
+                StatusCode::CONFLICT,
+                "Profile has trade history; disable it instead",
+            )
+        }
+        Err(_) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Cannot verify trade history",
+            )
+        }
+    }
+    let result = state
+        .db
+        .call(move |conn| {
+            Ok(conn.execute(
+                "DELETE FROM trading_profiles WHERE id=? AND owner=? AND is_active=0",
+                params![id, username],
+            )?)
+        })
+        .await;
+    match result {
+        Ok(1) => (StatusCode::OK, Json(json!({"success":true}))).into_response(),
+        Ok(_) => json_err(StatusCode::CONFLICT, "Profile must be owned and inactive"),
+        Err(_) => json_err(StatusCode::INTERNAL_SERVER_ERROR, "Cannot delete profile"),
+    }
 }
 
-// ─── DELETE /api/profiles/:id/trades ───
+// Durable trading history cannot be deleted through the UI.
 pub async fn handle_clear_trades(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(_id): Path<String>,
 ) -> Response {
     if check_basic_auth(&headers, &state).is_none() {
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
     }
+    json_err(
+        StatusCode::CONFLICT,
+        "Trade history is an execution ledger and cannot be cleared",
+    )
+}
 
-    let _id2 = id.clone();
-    let id3 = id.clone();
-    let _ = state
-        .db
-        .call(move |conn| {
-            conn.execute(
-                "UPDATE trading_profiles SET pending_commands='CLEAR_TRADES' WHERE id=?",
-                params![id],
-            )?;
-            Ok(())
-        })
-        .await;
-    let _ = state
-        .real_db
-        .call(move |conn| {
-            conn.execute("DELETE FROM trades WHERE profile_id=?", params![id3])?;
-            Ok(())
-        })
-        .await;
-
-    (StatusCode::OK, Json(json!({ "success": true }))).into_response()
+async fn can_manage_profile(state: &AppState, id: String, username: String) -> bool {
+    state.db.call(move |conn| {
+        Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM trading_profiles WHERE id=? AND (owner=? OR id='real-default'))", params![id,username], |r|r.get::<_,bool>(0))?)
+    }).await.unwrap_or(false)
 }
 
 // ─── POST /api/profiles/:id/market-close-all ───
@@ -1213,10 +1220,14 @@ pub async fn handle_market_close_all(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if check_basic_auth(&headers, &state).is_none() {
-        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
-    }
+    let username = match check_basic_auth(&headers, &state) {
+        Some(u) => u,
+        None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
+    };
 
+    if !can_manage_profile(&state, id.clone(), username).await {
+        return json_err(StatusCode::FORBIDDEN, "Profile access denied");
+    }
     let r1 = state.real_db.call(move |conn| {
         conn.execute("UPDATE trades SET manual_close_requested=1,close_reason='MANUAL_CLOSE' WHERE profile_id=? AND status IN ('ENTRY','RECONCILING','OPEN','CLOSING')", params![id])?;
         Ok(())
@@ -1238,10 +1249,31 @@ pub async fn handle_market_close_trade(
     headers: HeaderMap,
     Path(trade_id): Path<i64>,
 ) -> Response {
-    if check_basic_auth(&headers, &state).is_none() {
-        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
-    }
+    let username = match check_basic_auth(&headers, &state) {
+        Some(u) => u,
+        None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
+    };
 
+    let profile_id = state
+        .real_db
+        .call(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT profile_id FROM trades WHERE id=?",
+                    [trade_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok())
+        })
+        .await
+        .ok()
+        .flatten();
+    let Some(profile_id) = profile_id else {
+        return json_err(StatusCode::NOT_FOUND, "Trade not found");
+    };
+    if !can_manage_profile(&state, profile_id, username).await {
+        return json_err(StatusCode::FORBIDDEN, "Profile access denied");
+    }
     let r1 = state
         .real_db
         .call(move |conn| {

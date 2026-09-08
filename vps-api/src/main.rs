@@ -34,14 +34,23 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = dotenvy::dotenv();
 
-    let collector_token = env::var("COLLECTOR_TOKEN").unwrap_or_else(|_| "secret_token_123".into());
-    let pass_dima = env::var("PASS_DIMA").unwrap_or_else(|_| "pass_dima".into());
-    let pass_sergei = env::var("PASS_SERGEI").unwrap_or_else(|_| "pass_sergei".into());
+    let collector_token = env::var("COLLECTOR_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("COLLECTOR_TOKEN must be configured"))?;
+    let pass_dima = env::var("PASS_DIMA")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("PASS_DIMA must be configured"))?;
+    let pass_sergei = env::var("PASS_SERGEI")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("PASS_SERGEI must be configured"))?;
 
     let db_path = env::var("PROFILES_DB_PATH")
-        .unwrap_or_else(|_| "/home/ubuntu/core-node/vps-api.db".to_string());
+        .unwrap_or_else(|_| "/home/opc/core-node/vps-api.db".to_string());
     let real_path = env::var("REAL_DB_PATH")
-        .unwrap_or_else(|_| "/home/ubuntu/core-node/real-trader.db".to_string());
+        .unwrap_or_else(|_| "/home/opc/core-node/real-trader.db".to_string());
 
     // ── Profiles DB (vps-api.db) ──────────────────────────────────────────────
     tracing::info!("Profiles DB: {}", db_path);

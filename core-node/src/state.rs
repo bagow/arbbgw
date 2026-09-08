@@ -44,6 +44,12 @@ pub struct FundingInfo {
 }
 
 #[derive(Clone)]
+pub struct PositionSnapshot {
+    pub received_ms: i64,
+    pub positions: Vec<crate::engine::exchanges::traits::PositionInfo>,
+}
+
+#[derive(Clone)]
 pub struct EngineContext {
     pub multipliers: Arc<DashMap<String, f64>>,
     pub launch_times: Arc<DashMap<String, i64>>,
@@ -61,10 +67,12 @@ pub struct EngineContext {
     pub balance_low: Arc<DashMap<String, bool>>,
     pub margin_balances: Arc<DashMap<String, f64>>,
     pub positions: Arc<DashMap<String, Vec<crate::engine::exchanges::traits::PositionInfo>>>,
+    pub managed_positions: Arc<DashMap<String, PositionSnapshot>>,
     /// Guard against parallel close attempts on the same trade_id.
     /// Set to true when a close is in-flight; cleared when the spawn finishes.
     pub closing_in_flight: Arc<DashMap<i64, bool>>,
     pub owned_l2_wanted: Arc<tokio::sync::RwLock<Vec<String>>>,
+    pub supervisor_tick_ms: Arc<std::sync::atomic::AtomicI64>,
     /// Risk Kill-Switch: Number of consecutive delta trims. Reset on successful symmetric execution.
     pub consecutive_trims: Arc<std::sync::atomic::AtomicU32>,
     /// Risk Kill-Switch: Number of consecutive entry failures. Reset on successful entry.
@@ -100,11 +108,6 @@ pub struct EngineContext {
     /// When L2 WS data is unavailable, require N consecutive L1 zero-spread polls
     /// before allowing close. Prevents single-tick L1 flash closes.
     pub zero_spread_confirms: Arc<DashMap<i64, (u32, i64)>>,
-    /// Pending maker orders: key = pair (e.g. "BTCUSDT") → PendingMakerOrder.
-    /// Managed by maker_manager. WS private streams check this for fill detection.
-    pub pending_makers: Arc<DashMap<String, crate::engine::maker_manager::PendingMakerOrder>>,
-    /// Notify signal fired by WS private streams when a pending maker order fills.
-    pub maker_fill_notify: Arc<Notify>,
     /// Per-exchange maker fee rates (e.g. "gate" → 0.00015).
     pub maker_fee_rates: Arc<DashMap<String, f64>>,
     /// Unhedged orphan position confirmation counter: "exchange:pair:side" → (count, last_seen_ms).
@@ -126,8 +129,10 @@ impl Default for EngineContext {
             balance_low: Arc::new(DashMap::new()),
             margin_balances: Arc::new(DashMap::new()),
             positions: Arc::new(DashMap::new()),
+            managed_positions: Arc::new(DashMap::new()),
             closing_in_flight: Arc::new(DashMap::new()),
             owned_l2_wanted: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            supervisor_tick_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             consecutive_trims: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             consecutive_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             is_killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -141,8 +146,6 @@ impl Default for EngineContext {
             profiles_db: None,
             ws_order_unhealthy_until: Arc::new(DashMap::new()),
             zero_spread_confirms: Arc::new(DashMap::new()),
-            pending_makers: Arc::new(DashMap::new()),
-            maker_fill_notify: Arc::new(Notify::new()),
             maker_fee_rates: Arc::new(DashMap::new()),
             orphan_confirm_counter: Arc::new(DashMap::new()),
         }

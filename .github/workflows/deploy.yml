@@ -24,6 +24,9 @@ on:
         type: boolean
         default: false
 
+env:
+  BUILD_SHA: ${{ github.sha }}
+
 jobs:
   # --- 0. Cargo check для всего workspace (блокирует деплой при ошибке) ---
   check:
@@ -107,13 +110,16 @@ jobs:
             vps_api:
               - 'vps-api/**'
               - 'vps-api.service'
+              - '.github/scripts/migrate-vps-env.py'
               - 'shared/**'
               - 'Cargo.toml'
+              - 'Cargo.lock'
             core:
               - 'core-node/**'
               - 'core-node.service'
               - 'shared/**'
               - 'Cargo.toml'
+              - 'Cargo.lock'
             cloudflared:
               - 'cloudflared.service'
             cloudflare:
@@ -157,7 +163,7 @@ jobs:
           host: ${{ secrets.VPS_SSH_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "vps-api.service"
+          source: "vps-api.service,.github/scripts/migrate-vps-env.py"
           target: "/tmp/deploy/"
       - name: Install and Restart
         uses: appleboy/ssh-action@v1.0.3
@@ -166,6 +172,8 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
+            set -eu
+            sudo python3 /tmp/deploy/.github/scripts/migrate-vps-env.py
             sudo mv /tmp/deploy/vps-api /usr/local/bin/
             sudo chown root:root /usr/local/bin/vps-api
             sudo chmod +x /usr/local/bin/vps-api
@@ -214,6 +222,7 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
+            set -eu
             sudo mv /tmp/deploy/core-node /usr/local/bin/
             sudo chown root:root /usr/local/bin/core-node
             sudo chmod +x /usr/local/bin/core-node
@@ -254,8 +263,16 @@ jobs:
             sudo systemctl daemon-reload
             sudo systemctl enable core-node
             sudo systemctl restart core-node
-            sleep 5
-            sudo systemctl status core-node --no-pager || true
+            ready=0
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:3003/health; then
+                ready=1
+                break
+              fi
+              sleep 2
+            done
+            test "$ready" = 1
+            sudo systemctl is-active --quiet core-node
             echo "=== Profiles in use ==="
             sudo journalctl -u core-node --no-pager -n 30 | grep -E "STARTUP|Profiles DB|vol=" || true
 
@@ -275,6 +292,7 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
+            set -eu
             if ! command -v cloudflared &>/dev/null; then
               curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
               sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
