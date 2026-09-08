@@ -8,7 +8,7 @@
 - `vps-api/`: Rust/Axum API для настроек, истории, состояния и запросов закрытия. Читает те же SQLite-файлы, что и core.
 - `shared/`: общие структуры и настройки.
 - `public/`: HTML, CSS и обычный JavaScript. React/Vite в проекте нет.
-- `src/index.js`: Cloudflare Worker, аутентификация и проксирование API; статика на Cloudflare задаётся `wrangler.toml`.
+- `src/index.js`: Cloudflare Worker, статика и перенаправление `/api/*` на `api.arb.bagow.com`; аутентификацию API проверяет `vps-api`; статика на Cloudflare задаётся `wrangler.toml`.
 - Cloudflare Tunnel соединяет Cloudflare с API на VPS. Торговые ключи и исполнение находятся на VPS, не во фронтенде.
 
 Основной репозиторий — **GitHub `bagow/arbbgw`**. GitLab в текущем процессе публикации не используется.

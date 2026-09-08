@@ -34,8 +34,8 @@ pub fn capture(spreads: &[SpreadRow], ctx: &EngineContext, now: i64) -> Vec<Stri
     spreads.iter().filter(|s| [&s.exchange_a,&s.exchange_b].iter().all(|ex|
         super::exchanges::get_connector(ex).map(|c|c.supports_managed_orders()).unwrap_or(false)))
         .take(20).filter_map(|s| {
-            let a=ctx.l2_books.get(&format!("{}:{}",s.exchange_a,s.pair))?;
-            let b=ctx.l2_books.get(&format!("{}:{}",s.exchange_b,s.pair))?;
+            let a=ctx.l2_books.get(&format!("{}:{}",s.exchange_a,s.pair))?.clone();
+            let b=ctx.l2_books.get(&format!("{}:{}",s.exchange_b,s.pair))?.clone();
             // Include age explicitly: stale observations are evidence, never executable quotes.
             Some(serde_json::json!({"recorded_ms":now,"build_sha":option_env!("BUILD_SHA"),"spread":s,
                 "book_a":{"updated_ms":a.updated_ms,"bids":a.bids,"asks":a.asks},

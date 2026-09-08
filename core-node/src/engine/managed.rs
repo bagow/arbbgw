@@ -378,6 +378,19 @@ async fn enter(
         if half < 0.0 {
             continue;
         }
+        // Re-read entry authorization after REST preflight; a disabled profile must not
+        // open using the settings snapshot captured several seconds earlier.
+        let authorized = if let Some(db) = &ctx.profiles_db {
+            let profile_id = s.profile_id.clone();
+            db.call(move |c| {
+                Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM trading_profiles WHERE id=? AND is_active=1) AND NOT EXISTS(SELECT 1 FROM server_cache WHERE key='kill_switch_active' AND value='1')", [profile_id], |r|r.get::<_,bool>(0))?)
+            }).await.unwrap_or(false)
+        } else {
+            false
+        };
+        if !authorized || ctx.is_killed.load(Ordering::Acquire) {
+            continue;
+        }
         let id = match j
             .reserve(Plan {
                 funding_deadline_ms,
@@ -544,7 +557,7 @@ async fn manage(
 ) -> anyhow::Result<()> {
     let mut orders = j.orders(t.id).await?;
     for o in &orders {
-        if !o.observation.state.terminal() || o.observation.fee.is_none() {
+        if !o.observation.state.terminal() {
             let conn =
                 get_connector(&o.exchange).ok_or_else(|| anyhow::anyhow!("Missing connector"))?;
             if let Ok(obs) = conn

@@ -1491,10 +1491,10 @@ function renderKPICards(pid, stats, exchanges) {
 
     const kpis = [
         ['💰', 'Total Balance', `$${totalBalance.toFixed(2)}`, 'var(--text)'],
-        ['📈', 'Total PnL', fmtPnL(totalPnl), totalPnl >= 0 ? 'var(--green)' : 'var(--red)'],
+        ['📈', 'Recorded PnL', recordedTrades ? fmtPnL(totalPnl) : '—', totalPnl >= 0 ? 'var(--green)' : 'var(--red)'],
         ['📊', 'Trades', totalTrades, 'var(--text)'],
         ['🎯', 'Win Rate (recorded)', recordedTrades ? `${winRate}%` : '—', wins / (recordedTrades || 1) >= 0.5 ? 'var(--green)' : 'var(--red)'],
-        ['⚡', 'Avg PnL', fmtPnL(avgPnl), avgPnl >= 0 ? 'var(--green)' : 'var(--red)'],
+        ['⚡', 'Avg Recorded PnL', recordedTrades ? fmtPnL(avgPnl) : '—', avgPnl >= 0 ? 'var(--green)' : 'var(--red)'],
         ['⏱', 'Avg Duration', typeof fmtDuration === 'function' ? fmtDuration(avgDuration) : avgDuration + 'ms', 'var(--text)'],
     ];
     kpiEl.innerHTML = kpis.map(([icon, label, value, color]) => `

@@ -101,6 +101,13 @@ impl OrderObservation {
                     .average_price
                     .map(|p| p.is_finite() && p > 0.0)
                     .unwrap_or(false))
+            || (self.filled_quantity > 0.0
+                && self
+                    .order_id
+                    .as_ref()
+                    .map(|id| id.is_empty())
+                    .unwrap_or(true))
+            || (self.state == OrderState::Rejected && self.filled_quantity != 0.0)
             || (self.state == OrderState::Filled
                 && (self.filled_quantity - r.quantity).abs() > r.quantity * 1e-8)
         {

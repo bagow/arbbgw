@@ -56,7 +56,6 @@ pub fn symbols_match(a: &str, b: &str) -> bool {
     normalize_symbol(a) == normalize_symbol(b)
 }
 
-
 /// Get cached taker fee rate for an exchange (as fraction, e.g. 0.0005 = 0.05%).
 pub fn get_exchange_fee(
     exchange: &str,
@@ -67,6 +66,7 @@ pub fn get_exchange_fee(
         .fee_rates
         .get(exchange)
         .map(|v| *v)
+        .filter(|v| v.is_finite() && *v >= 0.0 && *v <= 0.1)
         .unwrap_or(default_fee)
 }
 
@@ -193,14 +193,26 @@ mod tests {
 
     #[test]
     fn detects_missing_position_errors_case_insensitively() {
-        assert!(is_position_missing_or_liquidated_error("Position not found"));
+        assert!(is_position_missing_or_liquidated_error(
+            "Position not found"
+        ));
         assert!(is_position_missing_or_liquidated_error("ORDER LIQUIDATED"));
-        assert!(is_position_missing_or_liquidated_error("bitget error 22002"));
-        assert!(is_position_missing_or_liquidated_error("code 300009 kucoin"));
-        assert!(is_position_missing_or_liquidated_error("Gate.io close order failed for XDCUSDT: REDUCE_EXCEEDED: empty position"));
+        assert!(is_position_missing_or_liquidated_error(
+            "bitget error 22002"
+        ));
+        assert!(is_position_missing_or_liquidated_error(
+            "code 300009 kucoin"
+        ));
+        assert!(is_position_missing_or_liquidated_error(
+            "Gate.io close order failed for XDCUSDT: REDUCE_EXCEEDED: empty position"
+        ));
         // Не должно глотать ошибки, требующие реальной реакции.
-        assert!(!is_position_missing_or_liquidated_error("insufficient balance"));
-        assert!(!is_position_missing_or_liquidated_error("rate limit exceeded"));
+        assert!(!is_position_missing_or_liquidated_error(
+            "insufficient balance"
+        ));
+        assert!(!is_position_missing_or_liquidated_error(
+            "rate limit exceeded"
+        ));
         assert!(!is_position_missing_or_liquidated_error("timeout"));
     }
 

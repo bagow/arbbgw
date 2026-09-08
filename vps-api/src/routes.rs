@@ -1415,12 +1415,27 @@ pub async fn handle_close_exchange_position(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<PositionCloseReq>,
 ) -> impl axum::response::IntoResponse {
-    if check_basic_auth(&headers, &state).is_none() {
-        return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
+    let username = match check_basic_auth(&headers, &state) {
+        Some(u) => u,
+        None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
+    };
+    let (pair, exchange) = (payload.symbol.clone(), payload.exchange.clone());
+    let profile_id = state.real_db.call(move |c| {
+        Ok(c.query_row("SELECT profile_id FROM trades WHERE pair=? AND (exchange_a=? OR exchange_b=?) AND status IN ('ENTRY','RECONCILING','OPEN','CLOSING')",params![pair,exchange,exchange],|r|r.get::<_,String>(0)).ok())
+    }).await.ok().flatten();
+    let Some(profile_id) = profile_id else {
+        return json_err(
+            StatusCode::CONFLICT,
+            "No owned trade for this position; reconciliation required",
+        );
+    };
+    if !can_manage_profile(&state, profile_id, username).await {
+        return json_err(StatusCode::FORBIDDEN, "Profile access denied");
     }
     let client = reqwest::Client::new();
     let res = client
         .post("http://127.0.0.1:3003/api/positions/close")
+        .timeout(std::time::Duration::from_secs(5))
         .json(&payload)
         .send()
         .await;
