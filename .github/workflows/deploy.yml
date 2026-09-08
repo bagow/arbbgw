@@ -34,6 +34,8 @@ env:
 jobs:
   # --- 0. Cargo check для всего workspace (блокирует деплой при ошибке) ---
   check:
+    permissions:
+      contents: write
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +57,17 @@ jobs:
         run: |
           set -o pipefail
           cargo build --release -p core-node -p vps-api 2>&1 | tee ci-release.log
+      - name: Publish check logs to a service branch
+        if: always() && github.event_name == 'push'
+        timeout-minutes: 2
+        run: |
+          set -eu
+          export GIT_INDEX_FILE="$RUNNER_TEMP/arb-ci-report-index"
+          git read-tree --empty
+          git add -f ci-*.log
+          report_tree=$(git write-tree)
+          report_commit=$(git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit-tree "$report_tree" -m "CI logs for $GITHUB_SHA")
+          git push origin "$report_commit:refs/heads/ci-results/$GITHUB_SHA"
       - name: Preserve tested release binaries
         uses: actions/upload-artifact@v4
         with:
