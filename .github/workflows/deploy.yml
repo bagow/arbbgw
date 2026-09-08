@@ -229,8 +229,10 @@ jobs:
         with:
           name: release-${{ github.sha }}
           path: target/release
-      - name: Copy to VPS
-        timeout-minutes: 20
+      - name: Copy core to VPS (attempt 1)
+        id: copy_core_1
+        continue-on-error: true
+        timeout-minutes: 3
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
@@ -238,7 +240,34 @@ jobs:
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           source: "target/release/core-node"
           target: "/tmp/deploy/"
-          command_timeout: 20m
+          command_timeout: 2m
+          strip_components: 2
+      - name: Copy core to VPS (attempt 2)
+        id: copy_core_2
+        if: ${{ steps.copy_core_1.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          source: "target/release/core-node"
+          target: "/tmp/deploy/"
+          command_timeout: 2m
+          strip_components: 2
+      - name: Copy core to VPS (attempt 3)
+        id: copy_core_3
+        if: ${{ steps.copy_core_2.outcome == 'failure' }}
+        timeout-minutes: 3
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          source: "target/release/core-node"
+          target: "/tmp/deploy/"
+          command_timeout: 2m
           strip_components: 2
       - name: Install and Restart
         uses: appleboy/ssh-action@v1.0.3
@@ -354,3 +383,25 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: npx -y wrangler@3.114.12 deploy
+
+  report-deployment:
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [check, changes, deploy-vps-api, deploy-core, deploy-cloudflared, deploy-cloudflare]
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish deployment job results through Git
+        env:
+          DEPLOY_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -eu
+          printf '%s\n' "$DEPLOY_RESULTS" > deployment.json
+          export GIT_INDEX_FILE="$RUNNER_TEMP/arb-deployment-report-index"
+          git read-tree --empty
+          git add -f deployment.json
+          report_tree=$(git write-tree)
+          report_commit=$(git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit-tree "$report_tree" -m "Deployment results for $GITHUB_SHA")
+          git push origin "$report_commit:refs/heads/ci-deploy/$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
