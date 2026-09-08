@@ -1,7 +1,7 @@
-//! Binance USDT Futures WebSocket collector — !bookTicker stream (all pairs)
+//! Binance USDT Futures WebSocket collector — individual real-time bookTicker streams
 //! + L2 depth stream for active pairs (top 5 levels @ 100ms)
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
@@ -204,21 +204,41 @@ async fn handler(
         warn!("[binance] Skipping volume seed — IP banned.");
     }
 
-    // WS: !bookTicker — instant bid/ask for every USDT future
+    // Individual public bookTicker streams; the aggregated stream updates every 5s.
     // NOTE: L2 depth stream and volume refresher are spawned ONCE in run(),
     // NOT here — spawning here caused N copies after N reconnects (task leak).
-    let (mut ws, _) = connect_async_tls_with_config(
-        "wss://fstream.binance.com/ws/!bookTicker",
-        None,
-        false,
-        None,
-    )
-    .await
-    .context("Binance WS connect failed")?;
-    info!("[binance] Connected (bookTicker)");
+    let (mut ws, _) =
+        connect_async_tls_with_config("wss://fstream.binance.com/public/stream", None, false, None)
+            .await
+            .context("Binance WS connect failed")?;
+    let symbols: Vec<String> = price_map
+        .get("binance")
+        .map(|m| m.keys().filter(|s| s.ends_with("USDT")).cloned().collect())
+        .unwrap_or_default();
+    anyhow::ensure!(
+        !symbols.is_empty(),
+        "No Binance symbols available for subscription"
+    );
+    for chunk in symbols.chunks(100) {
+        let streams: Vec<_> = chunk
+            .iter()
+            .map(|s| format!("{}@bookTicker", s.to_lowercase()))
+            .collect();
+        ws.send(Message::Text(serde_json::json!({"method":"SUBSCRIBE","params":streams,"id":uuid::Uuid::new_v4().to_string()}).to_string().into())).await?;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    info!(
+        "[binance] Connected individual bookTicker streams: {} symbols",
+        symbols.len()
+    );
+    let connected_at = std::time::Instant::now();
 
     #[derive(Deserialize)]
     struct BinanceTicker<'a> {
+        #[serde(rename = "E")]
+        event_ms: i64,
+        #[serde(default)]
+        st: Option<i64>,
         #[serde(rename = "s")]
         symbol: &'a str,
         #[serde(rename = "b")]
@@ -231,32 +251,47 @@ async fn handler(
         ask_qty: &'a str,
     }
 
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        #[serde(borrow)]
+        data: BinanceTicker<'a>,
+    }
+
     // Ensure binance map exists for getting mutably later
     price_map.entry("binance".to_string()).or_default();
 
     while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+        if connected_at.elapsed() > Duration::from_secs(1800) {
+            break;
+        }
         if let Ok(Message::Text(text)) = msg {
-            if let Ok(t) = serde_json::from_str::<BinanceTicker>(&text) {
+            if let Ok(envelope) = serde_json::from_str::<Envelope>(&text) {
+                let t = envelope.data;
+                if t.st == Some(2)
+                    || !(0..=750).contains(&(crate::engine::utils::now_ms() - t.event_ms))
+                {
+                    continue;
+                }
                 if !t.symbol.ends_with("USDT") {
                     continue;
                 }
                 let bid: f64 = match t.bid.parse() {
-                    Ok(v) if v > 0.0 => v,
+                    Ok(v) if f64::is_finite(v) && v > 0.0 => v,
                     _ => continue,
                 };
                 let ask: f64 = match t.ask.parse() {
-                    Ok(v) if v > 0.0 => v,
+                    Ok(v) if f64::is_finite(v) && v > 0.0 => v,
                     _ => continue,
                 };
+                if bid >= ask {
+                    continue;
+                }
                 let bid_qty: f64 = t.bid_qty.parse().unwrap_or(0.0);
                 let ask_qty: f64 = t.ask_qty.parse().unwrap_or(0.0);
                 let mid = (bid + ask) / 2.0;
 
                 if let Some(mut ex_map) = price_map.get_mut("binance") {
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
+                    let ts = (t.event_ms / 1000) as u64;
                     if let Some(entry) = ex_map.get_mut(t.symbol) {
                         entry.bid = bid;
                         entry.ask = ask;
@@ -374,11 +409,17 @@ async fn run_l2_depth_stream(
             .map(|k| k[8..].to_string())
             .collect();
 
-        let symbols: Vec<String> = if wanted_syms.is_empty() {
-            FALLBACK.iter().map(|s| s.to_string()).collect()
-        } else {
-            wanted_syms.into_iter().collect()
-        };
+        // Keep depth streams stable. Candidate churn must not repeatedly disconnect
+        // the books from which those same candidates are computed.
+        let mut universe: std::collections::HashSet<String> = price_map
+            .get("binance")
+            .map(|m| m.keys().filter(|s| s.ends_with("USDT")).cloned().collect())
+            .unwrap_or_default();
+        universe.extend(wanted_syms);
+        if universe.is_empty() {
+            universe.extend(FALLBACK.iter().map(|s| s.to_string()));
+        }
+        let symbols: Vec<String> = universe.into_iter().collect();
 
         info!(
             "[binance_l2] Starting L2 subscriptions for {} symbols (requires {} connections)",
@@ -386,7 +427,7 @@ async fn run_l2_depth_stream(
             (symbols.len() + 199) / 200
         );
 
-        let mut handles = Vec::new();
+        let mut handles = tokio::task::JoinSet::new();
 
         for chunk in symbols.chunks(200) {
             let chunk_symbols = chunk.to_vec();
@@ -394,7 +435,7 @@ async fn run_l2_depth_stream(
             let prices = price_map.clone();
             let signal = signal.clone();
 
-            let handle = tokio::spawn(async move {
+            handles.spawn(async move {
                 let mut backoff = Duration::from_secs(1);
                 let max_age = Duration::from_secs(1800);
                 let conn_start = std::time::Instant::now();
@@ -405,7 +446,7 @@ async fn run_l2_depth_stream(
                     }
 
                     match connect_async_tls_with_config(
-                        "wss://fstream.binance.com/ws",
+                        "wss://fstream.binance.com/public/stream",
                         None,
                         false,
                         None,
@@ -479,9 +520,8 @@ async fn run_l2_depth_stream(
                                                 .as_millis()
                                                 as i64;
                                             let exchange_ms = depth_data["E"].as_i64().unwrap_or(0);
-                                            if exchange_ms <= 0
-                                                || exchange_ms > now_ms + 250
-                                                || now_ms - exchange_ms > 1000
+                                            if !(0..=750).contains(&(now_ms - exchange_ms))
+                                                || depth_data["st"].as_i64() == Some(2)
                                             {
                                                 continue;
                                             }
@@ -491,18 +531,25 @@ async fn run_l2_depth_stream(
                                                     t.ask = asks[0].0;
                                                     t.bid_size = bids[0].0 * bids[0].1;
                                                     t.ask_size = asks[0].0 * asks[0].1;
-                                                    t.last_updated = (now_ms / 1000) as u64;
+                                                    t.last_updated = (exchange_ms / 1000) as u64;
                                                 }
                                             }
-                                            signal.notify_one();
+                                            if l2_books_clone
+                                                .get(&format!("binance:{}", sym_str))
+                                                .map(|b| b.updated_ms >= exchange_ms)
+                                                .unwrap_or(false)
+                                            {
+                                                continue;
+                                            }
                                             l2_books_clone.insert(
                                                 format!("binance:{}", sym_str),
                                                 L2Snapshot {
                                                     bids,
                                                     asks,
-                                                    updated_ms: now_ms,
+                                                    updated_ms: exchange_ms,
                                                 },
                                             );
+                                            signal.notify_one();
                                         }
                                     }
                                 }
@@ -519,29 +566,17 @@ async fn run_l2_depth_stream(
                     }
                 }
             });
-            handles.push(handle);
+
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // Rebuild only when demand changes; do not hold obsolete subscriptions for 30 minutes.
-        let subscribed: std::collections::HashSet<_> = symbols.into_iter().collect();
-        let started = std::time::Instant::now();
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            let desired: std::collections::HashSet<String> = l2_wanted
-                .iter()
-                .filter(|k| k.starts_with("binance:"))
-                .map(|k| k[8..].to_string())
-                .collect();
-            if started.elapsed() > Duration::from_secs(1800)
-                || (!desired.is_empty() && desired != subscribed)
-            {
-                break;
-            }
+        // Refresh the full instrument universe periodically; candidate churn does not reconnect streams.
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(1800)) => {},
+            _ = handles.join_next() => {},
         }
-        for h in handles {
-            h.abort();
-        }
+        handles.abort_all();
+        while handles.join_next().await.is_some() {}
     }
 }
 
@@ -554,7 +589,7 @@ fn parse_levels(data: &Value, key: &str) -> Vec<(f64, f64)> {
                 .filter_map(|level| {
                     let px: f64 = level[0].as_str()?.parse().ok()?;
                     let sz: f64 = level[1].as_str()?.parse().ok()?;
-                    if px > 0.0 && sz > 0.0 {
+                    if px.is_finite() && sz.is_finite() && px > 0.0 && sz > 0.0 {
                         Some((px, sz))
                     } else {
                         None
