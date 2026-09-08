@@ -26,7 +26,7 @@ on:
 
 concurrency:
   group: arb-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   BUILD_SHA: ${{ github.sha }}
