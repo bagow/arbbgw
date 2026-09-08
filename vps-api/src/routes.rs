@@ -296,6 +296,7 @@ pub async fn handle_get_unified(
     }).await.unwrap_or_default();
 
     let db_closed_pnl_today_total: f64 = daily_exch_stats.values().sum();
+    let mut exchanges = exchanges_raw;
     if let Some(obj) = exchanges.as_object_mut() {
         let mut daily_pnl_map = serde_json::Map::new();
         let mut daily_pct_map = serde_json::Map::new();
@@ -2293,4 +2294,79 @@ fn validate_profile_input(payload: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod integrity_api_tests {
+    use super::*;
+    #[tokio::test]
+    async fn empty_ledger_reports_unknown_wallet_reconciliation_and_rejects_clear() {
+        let db = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
+        let real_db = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
+        crate::db::init_db(&db).await.unwrap();
+        crate::db::init_trades_db(&real_db).await.unwrap();
+        let state = AppState {
+            db,
+            real_db,
+            collector_token: "test-collector".into(),
+            pass_dima: "test-password".into(),
+            pass_sergei: "different-test-password".into(),
+        };
+        let mut headers = HeaderMap::new();
+        use base64::Engine as _;
+        headers.insert(
+            "authorization",
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode("dima:test-password")
+            )
+            .parse()
+            .unwrap(),
+        );
+        let response = handle_get_unified(
+            State(state.clone()),
+            headers.clone(),
+            Query(UnifiedQuery {
+                profile_id: Some("real-default".into()),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["profile_stats"]["total_trades"], 0);
+        assert!(value["exchanges"]
+            .get("db_expected_balance_delta_total")
+            .unwrap()
+            .is_null());
+        assert_eq!(
+            handle_clear_trades(State(state.clone()), headers, Path("real-default".into()))
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            handle_get_unified(
+                State(state),
+                HeaderMap::new(),
+                Query(UnifiedQuery { profile_id: None })
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    #[test]
+    fn old_development_bearer_does_not_authenticate() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer local_dev".parse().unwrap());
+        assert!(!check_auth(&headers, "configured-test-secret"));
+        headers.insert(
+            "authorization",
+            "Bearer configured-test-secret".parse().unwrap(),
+        );
+        assert!(check_auth(&headers, "configured-test-secret"));
+    }
 }
