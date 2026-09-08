@@ -67,7 +67,7 @@ jobs:
           git add -f ci-*.log
           report_tree=$(git write-tree)
           report_commit=$(git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit-tree "$report_tree" -m "CI logs for $GITHUB_SHA")
-          git push origin "$report_commit:refs/heads/ci-results/$GITHUB_SHA"
+          git push origin "$report_commit:refs/heads/ci-results/$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
       - name: Preserve tested release binaries
         uses: actions/upload-artifact@v4
         with:
