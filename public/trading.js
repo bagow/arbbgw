@@ -493,20 +493,18 @@ function updateDynamicElements(profile, active, stats, exchanges) {
 
 function renderHistoryReconcile(exchangesData) {
     if (!exchangesData) return '';
-    const cexDelta = Number(exchangesData.cex_balance_delta_total_today ?? 0);
-    const dbExpected = Number(exchangesData.db_expected_balance_delta_total ?? 0);
-    const residual = Number(exchangesData.cex_vs_db_expected_delta ?? (cexDelta - dbExpected));
+    const cexDelta = exchangesData.cex_balance_delta_total_today;
+    const knownDelta = Number.isFinite(cexDelta);
     const baseTs = Number(exchangesData.cex_baseline_ts_ms ?? 0);
     const baseTsText = baseTs > 0
         ? new Date(baseTs).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false }) + ' UTC'
         : 'n/a';
     return `
         <div id="history-reconcile-box" class="reconcile-bar" style="margin:0 0 14px 0;">
-            <div class="reconcile-item"><span class="reconcile-label">Window</span><span class="reconcile-value" style="color:var(--text-sub)">All closed</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">Account movement</span><span class="reconcile-value" style="color:var(--text-sub)">Includes non-trading activity</span></div>
             <div class="reconcile-item"><span class="reconcile-label">CEX Start</span><span class="reconcile-value">${baseTsText}</span></div>
-            <div class="reconcile-item"><span class="reconcile-label">CEX Δ</span><span class="reconcile-value" style="color:${cexDelta>=0?'var(--green)':'var(--red)'}">${fmtPnL(cexDelta)}</span></div>
-            <div class="reconcile-item"><span class="reconcile-label">DB Expected Δ</span><span class="reconcile-value" style="color:${dbExpected>=0?'var(--green)':'var(--red)'}">${fmtPnL(dbExpected)}</span></div>
-            <div class="reconcile-item"><span class="reconcile-label">Residual</span><span class="reconcile-value" style="color:${Math.abs(residual)>0.05?'var(--red)':'var(--text-sub)'}">${fmtPnL(residual)}</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">CEX Δ</span><span class="reconcile-value" style="color:${cexDelta>=0?'var(--green)':'var(--red)'}">${knownDelta ? fmtPnL(cexDelta) : '—'}</span></div>
+            <div class="reconcile-item"><span class="reconcile-label">Wallet reconciliation</span><span class="reconcile-value" style="color:var(--text-sub)">Transfer ledger unavailable</span></div>
         </div>
     `;
 }
@@ -1452,7 +1450,7 @@ function renderDashboardHTML(profileId) {
             <!-- Charts row 1: Equity + Win/Loss -->
             <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;">
                 <div class="chart-card">
-                    <div class="chart-card-title">Equity Curve</div>
+                    <div class="chart-card-title">Cumulative Recorded PnL</div>
                     <div style="position:relative;height:240px;width:100%;">
                         <canvas id="dash-equity-${pid}"></canvas>
                     </div>
@@ -1466,7 +1464,7 @@ function renderDashboardHTML(profileId) {
             </div>
             <!-- Charts row 2: Exchange PnL -->
             <div class="chart-card">
-                <div class="chart-card-title">PnL by Exchange</div>
+                <div class="chart-card-title">Reconciled PnL by Exchange</div>
                 <div style="position:relative;height:260px;width:100%;">
                     <canvas id="dash-exchange-${pid}"></canvas>
                 </div>

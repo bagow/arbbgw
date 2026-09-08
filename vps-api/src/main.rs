@@ -71,42 +71,60 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = Router::new()
-        .route("/api/update",                  post(routes::handle_update))
-        .route("/api/unified",                 get(routes::handle_get_unified))
-        .route("/api/logs/core-node",          get(routes::handle_get_logs))
-        .route("/api/trading/settings/all",    get(routes::handle_get_all_settings))
-        .route("/api/profiles",                get(routes::handle_get_profiles).post(routes::handle_post_profile))
-        .route("/api/profiles/:id",            get(routes::handle_get_profile).patch(routes::handle_patch_profile).delete(routes::handle_delete_profile))
-        .route("/api/profiles/:id/trades",     delete(routes::handle_clear_trades))
-        .route("/api/profiles/:id/market-close-all", post(routes::handle_market_close_all))
-        .route("/api/trades/:id/close",        post(routes::handle_market_close_trade))
-        .route("/api/positions/close",         post(routes::handle_close_exchange_position))
-        .route("/api/kill-switch/reset",        post(routes::handle_kill_switch_reset))
-        .route("/api/technical-settings",       get(routes::handle_get_technical_settings).patch(routes::handle_patch_technical_settings))
-        .route("/api/trading/settings",         get(routes::handle_get_technical_settings))
-        .route("/api/system/metrics",           get(routes::handle_get_system_metrics))
-        .route("/api/klines/:exchange/:pair/:interval/:limit", get(routes::handle_get_klines))
-        .route("/api/debug_ps", get({
-            let db_clone = state.db.clone();
-            || async move {
-                let result = db_clone.call(|conn| {
-                    let mut stmt = conn.prepare("SELECT id, name, mode, is_active, trade_volume, min_entry_spread, take_profit_percent FROM trading_profiles ORDER BY created_at ASC")?;
-                    let rows: Vec<String> = stmt.query_map([], |r| {
-                        Ok(format!("id={} name={} mode={} active={} vol={} min_sp={} tp={}",
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, i64>(3)?,
-                            r.get::<_, f64>(4)?,
-                            r.get::<_, f64>(5)?,
-                            r.get::<_, f64>(6)?
-                        ))
-                    })?.filter_map(|r| r.ok()).collect();
-                    Ok(rows.join("\n"))
-                }).await.unwrap_or_else(|e| format!("DB error: {e}"));
-                result
-            }
-        }))
+        .route("/api/update", post(routes::handle_update))
+        .route("/api/unified", get(routes::handle_get_unified))
+        .route("/api/logs/core-node", get(routes::handle_get_logs))
+        .route(
+            "/api/trading/settings/all",
+            get(routes::handle_get_all_settings),
+        )
+        .route(
+            "/api/profiles",
+            get(routes::handle_get_profiles).post(routes::handle_post_profile),
+        )
+        .route(
+            "/api/profiles/:id",
+            get(routes::handle_get_profile)
+                .patch(routes::handle_patch_profile)
+                .delete(routes::handle_delete_profile),
+        )
+        .route(
+            "/api/profiles/:id/trades",
+            delete(routes::handle_clear_trades),
+        )
+        .route(
+            "/api/profiles/:id/market-close-all",
+            post(routes::handle_market_close_all),
+        )
+        .route(
+            "/api/trades/:id/close",
+            post(routes::handle_market_close_trade),
+        )
+        .route(
+            "/api/positions/close",
+            post(routes::handle_close_exchange_position),
+        )
+        .route(
+            "/api/kill-switch/reset",
+            post(routes::handle_kill_switch_reset),
+        )
+        .route(
+            "/api/technical-settings",
+            get(routes::handle_get_technical_settings)
+                .patch(routes::handle_patch_technical_settings),
+        )
+        .route(
+            "/api/trading/settings",
+            get(routes::handle_get_technical_settings),
+        )
+        .route(
+            "/api/system/metrics",
+            get(routes::handle_get_system_metrics),
+        )
+        .route(
+            "/api/klines/:exchange/:pair/:interval/:limit",
+            get(routes::handle_get_klines),
+        )
         .with_state(state)
         .layer(CorsLayer::permissive());
 
