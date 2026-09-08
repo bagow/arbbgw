@@ -41,6 +41,11 @@ pub fn start_multiplier_fetcher(
                             for c in arr {
                                 let name_stripped =
                                     c["name"].as_str().unwrap_or("").replace("_", "");
+                                let key = format!("gate:{}", name_stripped);
+                                match crate::engine::specification::Specification::parse("gate", c, crate::engine::utils::now_ms()) {
+                                    Ok(spec) => {e_ctx.specifications.insert(key, spec);},
+                                    Err(_) => {e_ctx.specifications.remove(&key);},
+                                }
                                 if let Some(mult_str) = c["quanto_multiplier"].as_str() {
                                     if let Ok(m) = mult_str.parse::<f64>() {
                                         map.insert(format!("gate:{}", name_stripped), m);
@@ -68,7 +73,7 @@ pub fn start_multiplier_fetcher(
                     .count();
                 if loaded > 0 {
                     info!("[multipliers] Gate: loaded {} symbols", loaded);
-                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 } else {
                     tracing::warn!("[multipliers] Gate: FAILED to load, retrying in 30s");
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -115,6 +120,10 @@ pub fn start_multiplier_fetcher(
                                     }
                                     let full_name = format!("kucoin:{}", std_name);
 
+                                    match crate::engine::specification::Specification::parse("kucoin", c, crate::engine::utils::now_ms()) {
+                                        Ok(spec) => {e_ctx.specifications.insert(full_name.clone(), spec);},
+                                        Err(_) => {e_ctx.specifications.remove(&full_name);},
+                                    }
                                     if let Some(mult) = c["multiplier"].as_f64() {
                                         map.insert(full_name.clone(), mult);
                                     }
@@ -139,7 +148,7 @@ pub fn start_multiplier_fetcher(
                     .count();
                 if loaded > 0 {
                     info!("[multipliers] KuCoin: loaded {} symbols", loaded);
-                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 } else {
                     tracing::warn!("[multipliers] KuCoin: FAILED to load, retrying in 30s");
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -194,6 +203,11 @@ pub fn start_multiplier_fetcher(
                                         let sym = s["symbol"].as_str().unwrap_or("");
                                         if !sym.ends_with("USDT") {
                                             continue;
+                                        }
+                                        let key = format!("binance:{}", sym);
+                                        match crate::engine::specification::Specification::parse("binance", s, crate::engine::utils::now_ms()) {
+                                            Ok(spec) => {e_ctx.specifications.insert(key, spec);},
+                                            Err(_) => {e_ctx.specifications.remove(&key);},
                                         }
                                         let ct = s["contractType"].as_str().unwrap_or("");
                                         if ct != "PERPETUAL" && ct != "TRADIFI_PERPETUAL" {
@@ -257,7 +271,7 @@ pub fn start_multiplier_fetcher(
                     .filter(|e| e.key().starts_with("binance:"))
                     .count();
                 if loaded > 0 {
-                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 } else if last_http_status == 418 {
                     tracing::error!("[multipliers] Binance: IP BANNED (418). Proxy failed. Backing off 10 min.");
                     tokio::time::sleep(std::time::Duration::from_secs(600)).await;

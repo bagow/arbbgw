@@ -123,6 +123,10 @@ async fn main() -> Result<()> {
         db: real_db.clone(),
     };
     journal.init().await?;
+    let shadow_tx = engine::shadow::start(
+        std::path::Path::new(&real_db_path).with_file_name("shadow-books.db"),
+    )
+    .await?;
     let legacy_active = real_db.call(|c| {
         c.query_row("SELECT COUNT(*) FROM trades t LEFT JOIN execution_plans p ON p.trade_id=t.id WHERE t.status NOT IN ('CLOSED','CANCELLED') AND p.trade_id IS NULL", [], |r| r.get::<_,i64>(0)).map_err(Into::into)
     }).await?;
@@ -308,6 +312,7 @@ async fn main() -> Result<()> {
                 let t_keys = keys.clone();
                 let t_e_ctx = e_ctx.clone();
                 let t_profiles_db = profiles_db_engine.clone();
+                let t_shadow_tx = shadow_tx.clone();
 
                 let tick_result = tokio::task::spawn(async move {
                     // Read cached settings (no SQL, just RwLock read)
@@ -328,6 +333,7 @@ async fn main() -> Result<()> {
                         > 1000
                     {
                         LAST_SNAP.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                        let _ = t_shadow_tx.try_send(engine::shadow::capture(&spreads, &t_e_ctx, now_ms as i64));
                         let snapshot_spreads: Vec<_> = spreads.iter().take(500).cloned().collect();
                         let snapshot_val =
                             serde_json::json!({ "ts": now_ms as i64, "data": snapshot_spreads })
@@ -469,6 +475,14 @@ async fn handle_health(
             .load(std::sync::atomic::Ordering::Acquire);
     let active = journal.active().await;
     let healthy = active.is_ok() && age >= 0 && age < 5000;
+    let now = engine::utils::now_ms();
+    let venues: Vec<_> = ["binance","gate","kucoin"].iter().map(|ex| {
+        let prefix = format!("{ex}:");
+        let books = ctx.l2_books.iter().filter(|b|b.key().starts_with(&prefix)).count();
+        let fresh = ctx.l2_books.iter().filter(|b|b.key().starts_with(&prefix) && (0..=750).contains(&(now-b.updated_ms))).count();
+        let specs = ctx.specifications.iter().filter(|s|s.key().starts_with(&prefix) && (0..=600_000).contains(&(now-s.fetched_ms))).count();
+        serde_json::json!({"exchange":ex,"books":books,"fresh_books":fresh,"current_specs":specs})
+    }).collect();
     (
         if healthy {
             axum::http::StatusCode::OK
@@ -476,7 +490,7 @@ async fn handle_health(
             axum::http::StatusCode::SERVICE_UNAVAILABLE
         },
         Json(
-            serde_json::json!({"healthy":healthy,"build_sha":option_env!("BUILD_SHA").unwrap_or("unknown"),"entries_halted":ctx.is_killed.load(std::sync::atomic::Ordering::Acquire),"supervisor_age_ms":age,"active_trades":active.ok().map(|v|v.len())}),
+            serde_json::json!({"venues":venues,"healthy":healthy,"build_sha":option_env!("BUILD_SHA").unwrap_or("unknown"),"entries_halted":ctx.is_killed.load(std::sync::atomic::Ordering::Acquire),"supervisor_age_ms":age,"active_trades":active.ok().map(|v|v.len())}),
         ),
     )
 }

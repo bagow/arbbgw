@@ -348,6 +348,20 @@ async fn enter(
             (Some(a), Some(b)) => (a, b),
             _ => continue,
         };
+        let specs_ok = [
+            (&s.exchange_a, s.target_qty_a, pa, s.mult_a, s.tick_a),
+            (&s.exchange_b, s.target_qty_b, pb, s.mult_b, s.tick_b),
+        ]
+        .iter()
+        .all(|(ex, qty, price, step, tick)| {
+            ctx.specifications
+                .get(&format!("{ex}:{}", s.pair))
+                .map(|spec| spec.permits(now_ms(), *qty, *price, *step, *tick))
+                .unwrap_or(false)
+        });
+        if !specs_ok {
+            continue;
+        }
         let gross = if s.is_a_higher {
             (pa - pb) / pb * 100.0
         } else {
@@ -436,6 +450,21 @@ async fn enter(
         let px = px.unwrap();
         if (!buy && px > bound) || (buy && px < bound) {
             j.state(id, "CLOSING", "HEDGE_BUDGET_EXHAUSTED").await?;
+            return Ok(());
+        }
+        let (ex, step, tick) = if first_a {
+            (&s.exchange_b, s.mult_b, s.tick_b)
+        } else {
+            (&s.exchange_a, s.mult_a, s.tick_a)
+        };
+        let bound = super::orders::bounded_price(bound, tick, !buy);
+        if !ctx
+            .specifications
+            .get(&format!("{ex}:{}", s.pair))
+            .map(|spec| spec.permits(now_ms(), q, bound, step, tick))
+            .unwrap_or(false)
+        {
+            j.state(id, "CLOSING", "HEDGE_FILTER_CHANGED").await?;
             return Ok(());
         }
         let second_order = request(&t, second, q, bound, false);

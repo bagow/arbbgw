@@ -51,6 +51,7 @@ pub struct PositionSnapshot {
 
 #[derive(Clone)]
 pub struct EngineContext {
+    pub specifications: Arc<DashMap<String, crate::engine::specification::Specification>>,
     pub multipliers: Arc<DashMap<String, f64>>,
     pub launch_times: Arc<DashMap<String, i64>>,
     pub tick_sizes: Arc<DashMap<String, f64>>,
@@ -125,6 +126,7 @@ impl Default for EngineContext {
             leverage_set: Arc::new(DashMap::new()),
             exchange_cooldown: Arc::new(DashMap::new()),
             pair_cooldown: Arc::new(DashMap::new()),
+            specifications: Arc::new(DashMap::new()),
             funding_rates: Arc::new(DashMap::new()),
             balance_low: Arc::new(DashMap::new()),
             margin_balances: Arc::new(DashMap::new()),
