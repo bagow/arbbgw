@@ -164,7 +164,9 @@ async fn main() -> Result<()> {
             info!("STARTUP-PROFILE: {}", line.trim());
             lines.push_str(&line);
         }
-        let _ = std::fs::write("/tmp/core-node-profiles.txt", &lines);
+        let diagnostic_path = std::env::var("CORE_DIAGNOSTIC_PATH")
+            .unwrap_or_else(|_| "/tmp/core-node-profiles.txt".into());
+        let _ = std::fs::write(diagnostic_path, &lines);
     }
 
     // ── Cached settings (refreshed every 2s from DB, not per-tick) ────────────

@@ -102,6 +102,41 @@ jobs:
           target: "/home/opc/arb-ci/${{ github.sha }}/"
           command_timeout: 2m
 
+  smoke-audit:
+    if: github.ref == 'refs/heads/fix/audit-risk-20260909'
+    needs: [check]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 6
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: release
+      - name: Start candidate without exchange credentials in temporary databases
+        env:
+          ARB_SMOKE_HOST: ${{ secrets.VPS_SSH_HOST }}
+          ARB_SMOKE_USER: ${{ secrets.VPS_SSH_USER }}
+          ARB_SMOKE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        run: python3 .github/scripts/smoke-core.py
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('smoke-result.json') != ''
+        with:
+          name: smoke-${{ github.sha }}
+          path: smoke-result.json
+      - name: Preserve smoke result in a service branch
+        if: always() && hashFiles('smoke-result.json') != ''
+        run: |
+          set -eu
+          export GIT_INDEX_FILE="$RUNNER_TEMP/arb-smoke-report-index"
+          git read-tree --empty
+          git add -f smoke-result.json
+          report_tree=$(git write-tree)
+          report_commit=$(git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit-tree "$report_tree" -m "Isolated core smoke for $GITHUB_SHA")
+          git push origin "$report_commit:refs/heads/smoke-results/$GITHUB_SHA-$GITHUB_RUN_ID"
+
   # --- 0.1 Lint и аудит зависимостей (НЕ блокирует деплой) ---
   lint:
     runs-on: ubuntu-22.04

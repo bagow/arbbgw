@@ -19,28 +19,28 @@ fn json_err(status: StatusCode, msg: &str) -> Response {
 }
 
 fn history_trade_view(t: crate::models::Trade) -> Value {
-            let mut v = serde_json::to_value(&t).unwrap_or_default();
-            let display_comm = t.commission_cost.unwrap_or(0.0);
-            let display_slip = t.slippage_cost.unwrap_or(0.0);
+    let mut v = serde_json::to_value(&t).unwrap_or_default();
+    let display_comm = t.commission_cost.unwrap_or(0.0);
+    let display_slip = t.slippage_cost.unwrap_or(0.0);
 
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("commission_cost".into(), json!(display_comm));
-                // Entry slippage (IOC target vs fill)
-                obj.insert("slippage_cost".into(), json!(display_slip));
-                // Exit slippage (separate for display)
-                obj.insert(
-                    "exit_slippage_cost".into(),
-                    json!(t.exit_slippage_cost.unwrap_or(0.0)),
-                );
-                let fund_cost = t.funding_cost.unwrap_or(0.0);
-                obj.insert("funding_cost".into(), json!(fund_cost));
-                // Gross PnL: actual fill-based PnL (slippage already baked in)
-                let actual_gross = t.gross_pnl.or_else(|| t.pnl_a.zip(t.pnl_b).map(|(a,b)|a+b));
-                obj.insert("gross_pnl".into(), json!(actual_gross));
-                // Preserve the ledger's optional net PnL; pending fees/funding are not zero.
-                obj.insert("pnl".into(), json!(t.pnl));
-            }
-            v
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("commission_cost".into(), json!(display_comm));
+        // Entry slippage (IOC target vs fill)
+        obj.insert("slippage_cost".into(), json!(display_slip));
+        // Exit slippage (separate for display)
+        obj.insert(
+            "exit_slippage_cost".into(),
+            json!(t.exit_slippage_cost.unwrap_or(0.0)),
+        );
+        let fund_cost = t.funding_cost.unwrap_or(0.0);
+        obj.insert("funding_cost".into(), json!(fund_cost));
+        // Gross PnL: actual fill-based PnL (slippage already baked in)
+        let actual_gross = t.gross_pnl.or_else(|| t.pnl_a.zip(t.pnl_b).map(|(a,b)|a+b));
+        obj.insert("gross_pnl".into(), json!(actual_gross));
+        // Preserve the ledger's optional net PnL; pending fees/funding are not zero.
+        obj.insert("pnl".into(), json!(t.pnl));
+    }
+    v
 }
 
 fn check_auth(headers: &HeaderMap, secret: &str) -> bool {
