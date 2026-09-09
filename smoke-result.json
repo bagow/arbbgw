@@ -1,0 +1,35 @@
+{
+  "health": {
+    "active_trades": 0,
+    "build_sha": "020a77288abefedfb0b8205c36006de8b0902391",
+    "entries_halted": false,
+    "healthy": true,
+    "supervisor_age_ms": 94,
+    "venues": [
+      {
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "binance",
+        "fresh_books": 0
+      },
+      {
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "gate",
+        "fresh_books": 0
+      },
+      {
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "kucoin",
+        "fresh_books": 0
+      }
+    ]
+  },
+  "order_intents": 0,
+  "trades": 0,
+  "exchange_credentials_provided": false,
+  "production_replaced": false,
+  "scope": "Startup smoke test only; collectors disabled; no profitability claim",
+  "ok": true
+}
