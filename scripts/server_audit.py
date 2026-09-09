@@ -9,6 +9,7 @@ import subprocess
 import urllib.request
 
 from audit_performance import summarize
+from audit_shadow import summarize_shadow
 
 
 def inspect_database(path, kind):
@@ -51,11 +52,26 @@ def inspect_database(path, kind):
                 "SELECT COUNT(*) AS count,MIN(json_extract(snapshot,'$.recorded_ms')) AS first_ms,"
                 "MAX(json_extract(snapshot,'$.recorded_ms')) AS last_ms FROM book_samples"
             ).fetchone())
+            result["quality"] = summarize_shadow(
+                json.loads(r[0]) for r in db.execute("SELECT snapshot FROM book_samples ORDER BY id")
+            )
         return result
 
 
 def main():
     result = {}
+    logs = subprocess.run(["journalctl", "-u", "core-node", "--since=-30min", "-n", "5000", "--no-pager"],
+                          capture_output=True, text=True, timeout=15)
+    lines = logs.stdout.splitlines()
+    result["recent_log_counts"] = {label: sum(pattern in line for line in lines) for label, pattern in (
+        ("binance_subscription_rejected", "[binance_l2_chunk] Subscription rejected"),
+        ("binance_receive_failed", "[binance_l2_chunk] Receive failed"),
+        ("binance_connection_failed", "[binance_l2_chunk] Connection failed"),
+        ("binance_banned", "[binance] IP still banned"),
+        ("engine_panics", "ENGINE LOOP PANIC"),
+        ("database_locked", "database is locked"),
+    )}
+    result["recent_log_count"] = len(lines)
     for service in ("core-node", "vps-api", "cloudflared"):
         proc = subprocess.run([
             "systemctl", "show", service, "--property=ActiveState,SubState,MainPID,ActiveEnterTimestamp,NRestarts"

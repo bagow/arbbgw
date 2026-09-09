@@ -27,6 +27,8 @@ jobs:
           source = pathlib.Path('scripts/audit_performance.py').read_text()
           remote = 'import sys, types\nmodule=types.ModuleType("audit_performance")\n'
           remote += 'exec(' + repr(source) + ', module.__dict__)\nsys.modules["audit_performance"]=module\n'
+          source = pathlib.Path('scripts/audit_shadow.py').read_text()
+          remote += 'module=types.ModuleType("audit_shadow")\nexec(' + repr(source) + ', module.__dict__)\nsys.modules["audit_shadow"]=module\n'
           remote += pathlib.Path('scripts/server_audit.py').read_text()
           destination = os.environ['ARB_AUDIT_USER'] + '@' + os.environ['ARB_AUDIT_HOST']
           try:
