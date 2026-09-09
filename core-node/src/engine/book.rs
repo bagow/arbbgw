@@ -1,5 +1,20 @@
 //! Canonical order-book quantities are always in the base asset.
+#[derive(Clone, Copy, Debug)]
+pub struct DepthQuote {
+    pub vwap: f64,
+    /// Last consumed level: the IOC limit must reach this price to cover the
+    /// requested quantity. An average price is not an executable limit.
+    pub worst_price: f64,
+}
 pub fn vwap(bids: &[(f64, f64)], asks: &[(f64, f64)], buy: bool, quantity: f64) -> Option<f64> {
+    quote(bids, asks, buy, quantity).map(|q| q.vwap)
+}
+pub fn quote(
+    bids: &[(f64, f64)],
+    asks: &[(f64, f64)],
+    buy: bool,
+    quantity: f64,
+) -> Option<DepthQuote> {
     if !quantity.is_finite() || quantity <= 0.0 {
         return None;
     }
@@ -21,8 +36,15 @@ pub fn vwap(bids: &[(f64, f64)], asks: &[(f64, f64)], buy: bool, quantity: f64) 
         cost += price * take;
         remaining -= take;
         if remaining <= quantity * 1e-10 {
-            let price = cost / (quantity - remaining);
-            return if price.is_finite() { Some(price) } else { None };
+            let average = cost / (quantity - remaining);
+            return if average.is_finite() {
+                Some(DepthQuote {
+                    vwap: average,
+                    worst_price: price,
+                })
+            } else {
+                None
+            };
         }
     }
     None
@@ -30,6 +52,31 @@ pub fn vwap(bids: &[(f64, f64)], asks: &[(f64, f64)], buy: bool, quantity: f64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ioc_limit_covers_the_last_level_in_both_directions() {
+        let asks = [(100.0, 1.0), (102.0, 1.0)];
+        let buy = quote(&[], &asks, true, 2.0).unwrap();
+        assert_eq!(buy.vwap, 101.0);
+        assert_eq!(buy.worst_price, 102.0);
+        assert_eq!(
+            asks.iter()
+                .filter(|(p, _)| *p <= buy.vwap)
+                .map(|(_, q)| q)
+                .sum::<f64>(),
+            1.0
+        );
+        let bids = [(100.0, 1.0), (98.0, 1.0)];
+        let sell = quote(&bids, &[], false, 2.0).unwrap();
+        assert_eq!(sell.vwap, 99.0);
+        assert_eq!(sell.worst_price, 98.0);
+        assert_eq!(
+            bids.iter()
+                .filter(|(p, _)| *p >= sell.worst_price)
+                .map(|(_, q)| q)
+                .sum::<f64>(),
+            2.0
+        );
+    }
     #[test]
     fn full_coverage_is_required() {
         assert!(vwap(&[], &[(10.0, 9.99)], true, 10.0).is_none());

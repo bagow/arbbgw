@@ -62,6 +62,17 @@ pub fn executable(
     buy: bool,
     qty: f64,
 ) -> Option<f64> {
+    executable_quote(prices, ctx, ex, pair, buy, qty).map(|q| q.vwap)
+}
+
+fn executable_quote(
+    prices: &PriceMap,
+    ctx: &EngineContext,
+    ex: &str,
+    pair: &str,
+    buy: bool,
+    qty: f64,
+) -> Option<super::book::DepthQuote> {
     if !qty.is_finite() || qty <= 0.0 {
         return None;
     }
@@ -80,7 +91,7 @@ pub fn executable(
             if !bid.is_finite() || !ask.is_finite() || bid <= 0.0 || bid >= ask {
                 return None;
             }
-            return super::book::vwap(&book.bids, &book.asks, buy, qty);
+            return super::book::quote(&book.bids, &book.asks, buy, qty);
         }
     }
     None
@@ -604,8 +615,8 @@ async fn manage(
         .unwrap_or(true);
     let timed =
         t.plan.settings.max_holding_time_ms > 0 && elapsed > t.plan.settings.max_holding_time_ms;
-    let (pxa, pxb) = (
-        executable(
+    let (quote_a, quote_b) = (
+        executable_quote(
             prices,
             ctx,
             &s.exchange_a,
@@ -613,7 +624,7 @@ async fn manage(
             s.is_a_higher,
             a.remaining(),
         ),
-        executable(
+        executable_quote(
             prices,
             ctx,
             &s.exchange_b,
@@ -622,6 +633,7 @@ async fn manage(
             b.remaining(),
         ),
     );
+    let (pxa, pxb) = (quote_a.map(|q| q.vwap), quote_b.map(|q| q.vwap));
     let mut profit = false;
     let mut stop = false;
     if let (Some(pa), Some(pb)) = (pxa, pxb) {
@@ -641,14 +653,36 @@ async fn manage(
         let entry_fees: f64 = orders
             .iter()
             .map(|o| {
-                o.observation.fee_with_reserve(super::utils::get_exchange_fee(
-                    &o.exchange, 0.001, ctx,
-                ))
+                o.observation
+                    .fee_with_reserve(super::utils::get_exchange_fee(&o.exchange, 0.001, ctx))
             })
             .sum();
         let percent = (pnl - entry_fees - reserve) / a.entry_value.max(1e-12) * 100.0;
         let peak = j.mark_to_market(t.id, pa, pb, pnl, percent).await?;
-        profit = percent >= t.plan.settings.take_profit_percent.max(0.05);
+        // TP must remain profitable at both hard IOC limits, not merely at
+        // their average prices. Otherwise a multi-level book creates partial
+        // closes followed by an avoidable emergency market exit.
+        if let (Some(qa), Some(qb)) = (quote_a, quote_b) {
+            let worst_pnl = super::pnl::calculate_gross_pnl(
+                s.is_a_higher,
+                a.entry_price(),
+                b.entry_price(),
+                qa.worst_price,
+                qb.worst_price,
+                a.remaining(),
+                b.remaining(),
+            )
+            .gross_pnl;
+            let worst_reserve = a.remaining()
+                * qa.worst_price
+                * super::utils::get_exchange_fee(&s.exchange_a, 0.001, ctx)
+                + b.remaining()
+                    * qb.worst_price
+                    * super::utils::get_exchange_fee(&s.exchange_b, 0.001, ctx);
+            let worst_percent =
+                (worst_pnl - entry_fees - worst_reserve) / a.entry_value.max(1e-12) * 100.0;
+            profit = worst_percent >= t.plan.settings.take_profit_percent.max(0.05);
+        }
         stop = t.plan.settings.trailing_stop_percent > 0.0
             && percent <= peak - t.plan.settings.trailing_stop_percent;
     }
@@ -674,7 +708,10 @@ async fn manage(
     j.state(t.id, "CLOSING", reason).await?;
     // Exit starts only once. Partial closes remain journaled and only residuals are submitted.
     let emergency = closing || timed || funding_due || stop;
-    for (leg, qty, px) in [("A", a.remaining(), pxa), ("B", b.remaining(), pxb)] {
+    for (leg, qty, px) in [
+        ("A", a.remaining(), quote_a.map(|q| q.worst_price)),
+        ("B", b.remaining(), quote_b.map(|q| q.worst_price)),
+    ] {
         let a_leg = leg == "A";
         let observed = if now_ms() - t.created_ms >= 10_000 {
             super::account_monitor::observed_remaining(

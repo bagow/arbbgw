@@ -18,6 +18,31 @@ fn json_err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
+fn history_trade_view(t: crate::models::Trade) -> Value {
+            let mut v = serde_json::to_value(&t).unwrap_or_default();
+            let display_comm = t.commission_cost.unwrap_or(0.0);
+            let display_slip = t.slippage_cost.unwrap_or(0.0);
+
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("commission_cost".into(), json!(display_comm));
+                // Entry slippage (IOC target vs fill)
+                obj.insert("slippage_cost".into(), json!(display_slip));
+                // Exit slippage (separate for display)
+                obj.insert(
+                    "exit_slippage_cost".into(),
+                    json!(t.exit_slippage_cost.unwrap_or(0.0)),
+                );
+                let fund_cost = t.funding_cost.unwrap_or(0.0);
+                obj.insert("funding_cost".into(), json!(fund_cost));
+                // Gross PnL: actual fill-based PnL (slippage already baked in)
+                let actual_gross = t.gross_pnl.or_else(|| t.pnl_a.zip(t.pnl_b).map(|(a,b)|a+b));
+                obj.insert("gross_pnl".into(), json!(actual_gross));
+                // Preserve the ledger's optional net PnL; pending fees/funding are not zero.
+                obj.insert("pnl".into(), json!(t.pnl));
+            }
+            v
+}
+
 fn check_auth(headers: &HeaderMap, secret: &str) -> bool {
     headers
         .get("authorization")
@@ -581,35 +606,7 @@ pub async fn handle_get_unified(
         .await
         .unwrap_or_else(|_| vec![]);
 
-    let history_trades: Vec<serde_json::Value> = history_trades_raw
-        .into_iter()
-        .map(|t| {
-            let mut v = serde_json::to_value(&t).unwrap_or_default();
-            let display_comm = t.commission_cost.unwrap_or(0.0);
-            let display_slip = t.slippage_cost.unwrap_or(0.0);
-
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("commission_cost".into(), json!(display_comm));
-                // Entry slippage (IOC target vs fill)
-                obj.insert("slippage_cost".into(), json!(display_slip));
-                // Exit slippage (separate for display)
-                obj.insert(
-                    "exit_slippage_cost".into(),
-                    json!(t.exit_slippage_cost.unwrap_or(0.0)),
-                );
-                let fund_cost = t.funding_cost.unwrap_or(0.0);
-                obj.insert("funding_cost".into(), json!(fund_cost));
-                // Gross PnL: actual fill-based PnL (slippage already baked in)
-                let actual_gross = t
-                    .gross_pnl
-                    .unwrap_or_else(|| t.pnl_a.unwrap_or(0.0) + t.pnl_b.unwrap_or(0.0));
-                let calculated_net_pnl = t.pnl.unwrap_or(actual_gross - display_comm - fund_cost);
-                obj.insert("gross_pnl".into(), json!(actual_gross));
-                obj.insert("pnl".into(), json!(calculated_net_pnl));
-            }
-            v
-        })
-        .collect();
+    let history_trades: Vec<serde_json::Value> = history_trades_raw.into_iter().map(history_trade_view).collect();
 
     // 4. Compute aggregate stats — cached for 30s to avoid 131K+ row scans every poll
     static STATS_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Value)>>> = OnceLock::new();
@@ -729,28 +726,17 @@ pub async fn handle_get_profile(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let _username = match check_basic_auth(&headers, &state) {
+    let username = match check_basic_auth(&headers, &state) {
         Some(u) => u,
         None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let (_maps_json, _) = state
-        .real_db
-        .call(move |conn| {
-            let mut stmt =
-                conn.prepare("SELECT value FROM server_cache WHERE key='exchange_maps'")?;
-            let json_str: String = stmt.query_row([], |row| row.get(0))?;
-            Ok::<(String, ()), tokio_rusqlite::Error>((json_str, ()))
-        })
-        .await
-        .unwrap_or_else(|_| ("{}".to_string(), ()));
-
     let profile = state
         .db
         .call(move |conn| {
-            let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE id = ?")?;
+            let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE id=? AND (owner=? OR id='real-default')")?;
             let items: Vec<_> = stmt
-                .query_map([id], row_to_profile)?
+                .query_map(params![id,username], row_to_profile)?
                 .filter_map(|r| r.ok())
                 .collect();
             Ok(items.into_iter().next())
@@ -2226,6 +2212,23 @@ fn validate_profile_input(payload: &Value) -> Result<(), String> {
 mod integrity_api_tests {
     use super::*;
     #[tokio::test]
+    async fn history_does_not_invent_net_pnl_before_reconciliation() {
+        let db = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
+        crate::db::init_trades_db(&db).await.unwrap();
+        let trade = db.call(|c| {
+            c.execute_batch("INSERT INTO trades(pair,exchange_a,exchange_b,direction,volume,
+              entry_price_a,entry_price_b,entry_spread,entry_time,highest_spread_reached,status,
+              gross_pnl,commission_cost,funding_cost,accounting_status)
+              VALUES('BTCUSDT','binance','kucoin','binance>kucoin',10,100,99,1,1,1,'CLOSED',
+              1.0,NULL,NULL,'FEES_PENDING');")?;
+            c.query_row("SELECT * FROM trades",[],row_to_trade).map_err(Into::into)
+        }).await.unwrap();
+        let view = history_trade_view(trade);
+        assert!(view["pnl"].is_null());
+        assert_eq!(view["gross_pnl"],1.0);
+        assert_eq!(view["accounting_status"],"FEES_PENDING");
+    }
+    #[tokio::test]
     async fn settings_require_auth_and_respect_owner_and_named_columns() {
         let db = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
         crate::db::init_db(&db).await.unwrap();
@@ -2247,6 +2250,7 @@ mod integrity_api_tests {
         let mut headers = HeaderMap::new();
         use base64::Engine as _;
         headers.insert("authorization", format!("Basic {}",base64::engine::general_purpose::STANDARD.encode("dima:test-password")).parse().unwrap());
+        assert_eq!(handle_get_profile(State(state.clone()),headers.clone(),Path("theirs".into())).await.status(),StatusCode::NOT_FOUND);
         let response = handle_get_all_settings(State(state),headers).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(),1_000_000).await.unwrap();

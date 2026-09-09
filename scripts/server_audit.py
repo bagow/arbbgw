@@ -66,12 +66,18 @@ def main():
     result["recent_log_counts"] = {label: sum(pattern in line for line in lines) for label, pattern in (
         ("binance_subscription_rejected", "[binance_l2_chunk] Subscription rejected"),
         ("binance_receive_failed", "[binance_l2_chunk] Receive failed"),
-        ("binance_connection_failed", "[binance_l2_chunk] Connection failed"),
+        ("binance_connection_failed", "[binance_l2_chunk] Connect failed"),
         ("binance_banned", "[binance] IP still banned"),
         ("engine_panics", "ENGINE LOOP PANIC"),
         ("database_locked", "database is locked"),
     )}
     result["recent_log_count"] = len(lines)
+    # Only transport errors from the unauthenticated public market-data stream;
+    # never export private order/account logs or service environments.
+    prefix = "[binance_l2_chunk] Receive failed: "
+    result["binance_public_transport_errors"] = list(dict.fromkeys(
+        line.split(prefix, 1)[1][:400] for line in lines if prefix in line
+    ))[:10]
     for service in ("core-node", "vps-api", "cloudflared"):
         proc = subprocess.run([
             "systemctl", "show", service, "--property=ActiveState,SubState,MainPID,ActiveEnterTimestamp,NRestarts"
