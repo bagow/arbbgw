@@ -322,7 +322,7 @@ pub fn start_multiplier_fetcher(
                                 // tickSize = price precision
                                 if let Some(ts_str) = c["priceFilter"]["tickSize"].as_str() {
                                     if let Ok(tick) = ts_str.parse::<f64>() {
-                                        if tick > 0.0 { 
+                                        if tick > 0.0 {
                                             tmap.insert(format!("bybit:{}", sym), tick); 
                                         }
                                     }

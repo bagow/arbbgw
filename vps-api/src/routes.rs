@@ -105,13 +105,17 @@ pub async fn handle_update(
 }
 
 // ─── GET /api/trading/settings/all ───
-pub async fn handle_get_all_settings(State(state): State<AppState>) -> Response {
+pub async fn handle_get_all_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let username = match check_basic_auth(&headers, &state) {
+        Some(u) => u,
+        None => return json_err(StatusCode::UNAUTHORIZED, "Unauthorized"),
+    };
     let profiles = match state
         .db
-        .call(|conn| {
-            let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE mode = 'real'")?;
+        .call(move |conn| {
+            let mut stmt = conn.prepare("SELECT * FROM trading_profiles WHERE mode = 'real' AND (owner=? OR id='real-default')")?;
             let items: Vec<_> = stmt
-                .query_map([], row_to_profile)?
+                .query_map([username], row_to_profile)?
                 .filter_map(|r| r.ok())
                 .collect();
             Ok(items)
@@ -627,85 +631,7 @@ pub async fn handle_get_unified(
         let fresh = trade_db.call({
         let p = pid.clone();
         move |conn| {
-            // Aggregate totals
-            let mut stmt = conn.prepare("SELECT COUNT(*), SUM(pnl), SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), SUM(exit_time - entry_time), COUNT(exit_time) FROM trades WHERE status='CLOSED' AND profile_id=?")?;
-            struct Agg { count: i64, pnl: Option<f64>, wins: Option<i64>, total_duration: Option<i64>, closed_count: Option<i64> }
-            let agg = stmt.query_row([p.clone()], |r| Ok(Agg {
-                count: r.get(0)?,
-                pnl: r.get(1)?,
-                wins: r.get(2)?,
-                total_duration: r.get(3)?,
-                closed_count: r.get(4)?
-            }))?;
-
-            let total_trades = agg.count;
-            let total_pnl = agg.pnl.unwrap_or(0.0);
-            let wins = agg.wins.unwrap_or(0);
-            let (losses,pending_count,legacy_count,verified_count):(i64,i64,i64,i64)=conn.query_row("SELECT COALESCE(SUM(pnl<0),0),COALESCE(SUM(pnl IS NULL),0),COALESCE(SUM(accounting_status='LEGACY_UNVERIFIED'),0),COALESCE(SUM(accounting_status='VERIFIED'),0) FROM trades WHERE status='CLOSED' AND profile_id=?",[&p],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
-            let recorded_count=total_trades-pending_count;
-            let avg_pnl = if recorded_count > 0 { total_pnl / recorded_count as f64 } else { 0.0 };
-
-            let avg_duration = if let (Some(td), Some(cc)) = (agg.total_duration, agg.closed_count) {
-                if cc > 0 { td / cc } else { 0 }
-            } else { 0 };
-
-            tracing::debug!("Stats for [{}]: count={} pnl={:.2} wins={}", p, total_trades, total_pnl, wins);
-
-            // Equity curve (last 1000)
-            let mut stmt = conn.prepare("SELECT pnl, exchange_a, exchange_b FROM trades WHERE status='CLOSED' AND profile_id=? ORDER BY exit_time ASC LIMIT 1000")?;
-            let equity_curve: Vec<serde_json::Value> = stmt.query_map([p.clone()], |r| {
-                let pnl: f64 = r.get(0)?;
-                let ex_a: String = r.get(1)?;
-                let ex_b: String = r.get(2)?;
-                Ok(json!({ "pnl": pnl, "ex_a": ex_a, "ex_b": ex_b }))
-            })?.filter_map(|r| r.ok()).collect();
-
-            // Top tokens by PnL
-            let mut stmt = conn.prepare("SELECT pair, SUM(pnl) as tpnl FROM trades WHERE status='CLOSED' AND profile_id=? GROUP BY pair ORDER BY tpnl DESC LIMIT 10")?;
-            let top_tokens: Vec<serde_json::Value> = stmt.query_map([p.clone()], |r| {
-                Ok(json!({ "token": r.get::<_, String>(0)?, "pnl": r.get::<_, f64>(1)? }))
-            })?.filter_map(|r| r.ok()).collect();
-
-            // PnL by Exchange and Best Exchange Pairs
-            let mut stmt = conn.prepare("SELECT exchange_a, exchange_b, SUM(pnl) FROM trades WHERE status='CLOSED' AND profile_id=? GROUP BY exchange_a, exchange_b")?;
-            let rows: Vec<(String, String, f64)> = stmt.query_map([p.clone()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.filter_map(|r| r.ok()).collect();
-
-            let mut pnl_by_exchange: HashMap<String, f64> = HashMap::new();
-            let mut exchange_pairs: HashMap<String, f64> = HashMap::new();
-
-            for (ex_a, ex_b, pnl) in rows {
-
-                let mut pair_arr = [ex_a, ex_b];
-                pair_arr.sort();
-                let pair_key = format!("{}-{}", pair_arr[0], pair_arr[1]);
-                *exchange_pairs.entry(pair_key).or_insert(0.0) += pnl;
-            }
-
-            let mut legs=conn.prepare("SELECT exchange_a,net_pnl_a FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND profile_id=?1 UNION ALL SELECT exchange_b,net_pnl_b FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND profile_id=?1")?;
-            for row in legs.query_map([&p],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?)))? {let (ex,net)=row?;*pnl_by_exchange.entry(ex).or_insert(0.0)+=net;}
-            let mut top_exchange_pairs: Vec<serde_json::Value> = exchange_pairs.into_iter()
-                .map(|(pair, pnl)| json!({ "pair": pair, "pnl": pnl }))
-                .collect();
-            top_exchange_pairs.sort_by(|a, b| {
-                b.get("pnl").unwrap().as_f64().unwrap().total_cmp(&a.get("pnl").unwrap().as_f64().unwrap())
-            });
-            top_exchange_pairs.truncate(10);
-
-            Ok(json!({
-                "total_pnl": total_pnl,
-                "pending_count":pending_count,
-                "legacy_count":legacy_count,
-                "verified_count":verified_count,
-                "total_trades": total_trades,
-                "wins": wins,
-                "losses": losses,
-                "avg_pnl": avg_pnl,
-                "avg_duration": avg_duration,
-                "equity_curve": equity_curve,
-                "pnl_by_exchange": pnl_by_exchange,
-                "top_tokens": top_tokens,
-                "top_exchange_pairs": top_exchange_pairs
-            }))
+            crate::statistics::profile_stats(conn, &p).map_err(Into::into)
         }
     }).await.unwrap_or_else(|e| {
         tracing::error!("Stats failed for [{}]: {}", pid, e);
@@ -2299,6 +2225,41 @@ fn validate_profile_input(payload: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod integrity_api_tests {
     use super::*;
+    #[tokio::test]
+    async fn settings_require_auth_and_respect_owner_and_named_columns() {
+        let db = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
+        crate::db::init_db(&db).await.unwrap();
+        db.call(|c| {
+            c.execute_batch("INSERT INTO trading_profiles(id,name,owner,created_at,updated_at,
+              leverage,min_depth_percent,hft_timeout_ms,max_holding_time_ms,min_structural_deviation)
+              VALUES('mine','Mine','dima',1,1,3,275,4321,123456,0.7),
+                    ('theirs','Theirs','sergei',1,1,4,300,5432,234567,0.8);")?;
+            Ok(())
+        }).await.unwrap();
+        let state = AppState {
+            db,
+            real_db: tokio_rusqlite::Connection::open_in_memory().await.unwrap(),
+            collector_token: "test-collector".into(),
+            pass_dima: "test-password".into(),
+            pass_sergei: "different-test-password".into(),
+        };
+        assert_eq!(handle_get_all_settings(State(state.clone()), HeaderMap::new()).await.status(), StatusCode::UNAUTHORIZED);
+        let mut headers = HeaderMap::new();
+        use base64::Engine as _;
+        headers.insert("authorization", format!("Basic {}",base64::engine::general_purpose::STANDARD.encode("dima:test-password")).parse().unwrap());
+        let response = handle_get_all_settings(State(state),headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(),1_000_000).await.unwrap();
+        let profiles: Value = serde_json::from_slice(&body).unwrap();
+        let profiles = profiles.as_array().unwrap();
+        assert!(!profiles.iter().any(|p|p["id"]=="theirs"));
+        let mine = profiles.iter().find(|p|p["id"]=="mine").unwrap();
+        assert_eq!(mine["leverage"],3);
+        assert_eq!(mine["min_depth_percent"],275.0);
+        assert_eq!(mine["hft_timeout_ms"],4321);
+        assert_eq!(mine["max_holding_time_ms"],123456);
+        assert_eq!(mine["min_structural_deviation"],0.7);
+    }
     #[tokio::test]
     async fn empty_ledger_reports_unknown_wallet_reconciliation_and_rejects_clear() {
         let db = tokio_rusqlite::Connection::open_in_memory().await.unwrap();

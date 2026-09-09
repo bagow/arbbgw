@@ -73,6 +73,13 @@ pub struct OrderObservation {
     pub fee: Option<f64>,
 }
 impl OrderObservation {
+    /// Reserve each unconfirmed fee independently. A confirmed fee on another
+    /// order must never absorb this order's reserve (including maker rebates).
+    pub fn fee_with_reserve(&self, rate: f64) -> f64 {
+        self.fee
+            .unwrap_or_else(|| self.filled_quantity * self.average_price.unwrap_or(0.0) * rate)
+    }
+
     pub fn rejected() -> Self {
         Self {
             order_id: None,
@@ -164,6 +171,38 @@ mod tests {
         assert!(o.validate(&r).is_err());
         o.state = OrderState::Cancelled;
         assert!(o.validate(&r).is_ok());
+    }
+
+    #[test]
+    fn mixed_confirmed_and_pending_fees_keep_the_full_reserve() {
+        let mut confirmed = OrderObservation {
+            order_id: Some("1".into()),
+            state: OrderState::Filled,
+            filled_quantity: 1.0,
+            average_price: Some(100.0),
+            fee: Some(0.3),
+        };
+        let pending = OrderObservation {
+            fee: None,
+            ..confirmed.clone()
+        };
+        let total = confirmed.fee_with_reserve(0.001) + pending.fee_with_reserve(0.001);
+        assert!((total - 0.4).abs() < 1e-12);
+        // The former max(confirmed total, estimated total) reserved only 0.3.
+        confirmed.fee = Some(-0.02);
+        let total = confirmed.fee_with_reserve(0.001) + pending.fee_with_reserve(0.001);
+        assert!((total - 0.08).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fee_reserve_uses_only_executed_quantity_and_preserves_confirmed_zero() {
+        let mut o = OrderObservation::pending(None);
+        assert_eq!(o.fee_with_reserve(0.001), 0.0);
+        o.filled_quantity = 0.25;
+        o.average_price = Some(100.0);
+        assert_eq!(o.fee_with_reserve(0.001), 0.025);
+        o.fee = Some(0.0);
+        assert_eq!(o.fee_with_reserve(0.001), 0.0);
     }
 }
 

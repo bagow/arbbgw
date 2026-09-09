@@ -1,0 +1,57 @@
+name: Read-only server audit
+on:
+  push:
+    branches: ["fix/audit-risk-20260909"]
+permissions:
+  contents: write
+jobs:
+  audit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read service and ledger state over SSH
+        env:
+          ARB_AUDIT_HOST: ${{ secrets.VPS_SSH_HOST }}
+          ARB_AUDIT_USER: ${{ secrets.VPS_SSH_USER }}
+          ARB_AUDIT_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, types
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'arb-audit-ssh'
+          directory.mkdir(mode=0o700)
+          key = directory / 'key'
+          fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, 'w') as stream:
+              stream.write(os.environ['ARB_AUDIT_KEY'] + '\n')
+          source = pathlib.Path('scripts/audit_performance.py').read_text()
+          remote = 'import sys, types\nmodule=types.ModuleType("audit_performance")\n'
+          remote += 'exec(' + repr(source) + ', module.__dict__)\nsys.modules["audit_performance"]=module\n'
+          remote += pathlib.Path('scripts/server_audit.py').read_text()
+          destination = os.environ['ARB_AUDIT_USER'] + '@' + os.environ['ARB_AUDIT_HOST']
+          try:
+              proc = subprocess.run(['ssh','-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15',
+                  '-o','StrictHostKeyChecking=accept-new','-o','UserKnownHostsFile='+str(directory/'known_hosts'),
+                  destination,'python3 -'], input=remote, capture_output=True, text=True, timeout=180)
+              if proc.returncode:
+                  raise RuntimeError('Read-only SSH audit failed with exit code '+str(proc.returncode))
+              report = json.loads(proc.stdout)
+              report['requested_commit'] = os.environ['GITHUB_SHA']
+              pathlib.Path('server-audit.json').write_text(json.dumps(report,indent=2,allow_nan=False))
+          finally:
+              key.unlink(missing_ok=True)
+          PY
+      - name: Preserve audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-audit-${{ github.sha }}
+          path: server-audit.json
+      - name: Publish report in a service branch
+        run: |
+          set -eu
+          export GIT_INDEX_FILE="$RUNNER_TEMP/arb-audit-report-index"
+          git read-tree --empty
+          git add -f server-audit.json
+          report_tree=$(git write-tree)
+          report_commit=$(git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit-tree "$report_tree" -m "Read-only server audit for $GITHUB_SHA")
+          git push origin "$report_commit:refs/heads/audit-results/$GITHUB_SHA-$GITHUB_RUN_ID"

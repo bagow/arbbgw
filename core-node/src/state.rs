@@ -76,7 +76,8 @@ pub struct EngineContext {
     pub supervisor_tick_ms: Arc<std::sync::atomic::AtomicI64>,
     /// Risk Kill-Switch: Number of consecutive delta trims. Reset on successful symmetric execution.
     pub consecutive_trims: Arc<std::sync::atomic::AtomicU32>,
-    /// Risk Kill-Switch: Number of consecutive entry failures. Reset on successful entry.
+    /// Risk exits since the last operator reset (process-local). A successful
+    /// entry does not prove profitability and must not reset this counter.
     pub consecutive_failures: Arc<std::sync::atomic::AtomicU32>,
     /// Risk Kill-Switch: If true, engine stops opening new trades until manual reset.
     pub is_killed: Arc<std::sync::atomic::AtomicBool>,

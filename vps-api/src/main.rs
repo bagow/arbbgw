@@ -1,6 +1,7 @@
 mod db;
 mod models;
 mod routes;
+mod statistics;
 
 use axum::{
     routing::{delete, get, post},

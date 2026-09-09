@@ -498,7 +498,8 @@ async fn enter(
             j.state(id, "CLOSING", "PARTIAL_HEDGE").await?;
         } else {
             j.project(&t, &orders, false).await?;
-            ctx.consecutive_failures.store(0, Ordering::Release);
+            // A hedged entry proves execution, not profit. Preserve the risk-exit
+            // counter until the operator explicitly resets the kill switch.
         }
         ctx.pair_cooldown
             .insert(s.pair.clone(), now_ms() + ts.pair_cooldown_ms);
@@ -637,18 +638,14 @@ async fn manage(
         let reserve =
             a.remaining() * pa * super::utils::get_exchange_fee(&s.exchange_a, 0.001, ctx)
                 + b.remaining() * pb * super::utils::get_exchange_fee(&s.exchange_b, 0.001, ctx);
-        let known_entry_fees = orders
+        let entry_fees: f64 = orders
             .iter()
-            .filter(|o| !o.request.reduce_only)
-            .all(|o| o.observation.fee.is_some());
-        let entry_fees = if known_entry_fees {
-            a.fee + b.fee
-        } else {
-            (a.fee + b.fee).max(
-                a.entry_value * super::utils::get_exchange_fee(&s.exchange_a, 0.001, ctx)
-                    + b.entry_value * super::utils::get_exchange_fee(&s.exchange_b, 0.001, ctx),
-            )
-        };
+            .map(|o| {
+                o.observation.fee_with_reserve(super::utils::get_exchange_fee(
+                    &o.exchange, 0.001, ctx,
+                ))
+            })
+            .sum();
         let percent = (pnl - entry_fees - reserve) / a.entry_value.max(1e-12) * 100.0;
         let peak = j.mark_to_market(t.id, pa, pb, pnl, percent).await?;
         profit = percent >= t.plan.settings.take_profit_percent.max(0.05);

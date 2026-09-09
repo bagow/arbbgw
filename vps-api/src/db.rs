@@ -282,56 +282,58 @@ pub async fn init_trades_db(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+// Fresh installs and databases upgraded by ALTER TABLE have different physical
+// column orders. Resolve every setting by name, including optional fields.
 pub fn row_to_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradingProfile> {
     Ok(TradingProfile {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        mode: row.get(2)?,
-        is_active: row.get::<_, i64>(3)? != 0,
-        min_entry_spread: row.get(4)?,
-        max_entry_spread: row.get(5)?,
-        trade_volume: row.get(6)?,
-        take_profit_percent: row.get(7)?,
-        trailing_stop_percent: row.get(8)?,
-        max_active_trades: row.get(9)?,
-        commission_rate: row.get(10)?,
-        slippage_percent: row.get(11)?,
-        funding_rate_8h: row.get(12)?,
-        min_volume_millions: row.get(13)?,
-        collector_interval_secs: row.get(14)?,
-        pending_commands: row.get(15)?,
-        owner: row.get(16)?,
-        created_at: row.get(17)?,
-        updated_at: row.get(18)?,
+        id: row.get("id")?,
+        name: row.get("name")?,
+        mode: row.get("mode")?,
+        is_active: row.get::<_, i64>("is_active")? != 0,
+        min_entry_spread: row.get("min_entry_spread")?,
+        max_entry_spread: row.get("max_entry_spread")?,
+        trade_volume: row.get("trade_volume")?,
+        take_profit_percent: row.get("take_profit_percent")?,
+        trailing_stop_percent: row.get("trailing_stop_percent")?,
+        max_active_trades: row.get("max_active_trades")?,
+        commission_rate: row.get("commission_rate")?,
+        slippage_percent: row.get("slippage_percent")?,
+        funding_rate_8h: row.get("funding_rate_8h")?,
+        min_volume_millions: row.get("min_volume_millions")?,
+        collector_interval_secs: row.get("collector_interval_secs")?,
+        pending_commands: row.get("pending_commands")?,
+        owner: row.get("owner")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
         disabled_exchanges: row
-            .get::<_, Option<String>>(19)
+            .get::<_, Option<String>>("disabled_exchanges")
             .unwrap_or(Some("[]".into())),
         leverage: row
-            .get::<_, Option<i64>>(20)
+            .get::<_, Option<i64>>("leverage")
             .unwrap_or(Some(10))
             .unwrap_or(10),
         margin_mode: row
-            .get::<_, Option<String>>(21)
+            .get::<_, Option<String>>("margin_mode")
             .unwrap_or(Some("cross".into()))
             .unwrap_or_else(|| "cross".into()),
         min_structural_deviation: row
-            .get::<_, Option<f64>>(22)
+            .get::<_, Option<f64>>("min_structural_deviation")
             .unwrap_or(Some(0.0))
             .unwrap_or(0.0),
         min_depth_percent: row
-            .get::<_, Option<f64>>(23)
+            .get::<_, Option<f64>>("min_depth_percent")
             .unwrap_or(Some(100.0))
             .unwrap_or(100.0),
         strategy_type: row
-            .get::<_, Option<String>>(24)
+            .get::<_, Option<String>>("strategy_type")
             .unwrap_or(Some("ema".into()))
             .unwrap_or_else(|| "ema".into()),
         hft_timeout_ms: row
-            .get::<_, Option<i64>>(25)
+            .get::<_, Option<i64>>("hft_timeout_ms")
             .unwrap_or(Some(10000))
             .unwrap_or(10000),
         max_holding_time_ms: row
-            .get::<_, Option<i64>>(26)
+            .get::<_, Option<i64>>("max_holding_time_ms")
             .unwrap_or(Some(1_800_000))
             .unwrap_or(1_800_000),
     })

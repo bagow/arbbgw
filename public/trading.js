@@ -1450,7 +1450,7 @@ function renderDashboardHTML(profileId) {
             <!-- Charts row 1: Equity + Win/Loss -->
             <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;">
                 <div class="chart-card">
-                    <div class="chart-card-title">Cumulative Recorded PnL</div>
+                    <div class="chart-card-title">Reconciled PnL (latest 1000 trades)</div>
                     <div style="position:relative;height:240px;width:100%;">
                         <canvas id="dash-equity-${pid}"></canvas>
                     </div>
@@ -1480,7 +1480,7 @@ function renderKPICards(pid, stats, exchanges) {
     const totalPnl = stats.total_pnl || 0;
     const totalTrades = stats.total_trades || 0;
     const wins = stats.wins || 0;
-    const recordedTrades = totalTrades - (stats.pending_count || 0);
+    const recordedTrades = stats.verified_count || 0;
     const winRate = recordedTrades > 0 ? (wins / recordedTrades * 100).toFixed(1) : '—';
     const avgPnl = stats.avg_pnl || 0;
     const avgDuration = stats.avg_duration || 0;
@@ -1489,10 +1489,10 @@ function renderKPICards(pid, stats, exchanges) {
 
     const kpis = [
         ['💰', 'Total Balance', `$${totalBalance.toFixed(2)}`, 'var(--text)'],
-        ['📈', 'Recorded PnL', recordedTrades ? fmtPnL(totalPnl) : '—', totalPnl >= 0 ? 'var(--green)' : 'var(--red)'],
+        ['📈', 'Reconciled PnL', recordedTrades ? fmtPnL(totalPnl) : '—', totalPnl >= 0 ? 'var(--green)' : 'var(--red)'],
         ['📊', 'Trades', totalTrades, 'var(--text)'],
-        ['🎯', 'Win Rate (recorded)', recordedTrades ? `${winRate}%` : '—', wins / (recordedTrades || 1) >= 0.5 ? 'var(--green)' : 'var(--red)'],
-        ['⚡', 'Avg Recorded PnL', recordedTrades ? fmtPnL(avgPnl) : '—', avgPnl >= 0 ? 'var(--green)' : 'var(--red)'],
+        ['🎯', 'Win Rate (reconciled)', recordedTrades ? `${winRate}%` : '—', wins / (recordedTrades || 1) >= 0.5 ? 'var(--green)' : 'var(--red)'],
+        ['⚡', 'Avg Reconciled PnL', recordedTrades ? fmtPnL(avgPnl) : '—', avgPnl >= 0 ? 'var(--green)' : 'var(--red)'],
         ['⏱', 'Avg Duration', typeof fmtDuration === 'function' ? fmtDuration(avgDuration) : avgDuration + 'ms', 'var(--text)'],
     ];
     kpiEl.innerHTML = kpis.map(([icon, label, value, color]) => `
@@ -1525,7 +1525,7 @@ function renderTopTables(pid, stats) {
 let _lastStatsHash = null;
 function statsHash(stats) {
     if (!stats) return '';
-    return `${stats.total_trades}_${stats.total_pnl}_${stats.wins}_${stats.losses}_${(stats.equity_curve||[]).length}`;
+    return `${stats.total_trades}_${stats.total_pnl}_${stats.wins}_${stats.losses}_${stats.verified_count}_${stats.breakeven}_${(stats.equity_curve||[]).length}`;
 }
 
 function renderDashboardCharts(profileId, stats, exchanges) {
@@ -1611,8 +1611,8 @@ function renderDashboardCharts(profileId, stats, exchanges) {
         chartInstances[pid].winloss = new Chart(wlCtx, {
             type: 'pie',
             data: {
-                labels: ['Wins', 'Losses'],
-                datasets: [{ data: [wins, losses], backgroundColor: ['#10b981', '#ef4444'] }]
+                labels: ['Wins', 'Losses', 'Breakeven'],
+                datasets: [{ data: [wins, losses, stats.breakeven || 0], backgroundColor: ['#10b981', '#ef4444', '#94a3b8'] }]
             },
             options: { responsive: true, maintainAspectRatio: false },
         });
