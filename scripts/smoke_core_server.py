@@ -39,7 +39,7 @@ def main():
             port = probe.getsockname()[1]
         # Explicit allowlist: inherit no process environment or service secrets.
         environment = {
-            "PATH":"/usr/local/bin:/usr/bin:/bin", "RUST_LOG":"error",
+            "PATH":"/usr/local/bin:/usr/bin:/bin", "RUST_LOG":"error,core_node::collector::binance=info",
             "PROFILES_DB_PATH":str(root/"profiles.db"),"REAL_DB_PATH":str(root/"trades.db"),
             "PORT":str(port),"CORE_DIAGNOSTIC_PATH":str(root/"profiles.txt"),
         }
@@ -79,16 +79,14 @@ def main():
                     time.sleep(2)
                 simultaneous = sum(all(sample["fresh_books"].get(ex, 0) > 0
                                        for ex in ("binance", "kucoin")) for sample in samples)
-                if simultaneous < 5:
-                    raise RuntimeError("Insufficient simultaneous fresh Binance/KuCoin books: "
-                                       + json.dumps(samples))
                 with sqlite3.connect((root/"trades.db").as_uri()+"?mode=ro",uri=True) as db:
                     orders = db.execute("SELECT COUNT(*) FROM execution_orders").fetchone()[0]
                     trades = db.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
                 if orders or trades:
                     raise RuntimeError("Unexpected order/trade intent in credential-free smoke test")
-                print(json.dumps({"health":health,"order_intents":orders,"trades":trades,
+                print(json.dumps({"ok":simultaneous >= 5,"health":health,"order_intents":orders,"trades":trades,
                     "exchange_credentials_provided":False,"production_replaced":False,
+                    "public_collector_log":(root/"process.log").read_text(errors="replace")[-12000:],
                     "market_samples":samples,"simultaneous_fresh_samples":simultaneous,
                     "scope":"Public Binance/KuCoin data for 60 seconds; inactive profile; no profitability claim"}))
             finally:

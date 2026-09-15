@@ -30,10 +30,13 @@ try:
         # Isolated process has no secrets; retain its exception for diagnosis.
         raise RuntimeError("Candidate smoke failed: "+proc.stderr[-2000:])
     report = json.loads(proc.stdout)
-    report["ok"] = True
+    report.setdefault("ok", True)
     Path("smoke-result.json").write_text(json.dumps(report,indent=2))
+    if not report["ok"]:
+        raise RuntimeError("Candidate market-data check failed; see smoke-result.json")
 except Exception as exc:
-    Path("smoke-result.json").write_text(json.dumps({"ok":False,"error":str(exc)},indent=2))
+    if not Path("smoke-result.json").exists():
+        Path("smoke-result.json").write_text(json.dumps({"ok":False,"error":str(exc)},indent=2))
     raise
 finally:
     if remote_directory and re.fullmatch(r"/tmp/arb-smoke\.[A-Za-z0-9]+",remote_directory):

@@ -389,9 +389,21 @@ async fn run_l2_depth_stream(
                                 continue;
                             }
 
+                            let mut received = 0u64;
+                            let mut accepted = 0u64;
+                            let mut stale = 0u64;
+                            let mut invalid = 0u64;
+                            let mut last_lag_ms = 0i64;
+                            let mut report_at = std::time::Instant::now();
                             while let Ok(Some(msg)) =
                                 tokio::time::timeout(Duration::from_secs(30), ws.next()).await
                             {
+                                received += 1;
+                                if report_at.elapsed() >= Duration::from_secs(10) {
+                                    info!("[binance_l2_quality] received={} accepted={} stale={} invalid={} last_lag_ms={}",
+                                          received, accepted, stale, invalid, last_lag_ms);
+                                    report_at = std::time::Instant::now();
+                                }
                                 if conn_start.elapsed() > max_age {
                                     break;
                                 }
@@ -449,9 +461,11 @@ async fn run_l2_depth_stream(
                                                 .as_millis()
                                                 as i64;
                                             let exchange_ms = depth_data["E"].as_i64().unwrap_or(0);
-                                            if !(0..=750).contains(&(now_ms - exchange_ms))
+                                            last_lag_ms = now_ms - exchange_ms;
+                                            if !(0..=750).contains(&last_lag_ms)
                                                 || depth_data["st"].as_i64() == Some(2)
                                             {
+                                                stale += 1;
                                                 continue;
                                             }
                                             if bids[0].0 >= asks[0].0 {
@@ -482,7 +496,10 @@ async fn run_l2_depth_stream(
                                                     updated_ms: exchange_ms,
                                                 },
                                             );
+                                            accepted += 1;
                                             signal.notify_one();
+                                        } else {
+                                            invalid += 1;
                                         }
                                     }
                                 }
