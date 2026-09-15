@@ -25,7 +25,7 @@ try:
     subprocess.run(["scp",*options,"release/core-node",destination+":"+binary],capture_output=True,timeout=90,check=True)
     command = "python3 - "+shlex.quote(binary)+" "+shlex.quote(os.environ["GITHUB_SHA"])
     proc = subprocess.run(["ssh",*options,destination,command],input=Path("scripts/smoke_core_server.py").read_text(),
-                          capture_output=True,text=True,timeout=60)
+                          capture_output=True,text=True,timeout=120)
     if proc.returncode:
         # Isolated process has no secrets; retain its exception for diagnosis.
         raise RuntimeError("Candidate smoke failed: "+proc.stderr[-2000:])

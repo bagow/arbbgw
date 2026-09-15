@@ -349,15 +349,19 @@ async fn run_l2_depth_stream(
                         break;
                     }
 
-                    match connect_async_tls_with_config(
-                        "wss://fstream.binance.com/public/stream",
-                        None,
-                        false,
-                        None,
+                    let session_start = std::time::Instant::now();
+                    match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        connect_async_tls_with_config(
+                            "wss://fstream.binance.com/public/stream",
+                            None,
+                            false,
+                            None,
+                        ),
                     )
                     .await
                     {
-                        Ok((mut ws, _)) => {
+                        Ok(Ok((mut ws, _))) => {
                             use futures_util::SinkExt;
                             let streams: Vec<String> = chunk_symbols
                                 .iter()
@@ -369,18 +373,21 @@ async fn run_l2_depth_stream(
                                 "id": 1
                             });
 
-                            if let Err(e) = ws
-                                .send(tokio_tungstenite::tungstenite::Message::Text(
-                                    msg.to_string().into(),
-                                ))
-                                .await
-                            {
-                                error!("[binance_l2_chunk] Subscribe failed: {}", e);
-                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            if !matches!(
+                                tokio::time::timeout(
+                                    Duration::from_secs(3),
+                                    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                                        msg.to_string().into(),
+                                    ))
+                                )
+                                .await,
+                                Ok(Ok(()))
+                            ) {
+                                error!("[binance_l2_chunk] Subscribe failed or timed out");
+                                tokio::time::sleep(backoff).await;
+                                backoff = next_backoff(backoff, false);
                                 continue;
                             }
-
-                            backoff = Duration::from_secs(1);
 
                             while let Ok(Some(msg)) =
                                 tokio::time::timeout(Duration::from_secs(30), ws.next()).await
@@ -481,15 +488,24 @@ async fn run_l2_depth_stream(
                                 }
                             }
                         }
-                        Err(e) => {
-                            error!(
-                                "[binance_l2_chunk] Connect failed: {}. Retry in {:?}",
-                                e, backoff
-                            );
-                            tokio::time::sleep(backoff).await;
-                            backoff = (backoff * 2).min(Duration::from_secs(60));
+                        Ok(Err(e)) => {
+                            error!("[binance_l2_chunk] Connect failed: {}", e);
+                        }
+                        Err(_) => {
+                            warn!("[binance_l2_chunk] Connect timed out");
                         }
                     }
+                    // A successful handshake alone must not reset retry pacing.
+                    // Expire this connection's books immediately after losing the stream.
+                    for symbol in &chunk_symbols {
+                        l2_books_clone.remove(&format!("binance:{}", symbol));
+                    }
+                    let stable = session_start.elapsed() >= Duration::from_secs(60);
+                    if stable {
+                        backoff = Duration::from_secs(1);
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = next_backoff(backoff, stable);
                 }
             });
 
@@ -512,7 +528,7 @@ fn parse_levels(data: &Value, key: &str) -> Vec<(f64, f64)> {
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|level| {
+                .map(|level| {
                     let px: f64 = level[0].as_str()?.parse().ok()?;
                     let sz: f64 = level[1].as_str()?.parse().ok()?;
                     if px.is_finite() && sz.is_finite() && px > 0.0 && sz > 0.0 {
@@ -521,7 +537,48 @@ fn parse_levels(data: &Value, key: &str) -> Vec<(f64, f64)> {
                         None
                     }
                 })
-                .collect()
+                .collect::<Option<Vec<_>>>()
         })
+        .flatten()
         .unwrap_or_default()
+}
+
+fn next_backoff(current: Duration, stable: bool) -> Duration {
+    if stable {
+        Duration::from_secs(1)
+    } else {
+        (current * 2).min(Duration::from_secs(60))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_level_rejects_entire_snapshot_side() {
+        for bad in [
+            serde_json::json!(["NaN", "1"]),
+            serde_json::json!(["99", "0"]),
+            serde_json::json!(["99"]),
+            serde_json::json!(["bad", "1"]),
+        ] {
+            let data = serde_json::json!({"b": [["100", "2"], bad]});
+            assert!(parse_levels(&data, "b").is_empty());
+        }
+        assert_eq!(
+            parse_levels(&serde_json::json!({"b": [["100", "2"], ["99", "3"]]}), "b"),
+            vec![(100.0, 2.0), (99.0, 3.0)]
+        );
+    }
+
+    #[test]
+    fn unstable_sessions_back_off_until_capped() {
+        let mut delay = Duration::from_secs(1);
+        for expected in [2, 4, 8, 16, 32, 60, 60] {
+            delay = next_backoff(delay, false);
+            assert_eq!(delay, Duration::from_secs(expected));
+        }
+        assert_eq!(next_backoff(delay, true), Duration::from_secs(1));
+    }
 }

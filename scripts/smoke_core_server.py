@@ -31,7 +31,7 @@ def main():
         with sqlite3.connect(source.as_uri()+"?mode=ro",uri=True,timeout=5) as live:
             with sqlite3.connect(root/"profiles.db") as copy:
                 live.backup(copy)
-                disabled = json.dumps(["binance","gate","kucoin","bybit","bitget","bingx","bitmex","ascendex","xt","toobit"])
+                disabled = json.dumps(["gate","bybit","bitget","bingx","bitmex","ascendex","xt","toobit"])
                 copy.execute("UPDATE trading_profiles SET is_active=0,pending_commands=NULL,disabled_exchanges=?",(disabled,))
                 copy.execute("DELETE FROM server_cache")
         with socket.socket() as probe:
@@ -64,6 +64,24 @@ def main():
                     time.sleep(0.25)
                 if not health or not health.get("healthy") or health.get("build_sha") != expected_sha:
                     raise RuntimeError("Candidate health/build identity not confirmed")
+                samples = []
+                observation_start = time.monotonic()
+                while time.monotonic() - observation_start < 60:
+                    if process.poll() is not None:
+                        raise RuntimeError("Candidate exited during public market observation")
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
+                        health = json.load(response)
+                    if not health.get("healthy") or health.get("build_sha") != expected_sha:
+                        raise RuntimeError("Candidate lost health/build identity during observation")
+                    fresh = {venue["exchange"]: venue["fresh_books"] for venue in health["venues"]}
+                    samples.append({"elapsed_seconds": round(time.monotonic()-observation_start, 1),
+                                    "fresh_books": fresh})
+                    time.sleep(2)
+                simultaneous = sum(all(sample["fresh_books"].get(ex, 0) > 0
+                                       for ex in ("binance", "kucoin")) for sample in samples)
+                if simultaneous < 5:
+                    raise RuntimeError("Insufficient simultaneous fresh Binance/KuCoin books: "
+                                       + json.dumps(samples))
                 with sqlite3.connect((root/"trades.db").as_uri()+"?mode=ro",uri=True) as db:
                     orders = db.execute("SELECT COUNT(*) FROM execution_orders").fetchone()[0]
                     trades = db.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
@@ -71,7 +89,8 @@ def main():
                     raise RuntimeError("Unexpected order/trade intent in credential-free smoke test")
                 print(json.dumps({"health":health,"order_intents":orders,"trades":trades,
                     "exchange_credentials_provided":False,"production_replaced":False,
-                    "scope":"Startup smoke test only; collectors disabled; no profitability claim"}))
+                    "market_samples":samples,"simultaneous_fresh_samples":simultaneous,
+                    "scope":"Public Binance/KuCoin data for 60 seconds; inactive profile; no profitability claim"}))
             finally:
                 if process.poll() is None:
                     process.terminate()
