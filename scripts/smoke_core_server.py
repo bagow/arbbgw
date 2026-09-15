@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -23,6 +24,12 @@ def main():
     expected_sha = sys.argv[2]
     if binary.name != "core-node" or not binary.is_file():
         raise RuntimeError("Missing candidate binary")
+    if len(expected_sha) != 40 or any(c not in "0123456789abcdef" for c in expected_sha):
+        raise RuntimeError("Invalid build identity")
+    candidate_dir = Path("/home/opc/arb-candidates") / expected_sha
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(binary, candidate_dir / "core-node.upload")
+    os.replace(candidate_dir / "core-node.upload", candidate_dir / "core-node")
     with tempfile.TemporaryDirectory(prefix="arb-core-smoke-", dir="/tmp") as directory:
         root = Path(directory)
         # An empty local .env prevents dotenv from searching parent directories.
