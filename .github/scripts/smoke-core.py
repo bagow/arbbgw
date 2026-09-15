@@ -22,7 +22,7 @@ try:
     if not re.fullmatch(r"/tmp/arb-smoke\.[A-Za-z0-9]+",remote_directory):
         raise RuntimeError("Unexpected staging directory")
     binary = remote_directory+"/core-node"
-    subprocess.run(["scp",*options,"release/core-node",destination+":"+binary],capture_output=True,timeout=90,check=True)
+    subprocess.run(["scp","-C",*options,"release/core-node",destination+":"+binary],capture_output=True,timeout=180,check=True)
     command = "python3 - "+shlex.quote(binary)+" "+shlex.quote(os.environ["GITHUB_SHA"])
     proc = subprocess.run(["ssh",*options,destination,command],input=Path("scripts/smoke_core_server.py").read_text(),
                           capture_output=True,text=True,timeout=120)

@@ -10,6 +10,10 @@ use tracing::{error, info, warn};
 
 use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
 
+// Large multiplexed streams queued seconds of old depth on the deployment host.
+// Keep each transport small; freshness is still checked against exchange time.
+const DEPTH_STREAMS_PER_CONNECTION: usize = 20;
+
 pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
@@ -328,12 +332,12 @@ async fn run_l2_depth_stream(
         info!(
             "[binance_l2] Starting L2 subscriptions for {} symbols (requires {} connections)",
             symbols.len(),
-            (symbols.len() + 199) / 200
+            (symbols.len() + DEPTH_STREAMS_PER_CONNECTION - 1) / DEPTH_STREAMS_PER_CONNECTION
         );
 
         let mut handles = tokio::task::JoinSet::new();
 
-        for chunk in symbols.chunks(200) {
+        for chunk in symbols.chunks(DEPTH_STREAMS_PER_CONNECTION) {
             let chunk_symbols = chunk.to_vec();
             let l2_books_clone = l2_books.clone();
             let prices = price_map.clone();

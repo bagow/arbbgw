@@ -106,7 +106,7 @@ jobs:
     if: github.ref == 'refs/heads/fix/audit-risk-20260909'
     needs: [check]
     runs-on: ubuntu-22.04
-    timeout-minutes: 6
+    timeout-minutes: 8
     permissions:
       contents: write
     steps:
