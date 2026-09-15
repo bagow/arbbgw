@@ -33,22 +33,35 @@ jobs:
           destination = os.environ['ARB_AUDIT_USER'] + '@' + os.environ['ARB_AUDIT_HOST']
           try:
               proc = subprocess.run(['ssh','-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15',
-                  '-o','StrictHostKeyChecking=accept-new','-o','UserKnownHostsFile='+str(directory/'known_hosts'),
+                  '-o','ServerAliveInterval=10','-o','ServerAliveCountMax=3','-o','StrictHostKeyChecking=accept-new','-o','UserKnownHostsFile='+str(directory/'known_hosts'),
                   destination,'python3 -'], input=remote, capture_output=True, text=True, timeout=180)
               if proc.returncode:
                   raise RuntimeError('Read-only SSH audit failed with exit code '+str(proc.returncode))
               report = json.loads(proc.stdout)
               report['requested_commit'] = os.environ['GITHUB_SHA']
               pathlib.Path('server-audit.json').write_text(json.dumps(report,indent=2,allow_nan=False))
+          except Exception as exc:
+              stderr = getattr(exc, 'stderr', '') or ''
+              if isinstance(stderr, bytes):
+                  stderr = stderr.decode(errors='replace')
+              if 'proc' in locals():
+                  stderr += proc.stderr or ''
+              report = {'ok': False, 'requested_commit': os.environ['GITHUB_SHA'],
+                        'error_type': type(exc).__name__,
+                        'remote_progress': [line for line in stderr.splitlines() if line.startswith('AUDIT:')]}
+              pathlib.Path('server-audit.json').write_text(json.dumps(report, indent=2))
+              raise RuntimeError('Server audit failed: '+type(exc).__name__) from None
           finally:
               key.unlink(missing_ok=True)
           PY
       - name: Preserve audit report
+        if: always() && hashFiles('server-audit.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: server-audit-${{ github.sha }}
           path: server-audit.json
       - name: Publish report in a service branch
+        if: always() && hashFiles('server-audit.json') != ''
         run: |
           set -eu
           export GIT_INDEX_FILE="$RUNNER_TEMP/arb-audit-report-index"

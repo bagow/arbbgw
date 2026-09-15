@@ -4,6 +4,9 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import signal
+import sys
+import time
 import sqlite3
 import subprocess
 import urllib.request
@@ -14,10 +17,17 @@ from audit_shadow import summarize_shadow
 
 def inspect_database(path, kind):
     with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as db:
+        deadline = time.monotonic() + 15
+        db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
-        result = {"quick_check": [r[0] for r in db.execute("PRAGMA quick_check")]}
+        result = {}
+        try:
+            result["quick_check"] = [r[0] for r in db.execute("PRAGMA quick_check")]
+        except sqlite3.OperationalError as exc:
+            result["quick_check_error"] = str(exc)
+        deadline = time.monotonic() + 15
         if kind == "trades":
             rows = db.execute("SELECT id,status,accounting_status,pnl,exit_time FROM trades").fetchall()
             result["performance"] = summarize(rows)
@@ -48,18 +58,20 @@ def inspect_database(path, kind):
                     "ts", "balances_ts", "positions_ts", "balances", "margin_balances", "positions"
                 )}
         elif kind == "shadow":
-            result["samples"] = dict(db.execute(
-                "SELECT COUNT(*) AS count,MIN(json_extract(snapshot,'$.recorded_ms')) AS first_ms,"
-                "MAX(json_extract(snapshot,'$.recorded_ms')) AS last_ms FROM book_samples"
-            ).fetchone())
+            result["scope"] = "Latest 10000 recorded snapshots, not complete history"
             result["quality"] = summarize_shadow(
-                json.loads(r[0]) for r in db.execute("SELECT snapshot FROM book_samples ORDER BY id")
+                json.loads(r[0]) for r in db.execute(
+                    "SELECT snapshot FROM book_samples ORDER BY id DESC LIMIT 10000")
             )
         return result
 
 
 def main():
+    # The remote process must stop even if its SSH client disappears.
+    signal.signal(signal.SIGALRM, lambda *_: sys.exit("AUDIT: overall deadline exceeded"))
+    signal.alarm(100)
     result = {}
+    print("AUDIT: service logs", file=sys.stderr, flush=True)
     logs = subprocess.run(["journalctl", "-u", "core-node", "--since=-30min", "-n", "5000", "--no-pager"],
                           capture_output=True, text=True, timeout=15)
     lines = logs.stdout.splitlines()
@@ -97,6 +109,7 @@ def main():
         result["health_error"] = type(exc).__name__
     root = Path("/home/opc/core-node")
     for filename, kind in (("real-trader.db", "trades"), ("vps-api.db", "profiles"), ("shadow-books.db", "shadow")):
+        print("AUDIT: database " + kind, file=sys.stderr, flush=True)
         try:
             result[filename] = inspect_database(root / filename, kind)
         except Exception as exc:
