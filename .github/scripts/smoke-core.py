@@ -16,7 +16,17 @@ options = ["-i",str(key),"-o","BatchMode=yes","-o","ConnectTimeout=15",
            "-o","StrictHostKeyChecking=accept-new","-o","UserKnownHostsFile="+str(directory/"known_hosts")]
 destination = os.environ["ARB_SMOKE_USER"]+"@"+os.environ["ARB_SMOKE_HOST"]
 remote_directory = None
+restore_needed = False
+
+def maintenance(mode):
+    return subprocess.run(["ssh",*options,destination,"python3 - "+mode],
+                          input=Path("scripts/smoke_maintenance.py").read_text(),
+                          capture_output=True,text=True,timeout=50,check=True)
+
 try:
+    maintenance("verify")
+    restore_needed = True
+    maintenance("pause")
     created = subprocess.run(["ssh",*options,destination,"mktemp -d /tmp/arb-smoke.XXXXXXXX"],capture_output=True,text=True,timeout=30,check=True)
     remote_directory = created.stdout.strip()
     if not re.fullmatch(r"/tmp/arb-smoke\.[A-Za-z0-9]+",remote_directory):
@@ -39,7 +49,22 @@ except Exception as exc:
         Path("smoke-result.json").write_text(json.dumps({"ok":False,"error":str(exc)},indent=2))
     raise
 finally:
-    if remote_directory and re.fullmatch(r"/tmp/arb-smoke\.[A-Za-z0-9]+",remote_directory):
-        command = "python3 -c "+shlex.quote("import shutil; shutil.rmtree("+repr(remote_directory)+")")
-        subprocess.run(["ssh",*options,destination,command],capture_output=True,timeout=30)
-    key.unlink(missing_ok=True)
+    try:
+        if restore_needed:
+            maintenance("restore")
+            report_path = Path("smoke-result.json")
+            report = json.loads(report_path.read_text()) if report_path.exists() else {"ok":False}
+            report["production_restored"] = True
+            report["production_paused_for_test"] = True
+            report_path.write_text(json.dumps(report,indent=2))
+    except Exception as exc:
+        report_path = Path("smoke-result.json")
+        report = json.loads(report_path.read_text()) if report_path.exists() else {}
+        report.update({"ok":False,"production_restored":False,"restore_error":type(exc).__name__})
+        report_path.write_text(json.dumps(report,indent=2))
+        raise
+    finally:
+        if remote_directory and re.fullmatch(r"/tmp/arb-smoke\.[A-Za-z0-9]+",remote_directory):
+            command = "python3 -c "+shlex.quote("import shutil; shutil.rmtree("+repr(remote_directory)+")")
+            subprocess.run(["ssh",*options,destination,command],capture_output=True,timeout=30)
+        key.unlink(missing_ok=True)

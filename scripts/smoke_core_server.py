@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import resource
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -20,6 +21,10 @@ def limits():
 
 
 def main():
+    def expire(*_):
+        raise TimeoutError("Isolated smoke exceeded its remote deadline")
+    signal.signal(signal.SIGALRM, expire)
+    signal.alarm(105)
     binary = Path(sys.argv[1]).resolve()
     expected_sha = sys.argv[2]
     if binary.name != "core-node" or not binary.is_file():
@@ -86,15 +91,19 @@ def main():
                     time.sleep(2)
                 simultaneous = sum(all(sample["fresh_books"].get(ex, 0) > 0
                                        for ex in ("binance", "kucoin")) for sample in samples)
+                steady_samples = samples[-10:]
+                steady_fresh = sum(all(sample["fresh_books"].get(ex, 0) > 0
+                                       for ex in ("binance", "kucoin")) for sample in steady_samples)
                 with sqlite3.connect((root/"trades.db").as_uri()+"?mode=ro",uri=True) as db:
                     orders = db.execute("SELECT COUNT(*) FROM execution_orders").fetchone()[0]
                     trades = db.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
                 if orders or trades:
                     raise RuntimeError("Unexpected order/trade intent in credential-free smoke test")
-                print(json.dumps({"ok":simultaneous >= 5,"health":health,"order_intents":orders,"trades":trades,
+                print(json.dumps({"ok":simultaneous >= 5 and len(steady_samples) == 10 and steady_fresh >= 8,"health":health,"order_intents":orders,"trades":trades,
                     "exchange_credentials_provided":False,"production_replaced":False,
                     "public_collector_log":(root/"process.log").read_text(errors="replace")[-12000:],
                     "market_samples":samples,"simultaneous_fresh_samples":simultaneous,
+                    "steady_fresh_samples":steady_fresh,"steady_samples":len(steady_samples),
                     "scope":"Public Binance/KuCoin data for 60 seconds; inactive profile; no profitability claim"}))
             finally:
                 if process.poll() is None:
