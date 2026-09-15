@@ -1,0 +1,4 @@
+{
+  "ok": false,
+  "error": "Command '['scp', '-C', '-i', '/home/runner/work/_temp/arb-smoke-ssh/key', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile=/home/runner/work/_temp/arb-smoke-ssh/known_hosts', 'release/core-node', 'opc@140.238.217.190:/tmp/arb-smoke.L6vzXi3I/core-node']' timed out after 180 seconds"
+}
