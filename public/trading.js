@@ -92,7 +92,15 @@ async function apiFetch(path, opts = {}) {
         }
         throw new Error(`HTTP 401 Unauthorized`);
     }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+        let message = `HTTP ${res.status}`;
+        try {
+            const body = await res.json();
+            const detail = body?.error || body?.message;
+            if (typeof detail === 'string' && detail.trim()) message = detail;
+        } catch (_) { /* Preserve the HTTP status for non-JSON proxy errors. */ }
+        throw new Error(message);
+    }
     return res.json();
 }
 
@@ -527,7 +535,7 @@ function renderSubNavStats(active, stats, mode) {
             border:1px solid ${isRunning ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'};
             transition:all .3s ease;">
             <span style="width:7px;height:7px;border-radius:50%;background:${isRunning ? 'var(--green)' : 'var(--red)'};${isRunning ? 'animation:pulse-green 2s infinite;' : ''}"></span>
-            ${isRunning ? 'Bot Active' : 'Bot Stopped'}
+            ${isRunning ? 'Entries Enabled' : 'Entries Disabled'}
         </span>
         <span class="mode-badge mode-badge--real">💰 Real</span>
     `;
@@ -546,7 +554,7 @@ function updateBotStatusUI(isRunning, profileId) {
         badge.style.borderColor = isRunning ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)';
         const dot = badge.querySelector('span');
         if (dot) dot.style.background = isRunning ? 'var(--green)' : 'var(--red)';
-        badge.lastChild.textContent = isRunning ? ' BOT ACTIVE' : ' BOT STOPPED';
+        badge.lastChild.textContent = isRunning ? ' ENTRIES ENABLED' : ' ENTRIES DISABLED';
     }
 
     // 2. Start/Stop button
@@ -1017,7 +1025,7 @@ function renderSettingsForm(profile) {
                     <div style="display:flex;align-items:center;gap:12px;">
                         <span class="settings-status-badge" style="background:${isRunning ? 'var(--green-dim)' : 'var(--red-dim)'};color:${isRunning ? 'var(--green)' : 'var(--red)'};border:1px solid ${isRunning ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'};">
                             <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${isRunning ? 'var(--green)' : 'var(--red)'};"></span>
-                            ${isRunning ? 'BOT ACTIVE' : 'BOT STOPPED'}
+                            ${isRunning ? 'ENTRIES ENABLED' : 'ENTRIES DISABLED'}
                         </span>
                         <span style="color:var(--text-sub);font-size:.82rem;">Profile ID: <strong>${p.id}</strong></span>
                     </div>
@@ -1042,12 +1050,9 @@ function renderSettingsForm(profile) {
                             style="margin:0;width:auto;padding:10px 24px;font-size:.9rem;background:var(--accent);color:#fff;border:none;">
                             💾 Save Settings
                         </button>
-                        <button type="button"
-                            onclick="clearTrades('${p.id}', '${p.mode}')"
-                            class="trading-save-btn outline-btn"
-                            style="margin:0;width:auto;padding:10px 20px;font-size:.85rem;background:transparent;color:var(--text-sub);border:1px solid var(--border);">
-                            🗑️ Wipe Trades
-                        </button>
+                        <span style="font-size:.8rem;color:var(--text-sub);max-width:260px;">
+                            Trade history is retained for execution reconciliation.
+                        </span>
                     </div>
                 </div>
             </form>
@@ -2424,13 +2429,6 @@ window.resumeKillSwitch = async function () {
     }
 };
 
-window.clearTrades = async function (profileId, mode) {
-    if (!confirm('Delete ALL active and historical trades for this profile?')) return;
-    try {
-        await apiFetch(`/api/profiles/${profileId}/trades`, { method: 'DELETE' });
-        await refreshActiveTab();
-    } catch (e) { alert('Failed: ' + e.message); }
-};
 
 window.marketCloseAll = async function (profileId) {
     if (!confirm('Close ALL active positions on ALL exchanges at market price now?')) return;
