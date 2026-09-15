@@ -19,9 +19,13 @@ remote_directory = None
 restore_needed = False
 
 def maintenance(mode):
-    return subprocess.run(["ssh",*options,destination,"python3 - "+mode],
+    proc = subprocess.run(["ssh",*options,destination,"python3 - "+mode],
                           input=Path("scripts/smoke_maintenance.py").read_text(),
-                          capture_output=True,text=True,timeout=50,check=True)
+                          capture_output=True,text=True,timeout=50)
+    if proc.returncode:
+        details = [line for line in proc.stderr.splitlines() if line.startswith(("RuntimeError:", "sqlite3.", "PermissionError:"))]
+        raise RuntimeError("Maintenance "+mode+" failed: "+"; ".join(details))
+    return proc
 
 try:
     maintenance("verify")

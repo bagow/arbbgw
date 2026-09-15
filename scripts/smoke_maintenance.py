@@ -32,6 +32,7 @@ def main():
     elif mode == 'restore':
         subprocess.run(['sudo','-n','systemctl','start','core-node'],check=True,timeout=20)
         subprocess.run(['systemctl','is-active','--quiet','core-node'],check=True,timeout=10)
+        subprocess.run(['sudo','-n','systemctl','stop','arb-core-restore-*.timer'],check=True,timeout=15)
     else:
         raise RuntimeError('Unknown maintenance operation')
 
