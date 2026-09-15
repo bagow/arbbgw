@@ -1050,9 +1050,12 @@ function renderSettingsForm(profile) {
                             style="margin:0;width:auto;padding:10px 24px;font-size:.9rem;background:var(--accent);color:#fff;border:none;">
                             💾 Save Settings
                         </button>
-                        <span style="font-size:.8rem;color:var(--text-sub);max-width:260px;">
-                            Trade history is retained for execution reconciliation.
-                        </span>
+                        <button type="button"
+                            onclick="clearTrades('${p.id}', '${p.mode}')"
+                            class="trading-save-btn outline-btn"
+                            style="margin:0;width:auto;padding:10px 20px;font-size:.85rem;background:transparent;color:var(--text-sub);border:1px solid var(--border);">
+                            🗑️ Wipe Trades
+                        </button>
                     </div>
                 </div>
             </form>
@@ -2429,6 +2432,14 @@ window.resumeKillSwitch = async function () {
     }
 };
 
+
+window.clearTrades = async function (profileId, mode) {
+    if (!confirm('Delete ALL active and historical trades for this profile?')) return;
+    try {
+        await apiFetch(`/api/profiles/${profileId}/trades`, { method: 'DELETE' });
+        await refreshActiveTab();
+    } catch (e) { alert('Failed: ' + e.message); }
+};
 
 window.marketCloseAll = async function (profileId) {
     if (!confirm('Close ALL active positions on ALL exchanges at market price now?')) return;
