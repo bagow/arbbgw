@@ -1,0 +1,4 @@
+{
+  "ok": false,
+  "error": "Command '['ssh', '-i', '/home/runner/work/_temp/arb-smoke-ssh/key', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile=/home/runner/work/_temp/arb-smoke-ssh/known_hosts', 'opc@140.238.217.190', 'python3 - verify']' returned non-zero exit status 1."
+}
