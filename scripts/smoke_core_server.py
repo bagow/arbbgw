@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 
@@ -18,6 +19,16 @@ def limits():
     os.nice(10)
     resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024, 768 * 1024 * 1024))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
+def read_health(url):
+    try:
+        response = urllib.request.urlopen(url, timeout=2)
+    except urllib.error.HTTPError as exc:
+        # Readiness deliberately returns 503 while fewer than two markets are fresh.
+        response = exc
+    with response:
+        return json.load(response)
 
 
 def main():
@@ -67,24 +78,22 @@ def main():
                         raise RuntimeError("Candidate exited before health check: "+str(process.returncode)
                             +"; isolated log: "+(root/"process.log").read_text(errors="replace")[-2000:])
                     try:
-                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health",timeout=2) as response:
-                            health = json.load(response)
-                        if health.get("healthy"):
+                        health = read_health(f"http://127.0.0.1:{port}/health")
+                        if health.get("process_healthy"):
                             break
                     except (OSError,ValueError):
                         pass
                     time.sleep(0.25)
-                if not health or not health.get("healthy") or health.get("build_sha") != expected_sha:
-                    raise RuntimeError("Candidate health/build identity not confirmed")
+                if not health or not health.get("process_healthy") or health.get("build_sha") != expected_sha:
+                    raise RuntimeError("Candidate process health/build identity not confirmed")
                 samples = []
                 observation_start = time.monotonic()
                 while time.monotonic() - observation_start < 60:
                     if process.poll() is not None:
                         raise RuntimeError("Candidate exited during public market observation")
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
-                        health = json.load(response)
-                    if not health.get("healthy") or health.get("build_sha") != expected_sha:
-                        raise RuntimeError("Candidate lost health/build identity during observation")
+                    health = read_health(f"http://127.0.0.1:{port}/health")
+                    if not health.get("process_healthy") or health.get("build_sha") != expected_sha:
+                        raise RuntimeError("Candidate lost process health/build identity during observation")
                     fresh = {venue["exchange"]: venue["fresh_books"] for venue in health["venues"]}
                     samples.append({"elapsed_seconds": round(time.monotonic()-observation_start, 1),
                                     "fresh_books": fresh})

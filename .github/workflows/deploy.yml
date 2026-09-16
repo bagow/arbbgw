@@ -348,7 +348,7 @@ jobs:
             sudo systemctl restart core-node
             ready=0
             for attempt in $(seq 1 30); do
-              if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:3003/health; then
+              if curl --silent --show-error --max-time 2 http://127.0.0.1:3003/health | python3 -c 'import json,sys; value=json.load(sys.stdin); raise SystemExit(0 if value.get("process_healthy") and value.get("build_sha") == "${{ github.sha }}" else 1)'; then
                 ready=1
                 break
               fi
