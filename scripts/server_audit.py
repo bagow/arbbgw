@@ -92,6 +92,7 @@ def main():
         ("scanner_depth_shallow", "L1 depth shallow"),
         ("scanner_lot_impossible", "physically impossible to balance lot sizes"),
         ("scanner_volume_too_high", "actual_vol exceeds max_v"),
+        ("scanner_volume_outside_range", "actual volume outside configured range"),
         ("scanner_below_notional", "below min_notional"),
         ("scanner_structural_deviation", "ema deviation"),
         ("scanner_health_rejected", "health check failed"),
