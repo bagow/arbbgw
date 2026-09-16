@@ -103,6 +103,10 @@ def main():
         line.split("[binance_l2_quality] ", 1)[1][:400]
         for line in lines if "[binance_l2_quality] " in line
     ][-20:]
+    result["binance_l2_subscription_tail"] = [
+        line.split("[binance_l2] ", 1)[1][:400]
+        for line in lines if "[binance_l2] " in line
+    ][-20:]
     result["spread_diagnostics_tail"] = [
         line.split("[spreads] ", 1)[1][:600]
         for line in lines if "[spreads] " in line
@@ -146,6 +150,12 @@ def main():
             "systemctl", "show", service, "--property=ActiveState,SubState,MainPID,ActiveEnterTimestamp,NRestarts"
         ], capture_output=True, text=True, timeout=10)
         result[service] = proc.stdout.strip()
+    process = subprocess.run(
+        ["ps", "-C", "core-node", "-o", "pid=,etimes=,pcpu=,pmem=,nlwp=,rss=,stat="],
+        capture_output=True, text=True, timeout=10,
+    )
+    result["core_process_usage"] = process.stdout.strip()
+    result["load_average"] = list(__import__("os").getloadavg())
     for binary in ("core-node", "vps-api"):
         path = Path("/usr/local/bin") / binary
         if path.is_file():
