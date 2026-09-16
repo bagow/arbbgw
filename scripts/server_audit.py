@@ -113,6 +113,31 @@ def main():
     result["binance_public_transport_errors"] = list(dict.fromkeys(
         line.split(prefix, 1)[1][:400] for line in lines if prefix in line
     ))[:10]
+    # Export only service lifecycle/startup lines around deployments. Avoid
+    # arbitrary engine messages because private order logs can contain account
+    # details that do not belong in the report branch.
+    deployment_markers = (
+        "Starting CEX Arbitrage Core Node",
+        "Started CEX Arbitrage Core Node",
+        "Stopping CEX Arbitrage Core Node",
+        "Stopped CEX Arbitrage Core Node",
+        "core-node.service: Main process exited",
+        "core-node.service: Failed with result",
+        "[STARTUP]",
+        "ENGINE LOOP PANIC",
+        "Address already in use",
+    )
+    result["core_deployment_tail"] = [
+        line[:800] for line in lines if any(marker in line for marker in deployment_markers)
+    ][-80:]
+    result["pending_core_artifacts"] = []
+    for path in sorted(Path("/tmp").glob("arb-core-*")):
+        entry = {"name": path.name, "mtime": path.stat().st_mtime}
+        if path.is_dir():
+            entry["files"] = sorted(child.name for child in path.iterdir())[:20]
+        else:
+            entry["size"] = path.stat().st_size
+        result["pending_core_artifacts"].append(entry)
     for service in ("core-node", "vps-api", "cloudflared"):
         proc = subprocess.run([
             "systemctl", "show", service, "--property=ActiveState,SubState,MainPID,ActiveEnterTimestamp,NRestarts"
