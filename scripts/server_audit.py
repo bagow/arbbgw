@@ -36,7 +36,7 @@ def sample_scanner_funnel(path, samples=60, delay=0.25):
             if profile is None:
                 row = db.execute(
                     "SELECT id,min_entry_spread,max_entry_spread,min_volume_millions,"
-                    "take_profit_percent,disabled_exchanges FROM trading_profiles "
+                    "min_structural_deviation,disabled_exchanges FROM trading_profiles "
                     "WHERE is_active=1 ORDER BY id LIMIT 1"
                 ).fetchone()
                 profile = dict(row) if row else None
@@ -83,18 +83,18 @@ def sample_scanner_funnel(path, samples=60, delay=0.25):
     min_entry = _float(profile.get("min_entry_spread"))
     max_entry = _float(profile.get("max_entry_spread"))
     min_volume = _float(profile.get("min_volume_millions")) * 1_000_000.0
-    take_profit = _float(profile.get("take_profit_percent"))
+    min_structural_deviation = _float(profile.get("min_structural_deviation"))
     default_fee = _float(technical.get("default_fee_rate"), 0.0005)
     # Matches the production helper: four fee legs plus four expected IOC legs at 0.02%.
     estimated_break_even = 4.0 * default_fee * 100.0 + 0.08
     stages = {
         "snapshot_rows": 0,
         "enabled_venues": 0,
-        "adjusted_spread_in_entry_window": 0,
+        "raw_spread_in_entry_window": 0,
         "both_24h_volumes_above_profile_minimum": 0,
-        "structural_verified": 0,
+        "configured_structural_filter_passed": 0,
         "positive_after_estimated_break_even": 0,
-        "managed_take_profit_preflight_estimate": 0,
+        "configured_entry_preflight_estimate": 0,
     }
     top = {}
     per_snapshot = []
@@ -128,22 +128,28 @@ def sample_scanner_funnel(path, samples=60, delay=0.25):
             if row.get("exchangeA") in disabled or row.get("exchangeB") in disabled:
                 continue
             stages["enabled_venues"] += 1
-            if not min_entry <= adjusted <= max_entry:
+            if not min_entry <= spread <= max_entry:
                 continue
-            stages["adjusted_spread_in_entry_window"] += 1
+            stages["raw_spread_in_entry_window"] += 1
             if _float(row.get("volA")) < min_volume or _float(row.get("volB")) < min_volume:
                 continue
             stages["both_24h_volumes_above_profile_minimum"] += 1
-            if row.get("structural_verified") is not True:
-                continue
-            stages["structural_verified"] += 1
-            if adjusted <= estimated_break_even:
+            structural_reserve = 0.0
+            if min_structural_deviation > 0.0:
+                if row.get("structural_verified") is not True or adjusted < min_structural_deviation:
+                    continue
+                structural_reserve = structural
+            stages["configured_structural_filter_passed"] += 1
+            if spread - structural_reserve <= estimated_break_even:
                 continue
             stages["positive_after_estimated_break_even"] += 1
-            required_profit = max(min_entry, take_profit, 0.05)
-            if adjusted - estimated_break_even <= required_profit:
+            required_spread = max(
+                min_entry,
+                structural_reserve + max(min_structural_deviation, estimated_break_even),
+            )
+            if spread <= required_spread:
                 continue
-            stages["managed_take_profit_preflight_estimate"] += 1
+            stages["configured_entry_preflight_estimate"] += 1
         per_snapshot.append({
             "ts": snapshot.get("ts"),
             "rows": local_count,
@@ -164,7 +170,7 @@ def summarize_recorded_funnel(shadow_path, profiles_path, build_sha):
         db.row_factory = sqlite3.Row
         profile_row = db.execute(
             "SELECT id,min_entry_spread,max_entry_spread,min_volume_millions,trade_volume,"
-            "min_depth_percent,take_profit_percent,disabled_exchanges FROM trading_profiles "
+            "min_depth_percent,min_structural_deviation,disabled_exchanges FROM trading_profiles "
             "WHERE is_active=1 ORDER BY id LIMIT 1"
         ).fetchone()
     if not profile_row:
@@ -178,13 +184,12 @@ def summarize_recorded_funnel(shadow_path, profiles_path, build_sha):
     max_entry = _float(profile["max_entry_spread"])
     min_volume = _float(profile["min_volume_millions"]) * 1_000_000.0
     required_depth = _float(profile["trade_volume"]) * _float(profile["min_depth_percent"]) / 100.0
-    take_profit = _float(profile["take_profit_percent"])
+    min_structural_deviation = _float(profile["min_structural_deviation"])
     stage_names = (
         "current_build_samples", "both_l2_books_fresh_and_valid", "enabled_venues",
-        "adjusted_spread_in_entry_window", "both_24h_volumes_above_profile_minimum",
-        "structural_verified", "positive_after_actual_break_even",
-        "l2_top_levels_above_configured_depth", "pre_take_profit_entry_rule",
-        "current_take_profit_entry_rule",
+        "raw_spread_in_entry_window", "both_24h_volumes_above_profile_minimum",
+        "configured_structural_filter_passed", "positive_after_actual_break_even",
+        "l2_top_levels_above_configured_depth", "configured_entry_preflight",
     )
     counts = {name: 0 for name in stage_names}
     timestamps = {name: set() for name in stage_names}
@@ -228,19 +233,22 @@ def summarize_recorded_funnel(shadow_path, profiles_path, build_sha):
             }
             if key not in top or adjusted > top[key]["adjusted_spread_pct"]:
                 top[key] = candidate
-            if not min_entry <= adjusted <= max_entry:
+            if not min_entry <= spread <= max_entry:
                 continue
-            passed("adjusted_spread_in_entry_window")
+            passed("raw_spread_in_entry_window")
             if _float(spread_row.get("volA")) < min_volume or _float(spread_row.get("volB")) < min_volume:
                 continue
             passed("both_24h_volumes_above_profile_minimum")
-            if spread_row.get("structural_verified") is not True:
-                continue
-            passed("structural_verified")
+            structural_reserve = 0.0
+            if min_structural_deviation > 0.0:
+                if spread_row.get("structural_verified") is not True or adjusted < min_structural_deviation:
+                    continue
+                structural_reserve = structural
+            passed("configured_structural_filter_passed")
             fee_a = _float(sample.get("fee_a"), 0.001)
             fee_b = _float(sample.get("fee_b"), 0.001)
             break_even = 2.0 * (fee_a + fee_b) * 100.0 + 0.08
-            if adjusted <= break_even:
+            if spread - structural_reserve <= break_even:
                 continue
             passed("positive_after_actual_break_even")
             is_a_higher = str(spread_row.get("direction", "")).startswith(
@@ -254,10 +262,12 @@ def summarize_recorded_funnel(shadow_path, profiles_path, build_sha):
                     or _float(level_b[0]) * _float(level_b[1]) < required_depth:
                 continue
             passed("l2_top_levels_above_configured_depth")
-            if adjusted - break_even > max(min_entry, 0.05):
-                passed("pre_take_profit_entry_rule")
-            if adjusted - break_even > max(min_entry, take_profit, 0.05):
-                passed("current_take_profit_entry_rule")
+            required_spread = max(
+                min_entry,
+                structural_reserve + max(min_structural_deviation, break_even),
+            )
+            if spread > required_spread:
+                passed("configured_entry_preflight")
     return {
         "scope": "Latest 10000 shadow rows, restricted to the currently deployed build",
         "build_sha": build_sha,
