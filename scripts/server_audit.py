@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 
 from audit_performance import summarize
-from audit_shadow import summarize_shadow
+from audit_shadow import summarize_shadow, valid_book
 
 
 def _float(value, default=0.0):
@@ -156,6 +156,121 @@ def sample_scanner_funnel(path, samples=60, delay=0.25):
         top.values(), key=lambda row: row["spread_pct"], reverse=True
     )[:20]
     return result
+
+
+def summarize_recorded_funnel(shadow_path, profiles_path, build_sha):
+    """Replay non-private scanner stages against the bounded shadow history."""
+    with sqlite3.connect(profiles_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as db:
+        db.row_factory = sqlite3.Row
+        profile_row = db.execute(
+            "SELECT id,min_entry_spread,max_entry_spread,min_volume_millions,trade_volume,"
+            "min_depth_percent,take_profit_percent,disabled_exchanges FROM trading_profiles "
+            "WHERE is_active=1 ORDER BY id LIMIT 1"
+        ).fetchone()
+    if not profile_row:
+        return {"error": "no active profile"}
+    profile = dict(profile_row)
+    try:
+        disabled = set(json.loads(profile.get("disabled_exchanges") or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        disabled = set()
+    min_entry = _float(profile["min_entry_spread"])
+    max_entry = _float(profile["max_entry_spread"])
+    min_volume = _float(profile["min_volume_millions"]) * 1_000_000.0
+    required_depth = _float(profile["trade_volume"]) * _float(profile["min_depth_percent"]) / 100.0
+    take_profit = _float(profile["take_profit_percent"])
+    stage_names = (
+        "current_build_samples", "both_l2_books_fresh_and_valid", "enabled_venues",
+        "adjusted_spread_in_entry_window", "both_24h_volumes_above_profile_minimum",
+        "structural_verified", "positive_after_actual_break_even",
+        "l2_top_levels_above_configured_depth", "pre_take_profit_entry_rule",
+        "current_take_profit_entry_rule",
+    )
+    counts = {name: 0 for name in stage_names}
+    timestamps = {name: set() for name in stage_names}
+    top = {}
+    with sqlite3.connect(shadow_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as db:
+        rows = db.execute(
+            "SELECT snapshot FROM book_samples ORDER BY id DESC LIMIT 10000"
+        )
+        for raw, in rows:
+            sample = json.loads(raw)
+            if str(sample.get("build_sha")) != str(build_sha):
+                continue
+            stamp = sample.get("recorded_ms")
+            spread_row = sample.get("spread") or {}
+
+            def passed(stage):
+                counts[stage] += 1
+                timestamps[stage].add(stamp)
+
+            passed("current_build_samples")
+            if not valid_book(sample.get("book_a") or {}, stamp) or not valid_book(sample.get("book_b") or {}, stamp):
+                continue
+            passed("both_l2_books_fresh_and_valid")
+            if spread_row.get("exchangeA") in disabled or spread_row.get("exchangeB") in disabled:
+                continue
+            passed("enabled_venues")
+            spread = _float(spread_row.get("spread"))
+            structural = abs(_float(spread_row.get("structural_spread")))
+            adjusted = spread - structural
+            key = "|".join(str(spread_row.get(name, "")) for name in (
+                "pair", "exchangeA", "exchangeB", "direction"
+            ))
+            candidate = {
+                "pair": spread_row.get("pair"),
+                "spread_pct": round(spread, 4),
+                "structural_spread_pct": round(structural, 4),
+                "adjusted_spread_pct": round(adjusted, 4),
+                "vol_a_usd": round(_float(spread_row.get("volA")), 2),
+                "vol_b_usd": round(_float(spread_row.get("volB")), 2),
+                "structural_verified": spread_row.get("structural_verified") is True,
+            }
+            if key not in top or adjusted > top[key]["adjusted_spread_pct"]:
+                top[key] = candidate
+            if not min_entry <= adjusted <= max_entry:
+                continue
+            passed("adjusted_spread_in_entry_window")
+            if _float(spread_row.get("volA")) < min_volume or _float(spread_row.get("volB")) < min_volume:
+                continue
+            passed("both_24h_volumes_above_profile_minimum")
+            if spread_row.get("structural_verified") is not True:
+                continue
+            passed("structural_verified")
+            fee_a = _float(sample.get("fee_a"), 0.001)
+            fee_b = _float(sample.get("fee_b"), 0.001)
+            break_even = 2.0 * (fee_a + fee_b) * 100.0 + 0.08
+            if adjusted <= break_even:
+                continue
+            passed("positive_after_actual_break_even")
+            is_a_higher = str(spread_row.get("direction", "")).startswith(
+                str(spread_row.get("exchangeA", ""))
+            )
+            side_a = "bids" if is_a_higher else "asks"
+            side_b = "asks" if is_a_higher else "bids"
+            level_a = (sample["book_a"].get(side_a) or [[0.0, 0.0]])[0]
+            level_b = (sample["book_b"].get(side_b) or [[0.0, 0.0]])[0]
+            if _float(level_a[0]) * _float(level_a[1]) < required_depth \
+                    or _float(level_b[0]) * _float(level_b[1]) < required_depth:
+                continue
+            passed("l2_top_levels_above_configured_depth")
+            if adjusted - break_even > max(min_entry, 0.05):
+                passed("pre_take_profit_entry_rule")
+            if adjusted - break_even > max(min_entry, take_profit, 0.05):
+                passed("current_take_profit_entry_rule")
+    return {
+        "scope": "Latest 10000 shadow rows, restricted to the currently deployed build",
+        "build_sha": build_sha,
+        "profile_id": profile["id"],
+        "configured_depth_usd": round(required_depth, 4),
+        "observation_stage_counts": counts,
+        "distinct_timestamp_stage_counts": {
+            name: len(values) for name, values in timestamps.items()
+        },
+        "top_adjusted_unique_rows": sorted(
+            top.values(), key=lambda row: row["adjusted_spread_pct"], reverse=True
+        )[:20],
+    }
 
 
 def inspect_database(path, kind):
@@ -356,6 +471,13 @@ def main():
         result["scanner_funnel"] = sample_scanner_funnel(root / "vps-api.db")
     except Exception as exc:
         result["scanner_funnel"] = {"error": type(exc).__name__ + ": " + str(exc)}
+    print("AUDIT: recorded scanner funnel", file=sys.stderr, flush=True)
+    try:
+        result["recorded_scanner_funnel"] = summarize_recorded_funnel(
+            root / "shadow-books.db", root / "vps-api.db", (result.get("health") or {}).get("build_sha")
+        )
+    except Exception as exc:
+        result["recorded_scanner_funnel"] = {"error": type(exc).__name__ + ": " + str(exc)}
     disk = shutil.disk_usage(root if root.exists() else "/")
     result["disk_free_bytes"] = disk.free
     print(json.dumps(result, indent=2, allow_nan=False))
