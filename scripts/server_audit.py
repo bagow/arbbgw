@@ -178,16 +178,29 @@ def main():
         except OSError as exc:
             result[binary + "_binary_error"] = type(exc).__name__
     print("AUDIT: binary metadata", file=sys.stderr, flush=True)
-    try:
+    result["health_samples"] = []
+    for sample_index in range(10):
         try:
-            response = urllib.request.urlopen("http://127.0.0.1:3003/health", timeout=5)
-        except urllib.error.HTTPError as exc:
-            response = exc
-        with response:
-            result["health_http_status"] = response.status
-            result["health"] = json.load(response)
-    except Exception as exc:
-        result["health_error"] = type(exc).__name__
+            try:
+                response = urllib.request.urlopen("http://127.0.0.1:3003/health", timeout=5)
+            except urllib.error.HTTPError as exc:
+                response = exc
+            with response:
+                health = json.load(response)
+                result["health_http_status"] = response.status
+                result["health"] = health
+                result["health_samples"].append({
+                    "status": response.status,
+                    "trading_ready": health.get("trading_ready"),
+                    "fresh_books": {
+                        venue.get("exchange"): venue.get("fresh_books")
+                        for venue in health.get("venues", [])
+                    },
+                })
+        except Exception as exc:
+            result["health_samples"].append({"error": type(exc).__name__})
+        if sample_index != 9:
+            time.sleep(0.5)
     print("AUDIT: health complete", file=sys.stderr, flush=True)
     root = Path("/home/opc/core-node")
     for filename, kind in (("real-trader.db", "trades"), ("vps-api.db", "profiles"), ("shadow-books.db", "shadow")):
