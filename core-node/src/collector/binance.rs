@@ -14,7 +14,7 @@ use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSigna
 // At 100 ms the deployment host accumulated a multi-second receive queue even with
 // bounded transports. The 500 ms partial-depth stream keeps exchange timestamps inside
 // the 750 ms execution freshness budget while cutting message volume by roughly 4x.
-const DEPTH_STREAMS_PER_CONNECTION: usize = 20;
+const DEPTH_STREAMS_PER_CONNECTION: usize = 5;
 const DEPTH_UPDATE_INTERVAL_MS: u64 = 500;
 const DEPTH_SUBSCRIPTION_REFRESH_SECS: u64 = 120;
 
@@ -460,6 +460,8 @@ async fn run_l2_depth_stream(
                 let mut backoff = Duration::from_secs(1);
                 let max_age = Duration::from_secs(1800);
                 let conn_start = std::time::Instant::now();
+                let stream_url = depth_stream_url(&chunk_symbols);
+                let stream_label = chunk_symbols.join(",");
 
                 loop {
                     if conn_start.elapsed() > max_age {
@@ -470,7 +472,7 @@ async fn run_l2_depth_stream(
                     match tokio::time::timeout(
                         Duration::from_secs(10),
                         connect_async_tls_with_config(
-                            "wss://fstream.binance.com/public/ws",
+                            &stream_url,
                             None,
                             false,
                             None,
@@ -479,39 +481,6 @@ async fn run_l2_depth_stream(
                     .await
                     {
                         Ok(Ok((mut ws, _))) => {
-                            use futures_util::SinkExt;
-                            let streams: Vec<String> = chunk_symbols
-                                .iter()
-                                .map(|s| {
-                                    format!(
-                                        "{}@depth5@{}ms",
-                                        s.to_lowercase(),
-                                        DEPTH_UPDATE_INTERVAL_MS
-                                    )
-                                })
-                                .collect();
-                            let msg = serde_json::json!({
-                                "method": "SUBSCRIBE",
-                                "params": streams,
-                                "id": 1
-                            });
-
-                            if !matches!(
-                                tokio::time::timeout(
-                                    Duration::from_secs(3),
-                                    ws.send(tokio_tungstenite::tungstenite::Message::Text(
-                                        msg.to_string().into(),
-                                    ))
-                                )
-                                .await,
-                                Ok(Ok(()))
-                            ) {
-                                error!("[binance_l2_chunk] Subscribe failed or timed out");
-                                tokio::time::sleep(backoff).await;
-                                backoff = next_backoff(backoff, false);
-                                continue;
-                            }
-
                             let mut received = 0u64;
                             let mut accepted = 0u64;
                             let mut stale = 0u64;
@@ -523,8 +492,12 @@ async fn run_l2_depth_stream(
                             {
                                 received += 1;
                                 if report_at.elapsed() >= Duration::from_secs(10) {
-                                    info!("[binance_l2_quality] received={} accepted={} stale={} invalid={} last_lag_ms={}",
-                                          received, accepted, stale, invalid, last_lag_ms);
+                                    info!("[binance_l2_quality] symbols={} received={} accepted={} stale={} invalid={} last_lag_ms={}",
+                                          stream_label, received, accepted, stale, invalid, last_lag_ms);
+                                    received = 0;
+                                    accepted = 0;
+                                    stale = 0;
+                                    invalid = 0;
                                     report_at = std::time::Instant::now();
                                 }
                                 if conn_start.elapsed() > max_age {
@@ -665,6 +638,21 @@ async fn run_l2_depth_stream(
     }
 }
 
+fn depth_stream_url(symbols: &[String]) -> String {
+    let streams = symbols
+        .iter()
+        .map(|symbol| {
+            format!(
+                "{}@depth5@{}ms",
+                symbol.to_lowercase(),
+                DEPTH_UPDATE_INTERVAL_MS
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("wss://fstream.binance.com/public/stream?streams={streams}")
+}
+
 /// Parse [[price, qty], ...] from depth snapshot
 fn parse_levels(data: &Value, key: &str) -> Vec<(f64, f64)> {
     data[key]
@@ -697,6 +685,14 @@ fn next_backoff(current: Duration, stable: bool) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_stream_uses_routed_combined_url() {
+        assert_eq!(
+            depth_stream_url(&["BTCUSDT".into(), "ETHUSDT".into()]),
+            "wss://fstream.binance.com/public/stream?streams=btcusdt@depth5@500ms/ethusdt@depth5@500ms"
+        );
+    }
 
     #[test]
     fn malformed_level_rejects_entire_snapshot_side() {
