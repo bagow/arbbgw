@@ -57,6 +57,31 @@ def backup_databases(label):
     return str(destination)
 
 
+def snapshot_profile():
+    with profile_connection() as db:
+        row = db.execute(
+            "SELECT * FROM trading_profiles WHERE id=?", (PROFILE_ID,)
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("canary profile is missing")
+        return dict(row)
+
+
+def restore_profile(snapshot):
+    columns = [name for name in snapshot if name != "id"]
+    assignments = ",".join(f'"{name}"=?' for name in columns)
+    values = [snapshot[name] for name in columns]
+    with profile_connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        updated = db.execute(
+            f"UPDATE trading_profiles SET {assignments} WHERE id=?",
+            (*values, snapshot["id"]),
+        ).rowcount
+        if updated != 1:
+            raise RuntimeError("canary profile restore did not update exactly one row")
+        db.commit()
+
+
 def disable_profile(request_close_after=None):
     with profile_connection() as db:
         db.execute(
@@ -252,11 +277,13 @@ def main():
     if not 60 <= monitor_seconds <= 2700:
         raise RuntimeError("monitor_seconds outside 60..2700")
     start_id = None
+    profile_before = None
     report = {"ok": False, "started_ms": int(time.time() * 1000), "config": config}
     try:
         wait_for_readiness(config, report)
         start_id, before_accounts = preflight(config)
         report["balances_before"] = before_accounts.get("balances")
+        profile_before = snapshot_profile()
         report["backup"] = backup_databases(str(report["started_ms"]))
         configure_and_enable(config)
         deadline = time.monotonic() + monitor_seconds
@@ -303,6 +330,16 @@ def main():
             except Exception as cleanup_exc:
                 report["cleanup_error"] = f"{type(cleanup_exc).__name__}: {cleanup_exc}"
     finally:
+        if profile_before is not None:
+            try:
+                restore_profile(profile_before)
+                report["profile_restored"] = True
+            except Exception as restore_exc:
+                report["profile_restored"] = False
+                report["profile_restore_error"] = (
+                    f"{type(restore_exc).__name__}: {restore_exc}"
+                )
+                report["ok"] = False
         signal.alarm(0)
         report["finished_ms"] = int(time.time() * 1000)
         print(json.dumps(report, indent=2, allow_nan=False))

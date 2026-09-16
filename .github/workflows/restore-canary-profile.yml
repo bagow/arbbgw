@@ -1,0 +1,64 @@
+name: Restore production profile after canary
+
+on:
+  push:
+    branches: ["fix/audit-risk-20260909"]
+    paths: [".github/profile-restore-request.json"]
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore the saved profile over SSH
+        env:
+          ARB_RESTORE_HOST: ${{ secrets.VPS_SSH_HOST }}
+          ARB_RESTORE_USER: ${{ secrets.VPS_SSH_USER }}
+          ARB_RESTORE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'arb-restore-ssh'
+          directory.mkdir(mode=0o700)
+          key = directory / 'key'
+          fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, 'w') as stream:
+              stream.write(os.environ['ARB_RESTORE_KEY'] + '\n')
+          source = pathlib.Path('scripts/restore_canary_profile.py').read_text()
+          encoded = base64.b64encode(source.encode()).decode()
+          remote = "python3 -c 'import base64;exec(base64.b64decode(\"" + encoded + "\"))'"
+          destination = os.environ['ARB_RESTORE_USER'] + '@' + os.environ['ARB_RESTORE_HOST']
+          options = ['-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15',
+              '-o','StrictHostKeyChecking=accept-new','-o','UserKnownHostsFile='+str(directory/'known_hosts')]
+          try:
+              proc = subprocess.run(
+                  ['ssh',*options,destination,remote],
+                  input=pathlib.Path('.github/profile-restore-request.json').read_text(),
+                  capture_output=True,text=True,timeout=180,
+              )
+              pathlib.Path('profile-restore-result.json').write_text(proc.stdout or json.dumps({
+                  'ok':False,'error':'remote restore returned no report','stderr_type':bool(proc.stderr)}))
+              if proc.returncode:
+                  raise SystemExit('profile restore failed; inspect result artifact')
+          finally:
+              key.unlink(missing_ok=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('profile-restore-result.json') != ''
+        with:
+          name: profile-restore-${{ github.sha }}
+          path: profile-restore-result.json
+      - name: Publish sanitized result in a service branch
+        if: always() && hashFiles('profile-restore-result.json') != ''
+        run: |
+          set -eu
+          export GIT_INDEX_FILE="$RUNNER_TEMP/arb-profile-restore-index"
+          git read-tree --empty
+          git add -f profile-restore-result.json
+          result_tree=$(git write-tree)
+          result_commit=$(git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit-tree "$result_tree" -m "Profile restore report for $GITHUB_SHA")
+          git push origin "$result_commit:refs/heads/profile-restore-results/$GITHUB_SHA-$GITHUB_RUN_ID"

@@ -1,5 +1,5 @@
 //! Binance USDT Futures discovery plus bounded executable-liquidity streams.
-//! All-book-ticker finds candidates; stable top-5 subscriptions @ 100ms verify them.
+//! All-book-ticker finds candidates; bounded top-5 subscriptions verify them.
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -11,9 +11,11 @@ use tracing::{error, info, warn};
 
 use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
 
-// Large multiplexed streams queued seconds of old depth on the deployment host.
-// Keep each transport small; freshness is still checked against exchange time.
+// At 100 ms the deployment host accumulated a multi-second receive queue even with
+// bounded transports. The 500 ms partial-depth stream keeps exchange timestamps inside
+// the 750 ms execution freshness budget while cutting message volume by roughly 4x.
 const DEPTH_STREAMS_PER_CONNECTION: usize = 20;
+const DEPTH_UPDATE_INTERVAL_MS: u64 = 500;
 
 pub async fn run(
     prices: PriceMap,
@@ -480,7 +482,13 @@ async fn run_l2_depth_stream(
                             use futures_util::SinkExt;
                             let streams: Vec<String> = chunk_symbols
                                 .iter()
-                                .map(|s| format!("{}@depth5@100ms", s.to_lowercase()))
+                                .map(|s| {
+                                    format!(
+                                        "{}@depth5@{}ms",
+                                        s.to_lowercase(),
+                                        DEPTH_UPDATE_INTERVAL_MS
+                                    )
+                                })
                                 .collect();
                             let msg = serde_json::json!({
                                 "method": "SUBSCRIBE",
