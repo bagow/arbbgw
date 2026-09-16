@@ -1,0 +1,293 @@
+{
+  "ok": true,
+  "health": {
+    "active_trades": 0,
+    "build_sha": "0acd050286754d420647357708f871ed8ae944f7",
+    "entries_halted": false,
+    "healthy": false,
+    "market_ready": false,
+    "private_ready": false,
+    "process_healthy": true,
+    "supervisor_age_ms": 508,
+    "trading_ready": false,
+    "venues": [
+      {
+        "balance_age_ms": null,
+        "books": 54,
+        "current_specs": 528,
+        "exchange": "binance",
+        "fresh_books": 0,
+        "positions_age_ms": null
+      },
+      {
+        "balance_age_ms": null,
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "gate",
+        "fresh_books": 0,
+        "positions_age_ms": null
+      },
+      {
+        "balance_age_ms": null,
+        "books": 677,
+        "current_specs": 673,
+        "exchange": "kucoin",
+        "fresh_books": 381,
+        "positions_age_ms": null
+      }
+    ]
+  },
+  "order_intents": 0,
+  "trades": 0,
+  "exchange_credentials_provided": false,
+  "production_replaced": false,
+  "public_collector_log": "\u001b[2m2026-09-16T12:34:34.594499Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance] Connecting (ban check passed)...\n\u001b[2m2026-09-16T12:34:35.651014Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance] Seeded volume for 766 symbols\n\u001b[2m2026-09-16T12:34:35.897293Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2] Starting L2 subscriptions for 62 symbols (requires 4 connections)\n\u001b[2m2026-09-16T12:34:36.681270Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance] Connected (all bookTicker discovery)\n\u001b[2m2026-09-16T12:34:46.943810Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=995 accepted=982 stale=11 invalid=0 last_lag_ms=393\n\u001b[2m2026-09-16T12:34:47.442817Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=658 accepted=648 stale=8 invalid=0 last_lag_ms=287\n\u001b[2m2026-09-16T12:34:47.902689Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2] Starting L2 subscriptions for 63 symbols (requires 4 connections)\n\u001b[2m2026-09-16T12:34:59.783443Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=508 accepted=56 stale=450 invalid=0 last_lag_ms=5148\n\u001b[2m2026-09-16T12:35:00.245157Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=495 accepted=330 stale=163 invalid=0 last_lag_ms=2646\n\u001b[2m2026-09-16T12:35:03.142621Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=159 accepted=35 stale=122 invalid=0 last_lag_ms=194\n\u001b[2m2026-09-16T12:35:09.546127Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=333 accepted=44 stale=287 invalid=0 last_lag_ms=3255\n\u001b[2m2026-09-16T12:35:10.247275Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1250 accepted=337 stale=911 invalid=0 last_lag_ms=633\n\u001b[2m2026-09-16T12:35:10.643976Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=989 accepted=56 stale=931 invalid=0 last_lag_ms=9840\n\u001b[2m2026-09-16T12:35:13.142753Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=329 accepted=135 stale=192 invalid=0 last_lag_ms=382\n\u001b[2m2026-09-16T12:35:20.256431Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1863 accepted=709 stale=1152 invalid=0 last_lag_ms=1160\n\u001b[2m2026-09-16T12:35:20.942990Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1733 accepted=56 stale=1675 invalid=0 last_lag_ms=15406\n\u001b[2m2026-09-16T12:35:23.157765Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=540 accepted=261 stale=277 invalid=0 last_lag_ms=133\n\u001b[2m2026-09-16T12:35:23.543454Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=676 accepted=44 stale=630 invalid=0 last_lag_ms=14901\n\u001b[2m2026-09-16T12:35:30.346498Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2129 accepted=709 stale=1418 invalid=0 last_lag_ms=7705\n\u001b[2m2026-09-16T12:35:33.242372Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=703 accepted=388 stale=312 invalid=0 last_lag_ms=1613\n\u001b[2m2026-09-16T12:35:33.543499Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=849 accepted=44 stale=803 invalid=0 last_lag_ms=29278\n\u001b[2m2026-09-16T12:35:34.184127Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2564 accepted=56 stale=2506 invalid=0 last_lag_ms=18661\n",
+  "market_samples": [
+    {
+      "elapsed_seconds": 0.0,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 0
+      }
+    },
+    {
+      "elapsed_seconds": 2.0,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 0
+      }
+    },
+    {
+      "elapsed_seconds": 4.0,
+      "fresh_books": {
+        "binance": 37,
+        "gate": 0,
+        "kucoin": 0
+      }
+    },
+    {
+      "elapsed_seconds": 6.0,
+      "fresh_books": {
+        "binance": 41,
+        "gate": 0,
+        "kucoin": 9
+      }
+    },
+    {
+      "elapsed_seconds": 8.0,
+      "fresh_books": {
+        "binance": 48,
+        "gate": 0,
+        "kucoin": 11
+      }
+    },
+    {
+      "elapsed_seconds": 10.0,
+      "fresh_books": {
+        "binance": 42,
+        "gate": 0,
+        "kucoin": 172
+      }
+    },
+    {
+      "elapsed_seconds": 12.0,
+      "fresh_books": {
+        "binance": 33,
+        "gate": 0,
+        "kucoin": 339
+      }
+    },
+    {
+      "elapsed_seconds": 14.1,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 319
+      }
+    },
+    {
+      "elapsed_seconds": 16.1,
+      "fresh_books": {
+        "binance": 14,
+        "gate": 0,
+        "kucoin": 358
+      }
+    },
+    {
+      "elapsed_seconds": 18.1,
+      "fresh_books": {
+        "binance": 11,
+        "gate": 0,
+        "kucoin": 465
+      }
+    },
+    {
+      "elapsed_seconds": 20.1,
+      "fresh_books": {
+        "binance": 11,
+        "gate": 0,
+        "kucoin": 362
+      }
+    },
+    {
+      "elapsed_seconds": 22.1,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 363
+      }
+    },
+    {
+      "elapsed_seconds": 24.1,
+      "fresh_books": {
+        "binance": 1,
+        "gate": 0,
+        "kucoin": 346
+      }
+    },
+    {
+      "elapsed_seconds": 26.2,
+      "fresh_books": {
+        "binance": 2,
+        "gate": 0,
+        "kucoin": 459
+      }
+    },
+    {
+      "elapsed_seconds": 28.2,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 329
+      }
+    },
+    {
+      "elapsed_seconds": 30.2,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 351
+      }
+    },
+    {
+      "elapsed_seconds": 32.2,
+      "fresh_books": {
+        "binance": 2,
+        "gate": 0,
+        "kucoin": 464
+      }
+    },
+    {
+      "elapsed_seconds": 34.2,
+      "fresh_books": {
+        "binance": 2,
+        "gate": 0,
+        "kucoin": 335
+      }
+    },
+    {
+      "elapsed_seconds": 36.2,
+      "fresh_books": {
+        "binance": 13,
+        "gate": 0,
+        "kucoin": 356
+      }
+    },
+    {
+      "elapsed_seconds": 38.2,
+      "fresh_books": {
+        "binance": 15,
+        "gate": 0,
+        "kucoin": 372
+      }
+    },
+    {
+      "elapsed_seconds": 40.2,
+      "fresh_books": {
+        "binance": 3,
+        "gate": 0,
+        "kucoin": 330
+      }
+    },
+    {
+      "elapsed_seconds": 42.3,
+      "fresh_books": {
+        "binance": 5,
+        "gate": 0,
+        "kucoin": 309
+      }
+    },
+    {
+      "elapsed_seconds": 44.3,
+      "fresh_books": {
+        "binance": 15,
+        "gate": 0,
+        "kucoin": 325
+      }
+    },
+    {
+      "elapsed_seconds": 46.3,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 320
+      }
+    },
+    {
+      "elapsed_seconds": 48.3,
+      "fresh_books": {
+        "binance": 2,
+        "gate": 0,
+        "kucoin": 430
+      }
+    },
+    {
+      "elapsed_seconds": 50.3,
+      "fresh_books": {
+        "binance": 3,
+        "gate": 0,
+        "kucoin": 314
+      }
+    },
+    {
+      "elapsed_seconds": 52.3,
+      "fresh_books": {
+        "binance": 3,
+        "gate": 0,
+        "kucoin": 322
+      }
+    },
+    {
+      "elapsed_seconds": 54.3,
+      "fresh_books": {
+        "binance": 1,
+        "gate": 0,
+        "kucoin": 338
+      }
+    },
+    {
+      "elapsed_seconds": 56.4,
+      "fresh_books": {
+        "binance": 2,
+        "gate": 0,
+        "kucoin": 295
+      }
+    },
+    {
+      "elapsed_seconds": 58.4,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 381
+      }
+    }
+  ],
+  "simultaneous_fresh_samples": 21,
+  "steady_fresh_samples": 8,
+  "steady_samples": 10,
+  "scope": "Public Binance/KuCoin data for 60 seconds; inactive profile; no profitability claim",
+  "production_restored": true,
+  "production_paused_for_test": true
+}
