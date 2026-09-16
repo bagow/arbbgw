@@ -1,8 +1,9 @@
-//! Binance USDT Futures prices and executable liquidity from the same L2 stream.
-//! Stable top-5 subscriptions @ 100ms, with REST volume discovery.
-use anyhow::Result;
+//! Binance USDT Futures discovery plus bounded executable-liquidity streams.
+//! All-book-ticker finds candidates; stable top-5 subscriptions @ 100ms verify them.
+use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
@@ -130,7 +131,7 @@ pub async fn run(
         };
 
         tokio::select! {
-            res = handler(&prices, &discovery_ready) => {
+            res = handler(&prices, &signal, &discovery_ready) => {
                 match res {
                     Ok(_)  => { backoff = Duration::from_secs(1); }
                     Err(e) => warn!("[binance] WS disconnected: {}. Reconnecting in {:?}", e, backoff),
@@ -148,6 +149,7 @@ pub async fn run(
 
 async fn handler(
     price_map: &PriceMap,
+    signal: &UpdateSignal,
     discovery_ready: &std::sync::atomic::AtomicBool,
 ) -> Result<()> {
     // Seed 24h volume from REST miniTicker snapshot
@@ -216,14 +218,126 @@ async fn handler(
         warn!("[binance] Skipping volume seed — IP banned.");
     }
 
-    // L2 updates both best prices and executable quantities. A second full-universe
-    // bookTicker feed adds tens of thousands of redundant updates per second.
-    // Refresh volume discovery periodically; the owned depth tasks stay connected.
-    tokio::time::sleep(Duration::from_secs(300)).await;
+    // The all-market book ticker is intentionally discovery-only. Binance publishes it
+    // every five seconds, which is too slow for execution but much cheaper than running
+    // depth5 at 100 ms for the entire futures universe. Fresh candidate depth is handled
+    // by the bounded streams below and remains mandatory before an order can be sent.
+    let (mut ws, _) = connect_async_tls_with_config(
+        "wss://fstream.binance.com/public/ws/!bookTicker",
+        None,
+        false,
+        None,
+    )
+    .await
+    .context("Binance all-book-ticker connect failed")?;
+    info!("[binance] Connected (all bookTicker discovery)");
+    price_map.entry("binance".to_string()).or_default();
+    let connected_at = std::time::Instant::now();
+
+    while let Ok(Some(message)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+        if connected_at.elapsed() > Duration::from_secs(300) {
+            break;
+        }
+        match message {
+            Ok(Message::Text(text)) => {
+                let now_ms = crate::engine::utils::now_ms();
+                if let Ok(payload) = serde_json::from_str::<BookTickerPayload>(&text) {
+                    let tickers = match payload {
+                        BookTickerPayload::One(ticker) => vec![ticker],
+                        BookTickerPayload::Many(tickers) => tickers,
+                    };
+                    let mut updated = false;
+                    if let Some(mut venue) = price_map.get_mut("binance") {
+                        for ticker in tickers {
+                            if apply_book_ticker(&mut venue, ticker, now_ms) {
+                                updated = true;
+                            }
+                        }
+                    }
+                    if updated {
+                        signal.notify_one();
+                    }
+                }
+            }
+            Ok(Message::Close(frame)) => {
+                warn!("[binance] All-book-ticker closed: {:?}", frame);
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => anyhow::bail!("Binance all-book-ticker receive failed: {error}"),
+        }
+    }
     Ok(())
 }
 
-/// Separate L2 depth streams for the seeded universe, at most 200 symbols per connection.
+#[derive(Deserialize)]
+struct BinanceBookTicker {
+    #[serde(rename = "E", default)]
+    event_ms: i64,
+    #[serde(rename = "s")]
+    symbol: String,
+    #[serde(rename = "b")]
+    bid: String,
+    #[serde(rename = "a")]
+    ask: String,
+    #[serde(rename = "B")]
+    bid_quantity: String,
+    #[serde(rename = "A")]
+    ask_quantity: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BookTickerPayload {
+    One(BinanceBookTicker),
+    Many(Vec<BinanceBookTicker>),
+}
+
+fn apply_book_ticker(
+    venue: &mut std::collections::HashMap<String, TickerData>,
+    ticker: BinanceBookTicker,
+    received_ms: i64,
+) -> bool {
+    if !ticker.symbol.ends_with("USDT") {
+        return false;
+    }
+    let bid = match ticker.bid.parse::<f64>() {
+        Ok(value) if value.is_finite() && value > 0.0 => value,
+        _ => return false,
+    };
+    let ask = match ticker.ask.parse::<f64>() {
+        Ok(value) if value.is_finite() && value > bid => value,
+        _ => return false,
+    };
+    let bid_quantity = ticker.bid_quantity.parse::<f64>().unwrap_or(0.0);
+    let ask_quantity = ticker.ask_quantity.parse::<f64>().unwrap_or(0.0);
+    if !bid_quantity.is_finite()
+        || !ask_quantity.is_finite()
+        || bid_quantity < 0.0
+        || ask_quantity < 0.0
+    {
+        return false;
+    }
+    let event_ms = if ticker.event_ms > 0 {
+        ticker.event_ms
+    } else {
+        received_ms
+    };
+    if !(0..=10_000).contains(&(received_ms - event_ms)) {
+        return false;
+    }
+    let mid = (bid + ask) / 2.0;
+    let entry = venue.entry(ticker.symbol).or_default();
+    entry.bid = bid;
+    entry.ask = ask;
+    entry.price = mid;
+    entry.bid_size = bid * bid_quantity;
+    entry.ask_size = ask * ask_quantity;
+    entry.last_updated = (event_ms / 1000) as u64;
+    true
+}
+
+/// Separate L2 depth streams for the bounded candidate universe.
 /// Wait for initial REST discovery; retry fallback discovery promptly if it fails.
 async fn run_l2_depth_stream(
     l2_books: L2OrderbookMap,
@@ -316,18 +430,16 @@ async fn run_l2_depth_stream(
             .map(|k| k[8..].to_string())
             .collect();
 
-        // Keep depth streams stable. Candidate churn must not repeatedly disconnect
-        // the books from which those same candidates are computed.
-        let mut universe: std::collections::HashSet<String> = price_map
-            .get("binance")
-            .map(|m| m.keys().filter(|s| s.ends_with("USDT")).cloned().collect())
-            .unwrap_or_default();
-        let discovery_ready = discovery_complete.load(std::sync::atomic::Ordering::Acquire);
-        universe.extend(wanted_syms);
+        // Depth at 100 ms for the full Binance universe overloads the host and queues
+        // seconds-old snapshots. Subscribe only to the cross-exchange candidates selected
+        // by the L1 discovery feed. Owned trades are always included in l2_wanted.
+        let using_fallback = wanted_syms.is_empty();
+        let mut universe = wanted_syms;
         if universe.is_empty() {
             universe.extend(FALLBACK.iter().map(|s| s.to_string()));
         }
-        let symbols: Vec<String> = universe.into_iter().collect();
+        let mut symbols: Vec<String> = universe.into_iter().collect();
+        symbols.sort_unstable();
 
         info!(
             "[binance_l2] Starting L2 subscriptions for {} symbols (requires {} connections)",
@@ -357,7 +469,7 @@ async fn run_l2_depth_stream(
                     match tokio::time::timeout(
                         Duration::from_secs(10),
                         connect_async_tls_with_config(
-                            "wss://fstream.binance.com/public/stream",
+                            "wss://fstream.binance.com/public/ws",
                             None,
                             false,
                             None,
@@ -533,9 +645,10 @@ async fn run_l2_depth_stream(
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // Refresh the full instrument universe periodically; candidate churn does not reconnect streams.
+        // Populate candidates promptly after the first all-book-ticker event, then keep
+        // transports stable long enough to avoid self-inflicted freshness gaps.
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(if discovery_ready { 1800 } else { 30 })) => {},
+            _ = tokio::time::sleep(Duration::from_secs(if using_fallback { 10 } else { 120 })) => {},
             _ = handles.join_next() => {},
         }
         handles.abort_all();
@@ -601,5 +714,45 @@ mod tests {
             assert_eq!(delay, Duration::from_secs(expected));
         }
         assert_eq!(next_backoff(delay, true), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn discovery_ticker_preserves_volume_and_rejects_stale_data() {
+        let mut venue = std::collections::HashMap::from([(
+            "BTCUSDT".to_string(),
+            TickerData {
+                vol: 42.0,
+                ..Default::default()
+            },
+        )]);
+        let payload: BookTickerPayload = serde_json::from_value(serde_json::json!({
+            "E": 1_000_000,
+            "s": "BTCUSDT",
+            "b": "100.0",
+            "B": "2.0",
+            "a": "101.0",
+            "A": "3.0"
+        }))
+        .unwrap();
+        let ticker = match payload {
+            BookTickerPayload::One(ticker) => ticker,
+            BookTickerPayload::Many(_) => panic!("single ticker expected"),
+        };
+        assert!(apply_book_ticker(&mut venue, ticker, 1_000_100));
+        let updated = &venue["BTCUSDT"];
+        assert_eq!(updated.vol, 42.0);
+        assert_eq!(updated.bid, 100.0);
+        assert_eq!(updated.ask, 101.0);
+
+        let stale = BinanceBookTicker {
+            event_ms: 900_000,
+            symbol: "BTCUSDT".into(),
+            bid: "99".into(),
+            ask: "100".into(),
+            bid_quantity: "1".into(),
+            ask_quantity: "1".into(),
+        };
+        assert!(!apply_book_ticker(&mut venue, stale, 1_000_100));
+        assert_eq!(venue["BTCUSDT"].bid, 100.0);
     }
 }
