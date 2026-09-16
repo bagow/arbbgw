@@ -1,0 +1,11 @@
+{
+  "ok": false,
+  "requested_commit": "b5e8209d4e3342bd064c1a08592601bbb05e02b1",
+  "error_type": "RuntimeError",
+  "remote_progress": [
+    "AUDIT: service logs",
+    "AUDIT: service logs loaded",
+    "AUDIT: service metadata",
+    "AUDIT: process usage"
+  ]
+}
