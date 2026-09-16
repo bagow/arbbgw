@@ -77,9 +77,10 @@ def main():
     signal.alarm(100)
     result = {}
     print("AUDIT: service logs", file=sys.stderr, flush=True)
-    logs = subprocess.run(["journalctl", "-u", "core-node", "--since=-30min", "-n", "5000", "--no-pager"],
-                          capture_output=True, text=True, timeout=15)
+    logs = subprocess.run(["journalctl", "-u", "core-node", "--since=-15min", "-n", "2500", "--no-pager"],
+                          capture_output=True, text=True, timeout=30)
     lines = logs.stdout.splitlines()
+    print("AUDIT: service logs loaded", file=sys.stderr, flush=True)
     result["recent_log_counts"] = {label: sum(pattern in line for line in lines) for label, pattern in (
         ("binance_subscription_rejected", "[binance_l2_chunk] Subscription rejected"),
         ("binance_receive_failed", "[binance_l2_chunk] Receive failed"),
@@ -136,16 +137,20 @@ def main():
         line[:800] for line in lines if any(marker in line for marker in deployment_markers)
     ][-80:]
     result["pending_core_artifacts"] = []
-    for path in sorted(Path("/tmp").glob("arb-core-*")):
-        entry = {"name": path.name, "mtime": path.stat().st_mtime}
-        if path.is_dir():
-            entry["files"] = [
-                {"name": child.name, "size": child.stat().st_size, "mtime": child.stat().st_mtime}
-                for child in sorted(path.iterdir())[:20]
-            ]
-        else:
-            entry["size"] = path.stat().st_size
-        result["pending_core_artifacts"].append(entry)
+    try:
+        for path in sorted(Path("/tmp").glob("arb-core-*")):
+            entry = {"name": path.name, "mtime": path.stat().st_mtime}
+            if path.is_dir():
+                entry["files"] = [
+                    {"name": child.name, "size": child.stat().st_size, "mtime": child.stat().st_mtime}
+                    for child in sorted(path.iterdir())[:20]
+                ]
+            else:
+                entry["size"] = path.stat().st_size
+            result["pending_core_artifacts"].append(entry)
+    except OSError as exc:
+        result["pending_core_artifacts_error"] = type(exc).__name__
+    print("AUDIT: service metadata", file=sys.stderr, flush=True)
     for service in ("core-node", "vps-api", "cloudflared"):
         proc = subprocess.run([
             "systemctl", "show", service, "--property=ActiveState,SubState,MainPID,ActiveEnterTimestamp,NRestarts"
@@ -157,6 +162,7 @@ def main():
     )
     result["core_process_usage"] = process.stdout.strip()
     result["load_average"] = list(__import__("os").getloadavg())
+    print("AUDIT: process usage", file=sys.stderr, flush=True)
     for binary in ("core-node", "vps-api"):
         path = Path("/usr/local/bin") / binary
         if path.is_file():
@@ -174,6 +180,7 @@ def main():
             result["health"] = json.load(response)
     except Exception as exc:
         result["health_error"] = type(exc).__name__
+    print("AUDIT: health complete", file=sys.stderr, flush=True)
     root = Path("/home/opc/core-node")
     for filename, kind in (("real-trader.db", "trades"), ("vps-api.db", "profiles"), ("shadow-books.db", "shadow")):
         print("AUDIT: database " + kind, file=sys.stderr, flush=True)
