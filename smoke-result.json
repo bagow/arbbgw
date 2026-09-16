@@ -1,0 +1,283 @@
+{
+  "ok": true,
+  "health": {
+    "active_trades": 0,
+    "build_sha": "7c7a7c75c52905e05a624b2e12a8bbcf8d38b5f5",
+    "entries_halted": false,
+    "healthy": true,
+    "supervisor_age_ms": 584,
+    "venues": [
+      {
+        "books": 690,
+        "current_specs": 528,
+        "exchange": "binance",
+        "fresh_books": 248
+      },
+      {
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "gate",
+        "fresh_books": 0
+      },
+      {
+        "books": 677,
+        "current_specs": 673,
+        "exchange": "kucoin",
+        "fresh_books": 336
+      }
+    ]
+  },
+  "order_intents": 0,
+  "trades": 0,
+  "exchange_credentials_provided": false,
+  "production_replaced": false,
+  "public_collector_log": "tor::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1106 accepted=975 stale=129 invalid=0 last_lag_ms=1671\n\u001b[2m2026-09-16T11:21:59.161792Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1252 accepted=825 stale=424 invalid=0 last_lag_ms=232\n\u001b[2m2026-09-16T11:21:59.245107Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2232 accepted=1860 stale=370 invalid=0 last_lag_ms=2665\n\u001b[2m2026-09-16T11:21:59.847530Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1367 accepted=1224 stale=141 invalid=0 last_lag_ms=2077\n\u001b[2m2026-09-16T11:21:59.848800Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=968 accepted=735 stale=231 invalid=0 last_lag_ms=1572\n\u001b[2m2026-09-16T11:21:59.963664Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1703 accepted=776 stale=925 invalid=0 last_lag_ms=580\n\u001b[2m2026-09-16T11:22:00.145952Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=900 accepted=885 stale=13 invalid=0 last_lag_ms=127\n\u001b[2m2026-09-16T11:22:00.362327Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1527 accepted=1485 stale=39 invalid=0 last_lag_ms=230\n\u001b[2m2026-09-16T11:22:00.548582Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=769 accepted=655 stale=112 invalid=0 last_lag_ms=187\n\u001b[2m2026-09-16T11:22:00.562321Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1137 accepted=876 stale=259 invalid=0 last_lag_ms=666\n\u001b[2m2026-09-16T11:22:01.245776Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1758 accepted=1261 stale=495 invalid=0 last_lag_ms=1418\n\u001b[2m2026-09-16T11:22:01.447992Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1421 accepted=1354 stale=65 invalid=0 last_lag_ms=174\n\u001b[2m2026-09-16T11:22:01.663873Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1246 accepted=821 stale=423 invalid=0 last_lag_ms=480\n\u001b[2m2026-09-16T11:22:01.665925Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1092 accepted=972 stale=118 invalid=0 last_lag_ms=116\n\u001b[2m2026-09-16T11:22:02.393652Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1569 accepted=1041 stale=526 invalid=0 last_lag_ms=1532\n\u001b[2m2026-09-16T11:22:02.460434Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1497 accepted=1301 stale=194 invalid=0 last_lag_ms=220\n\u001b[2m2026-09-16T11:22:02.771996Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1254 accepted=1017 stale=235 invalid=0 last_lag_ms=751\n\u001b[2m2026-09-16T11:22:03.146795Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1325 accepted=1222 stale=101 invalid=0 last_lag_ms=1503\n\u001b[2m2026-09-16T11:22:03.246154Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1348 accepted=1008 stale=338 invalid=0 last_lag_ms=178\n\u001b[2m2026-09-16T11:22:03.263572Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=968 accepted=708 stale=258 invalid=0 last_lag_ms=909\n\u001b[2m2026-09-16T11:22:03.747702Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1460 accepted=1186 stale=272 invalid=0 last_lag_ms=410\n\u001b[2m2026-09-16T11:22:04.263662Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1094 accepted=737 stale=355 invalid=0 last_lag_ms=719\n\u001b[2m2026-09-16T11:22:04.343003Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2044 accepted=1100 stale=942 invalid=0 last_lag_ms=458\n\u001b[2m2026-09-16T11:22:04.559965Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1459 accepted=1347 stale=110 invalid=0 last_lag_ms=405\n\u001b[2m2026-09-16T11:22:05.260945Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1733 accepted=1417 stale=314 invalid=0 last_lag_ms=1098\n\u001b[2m2026-09-16T11:22:05.345620Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1391 accepted=1006 stale=383 invalid=0 last_lag_ms=1026\n\u001b[2m2026-09-16T11:22:05.366745Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1839 accepted=1425 stale=412 invalid=0 last_lag_ms=1282\n\u001b[2m2026-09-16T11:22:05.445796Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=865 accepted=533 stale=330 invalid=0 last_lag_ms=3241\n\u001b[2m2026-09-16T11:22:05.462068Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=996 accepted=893 stale=101 invalid=0 last_lag_ms=1690\n\u001b[2m2026-09-16T11:22:06.061038Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1047 accepted=818 stale=227 invalid=0 last_lag_ms=1861\n\u001b[2m2026-09-16T11:22:06.545561Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1020 accepted=943 stale=75 invalid=0 last_lag_ms=2249\n\u001b[2m2026-09-16T11:22:06.745498Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1288 accepted=939 stale=347 invalid=0 last_lag_ms=1686\n\u001b[2m2026-09-16T11:22:06.745917Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1469 accepted=589 stale=877 invalid=0 last_lag_ms=3674\n\u001b[2m2026-09-16T11:22:07.444630Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1640 accepted=1282 stale=356 invalid=0 last_lag_ms=1977\n\u001b[2m2026-09-16T11:22:07.646838Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1269 accepted=843 stale=424 invalid=0 last_lag_ms=3154\n\u001b[2m2026-09-16T11:22:08.462717Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1547 accepted=1424 stale=121 invalid=0 last_lag_ms=825\n\u001b[2m2026-09-16T11:22:08.747781Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1655 accepted=1165 stale=488 invalid=0 last_lag_ms=3178\n\u001b[2m2026-09-16T11:22:09.243899Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1744 accepted=1066 stale=675 invalid=0 last_lag_ms=2479\n\u001b[2m2026-09-16T11:22:09.362658Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2999 accepted=2090 stale=907 invalid=0 last_lag_ms=2361\n\u001b[2m2026-09-16T11:22:10.045144Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2043 accepted=1630 stale=411 invalid=0 last_lag_ms=205\n\u001b[2m2026-09-16T11:22:10.045530Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1448 accepted=908 stale=537 invalid=0 last_lag_ms=3801\n\u001b[2m2026-09-16T11:22:10.061108Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2188 accepted=1034 stale=1152 invalid=0 last_lag_ms=352\n\u001b[2m2026-09-16T11:22:10.160282Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1346 accepted=1146 stale=198 invalid=0 last_lag_ms=211\n\u001b[2m2026-09-16T11:22:10.444173Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1945 accepted=1593 stale=349 invalid=0 last_lag_ms=3824\n\u001b[2m2026-09-16T11:22:10.660127Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1176 accepted=850 stale=324 invalid=0 last_lag_ms=204\n\u001b[2m2026-09-16T11:22:10.661048Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1735 accepted=905 stale=827 invalid=0 last_lag_ms=109\n\u001b[2m2026-09-16T11:22:11.347302Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2335 accepted=1353 stale=980 invalid=0 last_lag_ms=2821\n\u001b[2m2026-09-16T11:22:11.459663Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2058 accepted=1444 stale=612 invalid=0 last_lag_ms=113\n\u001b[2m2026-09-16T11:22:11.760754Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1468 accepted=1023 stale=443 invalid=0 last_lag_ms=4211\n\u001b[2m2026-09-16T11:22:11.861859Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1719 accepted=829 stale=888 invalid=0 last_lag_ms=936\n\u001b[2m2026-09-16T11:22:12.469223Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2051 accepted=1420 stale=629 invalid=0 last_lag_ms=205\n\u001b[2m2026-09-16T11:22:12.570587Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1983 accepted=1041 stale=940 invalid=0 last_lag_ms=4592\n\u001b[2m2026-09-16T11:22:12.860540Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1970 accepted=1149 stale=819 invalid=0 last_lag_ms=118\n\u001b[2m2026-09-16T11:22:13.243421Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1810 accepted=1325 stale=483 invalid=0 last_lag_ms=142\n\u001b[2m2026-09-16T11:22:13.265437Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1480 accepted=776 stale=702 invalid=0 last_lag_ms=134\n\u001b[2m2026-09-16T11:22:13.343131Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1977 accepted=1300 stale=675 invalid=0 last_lag_ms=110\n\u001b[2m2026-09-16T11:22:13.763651Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2162 accepted=1237 stale=923 invalid=0 last_lag_ms=399\n\u001b[2m2026-09-16T11:22:14.583410Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1941 accepted=1587 stale=352 invalid=0 last_lag_ms=251\n\u001b[2m2026-09-16T11:22:14.642052Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1493 accepted=774 stale=717 invalid=0 last_lag_ms=153\n\u001b[2m2026-09-16T11:22:14.694500Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2547 accepted=1100 stale=1445 invalid=0 last_lag_ms=3494\n\u001b[2m2026-09-16T11:22:15.445141Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2207 accepted=1511 stale=694 invalid=0 last_lag_ms=186\n\u001b[2m2026-09-16T11:22:15.449648Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=2425 accepted=1732 stale=691 invalid=0 last_lag_ms=311\n\u001b[2m2026-09-16T11:22:15.460191Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1936 accepted=1365 stale=569 invalid=0 last_lag_ms=600\n\u001b[2m2026-09-16T11:22:15.545399Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1553 accepted=1131 stale=420 invalid=0 last_lag_ms=198\n\u001b[2m2026-09-16T11:22:15.645532Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1471 accepted=682 stale=787 invalid=0 last_lag_ms=165\n\u001b[2m2026-09-16T11:22:16.145941Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mcore_node::collector::binance\u001b[0m\u001b[2m:\u001b[0m [binance_l2_quality] received=1484 accepted=1037 stale=444 invalid=0 last_lag_ms=157\n",
+  "market_samples": [
+    {
+      "elapsed_seconds": 0.0,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 0
+      }
+    },
+    {
+      "elapsed_seconds": 2.0,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 0
+      }
+    },
+    {
+      "elapsed_seconds": 4.0,
+      "fresh_books": {
+        "binance": 30,
+        "gate": 0,
+        "kucoin": 0
+      }
+    },
+    {
+      "elapsed_seconds": 6.0,
+      "fresh_books": {
+        "binance": 60,
+        "gate": 0,
+        "kucoin": 10
+      }
+    },
+    {
+      "elapsed_seconds": 8.0,
+      "fresh_books": {
+        "binance": 109,
+        "gate": 0,
+        "kucoin": 9
+      }
+    },
+    {
+      "elapsed_seconds": 10.0,
+      "fresh_books": {
+        "binance": 126,
+        "gate": 0,
+        "kucoin": 132
+      }
+    },
+    {
+      "elapsed_seconds": 12.0,
+      "fresh_books": {
+        "binance": 165,
+        "gate": 0,
+        "kucoin": 323
+      }
+    },
+    {
+      "elapsed_seconds": 14.0,
+      "fresh_books": {
+        "binance": 174,
+        "gate": 0,
+        "kucoin": 306
+      }
+    },
+    {
+      "elapsed_seconds": 16.0,
+      "fresh_books": {
+        "binance": 104,
+        "gate": 0,
+        "kucoin": 289
+      }
+    },
+    {
+      "elapsed_seconds": 18.0,
+      "fresh_books": {
+        "binance": 160,
+        "gate": 0,
+        "kucoin": 283
+      }
+    },
+    {
+      "elapsed_seconds": 20.1,
+      "fresh_books": {
+        "binance": 184,
+        "gate": 0,
+        "kucoin": 305
+      }
+    },
+    {
+      "elapsed_seconds": 22.1,
+      "fresh_books": {
+        "binance": 226,
+        "gate": 0,
+        "kucoin": 304
+      }
+    },
+    {
+      "elapsed_seconds": 24.1,
+      "fresh_books": {
+        "binance": 226,
+        "gate": 0,
+        "kucoin": 303
+      }
+    },
+    {
+      "elapsed_seconds": 26.1,
+      "fresh_books": {
+        "binance": 249,
+        "gate": 0,
+        "kucoin": 323
+      }
+    },
+    {
+      "elapsed_seconds": 28.1,
+      "fresh_books": {
+        "binance": 209,
+        "gate": 0,
+        "kucoin": 302
+      }
+    },
+    {
+      "elapsed_seconds": 30.2,
+      "fresh_books": {
+        "binance": 236,
+        "gate": 0,
+        "kucoin": 291
+      }
+    },
+    {
+      "elapsed_seconds": 32.2,
+      "fresh_books": {
+        "binance": 197,
+        "gate": 0,
+        "kucoin": 299
+      }
+    },
+    {
+      "elapsed_seconds": 34.2,
+      "fresh_books": {
+        "binance": 225,
+        "gate": 0,
+        "kucoin": 303
+      }
+    },
+    {
+      "elapsed_seconds": 36.2,
+      "fresh_books": {
+        "binance": 253,
+        "gate": 0,
+        "kucoin": 448
+      }
+    },
+    {
+      "elapsed_seconds": 38.3,
+      "fresh_books": {
+        "binance": 271,
+        "gate": 0,
+        "kucoin": 375
+      }
+    },
+    {
+      "elapsed_seconds": 40.3,
+      "fresh_books": {
+        "binance": 270,
+        "gate": 0,
+        "kucoin": 380
+      }
+    },
+    {
+      "elapsed_seconds": 42.3,
+      "fresh_books": {
+        "binance": 60,
+        "gate": 0,
+        "kucoin": 358
+      }
+    },
+    {
+      "elapsed_seconds": 44.3,
+      "fresh_books": {
+        "binance": 174,
+        "gate": 0,
+        "kucoin": 386
+      }
+    },
+    {
+      "elapsed_seconds": 46.4,
+      "fresh_books": {
+        "binance": 167,
+        "gate": 0,
+        "kucoin": 346
+      }
+    },
+    {
+      "elapsed_seconds": 48.4,
+      "fresh_books": {
+        "binance": 143,
+        "gate": 0,
+        "kucoin": 576
+      }
+    },
+    {
+      "elapsed_seconds": 50.4,
+      "fresh_books": {
+        "binance": 10,
+        "gate": 0,
+        "kucoin": 459
+      }
+    },
+    {
+      "elapsed_seconds": 52.4,
+      "fresh_books": {
+        "binance": 42,
+        "gate": 0,
+        "kucoin": 354
+      }
+    },
+    {
+      "elapsed_seconds": 54.4,
+      "fresh_books": {
+        "binance": 100,
+        "gate": 0,
+        "kucoin": 361
+      }
+    },
+    {
+      "elapsed_seconds": 56.4,
+      "fresh_books": {
+        "binance": 202,
+        "gate": 0,
+        "kucoin": 389
+      }
+    },
+    {
+      "elapsed_seconds": 58.5,
+      "fresh_books": {
+        "binance": 248,
+        "gate": 0,
+        "kucoin": 336
+      }
+    }
+  ],
+  "simultaneous_fresh_samples": 27,
+  "steady_fresh_samples": 10,
+  "steady_samples": 10,
+  "scope": "Public Binance/KuCoin data for 60 seconds; inactive profile; no profitability claim",
+  "production_restored": true,
+  "production_paused_for_test": true
+}
