@@ -264,14 +264,11 @@ pub fn generate_signals(
                 continue;
             }
 
-            // Break-even = exchange fees on all legs (entry + exit on both exchanges)
-            // + expected slippage budget.
-            // fee_a/fee_b are REAL taker rates fetched from exchange APIs.
-            // Including slippage in BE ensures only trades with real profit potential pass.
-            // Entry VWAP is checked from current L2. Reserve profile slippage for the two
-            // future exit legs instead of pretending every market has a fixed 0.02% cost.
-            let break_even_pct = 2.0 * (fee_a + fee_b) * 100.0
-                + 2.0 * profile.slippage_percent;
+            // The profile slippage value is the maximum IOC price-limit movement, not
+            // an expected fill cost. Profitability uses the conservative expected cost
+            // while execution remains bounded by the user's configured maximum.
+            let break_even_pct =
+                crate::engine::scanner_common::ioc_break_even_pct(fee_a, fee_b);
 
             // ── ABSOLUTE STRUCTURAL GUARD (ALWAYS ACTIVE) ──
             // Blocks entry when spread - structural_spread < break_even (fees).
@@ -292,8 +289,10 @@ pub fn generate_signals(
 
             // ── L1 DEPTH FILTER (Zero-Latency Fake Liquidity Protection) ──
             // Uses exact websocket Bid/Ask volume received in the same tick as the price.
-            {
-                let min_depth_usd = (profile.trade_volume * (profile.min_depth_percent.max(250.0) / 100.0)).max(15.0);
+            if let Some(min_depth_usd) = crate::engine::scanner_common::required_depth_usd(
+                profile.trade_volume,
+                profile.min_depth_percent,
+            ) {
 
                 // bid_size from collectors is ALREADY in TRUE USD (for all exchanges, natively calculated in the collectors).
                 // If A is higher, we SELL A (hit bid) and BUY B (hit ask).
@@ -341,14 +340,22 @@ pub fn generate_signals(
 
             let actual_vol_a = phys_qty * entry_a;
             let actual_vol_b = phys_qty * entry_b;
-            let max_v = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
-
-            if actual_vol_a > max_v {
+            if !crate::engine::scanner_common::volumes_within_tolerance(
+                profile.trade_volume,
+                ts.vol_tolerance_pct,
+                actual_vol_a,
+                actual_vol_b,
+            ) {
+                let min_v =
+                    profile.trade_volume * (1.0 - ts.vol_tolerance_pct / 100.0).max(0.0);
+                let max_v = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
                 if let Some(p) = &diag_prefix {
                     tracing::info!(
-                        "{} -> actual_vol exceeds max_v (${:.2} > ${:.2}) (mult_trap)",
+                        "{} -> actual volume outside configured range: A=${:.2} B=${:.2}, allowed=${:.2}..${:.2}",
                         p,
                         actual_vol_a,
+                        actual_vol_b,
+                        min_v,
                         max_v
                     );
                 }

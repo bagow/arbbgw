@@ -361,7 +361,7 @@ async fn enter(
                 continue;
             }
         };
-        s.break_even_pct = 2.0 * (fee_a + fee_b) * 100.0 + 2.0 * p.slippage_percent;
+        s.break_even_pct = super::scanner_common::ioc_break_even_pct(fee_a, fee_b);
         let (ba, bb) = tokio::join!(ca.fetch_balances(http, keys), cb.fetch_balances(http, keys));
         let (available_a, available_b) = match (ba, bb) {
             (Ok((_, a)), Ok((_, b))) if a.is_finite() && b.is_finite() => (a, b),
