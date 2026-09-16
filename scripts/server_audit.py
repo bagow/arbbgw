@@ -16,6 +16,148 @@ from audit_performance import summarize
 from audit_shadow import summarize_shadow
 
 
+def _float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def sample_scanner_funnel(path, samples=60, delay=0.25):
+    """Sample public spread snapshots and replay the visible scanner stages."""
+    observations = []
+    profile = None
+    technical = {}
+    last_ts = None
+    for index in range(samples):
+        with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA query_only=ON")
+            if profile is None:
+                row = db.execute(
+                    "SELECT id,min_entry_spread,max_entry_spread,min_volume_millions,"
+                    "take_profit_percent,disabled_exchanges FROM trading_profiles "
+                    "WHERE is_active=1 ORDER BY id LIMIT 1"
+                ).fetchone()
+                profile = dict(row) if row else None
+                technical = {
+                    row["key"]: row["value"]
+                    for row in db.execute("SELECT key,value FROM technical_settings")
+                }
+            cached = db.execute(
+                "SELECT value FROM server_cache WHERE key='snapshot'"
+            ).fetchone()
+        if cached:
+            snapshot = json.loads(cached[0])
+            stamp = snapshot.get("ts")
+            if stamp != last_ts:
+                observations.append(snapshot)
+                last_ts = stamp
+        if index + 1 < samples:
+            time.sleep(delay)
+
+    selected_settings = {
+        key: technical.get(key)
+        for key in (
+            "spread_threshold", "spread_max", "stale_secs", "intra_spread_max_pct",
+            "vol_tolerance_pct", "min_listing_age_days", "binance_min_notional",
+            "margin_check_multiplier", "max_spreads_per_cycle", "default_fee_rate",
+            "entry_order_type", "diag_log_interval",
+        )
+    }
+    result = {
+        "scope": "Distinct server_cache snapshots observed over 15 seconds; public market data only",
+        "profile_id": profile.get("id") if profile else None,
+        "technical_settings": selected_settings,
+        "distinct_snapshots": len(observations),
+        "nonempty_snapshots": sum(bool(item.get("data")) for item in observations),
+    }
+    if not profile:
+        result["error"] = "no active profile"
+        return result
+
+    try:
+        disabled = set(json.loads(profile.get("disabled_exchanges") or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        disabled = set()
+    min_entry = _float(profile.get("min_entry_spread"))
+    max_entry = _float(profile.get("max_entry_spread"))
+    min_volume = _float(profile.get("min_volume_millions")) * 1_000_000.0
+    take_profit = _float(profile.get("take_profit_percent"))
+    default_fee = _float(technical.get("default_fee_rate"), 0.0005)
+    # Matches the production helper: four fee legs plus four expected IOC legs at 0.02%.
+    estimated_break_even = 4.0 * default_fee * 100.0 + 0.08
+    stages = {
+        "snapshot_rows": 0,
+        "enabled_venues": 0,
+        "adjusted_spread_in_entry_window": 0,
+        "both_24h_volumes_above_profile_minimum": 0,
+        "structural_verified": 0,
+        "positive_after_estimated_break_even": 0,
+        "managed_take_profit_preflight_estimate": 0,
+    }
+    top = {}
+    per_snapshot = []
+    for snapshot in observations:
+        local_max = None
+        local_count = 0
+        for row in snapshot.get("data") or []:
+            spread = _float(row.get("spread"))
+            structural = abs(_float(row.get("structural_spread")))
+            adjusted = spread - structural
+            local_count += 1
+            stages["snapshot_rows"] += 1
+            local_max = spread if local_max is None else max(local_max, spread)
+            key = "|".join(str(row.get(name, "")) for name in (
+                "pair", "exchangeA", "exchangeB", "direction"
+            ))
+            public = {
+                "pair": row.get("pair"),
+                "exchange_a": row.get("exchangeA"),
+                "exchange_b": row.get("exchangeB"),
+                "direction": row.get("direction"),
+                "spread_pct": round(spread, 4),
+                "structural_spread_pct": round(structural, 4),
+                "adjusted_spread_pct": round(adjusted, 4),
+                "vol_a_usd": round(_float(row.get("volA")), 2),
+                "vol_b_usd": round(_float(row.get("volB")), 2),
+                "structural_verified": row.get("structural_verified") is True,
+            }
+            if key not in top or spread > top[key]["spread_pct"]:
+                top[key] = public
+            if row.get("exchangeA") in disabled or row.get("exchangeB") in disabled:
+                continue
+            stages["enabled_venues"] += 1
+            if not min_entry <= adjusted <= max_entry:
+                continue
+            stages["adjusted_spread_in_entry_window"] += 1
+            if _float(row.get("volA")) < min_volume or _float(row.get("volB")) < min_volume:
+                continue
+            stages["both_24h_volumes_above_profile_minimum"] += 1
+            if row.get("structural_verified") is not True:
+                continue
+            stages["structural_verified"] += 1
+            if adjusted <= estimated_break_even:
+                continue
+            stages["positive_after_estimated_break_even"] += 1
+            required_profit = max(min_entry, take_profit, 0.05)
+            if adjusted - estimated_break_even <= required_profit:
+                continue
+            stages["managed_take_profit_preflight_estimate"] += 1
+        per_snapshot.append({
+            "ts": snapshot.get("ts"),
+            "rows": local_count,
+            "max_spread_pct": round(local_max, 4) if local_max is not None else None,
+        })
+    result["estimated_break_even_pct_using_default_fee"] = round(estimated_break_even, 4)
+    result["observation_stage_counts"] = stages
+    result["samples"] = per_snapshot
+    result["top_unique_rows"] = sorted(
+        top.values(), key=lambda row: row["spread_pct"], reverse=True
+    )[:20]
+    return result
+
+
 def inspect_database(path, kind):
     with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as db:
         deadline = time.monotonic() + 15
@@ -209,6 +351,11 @@ def main():
             result[filename] = inspect_database(root / filename, kind)
         except Exception as exc:
             result[filename] = {"error": str(exc)}
+    print("AUDIT: scanner funnel", file=sys.stderr, flush=True)
+    try:
+        result["scanner_funnel"] = sample_scanner_funnel(root / "vps-api.db")
+    except Exception as exc:
+        result["scanner_funnel"] = {"error": type(exc).__name__ + ": " + str(exc)}
     disk = shutil.disk_usage(root if root.exists() else "/")
     result["disk_free_bytes"] = disk.free
     print(json.dumps(result, indent=2, allow_nan=False))
