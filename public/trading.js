@@ -904,14 +904,14 @@ function renderSettingsForm(profile) {
                             <div class="field-item">
                                 <label for="sf-leverage-${p.id}">Leverage (x)</label>
                                 <div class="field-input-wrap">
-                                    <input type="number" id="sf-leverage-${p.id}" step="1" min="1" max="125" value="${p.leverage??10}" />
+                                    <input type="number" id="sf-leverage-${p.id}" step="1" min="1" max="10" value="${p.leverage??10}" />
                                 </div>
-                                <div class="field-hint">Isolated cross leverage</div>
+                                <div class="field-hint">Cross leverage; managed maximum 10x</div>
                             </div>
                             <div class="field-item">
                                 <label for="sf-max-trades-${p.id}">Max Active Trades</label>
                                 <div class="field-input-wrap">
-                                    <input type="number" id="sf-max-trades-${p.id}" step="1" min="1" max="50" value="${p.max_active_trades??5}" />
+                                    <input type="number" id="sf-max-trades-${p.id}" step="1" min="1" max="10" value="${p.max_active_trades??5}" />
                                 </div>
                                 <div class="field-hint">Max concurrent pairs</div>
                             </div>
@@ -936,11 +936,39 @@ function renderSettingsForm(profile) {
                                 <div class="field-hint">Target net profit to exit</div>
                             </div>
                             <div class="field-item">
-                                <label for="sf-stop-${p.id}">Stop Loss (%)</label>
+                                <label for="sf-hard-stop-${p.id}">Hard Stop (%)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-hard-stop-${p.id}" step="0.05" min="0" max="20" value="${p.hard_stop_percent??1.0}" />
+                                </div>
+                                <div class="field-hint">Immediate executable net loss limit (0 = off)</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-trailing-activation-${p.id}">Trailing Activation (%)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-trailing-activation-${p.id}" step="0.01" min="0" value="${p.trailing_activation_percent??0.1}" />
+                                </div>
+                                <div class="field-hint">Minimum favorable net move before trailing arms</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-stop-${p.id}">Trailing Distance (%)</label>
                                 <div class="field-input-wrap">
                                     <input type="number" id="sf-stop-${p.id}" step="0.05" min="0" value="${p.trailing_stop_percent??0.5}" />
                                 </div>
-                                <div class="field-hint">Spread widening tolerance (0 = off)</div>
+                                <div class="field-hint">Distance from peak after activation (0 = off)</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-daily-loss-${p.id}">Daily Loss Limit (USDT)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-daily-loss-${p.id}" step="0.01" min="0" value="${p.daily_loss_limit_usdt??5}" />
+                                </div>
+                                <div class="field-hint">Blocks entries after VERIFIED UTC-day loss (0 = off)</div>
+                            </div>
+                            <div class="field-item">
+                                <label for="sf-max-exposure-${p.id}">Max Exposure (USDT)</label>
+                                <div class="field-input-wrap">
+                                    <input type="number" id="sf-max-exposure-${p.id}" step="1" min="0" value="${p.max_total_exposure_usdt??300}" />
+                                </div>
+                                <div class="field-hint">Active one-leg notionals combined (0 = off)</div>
                             </div>
                             <div class="field-item">
                                 <label for="sf-slip-${p.id}">Slippage IOC (%)</label>
@@ -2349,6 +2377,10 @@ window.saveSettings = async function (profileId) {
         trade_volume:              parseFloat(g(`sf-vol-${profileId}`)),
         take_profit_percent:       parseFloat(g(`sf-tp-${profileId}`)),
         trailing_stop_percent:     parseFloat(g(`sf-stop-${profileId}`)) || 0.0,
+        hard_stop_percent:         parseFloat(g(`sf-hard-stop-${profileId}`)) || 0.0,
+        trailing_activation_percent: parseFloat(g(`sf-trailing-activation-${profileId}`)) || 0.0,
+        daily_loss_limit_usdt:     parseFloat(g(`sf-daily-loss-${profileId}`)) || 0.0,
+        max_total_exposure_usdt:   parseFloat(g(`sf-max-exposure-${profileId}`)) || 0.0,
         min_entry_spread:          parseFloat(g(`sf-min-${profileId}`)),
         max_entry_spread:          parseFloat(g(`sf-max-${profileId}`)),
         min_structural_deviation:  parseFloat(g(`sf-dev-${profileId}`)) || 0.0,
@@ -2589,4 +2621,3 @@ setInterval(() => {
 
 // redeploy
 // deploy trigger
-

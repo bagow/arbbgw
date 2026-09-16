@@ -41,6 +41,9 @@ impl Journal {
                 created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);
               CREATE TABLE IF NOT EXISTS execution_observations(id INTEGER PRIMARY KEY, client_id TEXT NOT NULL,
                 observed_ms INTEGER NOT NULL, observation TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS execution_events(id INTEGER PRIMARY KEY, client_id TEXT NOT NULL,
+                trade_id INTEGER NOT NULL, event TEXT NOT NULL, at_ms INTEGER NOT NULL, detail TEXT);
+              CREATE INDEX IF NOT EXISTS execution_events_trade ON execution_events(trade_id,at_ms);
               CREATE INDEX IF NOT EXISTS execution_orders_trade ON execution_orders(trade_id);
               CREATE TABLE IF NOT EXISTS funding_events(exchange TEXT NOT NULL,event_id TEXT NOT NULL,trade_id INTEGER NOT NULL,time_ms INTEGER NOT NULL,cost REAL NOT NULL,PRIMARY KEY(exchange,event_id));
               CREATE TABLE IF NOT EXISTS reconciliation_alerts(key TEXT PRIMARY KEY, observed_ms INTEGER NOT NULL, detail TEXT NOT NULL);")?;
@@ -59,15 +62,31 @@ impl Journal {
         let s = plan.signal;
         let now = super::utils::now_ms();
         let max = plan.settings.max_active_trades;
+        let daily_limit = plan.settings.daily_loss_limit_usdt;
+        let exposure_limit = plan.settings.max_total_exposure_usdt;
+        let day_start = now - now.rem_euclid(86_400_000);
         Ok(self.db.call(move |c| {
             let tx=c.transaction()?;
             let blocked:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED') AND (pair=? OR profile_id=?)",params![s.pair,s.profile_id],|r|r.get(0))?;
             let same:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED') AND pair=?",[&s.pair],|r|r.get(0))?;
             let unresolved:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status IN ('ENTRY','RECONCILING')",[],|r|r.get(0))?;
-            if same>0 || blocked>=max || unresolved>0 {return Ok(None);}
+            let active_exposure:f64=tx.query_row("SELECT COALESCE(SUM(volume),0) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED') AND profile_id=?",[&s.profile_id],|r|r.get(0))?;
+            let daily_pnl:f64=tx.query_row("SELECT COALESCE(SUM(pnl),0) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND profile_id=? AND exit_time>=?",params![s.profile_id,day_start],|r|r.get(0))?;
+            let unsettled:i64=tx.query_row("SELECT COUNT(*) FROM trades t JOIN execution_plans p ON p.trade_id=t.id WHERE t.status='CLOSED' AND t.accounting_status!='VERIFIED' AND t.profile_id=?",[&s.profile_id],|r|r.get(0))?;
+            let loss_blocked=daily_limit>0.0 && daily_pnl<=-daily_limit;
+            let exposure_blocked=exposure_limit>0.0 && active_exposure+s.actual_vol_a_usd>exposure_limit+1e-9;
+            if same>0 || blocked>=max || unresolved>0 || unsettled>0 || loss_blocked || exposure_blocked {return Ok(None);}
             tx.execute("INSERT INTO trades(pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,status,profile_id,structural_spread,accounting_status,commission_cost,funding_cost,highest_spread_reached) VALUES(?,?,?,?,?,0,0,?,?,'ENTRY',?,?,'PENDING',0,0,0)",params![s.pair,s.exchange_a,s.exchange_b,s.direction,s.actual_vol_a_usd,s.spread,now,s.profile_id,s.structural_spread])?;
             let id=tx.last_insert_rowid();tx.execute("INSERT INTO execution_plans(trade_id,plan) VALUES(?,?)",params![id,json])?;
             tx.commit()?;Ok(Some(id))
+        }).await?)
+    }
+    pub async fn daily_verified_pnl(&self, profile_id: &str) -> anyhow::Result<f64> {
+        let profile_id = profile_id.to_string();
+        let now = super::utils::now_ms();
+        let day_start = now - now.rem_euclid(86_400_000);
+        Ok(self.db.call(move |c| {
+            c.query_row("SELECT COALESCE(SUM(pnl),0) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND profile_id=? AND exit_time>=?",params![profile_id,day_start],|r|r.get(0)).map_err(Into::into)
         }).await?)
     }
     pub async fn active(&self) -> anyhow::Result<Vec<ManagedTrade>> {
@@ -132,6 +151,16 @@ impl Journal {
             tx.execute("UPDATE execution_orders SET observation=?,updated_ms=? WHERE client_id=?",params![encoded,now,id])?;
             tx.execute("INSERT INTO execution_observations(client_id,observed_ms,observation) VALUES(?,?,?)",params![id,now,encoded])?;
             tx.commit()?;Ok(())
+        }).await?;
+        Ok(())
+    }
+    pub async fn execution_event(&self, trade_id: i64, client_id: &str, event: &str, detail: Option<String>) -> anyhow::Result<()> {
+        let client_id = client_id.to_string();
+        let event = event.to_string();
+        let at_ms = super::utils::now_ms();
+        self.db.call(move |c| {
+            c.execute("INSERT INTO execution_events(client_id,trade_id,event,at_ms,detail) VALUES(?,?,?,?,?)",params![client_id,trade_id,event,at_ms,detail])?;
+            Ok(())
         }).await?;
         Ok(())
     }
@@ -489,6 +518,23 @@ mod tests {
         assert!(j.reserve(plan()).await.unwrap().is_none());
         j.state(id, "CANCELLED", "NO_ORDER").await.unwrap();
         assert!(j.reserve(plan()).await.unwrap().is_some());
+    }
+    #[tokio::test]
+    async fn persistent_money_limits_block_new_reservations() {
+        let j = setup().await;
+        let mut too_large = plan();
+        too_large.settings.max_total_exposure_usdt = 5.0;
+        assert!(j.reserve(too_large).await.unwrap().is_none());
+
+        let id = j.reserve(plan()).await.unwrap().unwrap();
+        let now = super::super::utils::now_ms();
+        j.db.call(move |c| {
+            c.execute("UPDATE trades SET status='CLOSED',accounting_status='VERIFIED',pnl=-1.0,exit_time=? WHERE id=?",params![now,id])?;
+            Ok(())
+        }).await.unwrap();
+        let mut after_loss = plan();
+        after_loss.settings.daily_loss_limit_usdt = 0.5;
+        assert!(j.reserve(after_loss).await.unwrap().is_none());
     }
     #[tokio::test]
     async fn durable_identity_and_cumulative_receipts_cannot_double_count() {

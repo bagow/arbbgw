@@ -31,7 +31,11 @@ pub async fn init_db(db: &Connection) -> Result<()> {
                 trade_volume REAL DEFAULT 1000.0,
                 take_profit_percent REAL DEFAULT 0.1,
                 trailing_stop_percent REAL DEFAULT 0.5,
+                hard_stop_percent REAL DEFAULT 1.0,
+                trailing_activation_percent REAL DEFAULT 0.1,
                 max_active_trades INTEGER DEFAULT 5,
+                daily_loss_limit_usdt REAL DEFAULT 5.0,
+                max_total_exposure_usdt REAL DEFAULT 300.0,
                 commission_rate REAL DEFAULT 0.45,
                 slippage_percent REAL DEFAULT 0.1,
                 funding_rate_8h REAL DEFAULT 0.01,
@@ -60,6 +64,10 @@ pub async fn init_db(db: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN strategy_type TEXT DEFAULT 'ema'", []);
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN hft_timeout_ms INTEGER DEFAULT 10000", []);
         let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN max_holding_time_ms INTEGER DEFAULT 1800000", []);
+        let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN hard_stop_percent REAL DEFAULT 1.0", []);
+        let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN trailing_activation_percent REAL DEFAULT 0.1", []);
+        let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN daily_loss_limit_usdt REAL DEFAULT 5.0", []);
+        let _ = conn.execute("ALTER TABLE trading_profiles ADD COLUMN max_total_exposure_usdt REAL DEFAULT 300.0", []);
 
         // ── Technical settings table (global engine params) ──
         conn.execute_batch("
@@ -295,7 +303,11 @@ pub fn row_to_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradingProfil
         trade_volume: row.get("trade_volume")?,
         take_profit_percent: row.get("take_profit_percent")?,
         trailing_stop_percent: row.get("trailing_stop_percent")?,
+        hard_stop_percent: row.get::<_, Option<f64>>("hard_stop_percent")?.unwrap_or(1.0),
+        trailing_activation_percent: row.get::<_, Option<f64>>("trailing_activation_percent")?.unwrap_or(0.1),
         max_active_trades: row.get("max_active_trades")?,
+        daily_loss_limit_usdt: row.get::<_, Option<f64>>("daily_loss_limit_usdt")?.unwrap_or(5.0),
+        max_total_exposure_usdt: row.get::<_, Option<f64>>("max_total_exposure_usdt")?.unwrap_or(300.0),
         commission_rate: row.get("commission_rate")?,
         slippage_percent: row.get("slippage_percent")?,
         funding_rate_8h: row.get("funding_rate_8h")?,

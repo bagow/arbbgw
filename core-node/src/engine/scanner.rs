@@ -74,14 +74,6 @@ pub fn generate_signals(
             continue;
         }
 
-        // Only 1 signal per pair per scan cycle (prevents duplicate exchange combos)
-        if emitted_pairs.contains(&row.pair) {
-            if log_diag {
-                tracing::debug!("[scanner] TRACE {} → SKIP: already emitted", row.pair);
-            }
-            continue;
-        }
-
         // ── HEALTH & RISK GUARD ──
         if !crate::engine::risk_manager::verify_trade_health(&row.exchange_a, &row.exchange_b, e_ctx) {
             if log_diag {
@@ -203,10 +195,8 @@ pub fn generate_signals(
             continue;
         }
 
-        let fee_a =
-            get_exchange_fee(&row.exchange_a, ts.default_fee_rate, e_ctx);
-        let fee_b =
-            get_exchange_fee(&row.exchange_b, ts.default_fee_rate, e_ctx);
+        let fee_a = get_exchange_fee(&row.exchange_a, &row.pair, ts.default_fee_rate, e_ctx);
+        let fee_b = get_exchange_fee(&row.exchange_b, &row.pair, ts.default_fee_rate, e_ctx);
 
         // (Qty basis is now handled universally by sending phys_amount to exchange connectors)
 
@@ -278,27 +268,10 @@ pub fn generate_signals(
             // + expected slippage budget.
             // fee_a/fee_b are REAL taker rates fetched from exchange APIs.
             // Including slippage in BE ensures only trades with real profit potential pass.
-            let expected_slippage_per_leg = 0.02; // ~0.02% per leg
-            let break_even_pct = if ts.entry_order_type == "maker" {
-                // Maker mode: entry has 1 maker fee + 1 taker fee (hedge)
-                // Exit has 2 taker fees (both legs always IOC on exit)
-                // Maker entry has ZERO slippage (Post-Only sits in book)
-                let maker_fee_rate = {
-                    // Use actual maker fee from cache, or default 0.02%
-                    let rank_a = crate::engine::utils::liquidity_rank(&row.exchange_a);
-                    let rank_b = crate::engine::utils::liquidity_rank(&row.exchange_b);
-                    let maker_ex = if rank_a >= rank_b { &row.exchange_a } else { &row.exchange_b };
-                    e_ctx.maker_fee_rates.get(maker_ex).map(|v| *v).unwrap_or(0.0002)
-                };
-                // Entry: maker_fee (maker leg) + taker_fee (hedge leg)
-                // Exit: 2 × taker_fee
-                // Slippage: only 3 legs (hedge entry + 2 exit), maker entry = 0
-                (maker_fee_rate + fee_a.min(fee_b) + fee_a + fee_b) * 100.0
-                    + 3.0 * expected_slippage_per_leg
-            } else {
-                // IOC/Market mode: all 4 legs are taker
-                2.0 * (fee_a + fee_b) * 100.0 + 4.0 * expected_slippage_per_leg
-            };
+            // Entry VWAP is checked from current L2. Reserve profile slippage for the two
+            // future exit legs instead of pretending every market has a fixed 0.02% cost.
+            let break_even_pct = 2.0 * (fee_a + fee_b) * 100.0
+                + 2.0 * profile.slippage_percent;
 
             // ── ABSOLUTE STRUCTURAL GUARD (ALWAYS ACTIVE) ──
             // Blocks entry when spread - structural_spread < break_even (fees).
@@ -454,8 +427,14 @@ pub fn generate_signals(
                     );
                 }
             }
-            emitted_pairs.insert(row.pair.clone());
         }
     }
+    // Rank by executable net edge before retaining one route per profile/pair.
+    signals.sort_by(|a, b| {
+        let edge_a = a.spread - a.structural_spread - a.break_even_pct;
+        let edge_b = b.spread - b.structural_spread - b.break_even_pct;
+        edge_b.total_cmp(&edge_a)
+    });
+    signals.retain(|signal| emitted_pairs.insert(format!("{}:{}", signal.profile_id, signal.pair)));
     signals
 }

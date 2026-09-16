@@ -298,7 +298,7 @@ impl ExchangeConnector for BitmexConnector {
         Ok((wallet_balance, available_margin))
     }
 
-    async fn fetch_taker_fee(&self, _http: &Client, _keys: &ExchangeKeys) -> Result<f64, String> {
+    async fn fetch_taker_fee(&self, _http: &Client, _keys: &ExchangeKeys, _pair: &str) -> Result<f64, String> {
         Ok(0.00075) // BitMEX taker fee: 0.075%
     }
 

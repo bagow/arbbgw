@@ -104,6 +104,7 @@ pub fn start_balance_fetcher(
                     Ok((w, a)) => {
                         e_ctx.balances.insert(ex.to_string(), w);
                         e_ctx.margin_balances.insert(ex.to_string(), a);
+                        e_ctx.balances_updated_ms.insert(ex.to_string(), crate::engine::utils::now_ms());
                         if w > 1.0 {
                             e_ctx.balance_low.insert(ex.to_string(), false);
                         } else {
@@ -131,6 +132,7 @@ pub fn start_balance_fetcher(
                             info!("[{}] positions: {} → {}", ex, prev_count, new_count);
                         }
                         e_ctx.positions.insert(ex.to_string(), pos);
+                        e_ctx.positions_updated_ms.insert(ex.to_string(), crate::engine::utils::now_ms());
                     }
                     Err(e) => {
                         had_error = true;
@@ -145,16 +147,6 @@ pub fn start_balance_fetcher(
                     record_fetch_success(ex);
                 }
 
-                if e_ctx.fee_rates.get(ex).is_none() {
-                    if let Ok(fee) = conn.fetch_taker_fee(&http, &keys).await {
-                        e_ctx.fee_rates.insert(ex.to_string(), fee);
-                    }
-                }
-                if e_ctx.maker_fee_rates.get(ex).is_none() {
-                    if let Ok(maker_fee) = conn.fetch_maker_fee(&http, &keys).await {
-                        e_ctx.maker_fee_rates.insert(ex.to_string(), maker_fee);
-                    }
-                }
             }
 
             // Diagnostic: log current fee_rates and balances

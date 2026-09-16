@@ -947,14 +947,15 @@ impl ExchangeConnector for KucoinConnector {
         Ok((equity, avail))
     }
 
-    async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
-        let path = "/api/v1/trade-fees?symbol=XBTUSDTM";
+    async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys, pair: &str) -> Result<f64, String> {
+        let symbol = managed_kucoin_symbol(pair);
+        let path = format!("/api/v1/trade-fees?symbol={symbol}");
         let v = super::ws_kucoin::send_kucoin_request(
             &keys.kucoin_key,
             &keys.kucoin_secret,
             &keys.kucoin_passphrase,
             "GET",
-            path,
+            &path,
             "",
             10000,
         )
@@ -963,7 +964,10 @@ impl ExchangeConnector for KucoinConnector {
             .as_str()
             .and_then(|s| s.parse().ok())
             .or_else(|| v["data"]["takerFeeRate"].as_f64())
-            .unwrap_or(0.0006);
+            .ok_or_else(|| "Failed to parse KuCoin symbol fee".to_string())?;
+        if !(0.0..=0.01).contains(&taker) {
+            return Err("KuCoin returned an invalid taker fee".into());
+        }
         Ok(taker)
     }
 

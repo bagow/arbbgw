@@ -25,7 +25,11 @@ const PROFILE_SELECT: &str = "
         trade_volume,
         take_profit_percent,
         trailing_stop_percent,
+        hard_stop_percent,
+        trailing_activation_percent,
         max_active_trades,
+        daily_loss_limit_usdt,
+        max_total_exposure_usdt,
         commission_rate,
         slippage_percent,
         funding_rate_8h,
@@ -91,10 +95,10 @@ fn get_i64(row: &rusqlite::Row, idx: usize) -> Option<i64> {
 
 // Column indices match the PROFILE_SELECT list above (0-based).
 fn parse_row(row: &rusqlite::Row) -> TradingSettings {
-    // Parse disabled_exchanges JSON string from DB (col 16) into Vec<String>.
+    // Parse by name because upgraded databases can have a different physical column order.
     // Falls back to empty vec on any parse error.
     let disabled_exchanges: Vec<String> = row
-        .get::<_, Option<String>>(16)
+        .get::<_, Option<String>>("disabled_exchanges")
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
@@ -111,13 +115,17 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
         min_trade_volume: 5.0, // No DB column — use fixed default
         take_profit_percent: get_f64(row, 7).unwrap_or(0.2),
         trailing_stop_percent: get_f64(row, 8).unwrap_or(0.3),
-        max_active_trades: get_i64(row, 9).unwrap_or(3),
-        commission_rate: get_f64(row, 10).unwrap_or(0.05),
-        slippage_percent: get_f64(row, 11).unwrap_or(0.05),
-        funding_rate_8h: get_f64(row, 12).unwrap_or(0.01),
-        min_volume_millions: get_f64(row, 13).unwrap_or(10.0),
-        collector_interval_secs: get_i64(row, 14).unwrap_or(5),
-        pending_commands: row.get(15).ok().flatten(),
+        hard_stop_percent: row.get::<_, Option<f64>>("hard_stop_percent").ok().flatten().unwrap_or(1.0),
+        trailing_activation_percent: row.get::<_, Option<f64>>("trailing_activation_percent").ok().flatten().unwrap_or(0.1),
+        max_active_trades: row.get("max_active_trades").unwrap_or(3),
+        daily_loss_limit_usdt: row.get::<_, Option<f64>>("daily_loss_limit_usdt").ok().flatten().unwrap_or(5.0),
+        max_total_exposure_usdt: row.get::<_, Option<f64>>("max_total_exposure_usdt").ok().flatten().unwrap_or(300.0),
+        commission_rate: row.get("commission_rate").unwrap_or(0.05),
+        slippage_percent: row.get("slippage_percent").unwrap_or(0.05),
+        funding_rate_8h: row.get("funding_rate_8h").unwrap_or(0.01),
+        min_volume_millions: row.get("min_volume_millions").unwrap_or(10.0),
+        collector_interval_secs: row.get("collector_interval_secs").unwrap_or(5),
+        pending_commands: row.get("pending_commands").ok().flatten(),
         disabled_exchanges,
         leverage: row.get("leverage").unwrap_or(Some(10)).unwrap_or(10),
         margin_mode: row
@@ -133,17 +141,17 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
             .unwrap_or(Some(100.0))
             .unwrap_or(100.0),
         strategy_type: row
-            .get::<_, Option<String>>(21)
+            .get::<_, Option<String>>("strategy_type")
             .ok()
             .flatten()
             .unwrap_or_else(|| "ema".to_string()),
         hft_timeout_ms: row
-            .get::<_, Option<i64>>(22)
+            .get::<_, Option<i64>>("hft_timeout_ms")
             .ok()
             .flatten()
             .unwrap_or(10_000),
         max_holding_time_ms: row
-            .get::<_, Option<i64>>(23)
+            .get::<_, Option<i64>>("max_holding_time_ms")
             .ok()
             .flatten()
             .unwrap_or(1_800_000),

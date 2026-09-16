@@ -59,12 +59,13 @@ pub fn symbols_match(a: &str, b: &str) -> bool {
 /// Get cached taker fee rate for an exchange (as fraction, e.g. 0.0005 = 0.05%).
 pub fn get_exchange_fee(
     exchange: &str,
+    pair: &str,
     default_fee: f64,
     e_ctx: &crate::state::EngineContext,
 ) -> f64 {
     e_ctx
         .fee_rates
-        .get(exchange)
+        .get(&exchange_pair_key(exchange, pair))
         .map(|v| *v)
         .filter(|v| v.is_finite() && *v >= 0.0 && *v <= 0.1)
         .unwrap_or(default_fee)

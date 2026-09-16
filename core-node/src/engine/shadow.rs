@@ -36,12 +36,21 @@ pub fn capture(spreads: &[SpreadRow], ctx: &EngineContext, now: i64) -> Vec<Stri
         .take(20).filter_map(|s| {
             let a=ctx.l2_books.get(&format!("{}:{}",s.exchange_a,s.pair))?.clone();
             let b=ctx.l2_books.get(&format!("{}:{}",s.exchange_b,s.pair))?.clone();
+            let key_a=format!("{}:{}",s.exchange_a,s.pair);
+            let key_b=format!("{}:{}",s.exchange_b,s.pair);
+            let spec_json=|key:&str|ctx.specifications.get(key).map(|v|serde_json::json!({
+                "fetched_ms":v.fetched_ms,"quantity_step":v.quantity_step,"price_tick":v.price_tick,
+                "min_quantity":v.min_quantity,"max_quantity":v.max_quantity,"min_notional":v.min_notional
+            }));
             // Include age explicitly: stale observations are evidence, never executable quotes.
             Some(serde_json::json!({"recorded_ms":now,"build_sha":option_env!("BUILD_SHA"),"spread":s,
-                "book_a":{"updated_ms":a.updated_ms,"bids":a.bids,"asks":a.asks},
-                "book_b":{"updated_ms":b.updated_ms,"bids":b.bids,"asks":b.asks},
-                "fee_a":super::utils::get_exchange_fee(&s.exchange_a,0.001,ctx),
-                "fee_b":super::utils::get_exchange_fee(&s.exchange_b,0.001,ctx)
+                "book_a":{"updated_ms":a.updated_ms,"age_ms":now-a.updated_ms,"bids":a.bids,"asks":a.asks},
+                "book_b":{"updated_ms":b.updated_ms,"age_ms":now-b.updated_ms,"bids":b.bids,"asks":b.asks},
+                "spec_a":spec_json(&key_a),"spec_b":spec_json(&key_b),
+                "fee_a":super::utils::get_exchange_fee(&s.exchange_a,&s.pair,0.001,ctx),
+                "fee_b":super::utils::get_exchange_fee(&s.exchange_b,&s.pair,0.001,ctx),
+                "fee_a_updated_ms":ctx.fee_updated_ms.get(&key_a).map(|v|*v),
+                "fee_b_updated_ms":ctx.fee_updated_ms.get(&key_b).map(|v|*v)
             }).to_string())
         }).collect()
 }

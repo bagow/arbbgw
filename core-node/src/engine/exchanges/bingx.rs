@@ -303,7 +303,7 @@ impl ExchangeConnector for BingxConnector {
         Ok((equity, available))
     }
 
-    async fn fetch_taker_fee(&self, _http: &Client, _keys: &ExchangeKeys) -> Result<f64, String> {
+    async fn fetch_taker_fee(&self, _http: &Client, _keys: &ExchangeKeys, _pair: &str) -> Result<f64, String> {
         Ok(0.0005) // BingX standard taker fee: 0.05%
     }
 

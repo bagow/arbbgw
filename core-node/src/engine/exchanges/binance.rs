@@ -1279,13 +1279,13 @@ impl ExchangeConnector for BinanceConnector {
         Ok((total_balance, available_balance))
     }
 
-    async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
+    async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys, pair: &str) -> Result<f64, String> {
         check_ip_ban()?;
         use crate::engine::exchanges::ws_trader::send_ws_request;
         let ts = now_ms();
         let qs = format!(
-            "apiKey={}&symbol=BTCUSDT&timestamp={}",
-            keys.binance_key, ts
+            "apiKey={}&symbol={}&timestamp={}",
+            keys.binance_key, pair, ts
         );
         let sig = binance_sign(&keys.binance_secret, &qs);
         let req_id = uuid::Uuid::new_v4().to_string();
@@ -1294,7 +1294,7 @@ impl ExchangeConnector for BinanceConnector {
             "method": "v1/account.commissionRate",
             "params": {
                 "apiKey": keys.binance_key,
-                "symbol": "BTCUSDT",
+                "symbol": pair,
                 "timestamp": ts,
                 "signature": sig
             }
@@ -1320,7 +1320,7 @@ impl ExchangeConnector for BinanceConnector {
                     e
                 );
                 let fresh_ts = now_ms();
-                let rest_qs = format!("symbol=BTCUSDT&timestamp={}", fresh_ts);
+                let rest_qs = format!("symbol={}&timestamp={}", pair, fresh_ts);
                 let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
                 let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
                 let url = format!(

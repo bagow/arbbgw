@@ -128,6 +128,21 @@ pub fn spawn_exchange_maps_publisher(
                 Vec<crate::engine::exchanges::traits::PositionInfo>,
             > = HashMap::new();
             let mut fees: HashMap<String, f64> = HashMap::new();
+            let balances_ts_by_exchange: HashMap<String, i64> = e_ctx
+                .balances_updated_ms
+                .iter()
+                .map(|entry| (entry.key().clone(), *entry.value()))
+                .collect();
+            let positions_ts_by_exchange: HashMap<String, i64> = e_ctx
+                .positions_updated_ms
+                .iter()
+                .map(|entry| (entry.key().clone(), *entry.value()))
+                .collect();
+            let fees_ts_by_symbol: HashMap<String, i64> = e_ctx
+                .fee_updated_ms
+                .iter()
+                .map(|entry| (entry.key().clone(), *entry.value()))
+                .collect();
             for entry in e_ctx.balances.iter() {
                 balances.insert(entry.key().clone(), *entry.value());
             }
@@ -140,13 +155,19 @@ pub fn spawn_exchange_maps_publisher(
             for entry in e_ctx.fee_rates.iter() {
                 fees.insert(entry.key().clone(), *entry.value());
             }
+            let balances_ts = balances_ts_by_exchange.values().copied().min();
+            let positions_ts = positions_ts_by_exchange.values().copied().min();
+            let fees_ts = fees_ts_by_symbol.values().copied().min();
 
             let val = serde_json::json!({
                 "ts": now_ms,
                 "snapshot_ts": now_ms,
-                "balances_ts": now_ms,
-                "positions_ts": now_ms,
-                "fees_ts": now_ms,
+                "balances_ts": balances_ts,
+                "positions_ts": positions_ts,
+                "fees_ts": fees_ts,
+                "balances_ts_by_exchange": balances_ts_by_exchange,
+                "positions_ts_by_exchange": positions_ts_by_exchange,
+                "fees_ts_by_symbol": fees_ts_by_symbol,
                 "data": pairs_map,
                 "balances": balances,
                 "margin_balances": margin_balances,

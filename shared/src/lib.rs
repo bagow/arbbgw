@@ -135,6 +135,7 @@ pub struct SpreadPayload {
 ///   12=funding_rate_8h  13=min_volume_millions  14=collector_interval_secs
 ///   15=pending_commands  …  19=disabled_exchanges
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TradingSettings {
     pub id: String,
     pub is_active: bool,
@@ -144,7 +145,15 @@ pub struct TradingSettings {
     pub trade_volume: f64,
     pub take_profit_percent: f64,
     pub trailing_stop_percent: f64,
+    /// Immediate loss limit based on executable net PnL estimate (percentage points).
+    pub hard_stop_percent: f64,
+    /// Arm the trailing stop only after the net estimate reaches this level.
+    pub trailing_activation_percent: f64,
     pub max_active_trades: i64,
+    /// UTC-day VERIFIED loss budget. Zero disables the guard.
+    pub daily_loss_limit_usdt: f64,
+    /// Sum of one-leg notionals allowed across active trades. Zero disables the guard.
+    pub max_total_exposure_usdt: f64,
     pub commission_rate: f64,
     pub slippage_percent: f64,
     pub funding_rate_8h: f64,
@@ -173,11 +182,15 @@ impl TradingSettings {
             self.max_entry_spread,
             self.take_profit_percent,
             self.trailing_stop_percent,
+            self.hard_stop_percent,
+            self.trailing_activation_percent,
             self.commission_rate,
             self.slippage_percent,
             self.min_volume_millions,
             self.min_structural_deviation,
             self.min_depth_percent,
+            self.daily_loss_limit_usdt,
+            self.max_total_exposure_usdt,
         ];
         if nonnegative.iter().any(|v| !v.is_finite() || *v < 0.0)
             || !self.funding_rate_8h.is_finite()
@@ -185,7 +198,11 @@ impl TradingSettings {
             || self.trade_volume <= 0.0
             || self.max_entry_spread < self.min_entry_spread
             || self.max_active_trades < 1
-            || self.leverage < 1
+            || !(1..=10).contains(&self.leverage)
+            || self.max_active_trades > 10
+            || self.trade_volume > 100_000.0
+            || self.slippage_percent > 2.0
+            || self.hard_stop_percent > 20.0
             || self.max_holding_time_ms < 0
         {
             return Err("Invalid trading limits, amount, leverage or spread range".into());
@@ -208,7 +225,11 @@ impl Default for TradingSettings {
             trade_volume: 100.0,
             take_profit_percent: 0.2,
             trailing_stop_percent: 0.3,
+            hard_stop_percent: 1.0,
+            trailing_activation_percent: 0.1,
             max_active_trades: 3,
+            daily_loss_limit_usdt: 5.0,
+            max_total_exposure_usdt: 300.0,
             commission_rate: 0.05,
             slippage_percent: 0.05,
             funding_rate_8h: 0.01,

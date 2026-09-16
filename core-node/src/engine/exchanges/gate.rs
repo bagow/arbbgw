@@ -986,24 +986,21 @@ impl ExchangeConnector for GateConnector {
         Ok((total, avail))
     }
 
-    async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
-        use super::ws_gate::send_gate_ws_request;
-        let _ =
-            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "request_id": req_id,
-            "channel": "futures.fee_rate",
-            "event": "api",
-            "payload": []
-        });
-        match send_gate_ws_request(ws_req).await {
-            Ok(resp) => resp["data"]["result"]["taker_fee"]
-                .as_str()
-                .and_then(|s| s.parse::<f64>().ok())
-                .ok_or_else(|| "Failed to parse Gate fee from WS".to_string()),
-            Err(_) => Ok(0.0005), // Default taker fee if WS fails
-        }
+    async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys, pair: &str) -> Result<f64, String> {
+        let contract = format!("{}_USDT", pair.trim_end_matches("USDT").replace('_', ""));
+        let path = format!("/api/v4/futures/usdt/fee?contract={contract}");
+        let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, "");
+        let value: Value = http.get(format!("https://api.gateio.ws{path}"))
+            .headers(headers).timeout(Duration::from_secs(5)).send().await
+            .map_err(|e| format!("Gate fee HTTP error: {e}"))?.error_for_status()
+            .map_err(|e| format!("Gate fee status error: {e}"))?.json().await
+            .map_err(|e| format!("Gate fee JSON error: {e}"))?;
+        let item = value.get(&contract).unwrap_or(&value);
+        let fee = item["taker_fee"].as_str().and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| item["taker_fee"].as_f64())
+            .ok_or_else(|| format!("Missing Gate taker fee for {contract}"))?;
+        if !(0.0..=0.01).contains(&fee) { return Err("Gate returned an invalid taker fee".into()); }
+        Ok(fee)
     }
 
     async fn ensure_leverage(
@@ -1237,24 +1234,20 @@ impl ExchangeConnector for GateConnector {
         Err(format!("Gate cancel_order failed: {}", err_msg))
     }
 
-    async fn fetch_maker_fee(&self, _http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
-        use super::ws_gate::send_gate_ws_request;
-        let _ =
-            super::ws_gate::get_or_init_gate_ws(keys.gate_key.clone(), keys.gate_secret.clone());
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "request_id": req_id,
-            "channel": "futures.fee_rate",
-            "event": "api",
-            "payload": []
-        });
-        match send_gate_ws_request(ws_req).await {
-            Ok(resp) => resp["data"]["result"]["maker_fee"]
-                .as_str()
-                .and_then(|s| s.parse::<f64>().ok())
-                .ok_or_else(|| "Failed to parse Gate maker_fee from WS".to_string()),
-            Err(_) => Ok(0.00015), // Default maker fee if WS fails
-        }
+    async fn fetch_maker_fee(&self, http: &Client, keys: &ExchangeKeys, pair: &str) -> Result<f64, String> {
+        let contract = format!("{}_USDT", pair.trim_end_matches("USDT").replace('_', ""));
+        let path = format!("/api/v4/futures/usdt/fee?contract={contract}");
+        let headers = gate_sign(&keys.gate_key, &keys.gate_secret, "GET", &path, "");
+        let value: Value = http.get(format!("https://api.gateio.ws{path}"))
+            .headers(headers).timeout(Duration::from_secs(5)).send().await
+            .map_err(|e| format!("Gate maker fee HTTP error: {e}"))?.error_for_status()
+            .map_err(|e| format!("Gate maker fee status error: {e}"))?.json().await
+            .map_err(|e| format!("Gate maker fee JSON error: {e}"))?;
+        let item = value.get(&contract).unwrap_or(&value);
+        item["maker_fee"].as_str().and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| item["maker_fee"].as_f64())
+            .filter(|fee| fee.is_finite() && (-0.01..=0.01).contains(fee))
+            .ok_or_else(|| format!("Missing Gate maker fee for {contract}"))
     }
 
     async fn audit_trade(

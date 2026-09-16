@@ -56,7 +56,10 @@ pub struct EngineContext {
     pub launch_times: Arc<DashMap<String, i64>>,
     pub tick_sizes: Arc<DashMap<String, f64>>,
     pub balances: Arc<DashMap<String, f64>>,
+    pub balances_updated_ms: Arc<DashMap<String, i64>>,
     pub fee_rates: Arc<DashMap<String, f64>>,
+    /// Keyed by exchange:pair; fees without a fresh timestamp are never authoritative.
+    pub fee_updated_ms: Arc<DashMap<String, i64>>,
     #[allow(dead_code)]
     pub leverage_set: Arc<DashMap<String, bool>>,
     pub exchange_cooldown: Arc<DashMap<String, i64>>,
@@ -68,6 +71,7 @@ pub struct EngineContext {
     pub balance_low: Arc<DashMap<String, bool>>,
     pub margin_balances: Arc<DashMap<String, f64>>,
     pub positions: Arc<DashMap<String, Vec<crate::engine::exchanges::traits::PositionInfo>>>,
+    pub positions_updated_ms: Arc<DashMap<String, i64>>,
     pub managed_positions: Arc<DashMap<String, PositionSnapshot>>,
     /// Guard against parallel close attempts on the same trade_id.
     /// Set to true when a close is in-flight; cleared when the spawn finishes.
@@ -123,7 +127,9 @@ impl Default for EngineContext {
             launch_times: Arc::new(DashMap::new()),
             tick_sizes: Arc::new(DashMap::new()),
             balances: Arc::new(DashMap::new()),
+            balances_updated_ms: Arc::new(DashMap::new()),
             fee_rates: Arc::new(DashMap::new()),
+            fee_updated_ms: Arc::new(DashMap::new()),
             leverage_set: Arc::new(DashMap::new()),
             exchange_cooldown: Arc::new(DashMap::new()),
             pair_cooldown: Arc::new(DashMap::new()),
@@ -132,6 +138,7 @@ impl Default for EngineContext {
             balance_low: Arc::new(DashMap::new()),
             margin_balances: Arc::new(DashMap::new()),
             positions: Arc::new(DashMap::new()),
+            positions_updated_ms: Arc::new(DashMap::new()),
             managed_positions: Arc::new(DashMap::new()),
             closing_in_flight: Arc::new(DashMap::new()),
             owned_l2_wanted: Arc::new(tokio::sync::RwLock::new(Vec::new())),

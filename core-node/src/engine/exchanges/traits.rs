@@ -171,8 +171,8 @@ pub trait ExchangeConnector: Send + Sync {
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String>;
 
-    /// Fetches taker fee rate. (e.g. 0.0005)
-    async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String>;
+    /// Fetches the account's actual taker fee for one contract. (e.g. 0.0005)
+    async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys, pair: &str) -> Result<f64, String>;
 
     /// Ensures leverage and margin mode are correctly set.
     async fn ensure_leverage(
@@ -226,8 +226,8 @@ pub trait ExchangeConnector: Send + Sync {
 
     /// Fetch maker fee rate (e.g. 0.0002 = 0.02%).
     /// Default: falls back to taker fee.
-    async fn fetch_maker_fee(&self, http: &Client, keys: &ExchangeKeys) -> Result<f64, String> {
-        self.fetch_taker_fee(http, keys).await
+    async fn fetch_maker_fee(&self, http: &Client, keys: &ExchangeKeys, pair: &str) -> Result<f64, String> {
+        self.fetch_taker_fee(http, keys, pair).await
     }
 
     /// Asynchronously fetch verified exchange history (fills, fees, realized PnL, funding) for a symbol.

@@ -883,6 +883,10 @@ pub async fn handle_patch_profile(
                 | "trade_volume"
                 | "take_profit_percent"
                 | "trailing_stop_percent"
+                | "hard_stop_percent"
+                | "trailing_activation_percent"
+                | "daily_loss_limit_usdt"
+                | "max_total_exposure_usdt"
                 | "commission_rate"
                 | "slippage_percent"
                 | "funding_rate_8h"
@@ -2175,6 +2179,10 @@ fn validate_profile_input(payload: &Value) -> Result<(), String> {
                     | "max_entry_spread"
                     | "take_profit_percent"
                     | "trailing_stop_percent"
+                    | "hard_stop_percent"
+                    | "trailing_activation_percent"
+                    | "daily_loss_limit_usdt"
+                    | "max_total_exposure_usdt"
                     | "commission_rate"
                     | "slippage_percent"
                     | "min_volume_millions"
@@ -2204,6 +2212,14 @@ fn validate_profile_input(payload: &Value) -> Result<(), String> {
         if a > b {
             return Err("Minimum spread exceeds maximum".into());
         }
+    }
+    if payload["leverage"].as_i64().is_some_and(|v| !(1..=10).contains(&v))
+        || payload["max_active_trades"].as_i64().is_some_and(|v| !(1..=10).contains(&v))
+        || payload["trade_volume"].as_f64().is_some_and(|v| v > 100_000.0)
+        || payload["slippage_percent"].as_f64().is_some_and(|v| v > 2.0)
+        || payload["hard_stop_percent"].as_f64().is_some_and(|v| v > 20.0)
+    {
+        return Err("Profile exceeds managed risk limits".into());
     }
     Ok(())
 }

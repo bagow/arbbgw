@@ -77,9 +77,9 @@ pub fn has_sufficient_margin(
             let now = now_ms();
             if now - LAST_NONE_LOG.load(Ordering::Relaxed) > 15_000 {
                 LAST_NONE_LOG.store(now, Ordering::Relaxed);
-                tracing::warn!("[margin] {} NOT in margin_balances — allowing trade (exchange will reject if no margin)", exchange);
+                tracing::warn!("[margin] {} NOT in margin_balances — blocking entry until an authoritative balance arrives", exchange);
             }
-            true
+            false
         }
     }
 }

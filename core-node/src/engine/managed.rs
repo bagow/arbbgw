@@ -1,6 +1,6 @@
 //! Order ownership, bounded entries and independent position supervision.
 use super::{
-    exchanges::get_connector,
+    exchanges::{get_connector, traits::ExchangeConnector},
     journal::{aggregate, Journal, JournalOrder, ManagedTrade, Plan},
     orders::{OrderObservation, OrderRequest, OrderState},
     real::ExchangeKeys,
@@ -16,6 +16,7 @@ use std::sync::{
 
 static ENTRY_BUSY: AtomicBool = AtomicBool::new(false);
 static LAST_PREFLIGHT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+const FEE_TTL_MS: i64 = 3_600_000;
 struct BusyGuard;
 impl Drop for BusyGuard {
     fn drop(&mut self) {
@@ -97,6 +98,32 @@ fn executable_quote(
     None
 }
 
+async fn actual_taker_fee(
+    connector: &dyn ExchangeConnector,
+    exchange: &str,
+    pair: &str,
+    http: &Client,
+    keys: &ExchangeKeys,
+    ctx: &EngineContext,
+) -> Result<f64, String> {
+    let cache_key = super::utils::exchange_pair_key(exchange, pair);
+    let now = now_ms();
+    let fresh = ctx.fee_updated_ms.get(&cache_key)
+        .map(|stamp| now >= *stamp && now - *stamp <= FEE_TTL_MS).unwrap_or(false);
+    if fresh {
+        if let Some(value) = ctx.fee_rates.get(&cache_key).map(|v| *v) {
+            if value.is_finite() && (0.0..=0.01).contains(&value) { return Ok(value); }
+        }
+    }
+    let value = connector.fetch_taker_fee(http, keys, pair).await?;
+    if !value.is_finite() || !(0.0..=0.01).contains(&value) {
+        return Err(format!("Invalid {exchange}:{pair} taker fee"));
+    }
+    ctx.fee_rates.insert(cache_key.clone(), value);
+    ctx.fee_updated_ms.insert(cache_key, now_ms());
+    Ok(value)
+}
+
 fn request(t: &ManagedTrade, leg: &str, qty: f64, price: f64, reduce: bool) -> JournalOrder {
     let s = &t.plan.signal;
     let a = leg == "A";
@@ -176,13 +203,16 @@ async fn submit_using(
 ) -> anyhow::Result<OrderObservation> {
     o.request.validate().map_err(anyhow::Error::msg)?;
     j.prepare(o).await?;
+    j.execution_event(o.trade_id, &o.request.client_id, "SEND_STARTED", None).await?;
     let mut known = o.observation.clone();
     match transport.submit(&o.request).await {
         Ok(v) => {
             j.observe(o, v.clone()).await?;
+            j.execution_event(o.trade_id, &o.request.client_id, "SUBMIT_RETURNED", Some(format!("state={:?};filled={}", v.state, v.filled_quantity))).await?;
             known = v;
         }
         Err(e) => {
+            j.execution_event(o.trade_id, &o.request.client_id, "SUBMIT_UNKNOWN", Some(e.clone())).await?;
             tracing::warn!(
                 "[managed] submit outcome unknown client_id={} exchange={} detail={}",
                 o.request.client_id,
@@ -199,6 +229,7 @@ async fn submit_using(
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         if let Ok(v) = transport.query(&o.request, known.order_id.as_deref()).await {
             j.observe(o, v.clone()).await?;
+            j.execution_event(o.trade_id, &o.request.client_id, "QUERY_RETURNED", Some(format!("state={:?};filled={}", v.state, v.filled_quantity))).await?;
             known = v;
         }
     }
@@ -245,7 +276,7 @@ async fn enter(
         return Ok(());
     }
     LAST_PREFLIGHT.store(now, Ordering::Release);
-    for s in signals.into_iter().take(3) {
+    for mut s in signals.into_iter().take(3) {
         if ctx.is_killed.load(Ordering::Acquire) {
             break;
         }
@@ -257,6 +288,13 @@ async fn enter(
             None => continue,
         };
         p.validate().map_err(anyhow::Error::msg)?;
+        if p.daily_loss_limit_usdt > 0.0 {
+            let daily = j.daily_verified_pnl(&p.id).await?;
+            if daily <= -p.daily_loss_limit_usdt {
+                kill(ctx,j,format!("Daily VERIFIED loss limit reached for {}: {:.4} <= -{:.4} USDT",p.id,daily,p.daily_loss_limit_usdt)).await;
+                return Ok(());
+            }
+        }
         if ts.entry_order_type != "ioc" || p.strategy_type != "ema" {
             continue;
         }
@@ -312,6 +350,18 @@ async fn enter(
         if !matches!(idle_a, Ok(true)) || !matches!(idle_b, Ok(true)) {
             continue;
         }
+        let (fee_a, fee_b) = tokio::join!(
+            actual_taker_fee(ca.as_ref(), &s.exchange_a, &s.pair, http, keys, ctx),
+            actual_taker_fee(cb.as_ref(), &s.exchange_b, &s.pair, http, keys, ctx)
+        );
+        let (fee_a, fee_b) = match (fee_a, fee_b) {
+            (Ok(a), Ok(b)) => (a, b),
+            (a, b) => {
+                tracing::warn!("[managed] fee preflight failed for {} {}-{}: {:?} / {:?}",s.pair,s.exchange_a,s.exchange_b,a.err(),b.err());
+                continue;
+            }
+        };
+        s.break_even_pct = 2.0 * (fee_a + fee_b) * 100.0 + 2.0 * p.slippage_percent;
         let (ba, bb) = tokio::join!(ca.fetch_balances(http, keys), cb.fetch_balances(http, keys));
         let (available_a, available_b) = match (ba, bb) {
             (Ok((_, a)), Ok((_, b))) if a.is_finite() && b.is_finite() => (a, b),
@@ -635,7 +685,8 @@ async fn manage(
     );
     let (pxa, pxb) = (quote_a.map(|q| q.vwap), quote_b.map(|q| q.vwap));
     let mut profit = false;
-    let mut stop = false;
+    let mut hard_stop = false;
+    let mut trailing_stop = false;
     if let (Some(pa), Some(pb)) = (pxa, pxb) {
         let pnl = super::pnl::calculate_gross_pnl(
             s.is_a_higher,
@@ -648,13 +699,13 @@ async fn manage(
         )
         .gross_pnl;
         let reserve =
-            a.remaining() * pa * super::utils::get_exchange_fee(&s.exchange_a, 0.001, ctx)
-                + b.remaining() * pb * super::utils::get_exchange_fee(&s.exchange_b, 0.001, ctx);
+            a.remaining() * pa * super::utils::get_exchange_fee(&s.exchange_a, &s.pair, 0.001, ctx)
+                + b.remaining() * pb * super::utils::get_exchange_fee(&s.exchange_b, &s.pair, 0.001, ctx);
         let entry_fees: f64 = orders
             .iter()
             .map(|o| {
                 o.observation
-                    .fee_with_reserve(super::utils::get_exchange_fee(&o.exchange, 0.001, ctx))
+                    .fee_with_reserve(super::utils::get_exchange_fee(&o.exchange, &s.pair, 0.001, ctx))
             })
             .sum();
         let percent = (pnl - entry_fees - reserve) / a.entry_value.max(1e-12) * 100.0;
@@ -675,18 +726,21 @@ async fn manage(
             .gross_pnl;
             let worst_reserve = a.remaining()
                 * qa.worst_price
-                * super::utils::get_exchange_fee(&s.exchange_a, 0.001, ctx)
+                * super::utils::get_exchange_fee(&s.exchange_a, &s.pair, 0.001, ctx)
                 + b.remaining()
                     * qb.worst_price
-                    * super::utils::get_exchange_fee(&s.exchange_b, 0.001, ctx);
+                    * super::utils::get_exchange_fee(&s.exchange_b, &s.pair, 0.001, ctx);
             let worst_percent =
                 (worst_pnl - entry_fees - worst_reserve) / a.entry_value.max(1e-12) * 100.0;
             profit = worst_percent >= t.plan.settings.take_profit_percent.max(0.05);
         }
-        stop = t.plan.settings.trailing_stop_percent > 0.0
+        hard_stop = t.plan.settings.hard_stop_percent > 0.0
+            && percent <= -t.plan.settings.hard_stop_percent;
+        trailing_stop = t.plan.settings.trailing_stop_percent > 0.0
+            && peak >= t.plan.settings.trailing_activation_percent
             && percent <= peak - t.plan.settings.trailing_stop_percent;
     }
-    if !closing && !timed && !funding_due && !profit && !stop {
+    if !closing && !timed && !funding_due && !profit && !hard_stop && !trailing_stop {
         return Ok(());
     }
     let reason = if manual {
@@ -700,18 +754,25 @@ async fn manage(
         "FUNDING_BOUNDARY"
     } else if timed {
         "TIME_STOP"
-    } else if stop {
-        "STOP"
+    } else if hard_stop {
+        "HARD_STOP"
+    } else if trailing_stop {
+        "TRAILING_STOP"
     } else {
         "TP"
     };
     j.state(t.id, "CLOSING", reason).await?;
     // Exit starts only once. Partial closes remain journaled and only residuals are submitted.
-    let emergency = closing || timed || funding_due || stop;
-    for (leg, qty, px) in [
+    let emergency = closing || timed || funding_due || hard_stop || trailing_stop;
+    let mut legs = vec![
         ("A", a.remaining(), quote_a.map(|q| q.worst_price)),
         ("B", b.remaining(), quote_b.map(|q| q.worst_price)),
-    ] {
+    ];
+    legs.sort_by_key(|(leg, _, _)| {
+        let exchange = if *leg == "A" { &s.exchange_a } else { &s.exchange_b };
+        std::cmp::Reverse(super::utils::liquidity_rank(exchange))
+    });
+    for (leg, qty, px) in legs {
         let a_leg = leg == "A";
         let observed = if now_ms() - t.created_ms >= 10_000 {
             super::account_monitor::observed_remaining(
