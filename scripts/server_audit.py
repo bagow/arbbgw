@@ -134,7 +134,10 @@ def main():
     for path in sorted(Path("/tmp").glob("arb-core-*")):
         entry = {"name": path.name, "mtime": path.stat().st_mtime}
         if path.is_dir():
-            entry["files"] = sorted(child.name for child in path.iterdir())[:20]
+            entry["files"] = [
+                {"name": child.name, "size": child.stat().st_size, "mtime": child.stat().st_mtime}
+                for child in sorted(path.iterdir())[:20]
+            ]
         else:
             entry["size"] = path.stat().st_size
         result["pending_core_artifacts"].append(entry)
