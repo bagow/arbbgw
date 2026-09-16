@@ -16,6 +16,7 @@ use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSigna
 // the 750 ms execution freshness budget while cutting message volume by roughly 4x.
 const DEPTH_STREAMS_PER_CONNECTION: usize = 20;
 const DEPTH_UPDATE_INTERVAL_MS: u64 = 500;
+const DEPTH_SUBSCRIPTION_REFRESH_SECS: u64 = 120;
 
 pub async fn run(
     prices: PriceMap,
@@ -436,7 +437,6 @@ async fn run_l2_depth_stream(
         // seconds-old snapshots. Subscribe only to the cross-exchange candidates selected
         // by the L1 discovery feed plus a small liquid baseline. Owned trades are always
         // included in l2_wanted.
-        let using_fallback = wanted_syms.is_empty();
         let mut universe = wanted_syms;
         universe.extend(FALLBACK.iter().map(|s| s.to_string()));
         let mut symbols: Vec<String> = universe.into_iter().collect();
@@ -652,10 +652,12 @@ async fn run_l2_depth_stream(
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // Populate candidates promptly after the first all-book-ticker event, then keep
-        // transports stable long enough to avoid self-inflicted freshness gaps.
+        // Keep the fallback transports stable too. Restarting them every ten seconds
+        // created a circular readiness failure: books were removed before they could
+        // produce stable spreads, so l2_wanted stayed empty and fallback mode restarted
+        // forever. The next refresh still picks up newly discovered candidates.
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(if using_fallback { 10 } else { 120 })) => {},
+            _ = tokio::time::sleep(Duration::from_secs(DEPTH_SUBSCRIPTION_REFRESH_SECS)) => {},
             _ = handles.join_next() => {},
         }
         handles.abort_all();
