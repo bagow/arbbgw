@@ -46,8 +46,10 @@ def inspect_database(path, kind):
             )]
         elif kind == "profiles":
             result["profiles"] = [dict(r) for r in db.execute(
-                "SELECT id,is_active,trade_volume,leverage,min_entry_spread,take_profit_percent,"
-                "trailing_stop_percent,max_active_trades,max_holding_time_ms,disabled_exchanges "
+                "SELECT id,is_active,trade_volume,leverage,min_entry_spread,max_entry_spread,"
+                "take_profit_percent,trailing_stop_percent,max_active_trades,max_holding_time_ms,"
+                "min_volume_millions,min_structural_deviation,min_depth_percent,slippage_percent,"
+                "daily_loss_limit_usdt,max_total_exposure_usdt,disabled_exchanges "
                 "FROM trading_profiles"
             )]
             kill = db.execute("SELECT value FROM server_cache WHERE key='kill_switch_active'").fetchone()
@@ -85,6 +87,16 @@ def main():
         ("binance_banned", "[binance] IP still banned"),
         ("engine_panics", "ENGINE LOOP PANIC"),
         ("database_locked", "database is locked"),
+        ("scanner_signals", "[scanner] SIGNAL"),
+        ("scanner_rejects", "[scanner] REJECT"),
+        ("scanner_depth_shallow", "L1 depth shallow"),
+        ("scanner_lot_impossible", "physically impossible to balance lot sizes"),
+        ("scanner_volume_too_high", "actual_vol exceeds max_v"),
+        ("scanner_below_notional", "below min_notional"),
+        ("scanner_structural_deviation", "ema deviation"),
+        ("scanner_health_rejected", "health check failed"),
+        ("managed_fee_preflight_failed", "[managed] fee preflight failed"),
+        ("managed_entries_halted", "[managed] NEW ENTRIES HALTED"),
     )}
     result["recent_log_count"] = len(lines)
     # Only transport errors from the unauthenticated public market-data stream;
