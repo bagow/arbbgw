@@ -432,12 +432,11 @@ async fn run_l2_depth_stream(
 
         // Depth at 100 ms for the full Binance universe overloads the host and queues
         // seconds-old snapshots. Subscribe only to the cross-exchange candidates selected
-        // by the L1 discovery feed. Owned trades are always included in l2_wanted.
+        // by the L1 discovery feed plus a small liquid baseline. Owned trades are always
+        // included in l2_wanted.
         let using_fallback = wanted_syms.is_empty();
         let mut universe = wanted_syms;
-        if universe.is_empty() {
-            universe.extend(FALLBACK.iter().map(|s| s.to_string()));
-        }
+        universe.extend(FALLBACK.iter().map(|s| s.to_string()));
         let mut symbols: Vec<String> = universe.into_iter().collect();
         symbols.sort_unstable();
 
