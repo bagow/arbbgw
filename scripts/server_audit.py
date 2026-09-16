@@ -9,6 +9,7 @@ import sys
 import time
 import sqlite3
 import subprocess
+import urllib.error
 import urllib.request
 
 from audit_performance import summarize
@@ -55,7 +56,9 @@ def inspect_database(path, kind):
             if cached:
                 value = json.loads(cached[0])
                 result["cached_accounts"] = {k: value.get(k) for k in (
-                    "ts", "balances_ts", "positions_ts", "balances", "margin_balances", "positions"
+                    "ts", "balances_ts", "positions_ts", "balances_ts_by_exchange",
+                    "positions_ts_by_exchange", "fees_ts_by_symbol", "balances",
+                    "margin_balances", "positions"
                 )}
         elif kind == "shadow":
             result["scope"] = "Latest 10000 recorded snapshots, not complete history"
@@ -103,7 +106,12 @@ def main():
                 "mtime": path.stat().st_mtime,
             }
     try:
-        with urllib.request.urlopen("http://127.0.0.1:3003/health", timeout=5) as response:
+        try:
+            response = urllib.request.urlopen("http://127.0.0.1:3003/health", timeout=5)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        with response:
+            result["health_http_status"] = response.status
             result["health"] = json.load(response)
     except Exception as exc:
         result["health_error"] = type(exc).__name__

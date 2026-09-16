@@ -1,5 +1,6 @@
 {
   "enabled": true,
+  "attempt": 2,
   "expected_build_sha": "0acd050286754d420647357708f871ed8ae944f7",
   "notional_usdt": 6.0,
   "monitor_seconds": 1800,

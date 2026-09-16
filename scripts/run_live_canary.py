@@ -99,13 +99,26 @@ def active_canary_trades(start_id):
         ]
 
 
-def preflight(config):
-    current_health = health()
+def wait_for_readiness(config, report):
     expected = config["expected_build_sha"]
-    if current_health.get("build_sha") != expected:
-        raise RuntimeError(f"build mismatch: {current_health.get('build_sha')} != {expected}")
-    if not current_health.get("trading_ready"):
-        raise RuntimeError("core health is not trading_ready")
+    deadline = time.monotonic() + 300
+    consecutive = 0
+    while time.monotonic() < deadline:
+        current = health()
+        report["preflight_health"] = current
+        if current.get("build_sha") != expected:
+            raise RuntimeError(f"build mismatch: {current.get('build_sha')} != {expected}")
+        consecutive = consecutive + 1 if current.get("trading_ready") else 0
+        if consecutive >= 5:
+            report["readiness_consecutive_samples"] = consecutive
+            return
+        time.sleep(1)
+    raise RuntimeError(
+        "core was not trading_ready for five consecutive samples within 300 seconds"
+    )
+
+
+def preflight(config):
     with trade_connection() as db:
         active = db.execute(
             "SELECT COUNT(*) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED')"
@@ -161,7 +174,7 @@ def preflight(config):
                 raise RuntimeError(f"insufficient {venue} margin: {available:.4f} < {required_margin:.4f}")
         if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise RuntimeError("profile database quick_check failed")
-    return start_id, current_health, accounts
+    return start_id, accounts
 
 
 def configure_and_enable(config):
@@ -241,8 +254,8 @@ def main():
     start_id = None
     report = {"ok": False, "started_ms": int(time.time() * 1000), "config": config}
     try:
-        start_id, before_health, before_accounts = preflight(config)
-        report["preflight_health"] = before_health
+        wait_for_readiness(config, report)
+        start_id, before_accounts = preflight(config)
         report["balances_before"] = before_accounts.get("balances")
         report["backup"] = backup_databases(str(report["started_ms"]))
         configure_and_enable(config)
