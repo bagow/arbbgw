@@ -99,6 +99,14 @@ def main():
         ("managed_entries_halted", "[managed] NEW ENTRIES HALTED"),
     )}
     result["recent_log_count"] = len(lines)
+    result["binance_l2_quality_tail"] = [
+        line.split("[binance_l2_quality] ", 1)[1][:400]
+        for line in lines if "[binance_l2_quality] " in line
+    ][-20:]
+    result["spread_diagnostics_tail"] = [
+        line.split("[spreads] ", 1)[1][:600]
+        for line in lines if "[spreads] " in line
+    ][-20:]
     # Only transport errors from the unauthenticated public market-data stream;
     # never export private order/account logs or service environments.
     prefix = "[binance_l2_chunk] Receive failed: "
