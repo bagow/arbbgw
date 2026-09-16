@@ -5,7 +5,8 @@
 /// Conservative expected execution cost used for profitability filtering.
 ///
 /// `TradingSettings::slippage_percent` is an IOC price-limit ceiling, not an
-/// estimate that every fill is expected to consume. Using that ceiling as a
+/// estimate that every fill is expected to consume. The two controls must stay
+/// independent: using that ceiling as a
 /// guaranteed cost can make the configured entry window mathematically
 /// unreachable (for example a 2% ceiling with a 2.5% maximum spread).
 pub const EXPECTED_IOC_SLIPPAGE_PER_LEG_PCT: f64 = 0.02;
