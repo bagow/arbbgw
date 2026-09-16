@@ -1,0 +1,31 @@
+{
+  "check": {
+    "result": "success",
+    "outputs": {}
+  },
+  "changes": {
+    "result": "success",
+    "outputs": {
+      "cloudflared": "false",
+      "cloudflare": "false",
+      "vps_api": "false",
+      "core": "true"
+    }
+  },
+  "deploy-vps-api": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "deploy-core": {
+    "result": "success",
+    "outputs": {}
+  },
+  "deploy-cloudflared": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "deploy-cloudflare": {
+    "result": "skipped",
+    "outputs": {}
+  }
+}
