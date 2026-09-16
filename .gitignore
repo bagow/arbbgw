@@ -35,3 +35,5 @@ API KEYS.txt
 # Local secrets and CI diagnostics
 cex-keys.txt
 ci-*.log
+__pycache__/
+*.py[cod]

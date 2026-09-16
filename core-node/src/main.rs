@@ -483,22 +483,59 @@ async fn handle_health(
     let process_healthy = active.is_ok() && age >= 0 && age < 5000;
     let now = engine::utils::now_ms();
     let mut market_ready_venues = 0usize;
-    let venues: Vec<_> = ["binance","gate","kucoin"].iter().map(|ex| {
-        let prefix = format!("{ex}:");
-        let books = ctx.l2_books.iter().filter(|b|b.key().starts_with(&prefix)).count();
-        let fresh = ctx.l2_books.iter().filter(|b|b.key().starts_with(&prefix) && (0..=750).contains(&(now-b.updated_ms))).count();
-        let specs = ctx.specifications.iter().filter(|s|s.key().starts_with(&prefix) && (0..=600_000).contains(&(now-s.fetched_ms))).count();
-        if fresh > 0 && specs > 0 { market_ready_venues += 1; }
-        let balance_age_ms = ctx.balances_updated_ms.get(*ex).map(|stamp| now-*stamp);
-        let positions_age_ms = ctx.positions_updated_ms.get(*ex).map(|stamp| now-*stamp);
-        serde_json::json!({"exchange":ex,"books":books,"fresh_books":fresh,"current_specs":specs,"balance_age_ms":balance_age_ms,"positions_age_ms":positions_age_ms})
-    }).collect();
+    let venues: Vec<_> = ["binance", "gate", "kucoin"]
+        .iter()
+        .map(|ex| {
+            let prefix = format!("{ex}:");
+            let books = ctx
+                .l2_books
+                .iter()
+                .filter(|b| b.key().starts_with(&prefix))
+                .count();
+            let fresh = ctx
+                .l2_books
+                .iter()
+                .filter(|b| {
+                    b.key().starts_with(&prefix)
+                        && (0..=750).contains(&(now - b.updated_ms))
+                })
+                .count();
+            let specs = ctx
+                .specifications
+                .iter()
+                .filter(|s| {
+                    s.key().starts_with(&prefix)
+                        && (0..=600_000).contains(&(now - s.fetched_ms))
+                })
+                .count();
+            if fresh > 0 && specs > 0 {
+                market_ready_venues += 1;
+            }
+            let balance_age_ms = ctx.balances_updated_ms.get(*ex).map(|stamp| now - *stamp);
+            let positions_age_ms = ctx
+                .positions_updated_ms
+                .get(*ex)
+                .map(|stamp| now - *stamp);
+            serde_json::json!({"exchange":ex,"books":books,"fresh_books":fresh,"current_specs":specs,"balance_age_ms":balance_age_ms,"positions_age_ms":positions_age_ms})
+        })
+        .collect();
     let market_ready = market_ready_venues >= 2;
-    let private_ready_venues = ["binance", "gate", "kucoin"].iter().filter(|ex| {
-        let balance_fresh = ctx.balances_updated_ms.get(*ex).map(|stamp| (0..=60_000).contains(&(now-*stamp))).unwrap_or(false);
-        let positions_fresh = ctx.positions_updated_ms.get(*ex).map(|stamp| (0..=60_000).contains(&(now-*stamp))).unwrap_or(false);
-        balance_fresh && positions_fresh
-    }).count();
+    let private_ready_venues = ["binance", "gate", "kucoin"]
+        .iter()
+        .filter(|ex| {
+            let balance_fresh = ctx
+                .balances_updated_ms
+                .get(**ex)
+                .map(|stamp| (0..=60_000).contains(&(now - *stamp)))
+                .unwrap_or(false);
+            let positions_fresh = ctx
+                .positions_updated_ms
+                .get(**ex)
+                .map(|stamp| (0..=60_000).contains(&(now - *stamp)))
+                .unwrap_or(false);
+            balance_fresh && positions_fresh
+        })
+        .count();
     let private_ready = private_ready_venues >= 2;
     let healthy = process_healthy && market_ready;
     let trading_ready = healthy && private_ready && !ctx.is_killed.load(std::sync::atomic::Ordering::Acquire);

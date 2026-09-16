@@ -1,0 +1,67 @@
+name: Guarded live six-dollar canary
+
+on:
+  push:
+    branches: ["fix/audit-risk-20260909"]
+    paths: [".github/canary-request.json"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: guarded-live-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run guarded one-trade canary over SSH
+        env:
+          ARB_CANARY_HOST: ${{ secrets.VPS_SSH_HOST }}
+          ARB_CANARY_USER: ${{ secrets.VPS_SSH_USER }}
+          ARB_CANARY_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'arb-canary-ssh'
+          directory.mkdir(mode=0o700)
+          key = directory / 'key'
+          fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, 'w') as stream:
+              stream.write(os.environ['ARB_CANARY_KEY'] + '\n')
+          destination = os.environ['ARB_CANARY_USER'] + '@' + os.environ['ARB_CANARY_HOST']
+          options = ['-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15',
+              '-o','ServerAliveInterval=10','-o','ServerAliveCountMax=5',
+              '-o','StrictHostKeyChecking=accept-new','-o','UserKnownHostsFile='+str(directory/'known_hosts')]
+          source = pathlib.Path('scripts/run_live_canary.py').read_text()
+          config = json.loads(pathlib.Path('.github/canary-request.json').read_text())
+          encoded = base64.b64encode(source.encode()).decode()
+          remote = "python3 -c 'import base64;exec(base64.b64decode(\"" + encoded + "\"))'"
+          try:
+              proc = subprocess.run(['ssh',*options,destination,remote],input=json.dumps(config),
+                                    capture_output=True,text=True,timeout=3200)
+              pathlib.Path('canary-result.json').write_text(proc.stdout or json.dumps({
+                  'ok':False,'error':'remote canary returned no report','stderr_type':bool(proc.stderr)}))
+              if proc.returncode:
+                  raise SystemExit('guarded canary failed; inspect canary-result artifact')
+          finally:
+              key.unlink(missing_ok=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('canary-result.json') != ''
+        with:
+          name: live-canary-${{ github.sha }}
+          path: canary-result.json
+      - name: Publish sanitized result in a service branch
+        if: always() && hashFiles('canary-result.json') != ''
+        run: |
+          set -eu
+          export GIT_INDEX_FILE="$RUNNER_TEMP/arb-canary-report-index"
+          git read-tree --empty
+          git add -f canary-result.json
+          report_tree=$(git write-tree)
+          report_commit=$(git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit-tree "$report_tree" -m "Live canary report for $GITHUB_SHA")
+          git push origin "$report_commit:refs/heads/canary-results/$GITHUB_SHA-$GITHUB_RUN_ID"
