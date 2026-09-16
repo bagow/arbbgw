@@ -17,6 +17,66 @@ pub fn ioc_break_even_pct(fee_a: f64, fee_b: f64) -> f64 {
     2.0 * (fee_a + fee_b) * 100.0 + 4.0 * EXPECTED_IOC_SLIPPAGE_PER_LEG_PCT
 }
 
+/// Return the structural reserve selected by the profile.
+///
+/// A zero minimum structural deviation is the documented off switch. In that
+/// mode an unavailable historical warmup must not silently disable trading.
+pub fn configured_structural_reserve(
+    min_structural_deviation: f64,
+    structural_verified: bool,
+    observed_structural_spread: f64,
+) -> Option<f64> {
+    if !min_structural_deviation.is_finite()
+        || !observed_structural_spread.is_finite()
+        || min_structural_deviation < 0.0
+    {
+        return None;
+    }
+    if min_structural_deviation == 0.0 {
+        return Some(0.0);
+    }
+    structural_verified.then_some(observed_structural_spread.max(0.0))
+}
+
+/// Remaining two-leg price budget after preserving the configured entry rules.
+///
+/// The entry spread window and structural deviation are independent profile
+/// controls. Take profit is deliberately absent: it is an exit trigger, not an
+/// extra entry threshold.
+pub fn entry_execution_budget(
+    gross_spread: f64,
+    min_entry_spread: f64,
+    max_entry_spread: f64,
+    structural_reserve: f64,
+    min_structural_deviation: f64,
+    break_even_pct: f64,
+) -> Option<f64> {
+    if ![
+        gross_spread,
+        min_entry_spread,
+        max_entry_spread,
+        structural_reserve,
+        min_structural_deviation,
+        break_even_pct,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+        || min_entry_spread < 0.0
+        || max_entry_spread < min_entry_spread
+        || structural_reserve < 0.0
+        || min_structural_deviation < 0.0
+        || break_even_pct < 0.0
+        || gross_spread < min_entry_spread
+        || gross_spread > max_entry_spread
+    {
+        return None;
+    }
+    let structural_floor = structural_reserve + min_structural_deviation.max(break_even_pct);
+    let required = min_entry_spread.max(structural_floor);
+    let budget = gross_spread - required;
+    (budget > 0.0).then_some(budget)
+}
+
 /// Return the exact user-configured L1 depth requirement. Zero disables it.
 pub fn required_depth_usd(trade_volume: f64, min_depth_percent: f64) -> Option<f64> {
     if trade_volume.is_finite()
@@ -208,6 +268,29 @@ mod tests {
     fn ioc_break_even_uses_expected_cost_not_price_limit_ceiling() {
         // Four 0.05% taker fees + four expected 0.02% slips = 0.28%.
         assert!((ioc_break_even_pct(0.0005, 0.0005) - 0.28).abs() < 1e-12);
+    }
+
+    #[test]
+    fn zero_structural_deviation_really_disables_the_hidden_guard() {
+        assert_eq!(configured_structural_reserve(0.0, false, 1.65), Some(0.0));
+        assert_eq!(configured_structural_reserve(0.5, false, 1.65), None);
+        assert_eq!(configured_structural_reserve(0.5, true, 1.65), Some(1.65));
+    }
+
+    #[test]
+    fn entry_budget_uses_profile_window_without_take_profit_threshold() {
+        let budget = entry_execution_budget(1.4, 1.2, 2.5, 0.0, 0.0, 0.28)
+            .expect("configured entry spread should pass");
+        assert!((budget - 0.2).abs() < 1e-12);
+        assert!(entry_execution_budget(2.6, 1.2, 2.5, 0.0, 0.0, 0.28).is_none());
+    }
+
+    #[test]
+    fn entry_budget_preserves_enabled_structural_deviation() {
+        let budget = entry_execution_budget(1.8, 1.2, 2.5, 1.0, 0.7, 0.28)
+            .expect("raw and structural profile limits should pass");
+        assert!((budget - 0.1).abs() < 1e-12);
+        assert!(entry_execution_budget(1.7, 1.2, 2.5, 1.0, 0.7, 0.28).is_none());
     }
 
     #[test]

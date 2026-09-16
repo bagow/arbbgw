@@ -210,8 +210,9 @@ pub fn generate_signals(
             {
                 continue;
             }
-            let real_profit_spread = row.spread - row.structural_spread.abs();
-            if real_profit_spread < profile.min_entry_spread || real_profit_spread > profile.max_entry_spread {
+            // Min/max entry spread is the raw executable spread shown in the UI.
+            // Structural deviation is an independent filter with its own off switch.
+            if row.spread < profile.min_entry_spread || row.spread > profile.max_entry_spread {
                 continue;
             }
             // Intentional product rule: listing age is treated as token age from the
@@ -231,33 +232,35 @@ pub fn generate_signals(
                 None
             };
 
-            // ── STRUCTURAL VERIFICATION GUARD ──
-            // Block entry until warmup has verified this pair from 24h historical data.
-            // Without verification we don't know if there's a structural spread — entering
-            // could be a guaranteed loss if the pair has a hidden structural premium.
-            if !row.structural_verified {
-                if let Some(p) = &diag_prefix {
-                    tracing::debug!("{} -> structural NOT VERIFIED (failed historical warmup - insufficient candles or API error)", p);
-                }
-                continue;
-            }
-
-            // structural_spread is always ≥ 0 (clamped at source in spreads.rs)
-            let structural_deviation = row.spread - row.structural_spread;
-            let dev_threshold = if profile.min_structural_deviation > 0.0 {
-                profile.min_structural_deviation
-            } else {
-                0.0 // 0.0 means filter disabled
-            };
+            let structural_reserve =
+                match crate::engine::scanner_common::configured_structural_reserve(
+                    profile.min_structural_deviation,
+                    row.structural_verified,
+                    row.structural_spread,
+                ) {
+                    Some(value) => value,
+                    None => {
+                        if let Some(p) = &diag_prefix {
+                            tracing::debug!(
+                                "{} -> structural filter enabled but baseline is not verified",
+                                p
+                            );
+                        }
+                        continue;
+                    }
+                };
+            let structural_deviation = row.spread - structural_reserve;
 
             // Enforce deviation filter if explicitly configured (> 0.0)
-            if profile.min_structural_deviation > 0.0 && structural_deviation < dev_threshold {
+            if profile.min_structural_deviation > 0.0
+                && structural_deviation < profile.min_structural_deviation
+            {
                 if let Some(p) = &diag_prefix {
                     tracing::info!(
                         "{} -> ema deviation {:.4}% < {:.4}% req (base: {:.4}%)",
                         p,
                         structural_deviation,
-                        dev_threshold,
+                        profile.min_structural_deviation,
                         row.structural_spread
                     );
                 }
@@ -277,11 +280,11 @@ pub fn generate_signals(
             // If structural_spread is high (persistent premium), this blocks entry
             // because the spread will never converge enough to cover fees.
             {
-                let profit_potential = row.spread - row.structural_spread - break_even_pct;
+                let profit_potential = row.spread - structural_reserve - break_even_pct;
                 if profit_potential <= 0.0 {
                     if let Some(p) = &diag_prefix {
                         tracing::debug!("{} -> structural_guard: profit impossible (spread={:.4}% - structural={:.4}% - BE={:.4}% = {:.4}%)",
-                            p, row.spread, row.structural_spread, break_even_pct, profit_potential);
+                            p, row.spread, structural_reserve, break_even_pct, profit_potential);
                     }
                     continue;
                 }
@@ -413,7 +416,8 @@ pub fn generate_signals(
 
                 break_even_pct,
                 spread: row.spread,
-                structural_spread: row.structural_spread,
+                // Carry only the baseline that this profile explicitly enabled.
+                structural_spread: structural_reserve,
                 is_a_higher,
 
                 tick_a,

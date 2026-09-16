@@ -435,13 +435,18 @@ async fn enter(
         } else {
             (pb - pa) / pa * 100.0
         };
-        let required = s.structural_spread
-            + s.break_even_pct
-            + p.min_entry_spread.max(p.take_profit_percent).max(0.05);
-        let budget = (gross - required).max(0.0);
-        if budget <= 0.0 || gross - s.structural_spread > p.max_entry_spread {
-            continue;
-        }
+        let budget = match super::scanner_common::entry_execution_budget(
+            gross,
+            p.min_entry_spread,
+            p.max_entry_spread,
+            s.structural_spread,
+            p.min_structural_deviation,
+            s.break_even_pct,
+        ) {
+            Some(value) => value,
+            None => continue,
+        };
+        let required = gross - budget;
         let half = (budget / 2.0).min(p.slippage_percent);
         if half < 0.0 {
             continue;
