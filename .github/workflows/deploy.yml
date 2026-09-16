@@ -258,46 +258,13 @@ jobs:
         with:
           name: release-${{ github.sha }}
           path: target/release
-      - name: Copy core to VPS (attempt 1)
-        id: copy_core_1
-        continue-on-error: true
-        timeout-minutes: 3
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_SSH_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "target/release/core-node"
-          target: "/tmp/deploy/"
-          command_timeout: 2m
-          strip_components: 2
-      - name: Copy core to VPS (attempt 2)
-        id: copy_core_2
-        if: ${{ steps.copy_core_1.outcome == 'failure' }}
-        continue-on-error: true
-        timeout-minutes: 3
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_SSH_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "target/release/core-node"
-          target: "/tmp/deploy/"
-          command_timeout: 2m
-          strip_components: 2
-      - name: Copy core to VPS (attempt 3)
-        id: copy_core_3
-        if: ${{ steps.copy_core_2.outcome == 'failure' }}
-        timeout-minutes: 3
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_SSH_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          source: "target/release/core-node"
-          target: "/tmp/deploy/"
-          command_timeout: 2m
-          strip_components: 2
+      - name: Copy core to VPS and verify transfer digest
+        timeout-minutes: 12
+        env:
+          ARB_DEPLOY_HOST: ${{ secrets.VPS_SSH_HOST }}
+          ARB_DEPLOY_USER: ${{ secrets.VPS_SSH_USER }}
+          ARB_DEPLOY_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        run: python3 .github/scripts/copy-core.py
       - name: Install and Restart
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -306,7 +273,20 @@ jobs:
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           script: |
             set -eu
-            sudo mv /tmp/deploy/core-node /usr/local/bin/
+            core_backup=/usr/local/bin/core-node.rollback-${{ github.sha }}
+            deploy_ok=0
+            rollback_core() {
+              if [ "$deploy_ok" != 1 ] && [ -f "$core_backup" ]; then
+                sudo mv "$core_backup" /usr/local/bin/core-node
+                sudo systemctl restart core-node || true
+              fi
+            }
+            trap rollback_core 0
+            if [ -f /usr/local/bin/core-node ]; then
+              sudo cp --preserve=mode,ownership,timestamps /usr/local/bin/core-node "$core_backup"
+            fi
+            sudo mv /tmp/arb-core-${{ github.sha }}/core-node /usr/local/bin/core-node
+            rmdir /tmp/arb-core-${{ github.sha }} || true
             sudo chown root:root /usr/local/bin/core-node
             sudo chmod +x /usr/local/bin/core-node
             sudo restorecon -v /usr/local/bin/core-node
@@ -354,8 +334,12 @@ jobs:
               fi
               sleep 2
             done
-            test "$ready" = 1
+            if [ "$ready" != 1 ]; then
+              exit 1
+            fi
             sudo systemctl is-active --quiet core-node
+            sudo rm -f "$core_backup"
+            deploy_ok=1
             echo "=== Profiles in use ==="
             sudo journalctl -u core-node --no-pager -n 30 | grep -E "STARTUP|Profiles DB|vol=" || true
 
