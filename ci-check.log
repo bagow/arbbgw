@@ -1,0 +1,57 @@
+[1m[92m    Updating[0m crates.io index
+[1m[92m    Checking[0m shared v0.1.0 (/home/runner/work/arbbgw/arbbgw/shared)
+[1m[92m    Checking[0m core-node v0.1.0 (/home/runner/work/arbbgw/arbbgw/core-node)
+[1m[92m    Checking[0m vps-api v0.1.0 (/home/runner/work/arbbgw/arbbgw/vps-api)
+[1m[33mwarning[0m[1m: unused import: `crate::engine::utils::symbols_match`[0m
+  [1m[94m--> [0mcore-node/src/engine/real.rs:94:9
+   [1m[94m|[0m
+[1m[94m94[0m [1m[94m|[0m pub use crate::engine::utils::symbols_match;
+   [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+[1m[91merror[E0277][0m[1m: the trait bound `std::string::String: Borrow<&str>` is not satisfied[0m
+   [1m[94m--> [0mcore-node/src/main.rs:498:57
+    [1m[94m|[0m
+[1m[94m498[0m [1m[94m|[0m         let balance_fresh = ctx.balances_updated_ms.get(*ex).map(|stamp| (0..=60_000).contains(&(now-*stamp))).unwrap_or(false);
+    [1m[94m|[0m                                                     [1m[94m---[0m [1m[91m^^^[0m [1m[91mthe trait `Borrow<&str>` is not implemented for `std::string::String`[0m
+    [1m[94m|[0m                                                     [1m[94m|[0m
+    [1m[94m|[0m                                                     [1m[94mrequired by a bound introduced by this call[0m
+    [1m[94m|[0m
+[1m[96mhelp[0m: the trait `Borrow<[1m[35m&[0m_>` [1m[35mis not[0m implemented for `std::string::String`
+      but trait `Borrow<_>` [1m[35mis[0m implemented for it
+   [1m[94m--> [0m/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/str.rs:229:0
+    [1m[94m= [0m[1mhelp[0m: for that trait implementation, expected `[1m[35mstr[0m`, found `[1m[35m&str[0m`
+[1m[92mnote[0m: required by a bound in `DashMap::<K, V, S>::get`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dashmap-5.5.3/src/lib.rs:570:12
+    [1m[94m|[0m
+[1m[94m568[0m [1m[94m|[0m     pub fn get<Q>(&'a self, key: &Q) -> Option<Ref<'a, K, V, S>>
+    [1m[94m|[0m            [1m[94m---[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m569[0m [1m[94m|[0m     where
+[1m[94m570[0m [1m[94m|[0m         K: Borrow<Q>,
+    [1m[94m|[0m            [1m[92m^^^^^^^^^[0m [1m[92mrequired by this bound in `DashMap::<K, V, S>::get`[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `std::string::String: Borrow<&str>` is not satisfied[0m
+   [1m[94m--> [0mcore-node/src/main.rs:499:60
+    [1m[94m|[0m
+[1m[94m499[0m [1m[94m|[0m         let positions_fresh = ctx.positions_updated_ms.get(*ex).map(|stamp| (0..=60_000).contains(&(now-*stamp))).unwrap_or(false);
+    [1m[94m|[0m                                                        [1m[94m---[0m [1m[91m^^^[0m [1m[91mthe trait `Borrow<&str>` is not implemented for `std::string::String`[0m
+    [1m[94m|[0m                                                        [1m[94m|[0m
+    [1m[94m|[0m                                                        [1m[94mrequired by a bound introduced by this call[0m
+    [1m[94m|[0m
+[1m[96mhelp[0m: the trait `Borrow<[1m[35m&[0m_>` [1m[35mis not[0m implemented for `std::string::String`
+      but trait `Borrow<_>` [1m[35mis[0m implemented for it
+   [1m[94m--> [0m/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/str.rs:229:0
+    [1m[94m= [0m[1mhelp[0m: for that trait implementation, expected `[1m[35mstr[0m`, found `[1m[35m&str[0m`
+[1m[92mnote[0m: required by a bound in `DashMap::<K, V, S>::get`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dashmap-5.5.3/src/lib.rs:570:12
+    [1m[94m|[0m
+[1m[94m568[0m [1m[94m|[0m     pub fn get<Q>(&'a self, key: &Q) -> Option<Ref<'a, K, V, S>>
+    [1m[94m|[0m            [1m[94m---[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m569[0m [1m[94m|[0m     where
+[1m[94m570[0m [1m[94m|[0m         K: Borrow<Q>,
+    [1m[94m|[0m            [1m[92m^^^^^^^^^[0m [1m[92mrequired by this bound in `DashMap::<K, V, S>::get`[0m
+
+[1mFor more information about this error, try `rustc --explain E0277`.[0m
+[1m[33mwarning[0m: `core-node` (bin "core-node") generated 1 warning
+[1m[91merror[0m: could not compile `core-node` (bin "core-node") due to 2 previous errors; 1 warning emitted
