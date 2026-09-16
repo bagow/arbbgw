@@ -165,11 +165,19 @@ def main():
     print("AUDIT: process usage", file=sys.stderr, flush=True)
     for binary in ("core-node", "vps-api"):
         path = Path("/usr/local/bin") / binary
-        if path.is_file():
-            result[binary + "_binary"] = {
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                "mtime": path.stat().st_mtime,
-            }
+        try:
+            if path.is_file():
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                result[binary + "_binary"] = {
+                    "sha256": digest.hexdigest(),
+                    "mtime": path.stat().st_mtime,
+                }
+        except OSError as exc:
+            result[binary + "_binary_error"] = type(exc).__name__
+    print("AUDIT: binary metadata", file=sys.stderr, flush=True)
     try:
         try:
             response = urllib.request.urlopen("http://127.0.0.1:3003/health", timeout=5)
