@@ -27,7 +27,6 @@ fn margin_type_cache() -> &'static DashSet<String> {
 // Each method gets its own cooldown (last REST call timestamp).
 static REST_FALLBACK_BALANCE_MS: AtomicI64 = AtomicI64::new(0);
 static REST_FALLBACK_POSITIONS_MS: AtomicI64 = AtomicI64::new(0);
-static REST_FALLBACK_FEE_MS: AtomicI64 = AtomicI64::new(0);
 static REST_FALLBACK_LEVERAGE_MS: AtomicI64 = AtomicI64::new(0);
 static WS_CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
 
@@ -1279,76 +1278,41 @@ impl ExchangeConnector for BinanceConnector {
         Ok((total_balance, available_balance))
     }
 
-    async fn fetch_taker_fee(&self, _http: &Client, keys: &ExchangeKeys, pair: &str) -> Result<f64, String> {
-        check_ip_ban()?;
-        use crate::engine::exchanges::ws_trader::send_ws_request;
-        let ts = now_ms();
-        let qs = format!(
-            "apiKey={}&symbol={}&timestamp={}",
-            keys.binance_key, pair, ts
+    async fn fetch_taker_fee(&self, http: &Client, keys: &ExchangeKeys, pair: &str) -> Result<f64, String> {
+        // USD-M Futures currently documents commission rate as a signed REST
+        // endpoint. The former `v1/account.commissionRate` WS method is not part
+        // of the API and returns an application error, which used to block every
+        // otherwise executable entry before the REST fallback was considered.
+        check_before_binance_rest()?;
+        let timestamp = now_ms();
+        let query = format!("symbol={}&timestamp={}", pair, timestamp);
+        let signature = binance_sign(&keys.binance_secret, &query);
+        let url = format!(
+            "https://fapi.binance.com/fapi/v1/commissionRate?{}&signature={}",
+            query, signature
         );
-        let sig = binance_sign(&keys.binance_secret, &qs);
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "id": req_id,
-            "method": "v1/account.commissionRate",
-            "params": {
-                "apiKey": keys.binance_key,
-                "symbol": pair,
-                "timestamp": ts,
-                "signature": sig
-            }
-        });
-        match send_ws_request(ws_req).await {
-            Ok(resp) => {
-                record_ws_success();
-                if let Some(err) = resp.get("error") {
-                    detect_ban_from_response(err);
-                    return Err(format!("Binance WS fee error: {}", err));
-                }
-                resp["result"]["takerCommissionRate"]
-                    .as_str()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .ok_or_else(|| "Failed to parse Binance fee from WS".to_string())
-            }
-            Err(e) => {
-                record_ws_failure();
-                check_ip_ban()?;
-                check_rest_fallback_allowed(&REST_FALLBACK_FEE_MS, "fee")?;
-                tracing::warn!(
-                    "[binance] WS fee fetch failed ({}). Trying REST fallback...",
-                    e
-                );
-                let fresh_ts = now_ms();
-                let rest_qs = format!("symbol={}&timestamp={}", pair, fresh_ts);
-                let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
-                let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
-                let url = format!(
-                    "https://fapi.binance.com/fapi/v1/commissionRate?{}",
-                    full_qs
-                );
-                let resp = _http
-                    .get(&url)
-                    .header("X-MBX-APIKEY", &keys.binance_key)
-                    .timeout(std::time::Duration::from_millis(5000))
-                    .send()
-                    .await
-                    .map_err(|e| format!("Binance REST fee HTTP error: {}", e))?;
-
-                let status = resp.status();
-                let headers = resp.headers().clone();
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| format!("Binance REST fee JSON error: {}", e))?;
-                record_binance_response(status.as_u16(), &headers);
-                detect_ban_from_response(&body);
-                body["takerCommissionRate"]
-                    .as_str()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .ok_or_else(|| format!("Failed to parse Binance fee from REST: {}", body))
-            }
+        let response = http
+            .get(&url)
+            .header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|error| format!("Binance fee HTTP error: {}", error))?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("Binance fee JSON error: {}", error))?;
+        record_binance_response(status.as_u16(), &headers);
+        detect_ban_from_response(&body);
+        if !status.is_success() {
+            return Err(format!(
+                "Binance fee rejected code={} msg={}",
+                body["code"], body["msg"]
+            ));
         }
+        parse_binance_taker_fee(&body)
     }
 
     async fn ensure_leverage(
@@ -1709,4 +1673,43 @@ async fn managed_binance_get(
         return Err(format!("Binance query rejected code={}", v["code"]));
     }
     Ok(v)
+}
+
+fn parse_binance_taker_fee(value: &Value) -> Result<f64, String> {
+    let fee = value["takerCommissionRate"]
+        .as_str()
+        .and_then(|text| text.parse::<f64>().ok())
+        .or_else(|| value["takerCommissionRate"].as_f64())
+        .ok_or_else(|| "Binance fee response has no takerCommissionRate".to_string())?;
+    if !fee.is_finite() || !(0.0..=0.01).contains(&fee) {
+        return Err("Binance returned an invalid taker fee".into());
+    }
+    Ok(fee)
+}
+
+#[cfg(test)]
+mod fee_tests {
+    use super::*;
+
+    #[test]
+    fn parses_documented_rest_commission_response() {
+        assert_eq!(
+            parse_binance_taker_fee(&serde_json::json!({
+                "symbol": "ONEUSDT",
+                "makerCommissionRate": "0.000200",
+                "takerCommissionRate": "0.000500"
+            }))
+            .unwrap(),
+            0.0005
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_out_of_range_commission() {
+        assert!(parse_binance_taker_fee(&serde_json::json!({})).is_err());
+        assert!(parse_binance_taker_fee(&serde_json::json!({
+            "takerCommissionRate": "0.02"
+        }))
+        .is_err());
+    }
 }
