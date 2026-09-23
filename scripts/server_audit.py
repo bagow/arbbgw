@@ -352,6 +352,7 @@ def main():
         ("binance_subscription_rejected", "[binance_l2_chunk] Subscription rejected"),
         ("binance_receive_failed", "[binance_l2_chunk] Receive failed"),
         ("binance_connection_failed", "[binance_l2_chunk] Connect failed"),
+        ("binance_depth_backlog", "Backlog detected:"),
         ("binance_banned", "[binance] IP still banned"),
         ("engine_panics", "ENGINE LOOP PANIC"),
         ("database_locked", "database is locked"),
@@ -380,6 +381,10 @@ def main():
         line.split("[binance_l2_dynamic", 1)[1][:600]
         for line in lines if "[binance_l2_dynamic" in line
     ][-30:]
+    result["binance_depth_backlog_tail"] = [
+        line.split("Backlog detected: ", 1)[1][:400]
+        for line in lines if "Backlog detected: " in line
+    ][-40:]
     result["spread_diagnostics_tail"] = [
         line.split("[spreads] ", 1)[1][:600]
         for line in lines if "[spreads] " in line
