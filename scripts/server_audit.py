@@ -194,6 +194,7 @@ def summarize_recorded_funnel(shadow_path, profiles_path, build_sha):
     counts = {name: 0 for name in stage_names}
     timestamps = {name: set() for name in stage_names}
     top = {}
+    candidate_minutes = {}
     with sqlite3.connect(shadow_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as db:
         rows = db.execute(
             "SELECT snapshot FROM book_samples ORDER BY id DESC LIMIT 10000"
@@ -236,6 +237,33 @@ def summarize_recorded_funnel(shadow_path, profiles_path, build_sha):
             if not min_entry <= spread <= max_entry:
                 continue
             passed("raw_spread_in_entry_window")
+            try:
+                minute_ms = int(stamp) // 60_000 * 60_000
+            except (TypeError, ValueError):
+                minute_ms = None
+            if minute_ms is not None:
+                timeline_key = "|".join((
+                    str(spread_row.get("pair", "")),
+                    str(spread_row.get("direction", "")),
+                    str(minute_ms),
+                ))
+                minute = candidate_minutes.setdefault(timeline_key, {
+                    "minute_ms": minute_ms,
+                    "pair": spread_row.get("pair"),
+                    "direction": spread_row.get("direction"),
+                    "min_spread_pct": spread,
+                    "max_spread_pct": spread,
+                    "min_structural_pct": structural,
+                    "max_structural_pct": structural,
+                    "verified_samples": 0,
+                    "samples": 0,
+                })
+                minute["min_spread_pct"] = min(minute["min_spread_pct"], spread)
+                minute["max_spread_pct"] = max(minute["max_spread_pct"], spread)
+                minute["min_structural_pct"] = min(minute["min_structural_pct"], structural)
+                minute["max_structural_pct"] = max(minute["max_structural_pct"], structural)
+                minute["verified_samples"] += int(spread_row.get("structural_verified") is True)
+                minute["samples"] += 1
             if _float(spread_row.get("volA")) < min_volume or _float(spread_row.get("volB")) < min_volume:
                 continue
             passed("both_24h_volumes_above_profile_minimum")
@@ -280,6 +308,9 @@ def summarize_recorded_funnel(shadow_path, profiles_path, build_sha):
         "top_adjusted_unique_rows": sorted(
             top.values(), key=lambda row: row["adjusted_spread_pct"], reverse=True
         )[:20],
+        "entry_window_timeline": sorted(
+            candidate_minutes.values(), key=lambda row: row["minute_ms"]
+        )[-200:],
     }
 
 
