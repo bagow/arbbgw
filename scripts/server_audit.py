@@ -376,6 +376,10 @@ def main():
         line.split("[binance_l2] ", 1)[1][:400]
         for line in lines if "[binance_l2] " in line
     ][-20:]
+    result["binance_l2_dynamic_tail"] = [
+        line.split("[binance_l2_dynamic", 1)[1][:600]
+        for line in lines if "[binance_l2_dynamic" in line
+    ][-30:]
     result["spread_diagnostics_tail"] = [
         line.split("[spreads] ", 1)[1][:600]
         for line in lines if "[spreads] " in line
