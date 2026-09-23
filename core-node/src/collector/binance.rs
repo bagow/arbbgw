@@ -22,17 +22,10 @@ const DYNAMIC_DEPTH_RETENTION_SECS: u64 = 30;
 // 24 ranked candidates plus the profile-wide maximum of 10 owned trades.
 const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
 
-const FALLBACK_DEPTH_SYMBOLS: &[&str] = &[
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "XRPUSDT", "PEPEUSDT",
-    "SUIUSDT", "ADAUSDT", "TRXUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "LTCUSDT",
-    "MATICUSDT", "ARBUSDT", "OPUSDT", "APTUSDT", "NEARUSDT", "FILUSDT", "WIFUSDT",
-    "SHIBUSDT", "BONKUSDT", "FLOKIUSDT", "WLDUSDT", "ORDIUSDT", "TIAUSDT", "SEIUSDT",
-    "INJUSDT", "FETUSDT", "RUNEUSDT", "JUPUSDT", "ENAUSDT", "ONDOUSDT", "RENDERUSDT",
-    "AAVEUSDT", "MKRUSDT", "LDOUSDT", "PENDLEUSDT", "TONUSDT", "NOTUSDT", "STXUSDT",
-    "KATUSDT", "SPKUSDT", "HYPEUSDT", "VIRTUSDT", "BOMEUSDT", "WUSDT", "APEUSDT",
-    "GMTUSDT", "GALAUSDT", "FTMUSDT", "HBARUSDT", "FLOWUSDT", "ICPUSDT", "SANDUSDT",
-    "MANAUSDT", "AXSUSDT", "CRVUSDT", "SNXUSDT", "ATOMUSDT", "XLMUSDT",
-];
+// The baseline exists only as a stable health/liquidity probe. Discovery uses the
+// all-book ticker and every executable/owned symbol is followed by the dynamic
+// stream below, so keeping more than one baseline connection only adds queueing.
+const FALLBACK_DEPTH_SYMBOLS: &[&str] = &["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"];
 
 pub async fn run(
     prices: PriceMap,
@@ -834,6 +827,12 @@ mod tests {
             depth_stream_url(&["BTCUSDT".into(), "ETHUSDT".into()]),
             "wss://fstream.binance.com/public/stream?streams=btcusdt@depth5@500ms/ethusdt@depth5@500ms"
         );
+    }
+
+    #[test]
+    fn baseline_depth_fits_one_connection() {
+        assert!(!FALLBACK_DEPTH_SYMBOLS.is_empty());
+        assert!(FALLBACK_DEPTH_SYMBOLS.len() <= DEPTH_STREAMS_PER_CONNECTION);
     }
 
     #[test]
