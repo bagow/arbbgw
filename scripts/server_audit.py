@@ -301,6 +301,7 @@ def inspect_database(path, kind):
             result["performance"] = summarize(rows)
             result["recent_trades"] = [dict(r) for r in db.execute(
                 "SELECT id,pair,exchange_a,exchange_b,status,accounting_status,entry_time,exit_time,"
+                "entry_spread,structural_spread,highest_spread_reached,"
                 "entry_price_a,entry_price_b,exit_price_a,exit_price_b,opened_qty_a,opened_qty_b,"
                 "closed_qty_a,closed_qty_b,last_price_a,last_price_b,curr_gross_pnl,"
                 "current_net_estimate,valuation_ms,peak_net_percent,pnl,gross_pnl,commission_cost,"
@@ -357,7 +358,8 @@ def inspect_database(path, kind):
         elif kind == "profiles":
             result["profiles"] = [dict(r) for r in db.execute(
                 "SELECT id,is_active,trade_volume,leverage,min_entry_spread,max_entry_spread,"
-                "take_profit_percent,trailing_stop_percent,max_active_trades,max_holding_time_ms,"
+                "take_profit_percent,trailing_stop_percent,trailing_activation_percent,"
+                "hard_stop_percent,max_active_trades,max_holding_time_ms,"
                 "min_volume_millions,min_structural_deviation,min_depth_percent,slippage_percent,"
                 "daily_loss_limit_usdt,max_total_exposure_usdt,disabled_exchanges "
                 "FROM trading_profiles"
@@ -391,6 +393,14 @@ def main():
                           capture_output=True, text=True, timeout=30)
     lines = logs.stdout.splitlines()
     print("AUDIT: service logs loaded", file=sys.stderr, flush=True)
+    warmup_logs = subprocess.run(
+        ["journalctl", "-u", "core-node", "--since=-8h", "-n", "20000", "--no-pager"],
+        capture_output=True, text=True, timeout=30,
+    )
+    result["ema_warmup_tail"] = [
+        line.split("[ema_warmup] ", 1)[1][:800]
+        for line in warmup_logs.stdout.splitlines() if "[ema_warmup] " in line
+    ][-100:]
     result["recent_log_counts"] = {label: sum(pattern in line for line in lines) for label, pattern in (
         ("binance_subscription_rejected", "[binance_l2_chunk] Subscription rejected"),
         ("binance_receive_failed", "[binance_l2_chunk] Receive failed"),
