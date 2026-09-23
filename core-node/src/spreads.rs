@@ -27,6 +27,10 @@ static STRUCTURAL_EMA: OnceLock<DashMap<String, EmaEntry>> = OnceLock::new();
 /// Pairs NOT in this set are "on probation" — entry is blocked.
 static VERIFIED_KEYS: OnceLock<DashSet<String>> = OnceLock::new();
 
+/// Subset of VERIFIED_KEYS whose baseline was reconstructed from a complete
+/// historical window. A transient live-feed gap must not revoke this evidence.
+static HISTORICALLY_VERIFIED_KEYS: OnceLock<DashSet<String>> = OnceLock::new();
+
 /// Tracks when each pair (ema_key) was FIRST observed with a valid spread.
 /// Live verification requires distinct fresh observations over at least ten minutes.
 /// Independent of zero-cross timer so WS reconnects don't reset the clock.
@@ -50,6 +54,18 @@ impl ObservationQuality {
     }
 }
 static FIRST_SEEN: OnceLock<DashMap<String, ObservationQuality>> = OnceLock::new();
+
+fn reset_live_verification_after_gap(
+    key: &str,
+    verified: &DashSet<String>,
+    historically_verified: &DashSet<String>,
+    observations: &DashMap<String, ObservationQuality>,
+) {
+    observations.remove(key);
+    if !historically_verified.contains(key) {
+        verified.remove(key);
+    }
+}
 
 /// Compute spread opportunities from PriceMap.
 /// Called directly by the engine loop — zero serialization/HTTP overhead.
@@ -98,6 +114,7 @@ pub fn compute_spreads(
     let min_v = min_vol_m * 1_000_000.0;
     let ema_map = STRUCTURAL_EMA.get_or_init(|| DashMap::new());
     let verified = VERIFIED_KEYS.get_or_init(|| DashSet::new());
+    let historically_verified = HISTORICALLY_VERIFIED_KEYS.get_or_init(|| DashSet::new());
     let first_seen_map = FIRST_SEEN.get_or_init(|| DashMap::new());
     let blacklist = ts.blacklist_vec();
     let mut rows = Vec::with_capacity(512);
@@ -235,8 +252,12 @@ pub fn compute_spreads(
                     .map(|e| now_f64 - e.last_ts > 5.0)
                     .unwrap_or(false);
                 if gap {
-                    verified.remove(&ema_key);
-                    first_seen_map.remove(&ema_key);
+                    reset_live_verification_after_gap(
+                        &ema_key,
+                        verified,
+                        historically_verified,
+                        first_seen_map,
+                    );
                 }
 
                 let (ema_12, ema_21, max_12, min_12, max_21, min_21, cross_12, cross_21) =
@@ -436,6 +457,7 @@ pub fn warmup_ema_from_premiums(
 ) {
     let ema_map = STRUCTURAL_EMA.get_or_init(DashMap::new);
     let verified = VERIFIED_KEYS.get_or_init(DashSet::new);
+    let historically_verified = HISTORICALLY_VERIFIED_KEYS.get_or_init(DashSet::new);
     if !ts.ema_tau_secs.is_finite() || ts.ema_tau_secs <= 0.0 {
         return;
     }
@@ -453,7 +475,7 @@ pub fn warmup_ema_from_premiums(
         }
     }
     for (key, mut rows) in grouped {
-        if verified.contains(&key) {
+        if historically_verified.contains(&key) {
             continue;
         }
         rows.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -500,7 +522,8 @@ pub fn warmup_ema_from_premiums(
         }
         e.last_ts = now;
         ema_map.insert(key.clone(), e);
-        verified.insert(key);
+        verified.insert(key.clone());
+        historically_verified.insert(key);
     }
 }
 
@@ -542,5 +565,25 @@ mod quality_tests {
         assert!(q.observe(602.0));
         assert!(!q.observe(700.0));
         assert_eq!(q.count, 1);
+    }
+
+    #[test]
+    fn feed_gap_preserves_historical_verification_only() {
+        let verified = DashSet::new();
+        let historical = DashSet::new();
+        let observations = DashMap::new();
+        verified.insert("history".to_string());
+        verified.insert("live".to_string());
+        historical.insert("history".to_string());
+        observations.insert("history".to_string(), ObservationQuality::default());
+        observations.insert("live".to_string(), ObservationQuality::default());
+
+        reset_live_verification_after_gap("history", &verified, &historical, &observations);
+        reset_live_verification_after_gap("live", &verified, &historical, &observations);
+
+        assert!(verified.contains("history"));
+        assert!(!verified.contains("live"));
+        assert!(!observations.contains_key("history"));
+        assert!(!observations.contains_key("live"));
     }
 }
