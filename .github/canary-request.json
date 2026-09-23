@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "attempt": 3,
+  "attempt": 4,
   "expected_build_sha": "d5ca2205d2f7e4b75b0f9363619b1e471ce32eb7",
   "notional_usdt": 6.0,
   "monitor_seconds": 1800,
@@ -10,7 +10,7 @@
   "trailing_stop_percent": 0.1,
   "hard_stop_percent": 0.5,
   "trailing_activation_percent": 0.1,
-  "daily_loss_limit_usdt": 0.1,
+  "daily_loss_limit_usdt": 0.25,
   "max_total_exposure_usdt": 7.0,
   "slippage_percent": 0.05,
   "min_structural_deviation": 0.5,
