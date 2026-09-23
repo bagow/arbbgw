@@ -2,6 +2,7 @@ name: Read-only server audit
 on:
   push:
     branches: ["fix/audit-risk-20260909"]
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:
