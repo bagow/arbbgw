@@ -311,6 +311,25 @@ def inspect_database(path, kind):
                 "SELECT json_extract(observation,'$.state') AS state,COUNT(*) AS count "
                 "FROM execution_orders GROUP BY state"
             )]
+            result["pending_accounting"] = [dict(r) for r in db.execute(
+                "SELECT id,pair,exchange_a,exchange_b,accounting_status,last_accounting_check,"
+                "accounting_error FROM trades WHERE status='CLOSED' "
+                "AND accounting_status!='VERIFIED' AND id IN (SELECT trade_id FROM execution_plans) "
+                "ORDER BY id DESC LIMIT 20"
+            )]
+            # Operational state only: deliberately omit exchange/client order IDs.
+            result["pending_accounting_orders"] = [dict(r) for r in db.execute(
+                "SELECT o.trade_id,o.leg,o.exchange,"
+                "json_extract(o.request,'$.reduce_only') AS reduce_only,"
+                "json_extract(o.request,'$.quantity') AS requested_quantity,"
+                "json_extract(o.observation,'$.state') AS state,"
+                "json_extract(o.observation,'$.filled_quantity') AS filled_quantity,"
+                "json_extract(o.observation,'$.average_price') AS average_price,"
+                "json_extract(o.observation,'$.fee') AS fee,o.updated_ms "
+                "FROM execution_orders o JOIN trades t ON t.id=o.trade_id "
+                "WHERE t.status='CLOSED' AND t.accounting_status!='VERIFIED' "
+                "ORDER BY o.trade_id DESC,o.created_ms LIMIT 80"
+            )]
         elif kind == "profiles":
             result["profiles"] = [dict(r) for r in db.execute(
                 "SELECT id,is_active,trade_volume,leverage,min_entry_spread,max_entry_spread,"
@@ -366,6 +385,8 @@ def main():
         ("scanner_structural_deviation", "ema deviation"),
         ("scanner_health_rejected", "health check failed"),
         ("managed_fee_preflight_failed", "[managed] fee preflight failed"),
+        ("managed_binance_l2_refresh_failed", "[managed] Binance L2 refresh failed"),
+        ("accounting_pending", "[accounting] trade="),
         ("managed_entries_halted", "[managed] NEW ENTRIES HALTED"),
     )}
     result["recent_log_count"] = len(lines)
@@ -393,6 +414,10 @@ def main():
         line.split("[managed] fee preflight failed", 1)[1][:800]
         for line in lines if "[managed] fee preflight failed" in line
     ][-20:]
+    result["accounting_pending_tail"] = [
+        line.split("[accounting] ", 1)[1][:800]
+        for line in lines if "[accounting] trade=" in line
+    ][-30:]
     # Only transport errors from the unauthenticated public market-data stream;
     # never export private order/account logs or service environments.
     prefix = "[binance_l2_chunk] Receive failed: "
