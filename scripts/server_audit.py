@@ -302,7 +302,9 @@ def inspect_database(path, kind):
             result["recent_trades"] = [dict(r) for r in db.execute(
                 "SELECT id,pair,exchange_a,exchange_b,status,accounting_status,entry_time,exit_time,"
                 "entry_price_a,entry_price_b,exit_price_a,exit_price_b,opened_qty_a,opened_qty_b,"
-                "closed_qty_a,closed_qty_b,pnl,gross_pnl,commission_cost,funding_cost,close_reason "
+                "closed_qty_a,closed_qty_b,last_price_a,last_price_b,curr_gross_pnl,"
+                "current_net_estimate,valuation_ms,peak_net_percent,pnl,gross_pnl,commission_cost,"
+                "funding_cost,close_reason "
                 "FROM trades ORDER BY id DESC LIMIT 30"
             )]
             result["active_trades"] = [dict(r) for r in db.execute(
