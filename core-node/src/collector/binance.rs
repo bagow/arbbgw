@@ -19,8 +19,10 @@ const DEPTH_UPDATE_INTERVAL_MS: u64 = 500;
 const DEPTH_SUBSCRIPTION_REFRESH_SECS: u64 = 1_800;
 const DYNAMIC_DEPTH_REFRESH_SECS: u64 = 1;
 const DYNAMIC_DEPTH_RETENTION_SECS: u64 = 30;
-const MAX_DEPTH_BACKLOG_MS: i64 = 2_000;
-const MAX_CONSECUTIVE_STALE_DEPTH: u32 = 3;
+const MAX_BASELINE_DEPTH_BACKLOG_MS: i64 = 5_000;
+const MAX_BASELINE_CONSECUTIVE_STALE_DEPTH: u32 = 10;
+const MAX_DYNAMIC_DEPTH_BACKLOG_MS: i64 = 2_000;
+const MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH: u32 = 3;
 // 24 ranked candidates plus the profile-wide maximum of 10 owned trades.
 const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
 // Binance's documented USD-M market-stream endpoints. The `/public/*` relay
@@ -486,7 +488,12 @@ async fn run_l2_depth_stream(
                                                 stale += 1;
                                                 stale_streak += 1;
                                                 last_lag_ms = lag_ms;
-                                                if depth_backlog_detected(lag_ms, stale_streak) {
+                                                if depth_backlog_detected(
+                                                    lag_ms,
+                                                    stale_streak,
+                                                    MAX_BASELINE_DEPTH_BACKLOG_MS,
+                                                    MAX_BASELINE_CONSECUTIVE_STALE_DEPTH,
+                                                ) {
                                                     backlog_detected = true;
                                                     warn!("[binance_l2_chunk] Backlog detected: lag_ms={} stale_streak={}; reconnecting", lag_ms, stale_streak);
                                                     break;
@@ -685,7 +692,12 @@ async fn run_dynamic_l2_depth_stream(
                                 stale += 1;
                                 stale_streak += 1;
                                 last_lag_ms = lag_ms;
-                                if depth_backlog_detected(lag_ms, stale_streak) {
+                                if depth_backlog_detected(
+                                    lag_ms,
+                                    stale_streak,
+                                    MAX_DYNAMIC_DEPTH_BACKLOG_MS,
+                                    MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+                                ) {
                                     backlog_detected = true;
                                     warn!("[binance_l2_dynamic] Backlog detected: lag_ms={} stale_streak={}; reconnecting", lag_ms, stale_streak);
                                     break;
@@ -729,8 +741,13 @@ enum DepthUpdate {
     Ignored,
 }
 
-fn depth_backlog_detected(lag_ms: i64, stale_streak: u32) -> bool {
-    lag_ms > MAX_DEPTH_BACKLOG_MS || stale_streak >= MAX_CONSECUTIVE_STALE_DEPTH
+fn depth_backlog_detected(
+    lag_ms: i64,
+    stale_streak: u32,
+    max_lag_ms: i64,
+    max_stale_streak: u32,
+) -> bool {
+    lag_ms > max_lag_ms || stale_streak >= max_stale_streak
 }
 
 fn apply_depth_update(
@@ -865,10 +882,10 @@ mod tests {
 
     #[test]
     fn sustained_or_severe_depth_lag_reconnects() {
-        assert!(!depth_backlog_detected(MAX_DEPTH_BACKLOG_MS, 1));
-        assert!(!depth_backlog_detected(751, MAX_CONSECUTIVE_STALE_DEPTH - 1));
-        assert!(depth_backlog_detected(MAX_DEPTH_BACKLOG_MS + 1, 1));
-        assert!(depth_backlog_detected(751, MAX_CONSECUTIVE_STALE_DEPTH));
+        assert!(!depth_backlog_detected(2_000, 1, 2_000, 3));
+        assert!(!depth_backlog_detected(751, 2, 2_000, 3));
+        assert!(depth_backlog_detected(2_001, 1, 2_000, 3));
+        assert!(depth_backlog_detected(751, 3, 2_000, 3));
     }
 
     #[test]

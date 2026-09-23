@@ -102,6 +102,29 @@ fn executable_quote(
     None
 }
 
+async fn refresh_binance_execution_book(
+    pair: &str,
+    prices: &PriceMap,
+    http: &Client,
+    ctx: &EngineContext,
+) -> Result<(), String> {
+    let book = super::exchanges::binance::fetch_public_depth_snapshot(http, pair).await?;
+    let bid = book.bids.first().ok_or("Binance REST depth has no bid")?;
+    let ask = book.asks.first().ok_or("Binance REST depth has no ask")?;
+    if let Some(mut venue) = prices.get_mut("binance") {
+        if let Some(ticker) = venue.get_mut(pair) {
+            ticker.bid = bid.0;
+            ticker.ask = ask.0;
+            ticker.price = (bid.0 + ask.0) / 2.0;
+            ticker.bid_size = bid.0 * bid.1;
+            ticker.ask_size = ask.0 * ask.1;
+            ticker.last_updated = (book.updated_ms / 1000) as u64;
+        }
+    }
+    ctx.l2_books.insert(format!("binance:{pair}"), book);
+    Ok(())
+}
+
 async fn actual_taker_fee(
     connector: &dyn ExchangeConnector,
     exchange: &str,
@@ -427,6 +450,16 @@ async fn enter(
         if funding_deadline_ms.is_none() {
             record_entry_decision(ctx, "rejected_funding_fetch");
             continue;
+        }
+        // The Binance public WS occasionally queues seconds-old frames on the VPS.
+        // Refresh its top-5 snapshot after all slower private/funding checks, so the
+        // final IOC quote is based on authoritative data inside the 750 ms budget.
+        if s.exchange_a == "binance" || s.exchange_b == "binance" {
+            if let Err(error) = refresh_binance_execution_book(&s.pair, prices, http, ctx).await {
+                tracing::warn!("[managed] Binance L2 refresh failed for {}: {}", s.pair, error);
+                record_entry_decision(ctx, "rejected_binance_l2_refresh");
+                continue;
+            }
         }
         let (pa, pb) = match (
             executable(

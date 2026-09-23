@@ -2,7 +2,9 @@ name: Deploy Crypto Arbitrage Stack
 
 on:
   push:
-    branches: [ main, "fix/**" ]
+    # Audit-only commits have their own read-only workflow and must never enter
+    # the build/deploy pipeline (or its isolated smoke job).
+    branches: [ main, "fix/**", "!fix/audit-risk-20260909" ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
