@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Guarded one-trade production canary. Never prints or reads exchange secrets."""
 import json
+import secrets
 import signal
 import sqlite3
+import subprocess
 import sys
 import time
 import urllib.error
@@ -16,6 +18,7 @@ TRADE_DB = ROOT / "real-trader.db"
 PROFILE_ID = "real-default"
 MANAGED_VENUES = ("binance", "kucoin")
 DISABLED = ["htx", "toobit", "ascendex", "bingx", "bitget", "bitmex", "gate", "xt", "bybit"]
+WATCHDOG_CACHE_KEY = "canary_watchdog_token"
 
 
 def abort_on_signal(signum, _frame):
@@ -67,7 +70,7 @@ def snapshot_profile():
         return dict(row)
 
 
-def restore_profile_halted(snapshot):
+def restore_profile_halted(snapshot, watchdog_token=None):
     snapshot = dict(snapshot)
     snapshot["is_active"] = 0
     columns = [name for name in snapshot if name != "id"]
@@ -75,6 +78,12 @@ def restore_profile_halted(snapshot):
     values = [snapshot[name] for name in columns]
     with profile_connection() as db:
         db.execute("BEGIN IMMEDIATE")
+        if watchdog_token is not None:
+            current = db.execute(
+                "SELECT value FROM server_cache WHERE key=?", (WATCHDOG_CACHE_KEY,)
+            ).fetchone()
+            if current is not None and current[0] != watchdog_token:
+                raise RuntimeError("canary watchdog lease belongs to a newer run")
         updated = db.execute(
             f"UPDATE trading_profiles SET {assignments} WHERE id=?",
             (*values, snapshot["id"]),
@@ -85,7 +94,59 @@ def restore_profile_halted(snapshot):
             "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','1',0) "
             "ON CONFLICT(key) DO UPDATE SET value='1'"
         )
+        if watchdog_token is not None:
+            db.execute(
+                "DELETE FROM server_cache WHERE key=? AND value=?",
+                (WATCHDOG_CACHE_KEY, watchdog_token),
+            )
         db.commit()
+
+
+def watchdog_program(token, start_id, delay_seconds):
+    return f'''import sqlite3,time
+time.sleep({int(delay_seconds)})
+for _ in range(60):
+    profile = None
+    try:
+        profile = sqlite3.connect({str(PROFILE_DB)!r}, timeout=10)
+        profile.execute("PRAGMA busy_timeout=10000")
+        profile.execute("BEGIN IMMEDIATE")
+        row = profile.execute("SELECT value FROM server_cache WHERE key=?", ({WATCHDOG_CACHE_KEY!r},)).fetchone()
+        if row is None or row[0] != {token!r}:
+            profile.rollback()
+            break
+        with sqlite3.connect({str(TRADE_DB)!r}, timeout=10) as trades:
+            trades.execute("PRAGMA busy_timeout=10000")
+            trades.execute("UPDATE trades SET manual_close_requested=1 WHERE id>? AND status NOT IN ('CLOSED','CANCELLED')", ({int(start_id)},))
+        profile.execute("UPDATE trading_profiles SET is_active=0,updated_at=? WHERE id=?", (int(time.time()*1000), {PROFILE_ID!r}))
+        profile.execute("INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','1',0) ON CONFLICT(key) DO UPDATE SET value='1'")
+        profile.execute("DELETE FROM server_cache WHERE key=? AND value=?", ({WATCHDOG_CACHE_KEY!r}, {token!r}))
+        profile.commit()
+        break
+    except Exception:
+        if profile is not None:
+            try:
+                profile.rollback()
+            except Exception:
+                pass
+        time.sleep(5)
+    finally:
+        if profile is not None:
+            profile.close()
+'''
+
+
+def arm_fail_closed_watchdog(start_id, delay_seconds):
+    token = secrets.token_hex(16)
+    subprocess.Popen(
+        [sys.executable, "-c", watchdog_program(token, start_id, delay_seconds)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    return token
 
 
 def disable_profile(request_close_after=None):
@@ -222,7 +283,7 @@ def preflight(config):
     return start_id, accounts
 
 
-def configure_and_enable(config):
+def configure_and_enable(config, watchdog_token):
     now = int(time.time() * 1000)
     with profile_connection() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -248,6 +309,11 @@ def configure_and_enable(config):
         ).rowcount
         if updated != 1:
             raise RuntimeError("canary configuration did not update exactly one profile")
+        db.execute(
+            "INSERT INTO server_cache(key,value,expires_at) VALUES(?,?,0) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (WATCHDOG_CACHE_KEY, watchdog_token),
+        )
         db.execute(
             "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','0',0) "
             "ON CONFLICT(key) DO UPDATE SET value='0'"
@@ -309,13 +375,16 @@ def main():
         raise RuntimeError("monitor_seconds outside 60..2700")
     start_id = None
     profile_before = None
+    watchdog_token = None
     report = {"ok": False, "started_ms": int(time.time() * 1000), "config": config}
     try:
         profile_before = snapshot_profile()
         start_id, before_accounts = preflight(config)
         report["balances_before"] = before_accounts.get("balances")
         report["backup"] = backup_databases(str(report["started_ms"]))
-        configure_and_enable(config)
+        watchdog_token = arm_fail_closed_watchdog(start_id, monitor_seconds + 60)
+        configure_and_enable(config, watchdog_token)
+        report["watchdog_armed"] = True
         wait_for_readiness(config, report)
         deadline = time.monotonic() + monitor_seconds
         first_seen = False
@@ -363,7 +432,7 @@ def main():
     finally:
         if profile_before is not None:
             try:
-                restore_profile_halted(profile_before)
+                restore_profile_halted(profile_before, watchdog_token)
                 report["profile_restored_inactive"] = True
                 report["kill_switch_restored"] = True
             except Exception as restore_exc:

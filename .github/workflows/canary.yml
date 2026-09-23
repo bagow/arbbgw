@@ -25,7 +25,7 @@ jobs:
           ARB_CANARY_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
         run: |
           python3 - <<'PY'
-          import base64, json, os, pathlib, subprocess
+          import base64, json, os, pathlib, subprocess, time
           directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'arb-canary-ssh'
           directory.mkdir(mode=0o700)
           key = directory / 'key'
@@ -38,15 +38,111 @@ jobs:
               '-o','StrictHostKeyChecking=accept-new','-o','UserKnownHostsFile='+str(directory/'known_hosts')]
           source = pathlib.Path('scripts/run_live_canary.py').read_text()
           config = json.loads(pathlib.Path('.github/canary-request.json').read_text())
-          encoded = base64.b64encode(source.encode()).decode()
-          remote = "python3 -c 'import base64;exec(base64.b64decode(\"" + encoded + "\"))'"
+          task = 'arb-canary-' + os.environ['GITHUB_SHA'] + '-' + os.environ['GITHUB_RUN_ID']
+
+          def remote_python(program, payload, timeout=60):
+              encoded = base64.b64encode(program.encode()).decode()
+              command = "python3 -c 'import base64;exec(base64.b64decode(\"" + encoded + "\"))'"
+              return subprocess.run(
+                  ['ssh',*options,destination,command], input=json.dumps(payload),
+                  capture_output=True,text=True,timeout=timeout,
+              )
+
+          bootstrap = r'''
+          import base64,json,os,pathlib,subprocess,sys
+          payload=json.load(sys.stdin)
+          directory=pathlib.Path('/tmp')/payload['task']
+          directory.mkdir(mode=0o700,exist_ok=False)
+          script=directory/'run.py'
+          config=directory/'config.json'
+          temporary=directory/'result.tmp'
+          result=directory/'result.json'
+          log=directory/'runner.log'
+          script.write_bytes(base64.b64decode(payload['source']))
+          config.write_text(json.dumps(payload['config']))
+          supervisor=r"""import os,pathlib,subprocess,sys
+          script,config,temporary,result,log=sys.argv[1:]
+          with open(config) as stdin,open(temporary,'w') as stdout,open(log,'w') as stderr:
+              completed=subprocess.run([sys.executable,script],stdin=stdin,stdout=stdout,stderr=stderr)
+          os.replace(temporary,result)
+          pathlib.Path(result+'.exit').write_text(str(completed.returncode))
+          """
+          process=subprocess.Popen(
+              [sys.executable,'-c',supervisor,str(script),str(config),str(temporary),str(result),str(log)],
+              stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+              start_new_session=True,close_fds=True,
+          )
+          (directory/'pid').write_text(str(process.pid))
+          print(json.dumps({'started':True,'pid':process.pid}))
+          '''
+          poll = r'''
+          import base64,json,os,pathlib,sys
+          payload=json.load(sys.stdin)
+          directory=pathlib.Path('/tmp')/payload['task']
+          result=directory/'result.json'
+          if result.exists():
+              print(json.dumps({'status':'complete','result':base64.b64encode(result.read_bytes()).decode()}))
+          elif (directory/'pid').exists():
+              pid=int((directory/'pid').read_text())
+              try:
+                  os.kill(pid,0)
+                  status='running'
+              except ProcessLookupError:
+                  status='failed'
+              print(json.dumps({'status':status}))
+          else:
+              print(json.dumps({'status':'missing'}))
+          '''
+          cleanup = r'''
+          import json,pathlib,shutil,sys
+          payload=json.load(sys.stdin)
+          directory=pathlib.Path('/tmp')/payload['task']
+          if directory.parent==pathlib.Path('/tmp') and directory.name.startswith('arb-canary-'):
+              shutil.rmtree(directory,ignore_errors=True)
+          '''
           try:
-              proc = subprocess.run(['ssh',*options,destination,remote],input=json.dumps(config),
-                                    capture_output=True,text=True,timeout=3200)
-              pathlib.Path('canary-result.json').write_text(proc.stdout or json.dumps({
-                  'ok':False,'error':'remote canary returned no report','stderr_type':bool(proc.stderr)}))
-              if proc.returncode:
+              started = remote_python(bootstrap, {
+                  'task':task,
+                  'source':base64.b64encode(source.encode()).decode(),
+                  'config':config,
+              })
+              if started.returncode:
+                  raise RuntimeError('could not start detached remote canary')
+              deadline=time.monotonic()+3200
+              consecutive_poll_errors=0
+              while time.monotonic()<deadline:
+                  time.sleep(10)
+                  try:
+                      checked=remote_python(poll,{'task':task},timeout=45)
+                      if checked.returncode:
+                          raise RuntimeError('poll SSH failed')
+                      state=json.loads(checked.stdout)
+                      consecutive_poll_errors=0
+                  except Exception:
+                      consecutive_poll_errors+=1
+                      if consecutive_poll_errors<12:
+                          continue
+                      raise RuntimeError('remote canary polling unavailable for two minutes')
+                  if state.get('status')=='running':
+                      continue
+                  if state.get('status')!='complete':
+                      raise RuntimeError('detached remote canary exited without a report')
+                  report=base64.b64decode(state['result']).decode()
+                  json.loads(report)
+                  pathlib.Path('canary-result.json').write_text(report)
+                  remote_python(cleanup,{'task':task})
+                  break
+              else:
+                  raise TimeoutError('detached remote canary exceeded workflow deadline')
+              if not json.loads(pathlib.Path('canary-result.json').read_text()).get('ok'):
                   raise SystemExit('guarded canary failed; inspect canary-result artifact')
+          except Exception as exc:
+              if not pathlib.Path('canary-result.json').exists():
+                  pathlib.Path('canary-result.json').write_text(json.dumps({
+                      'ok':False,'error':type(exc).__name__+': '+str(exc),
+                      'detached_watchdog_expected':True,
+                  }))
+              raise
           finally:
               key.unlink(missing_ok=True)
           PY

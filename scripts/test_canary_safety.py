@@ -91,7 +91,7 @@ class CanarySafetyTests(unittest.TestCase):
             "max_holding_time_ms": 600_000,
         }
 
-        canary.configure_and_enable(config)
+        canary.configure_and_enable(config, "test-watchdog-token")
 
         with sqlite3.connect(self.profile_db) as db:
             row = db.execute(
@@ -101,9 +101,87 @@ class CanarySafetyTests(unittest.TestCase):
             kill = db.execute(
                 "SELECT value FROM server_cache WHERE key='kill_switch_active'"
             ).fetchone()[0]
+            watchdog = db.execute(
+                "SELECT value FROM server_cache WHERE key=?",
+                (canary.WATCHDOG_CACHE_KEY,),
+            ).fetchone()[0]
         self.assertEqual(row[:4], (1, 2, 1, 0.5))
         self.assertEqual(json.loads(row[4]), canary.DISABLED)
         self.assertEqual(kill, "0")
+        self.assertEqual(watchdog, "test-watchdog-token")
+
+    def test_restore_refuses_to_overwrite_newer_watchdog_lease(self):
+        snapshot = canary.snapshot_profile()
+        with sqlite3.connect(self.profile_db) as db:
+            db.execute("UPDATE trading_profiles SET is_active=1")
+            db.execute("UPDATE server_cache SET value='0' WHERE key='kill_switch_active'")
+            db.execute(
+                "INSERT INTO server_cache VALUES(?,?,0)",
+                (canary.WATCHDOG_CACHE_KEY, "newer-token"),
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "newer run"):
+            canary.restore_profile_halted(snapshot, "stale-token")
+
+        with sqlite3.connect(self.profile_db) as db:
+            active = db.execute(
+                "SELECT is_active FROM trading_profiles WHERE id='real-default'"
+            ).fetchone()[0]
+            kill = db.execute(
+                "SELECT value FROM server_cache WHERE key='kill_switch_active'"
+            ).fetchone()[0]
+        self.assertEqual(active, 1)
+        self.assertEqual(kill, "0")
+
+    @mock.patch.object(canary.subprocess, "Popen")
+    @mock.patch.object(canary.secrets, "token_hex", return_value="watchdog-token")
+    def test_watchdog_is_detached_before_returning_token(self, _token_hex, popen):
+        token = canary.arm_fail_closed_watchdog(2036, 120)
+
+        self.assertEqual(token, "watchdog-token")
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0][:2], [canary.sys.executable, "-c"])
+        self.assertIn("2036", args[0][2])
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertTrue(kwargs["close_fds"])
+
+    def test_watchdog_halts_profile_and_requests_close(self):
+        trade_db = Path(self.tempdir.name) / "trades.db"
+        with sqlite3.connect(trade_db) as db:
+            db.executescript(
+                "CREATE TABLE trades(id INTEGER PRIMARY KEY,status TEXT,manual_close_requested INTEGER);"
+                "INSERT INTO trades VALUES(2037,'OPEN',0);"
+            )
+        with sqlite3.connect(self.profile_db) as db:
+            db.execute("UPDATE trading_profiles SET is_active=1")
+            db.execute("UPDATE server_cache SET value='0' WHERE key='kill_switch_active'")
+            db.execute(
+                "INSERT INTO server_cache VALUES(?,?,0)",
+                (canary.WATCHDOG_CACHE_KEY, "owned-token"),
+            )
+
+        with mock.patch.object(canary, "TRADE_DB", trade_db):
+            exec(canary.watchdog_program("owned-token", 2036, 0), {})
+
+        with sqlite3.connect(self.profile_db) as db:
+            active = db.execute(
+                "SELECT is_active FROM trading_profiles WHERE id='real-default'"
+            ).fetchone()[0]
+            kill = db.execute(
+                "SELECT value FROM server_cache WHERE key='kill_switch_active'"
+            ).fetchone()[0]
+            token = db.execute(
+                "SELECT value FROM server_cache WHERE key=?",
+                (canary.WATCHDOG_CACHE_KEY,),
+            ).fetchone()
+        with sqlite3.connect(trade_db) as db:
+            close_requested = db.execute(
+                "SELECT manual_close_requested FROM trades WHERE id=2037"
+            ).fetchone()[0]
+        self.assertEqual(active, 0)
+        self.assertEqual(kill, "1")
+        self.assertIsNone(token)
+        self.assertEqual(close_requested, 1)
 
 
 if __name__ == "__main__":
