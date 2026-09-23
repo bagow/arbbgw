@@ -38,7 +38,8 @@ jobs:
               '-o','StrictHostKeyChecking=accept-new','-o','UserKnownHostsFile='+str(directory/'known_hosts')]
           source = pathlib.Path('scripts/run_live_canary.py').read_text()
           config = json.loads(pathlib.Path('.github/canary-request.json').read_text())
-          task = 'arb-canary-' + os.environ['GITHUB_SHA'] + '-' + os.environ['GITHUB_RUN_ID']
+          task = ('arb-canary-' + os.environ['GITHUB_SHA'] + '-' +
+                  os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'])
 
           def remote_python(program, payload, timeout=60):
               encoded = base64.b64encode(program.encode()).decode()
@@ -107,7 +108,11 @@ jobs:
                   'config':config,
               })
               if started.returncode:
-                  raise RuntimeError('could not start detached remote canary')
+                  detail=(started.stderr or started.stdout or 'no diagnostic').strip().splitlines()[-1][:500]
+                  raise RuntimeError(
+                      'could not start detached remote canary '
+                      f'(exit {started.returncode}): {detail}'
+                  )
               deadline=time.monotonic()+3200
               consecutive_poll_errors=0
               while time.monotonic()<deadline:

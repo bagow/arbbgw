@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "attempt": 8,
+  "attempt": 9,
   "expected_build_sha": "b7a7372ea5cce6e7e5ac22c15af760c4746a5337",
   "notional_usdt": 6.0,
   "leverage": 2,
