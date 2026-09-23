@@ -47,15 +47,17 @@ def report_view(row):
 
 def main():
     request = json.load(sys.stdin)
+    if request.get("enabled") is not True:
+        raise RuntimeError("explicit enabled=true is required")
+    halt_only = request.get("halt_only") is True
     label = str(request.get("backup_label", ""))
-    if request.get("enabled") is not True or not label or not set(label) <= SAFE_LABEL_CHARS:
+    if not halt_only and (not label or not set(label) <= SAFE_LABEL_CHARS):
         raise RuntimeError("explicit enabled=true and a numeric backup_label are required")
 
-    backup = ROOT / "canary-backups" / label / "vps-api.db"
     current = ROOT / "vps-api.db"
     trades = ROOT / "real-trader.db"
-    if not backup.is_file() or not current.is_file() or not trades.is_file():
-        raise RuntimeError("current or backup database is missing")
+    if not current.is_file() or not trades.is_file():
+        raise RuntimeError("current database is missing")
 
     with connect(trades, read_only=True) as trade_db:
         active = trade_db.execute(
@@ -63,6 +65,39 @@ def main():
         ).fetchone()[0]
         if active:
             raise RuntimeError(f"refusing profile restore with {active} active trades")
+
+    if halt_only:
+        with connect(current) as target:
+            target.execute("BEGIN IMMEDIATE")
+            before = target.execute(
+                "SELECT * FROM trading_profiles WHERE id=?", (PROFILE_ID,)
+            ).fetchone()
+            if before is None:
+                raise RuntimeError("current profile is missing")
+            target.execute(
+                "UPDATE trading_profiles SET is_active=0,updated_at=? WHERE id=?",
+                (int(time.time() * 1000), PROFILE_ID),
+            )
+            target.execute(
+                "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','1',0) "
+                "ON CONFLICT(key) DO UPDATE SET value='1'"
+            )
+            target.commit()
+            after = target.execute(
+                "SELECT * FROM trading_profiles WHERE id=?", (PROFILE_ID,)
+            ).fetchone()
+        print(json.dumps({
+            "ok": True,
+            "halt_only": True,
+            "before": report_view(before),
+            "after": report_view(after),
+            "kill_switch": "1",
+        }, indent=2, allow_nan=False))
+        return
+
+    backup = ROOT / "canary-backups" / label / "vps-api.db"
+    if not backup.is_file():
+        raise RuntimeError("backup database is missing")
 
     with connect(backup, read_only=True) as source:
         if source.execute("PRAGMA quick_check").fetchone()[0] != "ok":

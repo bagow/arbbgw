@@ -196,6 +196,10 @@ def preflight(config):
         if not cached:
             raise RuntimeError("missing private account cache")
         accounts = json.loads(cached[0])
+        margin_row = db.execute(
+            "SELECT value FROM technical_settings WHERE key='margin_check_multiplier'"
+        ).fetchone()
+        margin_multiplier = max(1.0, float(margin_row[0]) if margin_row else 1.5)
         now = int(time.time() * 1000)
         balance_stamps = accounts.get("balances_ts_by_exchange") or {}
         position_stamps = accounts.get("positions_ts_by_exchange") or {}
@@ -207,7 +211,7 @@ def preflight(config):
             if accounts.get("positions", {}).get(venue):
                 raise RuntimeError(f"existing exchange position on {venue}")
             required_margin = (
-                config["notional_usdt"] * 1.2
+                config["notional_usdt"] / config["leverage"] * margin_multiplier
                 + config["notional_usdt"] * 0.002
             )
             available = float(accounts.get("margin_balances", {}).get(venue, 0))
@@ -223,13 +227,14 @@ def configure_and_enable(config):
     with profile_connection() as db:
         db.execute("BEGIN IMMEDIATE")
         updated = db.execute(
-            "UPDATE trading_profiles SET is_active=1,trade_volume=?,leverage=1,max_active_trades=1,"
+            "UPDATE trading_profiles SET is_active=1,trade_volume=?,leverage=?,max_active_trades=1,"
             "min_entry_spread=?,max_entry_spread=?,take_profit_percent=?,trailing_stop_percent=?,"
             "hard_stop_percent=?,trailing_activation_percent=?,daily_loss_limit_usdt=?,"
             "max_total_exposure_usdt=?,slippage_percent=?,min_structural_deviation=?,"
             "min_depth_percent=?,max_holding_time_ms=?,disabled_exchanges=?,updated_at=? WHERE id=?",
             (
                 config["notional_usdt"],
+                config["leverage"],
                 config["min_entry_spread"],
                 config["max_entry_spread"],
                 config["take_profit_percent"],
@@ -297,6 +302,8 @@ def main():
     config = json.load(sys.stdin)
     if config.get("enabled") is not True or config.get("notional_usdt") != 6.0:
         raise RuntimeError("explicit enabled=true and notional_usdt=6.0 are required")
+    if config.get("leverage") not in (1, 2):
+        raise RuntimeError("canary leverage must be 1 or 2")
     monitor_seconds = int(config.get("monitor_seconds", 1800))
     if not 60 <= monitor_seconds <= 2700:
         raise RuntimeError("monitor_seconds outside 60..2700")

@@ -1,4 +1,5 @@
 {
   "enabled": true,
-  "backup_label": "1789562722560"
+  "halt_only": true,
+  "reason": "supersede margin-rejected canary attempt 4"
 }
