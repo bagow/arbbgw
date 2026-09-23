@@ -158,8 +158,24 @@ fn parse_row(row: &rusqlite::Row) -> TradingSettings {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum KillSyncAction {
+    Activate,
+    Reset,
+    None,
+}
+
+fn kill_sync_action(persisted: Option<&str>, active_in_memory: bool) -> KillSyncAction {
+    match (persisted, active_in_memory) {
+        (Some("1"), false) => KillSyncAction::Activate,
+        (Some("0"), true) => KillSyncAction::Reset,
+        _ => KillSyncAction::None,
+    }
+}
+
 /// Spawn background task refreshing ALL profiles from DB every `interval_secs`.
-/// Also monitors kill-switch reset requests from frontend (server_cache key 'kill_switch_active').
+/// Mirrors the persisted kill switch in both directions so an external pause is
+/// fail-closed just like a frontend resume.
 pub fn spawn_all_settings_refresher(
     db: Connection,
     mode: &'static str,
@@ -174,34 +190,42 @@ pub fn spawn_all_settings_refresher(
             let fresh = load_all_settings(&db, &m).await;
             *settings.write().await = fresh;
 
-            // ── KILL-SWITCH RESET CHECK ──
-            // Frontend writes kill_switch_active='0' via Resume button.
-            // When we see '0' and engine is killed, reset the kill-switch.
             if let Some(ref ctx) = e_ctx {
-                if ctx.is_killed.load(std::sync::atomic::Ordering::Relaxed) {
-                    let reset_requested = db
-                        .call(|conn| {
-                            let val: Result<String, _> = conn.query_row(
-                                "SELECT value FROM server_cache WHERE key = 'kill_switch_active'",
-                                [],
-                                |r| r.get(0),
-                            );
-                            Ok(val.unwrap_or_else(|_| "1".to_string()))
-                        })
-                        .await
-                        .unwrap_or_else(|_| "1".to_string());
-
-                    if reset_requested == "0" {
+                let persisted = db
+                    .call(|conn| {
+                        let value: Result<String, _> = conn.query_row(
+                            "SELECT value FROM server_cache WHERE key = 'kill_switch_active'",
+                            [],
+                            |r| r.get(0),
+                        );
+                        Ok(value.ok())
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                let active = ctx
+                    .is_killed
+                    .load(std::sync::atomic::Ordering::Acquire);
+                match kill_sync_action(persisted.as_deref(), active) {
+                    KillSyncAction::Activate => {
                         ctx.is_killed
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        tracing::warn!(
+                            "[settings] Persisted kill switch activated; new entries paused."
+                        );
+                    }
+                    KillSyncAction::Reset => {
+                        ctx.is_killed
+                            .store(false, std::sync::atomic::Ordering::Release);
                         ctx.consecutive_trims
-                            .store(0, std::sync::atomic::Ordering::Relaxed);
+                            .store(0, std::sync::atomic::Ordering::Release);
                         ctx.consecutive_failures
-                            .store(0, std::sync::atomic::Ordering::Relaxed);
+                            .store(0, std::sync::atomic::Ordering::Release);
                         // Clear all exchange cooldowns so trading resumes immediately
                         ctx.exchange_cooldown.clear();
                         tracing::info!("[settings] ✅ KILL-SWITCH RESET by user via frontend Resume button. Engine resumed.");
                     }
+                    KillSyncAction::None => {}
                 }
             }
         }
@@ -237,4 +261,18 @@ pub fn spawn_technical_settings_refresher(
             *ts.write().await = fresh;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_kill_switch_syncs_in_both_directions() {
+        assert_eq!(kill_sync_action(Some("1"), false), KillSyncAction::Activate);
+        assert_eq!(kill_sync_action(Some("0"), true), KillSyncAction::Reset);
+        assert_eq!(kill_sync_action(Some("1"), true), KillSyncAction::None);
+        assert_eq!(kill_sync_action(Some("0"), false), KillSyncAction::None);
+        assert_eq!(kill_sync_action(None, false), KillSyncAction::None);
+    }
 }
