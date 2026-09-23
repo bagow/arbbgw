@@ -1,0 +1,28 @@
+{
+  "ok": false,
+  "started_ms": 1790200236064,
+  "config": {
+    "enabled": true,
+    "attempt": 5,
+    "expected_build_sha": "d5ca2205d2f7e4b75b0f9363619b1e471ce32eb7",
+    "notional_usdt": 6.0,
+    "leverage": 2,
+    "monitor_seconds": 1800,
+    "min_entry_spread": 1.2,
+    "max_entry_spread": 2.5,
+    "take_profit_percent": 0.2,
+    "trailing_stop_percent": 0.1,
+    "hard_stop_percent": 0.5,
+    "trailing_activation_percent": 0.1,
+    "daily_loss_limit_usdt": 0.25,
+    "max_total_exposure_usdt": 7.0,
+    "slippage_percent": 0.05,
+    "min_structural_deviation": 0.5,
+    "min_depth_percent": 500.0,
+    "max_holding_time_ms": 600000
+  },
+  "error": "RuntimeError: build mismatch: 3fdd060900f4521d4f38b52782884781c52b9982 != d5ca2205d2f7e4b75b0f9363619b1e471ce32eb7",
+  "profile_restored_inactive": true,
+  "kill_switch_restored": true,
+  "finished_ms": 1790200236071
+}
