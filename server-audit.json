@@ -1,0 +1,1006 @@
+{
+  "recent_log_counts": {
+    "binance_subscription_rejected": 0,
+    "binance_receive_failed": 0,
+    "binance_connection_failed": 0,
+    "binance_banned": 0,
+    "engine_panics": 0,
+    "database_locked": 0,
+    "scanner_signals": 72,
+    "scanner_rejects": 11,
+    "scanner_depth_shallow": 11,
+    "scanner_lot_impossible": 0,
+    "scanner_volume_too_high": 0,
+    "scanner_volume_outside_range": 0,
+    "scanner_below_notional": 0,
+    "scanner_structural_deviation": 0,
+    "scanner_health_rejected": 0,
+    "managed_fee_preflight_failed": 0,
+    "managed_entries_halted": 0
+  },
+  "recent_log_count": 1379,
+  "binance_l2_quality_tail": [
+    "symbols=SANDUSDT,SEIUSDT,SHIBUSDT,SNXUSDT,SOLUSDT received=34 accepted=0 stale=34 invalid=0 last_lag_ms=33005",
+    "symbols=ENAUSDT,ETHUSDT,FETUSDT,FILUSDT,FLOKIUSDT received=50 accepted=0 stale=49 invalid=0 last_lag_ms=42586",
+    "symbols=HYPEUSDT,ICPUSDT,INJUSDT,JUPUSDT,KATUSDT received=118 accepted=0 stale=118 invalid=0 last_lag_ms=20722",
+    "symbols=ATOMUSDT,AVAXUSDT,AXSUSDT,BNBUSDT,BOMEUSDT received=71 accepted=0 stale=71 invalid=0 last_lag_ms=33743",
+    "symbols=FLOWUSDT,FTMUSDT,GALAUSDT,GMTUSDT,HBARUSDT received=33 accepted=0 stale=33 invalid=0 last_lag_ms=39648",
+    "symbols=MKRUSDT,NEARUSDT,NOTUSDT,ONDOUSDT,OPUSDT received=34 accepted=0 stale=34 invalid=0 last_lag_ms=36290",
+    "symbols=LDOUSDT,LINKUSDT,LTCUSDT,MANAUSDT,MATICUSDT received=31 accepted=0 stale=31 invalid=0 last_lag_ms=16175",
+    "symbols=SPKUSDT,STXUSDT,SUIUSDT,TIAUSDT,TONUSDT received=35 accepted=0 stale=35 invalid=0 last_lag_ms=42522",
+    "symbols=BONKUSDT,BTCUSDT,CRVUSDT,DOGEUSDT,DOTUSDT received=101 accepted=0 stale=101 invalid=0 last_lag_ms=11788",
+    "symbols=ORDIUSDT,PENDLEUSDT,PEPEUSDT,RENDERUSDT,RUNEUSDT received=26 accepted=0 stale=26 invalid=0 last_lag_ms=3563",
+    "symbols=TRXUSDT,VIRTUSDT,WIFUSDT,WLDUSDT,WUSDT received=156 accepted=0 stale=156 invalid=0 last_lag_ms=23068",
+    "symbols=XLMUSDT,XRPUSDT received=55 accepted=0 stale=55 invalid=0 last_lag_ms=8710",
+    "symbols=AAVEUSDT,ADAUSDT,APEUSDT,APTUSDT,ARBUSDT received=41 accepted=0 stale=41 invalid=0 last_lag_ms=64383",
+    "symbols=ENAUSDT,ETHUSDT,FETUSDT,FILUSDT,FLOKIUSDT received=20 accepted=0 stale=20 invalid=0 last_lag_ms=45774",
+    "symbols=MKRUSDT,NEARUSDT,NOTUSDT,ONDOUSDT,OPUSDT received=29 accepted=0 stale=29 invalid=0 last_lag_ms=44497",
+    "symbols=LDOUSDT,LINKUSDT,LTCUSDT,MANAUSDT,MATICUSDT received=52 accepted=0 stale=52 invalid=0 last_lag_ms=43139",
+    "symbols=FLOWUSDT,FTMUSDT,GALAUSDT,GMTUSDT,HBARUSDT received=21 accepted=0 stale=21 invalid=0 last_lag_ms=45390",
+    "symbols=SPKUSDT,STXUSDT,SUIUSDT,TIAUSDT,TONUSDT received=38 accepted=0 stale=38 invalid=0 last_lag_ms=49971",
+    "symbols=BONKUSDT,BTCUSDT,CRVUSDT,DOGEUSDT,DOTUSDT received=120 accepted=0 stale=120 invalid=0 last_lag_ms=14559",
+    "symbols=HYPEUSDT,ICPUSDT,INJUSDT,JUPUSDT,KATUSDT received=79 accepted=0 stale=79 invalid=0 last_lag_ms=29803"
+  ],
+  "binance_l2_subscription_tail": [
+    "Starting L2 subscriptions for 62 symbols (requires 13 connections)"
+  ],
+  "spread_diagnostics_tail": [
+    "DIAG: exchanges=2 total_pairs=615 \u2192 blacklist=0 stale=610 invalid_price=0 intra_spread=0 volume=0 spread_range=0 \u2192 PASSED=0 | min_vol=0.0M spread_thr=0.50 stale=5s",
+    "FRESH: kucoin:530/677 binance:0/728",
+    "DIAG: exchanges=2 total_pairs=615 \u2192 blacklist=0 stale=608 invalid_price=0 intra_spread=0 volume=0 spread_range=2 \u2192 PASSED=0 | min_vol=0.0M spread_thr=0.50 stale=5s",
+    "FRESH: kucoin:596/677 binance:2/728",
+    "DIAG: exchanges=2 total_pairs=615 \u2192 blacklist=0 stale=603 invalid_price=0 intra_spread=0 volume=0 spread_range=7 \u2192 PASSED=0 | min_vol=0.0M spread_thr=0.50 stale=5s",
+    "FRESH: kucoin:514/677 binance:10/728",
+    "DIAG: exchanges=2 total_pairs=615 \u2192 blacklist=0 stale=605 invalid_price=0 intra_spread=0 volume=0 spread_range=5 \u2192 PASSED=0 | min_vol=0.0M spread_thr=0.50 stale=5s",
+    "FRESH: kucoin:582/677 binance:7/728",
+    "DIAG: exchanges=2 total_pairs=615 \u2192 blacklist=0 stale=610 invalid_price=0 intra_spread=0 volume=0 spread_range=0 \u2192 PASSED=0 | min_vol=0.0M spread_thr=0.50 stale=5s",
+    "FRESH: kucoin:526/677 binance:0/728",
+    "DIAG: exchanges=2 total_pairs=615 \u2192 blacklist=0 stale=610 invalid_price=0 intra_spread=0 volume=0 spread_range=0 \u2192 PASSED=0 | min_vol=0.0M spread_thr=0.50 stale=5s",
+    "FRESH: kucoin:535/677 binance:0/728",
+    "DIAG: exchanges=2 total_pairs=615 \u2192 blacklist=0 stale=0 invalid_price=0 intra_spread=0 volume=0 spread_range=0 \u2192 PASSED=0 | min_vol=0.0M spread_thr=0.50 stale=5s",
+    "FRESH: binance:1/728 kucoin:0/676",
+    "DIAG: exchanges=2 total_pairs=615 \u2192 blacklist=0 stale=559 invalid_price=0 intra_spread=0 volume=0 spread_range=0 \u2192 PASSED=1 | min_vol=0.0M spread_thr=0.50 stale=5s",
+    "FRESH: kucoin:515/677 binance:1/728",
+    "DIAG: exchanges=2 total_pairs=615 \u2192 blacklist=0 stale=567 invalid_price=0 intra_spread=0 volume=0 spread_range=0 \u2192 PASSED=1 | min_vol=0.0M spread_thr=0.50 stale=5s",
+    "FRESH: kucoin:531/677 binance:1/728",
+    "DIAG: exchanges=2 total_pairs=615 \u2192 blacklist=0 stale=566 invalid_price=0 intra_spread=0 volume=0 spread_range=4 \u2192 PASSED=1 | min_vol=0.0M spread_thr=0.50 stale=5s",
+    "FRESH: kucoin:530/677 binance:5/728"
+  ],
+  "managed_fee_preflight_tail": [],
+  "binance_public_transport_errors": [],
+  "core_deployment_tail": [
+    "Sep 23 16:17:39 instance-20260331-1947 systemd[1]: Stopping CEX Arbitrage Core Node...",
+    "Sep 23 16:17:39 instance-20260331-1947 systemd[1]: Stopped CEX Arbitrage Core Node.",
+    "Sep 23 16:17:39 instance-20260331-1947 systemd[1]: Started CEX Arbitrage Core Node."
+  ],
+  "pending_core_artifacts": [
+    {
+      "name": "arb-core-656703bf41512f3e584b90b7ff0b02365ed1e675",
+      "mtime": 1789572656.2431757,
+      "files": [
+        {
+          "name": "core-node.upload",
+          "size": 10846208,
+          "mtime": 1789573377.0427485
+        }
+      ]
+    }
+  ],
+  "core-node": "MainPID=2879815\nNRestarts=0\nActiveState=active\nSubState=running\nActiveEnterTimestamp=Wed 2026-09-23 16:17:39 GMT",
+  "vps-api": "MainPID=2422086\nNRestarts=0\nActiveState=active\nSubState=running\nActiveEnterTimestamp=Wed 2026-09-16 12:40:38 GMT",
+  "cloudflared": "MainPID=1000969\nNRestarts=0\nActiveState=active\nSubState=running\nActiveEnterTimestamp=Tue 2026-08-25 10:10:37 GMT",
+  "core_process_usage": "2879815     120 20.8  5.9    6 58324 Ssl",
+  "load_average": [
+    0.03,
+    0.27,
+    0.35
+  ],
+  "core-node_binary_error": "PermissionError",
+  "vps-api_binary": {
+    "sha256": "86b15e45a9a68c86a31c3f6b070d8fc837fe262a4202b4b20fe245d2c70b48d3",
+    "mtime": 1789562393.0
+  },
+  "health_samples": [
+    {
+      "status": 503,
+      "trading_ready": false,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 400
+      }
+    },
+    {
+      "status": 503,
+      "trading_ready": false,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 400
+      }
+    },
+    {
+      "status": 503,
+      "trading_ready": false,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 408
+      }
+    },
+    {
+      "status": 503,
+      "trading_ready": false,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 390
+      }
+    },
+    {
+      "status": 503,
+      "trading_ready": false,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 426
+      }
+    },
+    {
+      "status": 503,
+      "trading_ready": false,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 404
+      }
+    },
+    {
+      "status": 503,
+      "trading_ready": false,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 406
+      }
+    },
+    {
+      "status": 503,
+      "trading_ready": false,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 363
+      }
+    },
+    {
+      "status": 503,
+      "trading_ready": false,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 405
+      }
+    },
+    {
+      "status": 503,
+      "trading_ready": false,
+      "fresh_books": {
+        "binance": 0,
+        "gate": 0,
+        "kucoin": 387
+      }
+    }
+  ],
+  "health_http_status": 503,
+  "health": {
+    "active_trades": 0,
+    "build_sha": "0143d8139a64b65367545e70ec72b2232a889b5d",
+    "entries_halted": false,
+    "entry_decisions": {
+      "rejected_entry_budget": 1,
+      "rejected_executable_l2": 8,
+      "signal_received": 9
+    },
+    "healthy": false,
+    "market_ready": false,
+    "private_ready": true,
+    "process_healthy": true,
+    "scanner_status": {
+      "active_profiles": 1,
+      "profile_window_rows": 0,
+      "signals_emitted": 0,
+      "spreads_available": 0,
+      "spreads_considered": 0,
+      "updated_ms": 1790180384754
+    },
+    "supervisor_age_ms": 7,
+    "trading_ready": false,
+    "venues": [
+      {
+        "balance_age_ms": 7920,
+        "books": 54,
+        "current_specs": 528,
+        "exchange": "binance",
+        "fresh_books": 0,
+        "positions_age_ms": 6695,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": null,
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "gate",
+        "fresh_books": 0,
+        "positions_age_ms": null,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": 6131,
+        "books": 677,
+        "current_specs": 673,
+        "exchange": "kucoin",
+        "fresh_books": 387,
+        "positions_age_ms": 5827,
+        "wanted_books": 0
+      }
+    ]
+  },
+  "real-trader.db": {
+    "quick_check": [
+      "ok"
+    ],
+    "performance": {
+      "scope": "Closed VERIFIED trades only; no forecast of future returns",
+      "status_counts": {
+        "CLOSED": 61
+      },
+      "excluded_closed": {
+        "LEGACY_UNVERIFIED": 60,
+        "FEES_PENDING": 1
+      },
+      "active_count": 0,
+      "verified_closed_count": 0,
+      "wins": 0,
+      "losses": 0,
+      "breakeven": 0,
+      "win_rate_percent": null,
+      "net_pnl_usdt": null,
+      "average_net_pnl_usdt": null,
+      "profit_factor": null,
+      "realized_pnl_max_drawdown_usdt": null,
+      "limitations": [
+        "Drawdown excludes unrealized exposure, deposits and withdrawals.",
+        "Null profit factor means no observed losses, not proven profitability.",
+        "VERIFIED reflects the ledger label; this tool does not recheck exchange evidence."
+      ]
+    },
+    "recent_trades": [
+      {
+        "id": 2031,
+        "pair": "AINUSDT",
+        "exchange_a": "kucoin",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "FEES_PENDING",
+        "entry_time": 1789595310044,
+        "exit_time": 1789595319346,
+        "pnl": null,
+        "gross_pnl": -0.04800000000000004,
+        "commission_cost": 0.005748,
+        "funding_cost": 0.0,
+        "close_reason": "HARD_STOP"
+      },
+      {
+        "id": 2030,
+        "pair": "VELVETUSDT",
+        "exchange_a": "binance",
+        "exchange_b": "kucoin",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787737170747,
+        "exit_time": 1787737170747,
+        "pnl": 0.027382649999999998,
+        "gross_pnl": 0.0399,
+        "commission_cost": 0.01251735,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2029,
+        "pair": "BTRUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787734521743,
+        "exit_time": 1787734521743,
+        "pnl": -0.10894610000000002,
+        "gross_pnl": -0.0357,
+        "commission_cost": 0.07324610000000001,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2028,
+        "pair": "BTRUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787732720057,
+        "exit_time": 1787732723564,
+        "pnl": 0.017832649999999894,
+        "gross_pnl": 0.0846999999999999,
+        "commission_cost": 0.06686735,
+        "funding_cost": 0.0,
+        "close_reason": "STOP"
+      },
+      {
+        "id": 2027,
+        "pair": "BTRUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787732453563,
+        "exit_time": 1787732453563,
+        "pnl": -0.06848505000000002,
+        "gross_pnl": -0.0077,
+        "commission_cost": 0.060785050000000014,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2026,
+        "pair": "BTRUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787731361245,
+        "exit_time": 1787731361245,
+        "pnl": -0.04272995000000001,
+        "gross_pnl": 0.0112,
+        "commission_cost": 0.05392995000000001,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2025,
+        "pair": "BTRUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787729779152,
+        "exit_time": 1787729779152,
+        "pnl": -0.08818665000000002,
+        "gross_pnl": -0.0396,
+        "commission_cost": 0.048586650000000016,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2024,
+        "pair": "BTRUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787729114447,
+        "exit_time": 1787729114447,
+        "pnl": -0.038397150000000005,
+        "gross_pnl": 0.004,
+        "commission_cost": 0.04239715000000001,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2023,
+        "pair": "BTRUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787728860165,
+        "exit_time": 1787728860165,
+        "pnl": -0.02073395,
+        "gross_pnl": 0.0152,
+        "commission_cost": 0.03593395,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2022,
+        "pair": "BTRUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787728716191,
+        "exit_time": 1787728716191,
+        "pnl": -0.044241649999999993,
+        "gross_pnl": -0.0144,
+        "commission_cost": 0.029841649999999997,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2021,
+        "pair": "STORJUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "kucoin",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787727608045,
+        "exit_time": 1787727608045,
+        "pnl": -0.19677061500000032,
+        "gross_pnl": -0.004470000000000335,
+        "commission_cost": 0.19230061499999998,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2020,
+        "pair": "STORJUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "kucoin",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787727451412,
+        "exit_time": 1787727451412,
+        "pnl": -0.1967003650000003,
+        "gross_pnl": -0.004440000000000333,
+        "commission_cost": 0.19226036499999996,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2019,
+        "pair": "STORJUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "kucoin",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787727320153,
+        "exit_time": 1787727320153,
+        "pnl": -0.2040535350000005,
+        "gross_pnl": -0.011840000000000545,
+        "commission_cost": 0.19221353499999996,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2018,
+        "pair": "STORJUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "kucoin",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787726910010,
+        "exit_time": 1787727010698,
+        "pnl": -0.26728580500000043,
+        "gross_pnl": -0.06468000000000043,
+        "commission_cost": 0.202605805,
+        "funding_cost": 0.0,
+        "close_reason": "STOP"
+      },
+      {
+        "id": 2017,
+        "pair": "STORJUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787726234143,
+        "exit_time": 1787726632115,
+        "pnl": -0.06416380499999996,
+        "gross_pnl": 0.14043,
+        "commission_cost": 0.20459380499999996,
+        "funding_cost": 0.0,
+        "close_reason": "TP"
+      },
+      {
+        "id": 2016,
+        "pair": "PROMUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787725084565,
+        "exit_time": 1787725084565,
+        "pnl": -0.0615183,
+        "gross_pnl": -0.0322,
+        "commission_cost": 0.0293183,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2015,
+        "pair": "BTRUSDT",
+        "exchange_a": "binance",
+        "exchange_b": "gate",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787724024453,
+        "exit_time": 1787724029259,
+        "pnl": -0.1585404499999998,
+        "gross_pnl": -0.14079999999999981,
+        "commission_cost": 0.017740449999999998,
+        "funding_cost": 0.0,
+        "close_reason": "LEG_MISSING_ON_CLOSE"
+      },
+      {
+        "id": 2014,
+        "pair": "BTRUSDT",
+        "exchange_a": "binance",
+        "exchange_b": "gate",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787724018856,
+        "exit_time": 1787724024213,
+        "pnl": -0.23854044999999988,
+        "gross_pnl": -0.22079999999999989,
+        "commission_cost": 0.017740449999999998,
+        "funding_cost": 0.0,
+        "close_reason": "LEG_MISSING_ON_CLOSE"
+      },
+      {
+        "id": 2013,
+        "pair": "BTRUSDT",
+        "exchange_a": "binance",
+        "exchange_b": "gate",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787724006570,
+        "exit_time": 1787724018089,
+        "pnl": 0.12957875000000002,
+        "gross_pnl": 0.1504,
+        "commission_cost": 0.02082125,
+        "funding_cost": 0.0,
+        "close_reason": "LEG_MISSING_ON_CLOSE"
+      },
+      {
+        "id": 2012,
+        "pair": "BTRUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787723975680,
+        "exit_time": 1787724005578,
+        "pnl": 0.13042274999999956,
+        "gross_pnl": 0.15439999999999957,
+        "commission_cost": 0.02397725,
+        "funding_cost": 0.0,
+        "close_reason": "ZERO_SPREAD"
+      },
+      {
+        "id": 2011,
+        "pair": "BTRUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787722228797,
+        "exit_time": 1787722228797,
+        "pnl": 0.03490795000000001,
+        "gross_pnl": 0.0522,
+        "commission_cost": 0.01729205,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2010,
+        "pair": "BTRUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787721847772,
+        "exit_time": 1787721847772,
+        "pnl": 0.008488,
+        "gross_pnl": 0.02,
+        "commission_cost": 0.011512,
+        "funding_cost": 0.0,
+        "close_reason": "ASYMMETRIC_CLOSE"
+      },
+      {
+        "id": 2009,
+        "pair": "STORJUSDT",
+        "exchange_a": "binance",
+        "exchange_b": "gate",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787719397578,
+        "exit_time": 1787719407650,
+        "pnl": -0.22447279500000067,
+        "gross_pnl": -0.02310000000000066,
+        "commission_cost": 0.201372795,
+        "funding_cost": 0.0,
+        "close_reason": "LEG_MISSING_ON_CLOSE"
+      },
+      {
+        "id": 2008,
+        "pair": "STORJUSDT",
+        "exchange_a": "binance",
+        "exchange_b": "gate",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787719383759,
+        "exit_time": 1787719397249,
+        "pnl": -0.229114355,
+        "gross_pnl": -0.02464,
+        "commission_cost": 0.204474355,
+        "funding_cost": 0.0,
+        "close_reason": "LEG_MISSING_ON_CLOSE"
+      },
+      {
+        "id": 2007,
+        "pair": "STORJUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787719123755,
+        "exit_time": 1787719382807,
+        "pnl": -0.26454359500000024,
+        "gross_pnl": -0.05698000000000028,
+        "commission_cost": 0.207563595,
+        "funding_cost": 0.0,
+        "close_reason": "STOP"
+      },
+      {
+        "id": 2006,
+        "pair": "STORJUSDT",
+        "exchange_a": "binance",
+        "exchange_b": "gate",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787718989069,
+        "exit_time": 1787719118745,
+        "pnl": -0.23696234505999947,
+        "gross_pnl": -0.029420000059999493,
+        "commission_cost": 0.207542345,
+        "funding_cost": 0.0,
+        "close_reason": "EXTERNAL_CLOSE"
+      },
+      {
+        "id": 2005,
+        "pair": "STORJUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787718889466,
+        "exit_time": 1787718988296,
+        "pnl": -0.25861954000000015,
+        "gross_pnl": -0.04805000000000013,
+        "commission_cost": 0.21056954,
+        "funding_cost": 0.0,
+        "close_reason": "STOP"
+      },
+      {
+        "id": 2004,
+        "pair": "STORJUSDT",
+        "exchange_a": "binance",
+        "exchange_b": "gate",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787718758877,
+        "exit_time": 1787718887458,
+        "pnl": -0.17984060500000043,
+        "gross_pnl": 0.03659999999999956,
+        "commission_cost": 0.21644060499999998,
+        "funding_cost": 0.0,
+        "close_reason": "EXTERNAL_CLOSE"
+      },
+      {
+        "id": 2003,
+        "pair": "STORJUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "binance",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787716954778,
+        "exit_time": 1787718758307,
+        "pnl": -0.19806150000000078,
+        "gross_pnl": 0.018359999999999252,
+        "commission_cost": 0.21642150000000002,
+        "funding_cost": 0.0,
+        "close_reason": "TIME_STOP"
+      },
+      {
+        "id": 2002,
+        "pair": "STORJUSDT",
+        "exchange_a": "gate",
+        "exchange_b": "kucoin",
+        "status": "CLOSED",
+        "accounting_status": "LEGACY_UNVERIFIED",
+        "entry_time": 1787716922702,
+        "exit_time": 1787716951550,
+        "pnl": -0.2807576099999995,
+        "gross_pnl": -0.06299999999999951,
+        "commission_cost": 0.21775760999999996,
+        "funding_cost": 0.0,
+        "close_reason": "STOP"
+      }
+    ],
+    "active_trades": [],
+    "order_states": [
+      {
+        "state": "Filled",
+        "count": 4
+      }
+    ]
+  },
+  "vps-api.db": {
+    "quick_check": [
+      "ok"
+    ],
+    "profiles": [
+      {
+        "id": "real-default",
+        "is_active": 1,
+        "trade_volume": 6.0,
+        "leverage": 10,
+        "min_entry_spread": 1.2,
+        "max_entry_spread": 2.5,
+        "take_profit_percent": 2.0,
+        "trailing_stop_percent": 1.0,
+        "max_active_trades": 7,
+        "max_holding_time_ms": 1800000,
+        "min_volume_millions": 3.0,
+        "min_structural_deviation": 0.0,
+        "min_depth_percent": 200.0,
+        "slippage_percent": 2.0,
+        "daily_loss_limit_usdt": 5.0,
+        "max_total_exposure_usdt": 300.0,
+        "disabled_exchanges": "[\"htx\",\"toobit\",\"ascendex\",\"bingx\",\"bitget\",\"bitmex\",\"gate\",\"xt\",\"bybit\"]"
+      }
+    ],
+    "kill_switch": "0",
+    "cached_accounts": {
+      "ts": 1790180382759,
+      "balances_ts": 1790180376846,
+      "positions_ts": 1790180378071,
+      "balances_ts_by_exchange": {
+        "binance": 1790180376846,
+        "kucoin": 1790180378635
+      },
+      "positions_ts_by_exchange": {
+        "binance": 1790180378071,
+        "kucoin": 1790180378939
+      },
+      "fees_ts_by_symbol": {
+        "binance:ONEUSDT": 1790180276733,
+        "kucoin:ONEUSDT": 1790180276953
+      },
+      "balances": {
+        "binance": 9.83980873,
+        "kucoin": 8.4275245038
+      },
+      "margin_balances": {
+        "binance": 9.83980873,
+        "kucoin": 8.4275245038
+      },
+      "positions": {
+        "binance": [],
+        "kucoin": []
+      }
+    }
+  },
+  "shadow-books.db": {
+    "quick_check": [
+      "ok"
+    ],
+    "scope": "Latest 10000 recorded snapshots, not complete history",
+    "quality": {
+      "samples": 10000,
+      "first_ms": 1790152143043,
+      "last_ms": 1790180376946,
+      "both_books_fresh_and_valid": 2106,
+      "both_books_valid_and_structural_verified": 199,
+      "venue_observations": {
+        "binance": 10000,
+        "kucoin": 10000
+      },
+      "stale_or_invalid_by_venue": {
+        "binance": 7847,
+        "kucoin": 960
+      },
+      "usable_pairs": {
+        "ONEUSDT": 1391,
+        "GUSDT": 8,
+        "RVNUSDT": 23,
+        "STARUSDT": 135,
+        "TAKEUSDT": 19,
+        "GRIFFAINUSDT": 1,
+        "JUPUSDT": 1,
+        "CETUSUSDT": 30,
+        "CARVUSDT": 1,
+        "MUSDT": 447,
+        "ZILUSDT": 49,
+        "NEARUSDT": 1
+      },
+      "build_samples": {
+        "0143d8139a64b65367545e70ec72b2232a889b5d": 69,
+        "2b6dc8e40b02d7f8519aa85959aff9dda6678930": 576,
+        "25ae1e91004d7104046d8386c24eb63e519ef9b3": 9355
+      },
+      "replay_limitations": [
+        "Historical samples omit contract filters, funding deadlines and order latency.",
+        "Snapshots cannot prove fills, hedge execution or realized profit.",
+        "Sparse or stale samples cannot establish stop/TP execution between observations."
+      ]
+    }
+  },
+  "scanner_funnel": {
+    "scope": "Distinct server_cache snapshots observed over 15 seconds; public market data only",
+    "profile_id": "real-default",
+    "technical_settings": {
+      "spread_threshold": "0.5",
+      "spread_max": "50.0",
+      "stale_secs": "5",
+      "intra_spread_max_pct": "1.0",
+      "vol_tolerance_pct": "15.0",
+      "min_listing_age_days": "21",
+      "binance_min_notional": "5.05",
+      "margin_check_multiplier": "1.5",
+      "max_spreads_per_cycle": "200",
+      "default_fee_rate": "0.0005",
+      "entry_order_type": "ioc",
+      "diag_log_interval": "10000"
+    },
+    "distinct_snapshots": 16,
+    "nonempty_snapshots": 7,
+    "estimated_break_even_pct_using_default_fee": 0.28,
+    "observation_stage_counts": {
+      "snapshot_rows": 7,
+      "enabled_venues": 7,
+      "raw_spread_in_entry_window": 5,
+      "both_24h_volumes_above_profile_minimum": 5,
+      "configured_structural_filter_passed": 5,
+      "positive_after_estimated_break_even": 5,
+      "configured_entry_preflight_estimate": 5
+    },
+    "samples": [
+      {
+        "ts": 1790180389451,
+        "rows": 0,
+        "max_spread_pct": null
+      },
+      {
+        "ts": 1790180390461,
+        "rows": 1,
+        "max_spread_pct": 1.0885
+      },
+      {
+        "ts": 1790180391546,
+        "rows": 1,
+        "max_spread_pct": 1.2352
+      },
+      {
+        "ts": 1790180392635,
+        "rows": 1,
+        "max_spread_pct": 1.4808
+      },
+      {
+        "ts": 1790180393647,
+        "rows": 1,
+        "max_spread_pct": 1.4106
+      },
+      {
+        "ts": 1790180394657,
+        "rows": 0,
+        "max_spread_pct": null
+      },
+      {
+        "ts": 1790180395667,
+        "rows": 0,
+        "max_spread_pct": null
+      },
+      {
+        "ts": 1790180396678,
+        "rows": 1,
+        "max_spread_pct": 1.2477
+      },
+      {
+        "ts": 1790180397738,
+        "rows": 1,
+        "max_spread_pct": 1.2477
+      },
+      {
+        "ts": 1790180398748,
+        "rows": 1,
+        "max_spread_pct": 1.1428
+      },
+      {
+        "ts": 1790180399758,
+        "rows": 0,
+        "max_spread_pct": null
+      },
+      {
+        "ts": 1790180400833,
+        "rows": 0,
+        "max_spread_pct": null
+      },
+      {
+        "ts": 1790180401844,
+        "rows": 0,
+        "max_spread_pct": null
+      },
+      {
+        "ts": 1790180402856,
+        "rows": 0,
+        "max_spread_pct": null
+      },
+      {
+        "ts": 1790180403944,
+        "rows": 0,
+        "max_spread_pct": null
+      },
+      {
+        "ts": 1790180404954,
+        "rows": 0,
+        "max_spread_pct": null
+      }
+    ],
+    "top_unique_rows": [
+      {
+        "pair": "ONEUSDT",
+        "exchange_a": "binance",
+        "exchange_b": "kucoin",
+        "direction": "kucoin>binance",
+        "spread_pct": 1.4808,
+        "structural_spread_pct": 3.819,
+        "adjusted_spread_pct": -2.3382,
+        "vol_a_usd": 171652025.2,
+        "vol_b_usd": 4426151.83,
+        "structural_verified": false
+      }
+    ]
+  },
+  "recorded_scanner_funnel": {
+    "scope": "Latest 10000 shadow rows, restricted to the currently deployed build",
+    "build_sha": "0143d8139a64b65367545e70ec72b2232a889b5d",
+    "profile_id": "real-default",
+    "configured_depth_usd": 12.0,
+    "observation_stage_counts": {
+      "current_build_samples": 80,
+      "both_l2_books_fresh_and_valid": 18,
+      "enabled_venues": 18,
+      "raw_spread_in_entry_window": 4,
+      "both_24h_volumes_above_profile_minimum": 4,
+      "configured_structural_filter_passed": 4,
+      "positive_after_actual_break_even": 4,
+      "l2_top_levels_above_configured_depth": 3,
+      "configured_entry_preflight": 3
+    },
+    "distinct_timestamp_stage_counts": {
+      "current_build_samples": 80,
+      "both_l2_books_fresh_and_valid": 18,
+      "enabled_venues": 18,
+      "raw_spread_in_entry_window": 4,
+      "both_24h_volumes_above_profile_minimum": 4,
+      "configured_structural_filter_passed": 4,
+      "positive_after_actual_break_even": 4,
+      "l2_top_levels_above_configured_depth": 3,
+      "configured_entry_preflight": 3
+    },
+    "top_adjusted_unique_rows": [
+      {
+        "pair": "ONEUSDT",
+        "spread_pct": 1.4145,
+        "structural_spread_pct": 1.252,
+        "adjusted_spread_pct": 0.1625,
+        "vol_a_usd": 171652025.2,
+        "vol_b_usd": 4426151.83,
+        "structural_verified": false
+      }
+    ]
+  },
+  "disk_free_bytes": 14543994880,
+  "requested_commit": "b5e10b19f3be44543759f58f63663d52f253d271"
+}
