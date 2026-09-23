@@ -17,10 +17,11 @@ pub fn ioc_break_even_pct(fee_a: f64, fee_b: f64) -> f64 {
     2.0 * (fee_a + fee_b) * 100.0 + 4.0 * EXPECTED_IOC_SLIPPAGE_PER_LEG_PCT
 }
 
-/// Return the structural reserve selected by the profile.
+/// Return the verified structural reserve used by every EMA entry.
 ///
-/// A zero minimum structural deviation is the documented off switch. In that
-/// mode an unavailable historical warmup must not silently disable trading.
+/// `min_structural_deviation` controls the additional deviation required by
+/// the profile. Zero disables only that extra margin; it must not turn a
+/// persistent venue premium into presumed profit or bypass historical warmup.
 pub fn configured_structural_reserve(
     min_structural_deviation: f64,
     structural_verified: bool,
@@ -31,9 +32,6 @@ pub fn configured_structural_reserve(
         || min_structural_deviation < 0.0
     {
         return None;
-    }
-    if min_structural_deviation == 0.0 {
-        return Some(0.0);
     }
     structural_verified.then_some(observed_structural_spread.max(0.0))
 }
@@ -271,8 +269,9 @@ mod tests {
     }
 
     #[test]
-    fn zero_structural_deviation_really_disables_the_hidden_guard() {
-        assert_eq!(configured_structural_reserve(0.0, false, 1.65), Some(0.0));
+    fn structural_baseline_is_mandatory_even_without_extra_deviation() {
+        assert_eq!(configured_structural_reserve(0.0, false, 1.65), None);
+        assert_eq!(configured_structural_reserve(0.0, true, 1.65), Some(1.65));
         assert_eq!(configured_structural_reserve(0.5, false, 1.65), None);
         assert_eq!(configured_structural_reserve(0.5, true, 1.65), Some(1.65));
     }

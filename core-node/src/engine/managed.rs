@@ -17,6 +17,20 @@ use std::sync::{
 static ENTRY_BUSY: AtomicBool = AtomicBool::new(false);
 static LAST_PREFLIGHT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 const FEE_TTL_MS: i64 = 3_600_000;
+const NORMAL_EXIT_PAIR_COOLDOWN_MS: i64 = 60_000;
+const RISK_EXIT_PAIR_COOLDOWN_MS: i64 = 30 * 60_000;
+
+fn pair_cooldown_after_close(reason: &str) -> i64 {
+    if matches!(reason, "TP" | "MANUAL_CLOSE") {
+        NORMAL_EXIT_PAIR_COOLDOWN_MS
+    } else {
+        RISK_EXIT_PAIR_COOLDOWN_MS
+    }
+}
+
+fn trailing_stop_reached(percent: f64, peak: f64, activation: f64, distance: f64) -> bool {
+    distance > 0.0 && peak >= activation && percent <= (peak - distance).max(0.0)
+}
 struct BusyGuard;
 impl Drop for BusyGuard {
     fn drop(&mut self) {
@@ -589,6 +603,26 @@ async fn enter(
         let second_step = if first_a { s.mult_b } else { s.mult_a };
         let q = v.filled_quantity;
         let on_grid = (q / second_step - (q / second_step).round()).abs() < 1e-8;
+        let second_exchange = if first_a {
+            &s.exchange_b
+        } else {
+            &s.exchange_a
+        };
+        // The first venue's submit/query round trip is commonly longer than
+        // the 750 ms execution-book freshness budget. Refresh Binance again
+        // immediately before pricing the hedge, not only before the first leg.
+        if on_grid && second_exchange == "binance" {
+            if let Err(error) = refresh_binance_execution_book(&s.pair, prices, http, ctx).await {
+                tracing::warn!(
+                    "[managed] Binance hedge L2 refresh failed for {}: {}",
+                    s.pair,
+                    error
+                );
+                j.state(id, "CLOSING", "HEDGE_MARKET_DATA_UNAVAILABLE")
+                    .await?;
+                return Ok(());
+            }
+        }
         let px = executable(
             prices,
             ctx,
@@ -820,9 +854,12 @@ async fn manage(
         }
         hard_stop = t.plan.settings.hard_stop_percent > 0.0
             && percent <= -t.plan.settings.hard_stop_percent;
-        trailing_stop = t.plan.settings.trailing_stop_percent > 0.0
-            && peak >= t.plan.settings.trailing_activation_percent
-            && percent <= peak - t.plan.settings.trailing_stop_percent;
+        trailing_stop = trailing_stop_reached(
+            percent,
+            peak,
+            t.plan.settings.trailing_activation_percent,
+            t.plan.settings.trailing_stop_percent,
+        );
     }
     if !closing && !timed && !funding_due && !profit && !hard_stop && !trailing_stop {
         return Ok(());
@@ -887,7 +924,8 @@ async fn manage(
         && aggregate(&updated, "B").remaining() <= 1e-9
         && updated.iter().all(|o| o.observation.state.terminal());
     if flat {
-        ctx.pair_cooldown.insert(s.pair.clone(), now_ms() + 60_000);
+        ctx.pair_cooldown
+            .insert(s.pair.clone(), now_ms() + pair_cooldown_after_close(reason));
     }
     if flat && !matches!(reason, "TP" | "MANUAL_CLOSE") && a.opened + b.opened > 0.0 {
         let n = ctx.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
@@ -907,6 +945,23 @@ async fn manage(
 mod transport_tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn risk_exits_quarantine_the_pair_longer_than_normal_exits() {
+        assert_eq!(pair_cooldown_after_close("TP"), 60_000);
+        assert_eq!(pair_cooldown_after_close("MANUAL_CLOSE"), 60_000);
+        assert_eq!(pair_cooldown_after_close("HARD_STOP"), 1_800_000);
+        assert_eq!(pair_cooldown_after_close("HEDGE_UNAVAILABLE"), 1_800_000);
+    }
+
+    #[test]
+    fn armed_trailing_stop_never_sets_a_negative_net_floor() {
+        assert!(!trailing_stop_reached(0.05, 0.60, 0.10, 1.0));
+        assert!(trailing_stop_reached(-0.01, 0.60, 0.10, 1.0));
+        assert!(trailing_stop_reached(0.29, 0.60, 0.10, 0.30));
+        assert!(!trailing_stop_reached(-0.50, 0.05, 0.10, 0.30));
+    }
+
     struct LostAck {
         queries: Mutex<Vec<String>>,
         submits: std::sync::atomic::AtomicU32,

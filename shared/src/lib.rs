@@ -157,8 +157,8 @@ pub struct TradingSettings {
     pub commission_rate: f64,
     pub slippage_percent: f64,
     pub funding_rate_8h: f64,
-    /// Minimum structural deviation (spread - structural_spread) to allow entry.
-    /// If 0.0, falls back to min_entry_spread for backward compatibility.
+    /// Additional deviation above the verified structural spread and costs.
+    /// Zero disables the extra margin, but never disables structural verification.
     pub min_structural_deviation: f64,
     pub min_depth_percent: f64,
     pub min_volume_millions: f64,
