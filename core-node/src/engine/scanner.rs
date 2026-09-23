@@ -447,5 +447,35 @@ pub fn generate_signals(
         edge_b.total_cmp(&edge_a)
     });
     signals.retain(|signal| emitted_pairs.insert(format!("{}:{}", signal.profile_id, signal.pair)));
+    let considered = spreads.len().min(ts.max_spreads_per_cycle.max(0) as usize);
+    let profile_window_rows = spreads
+        .iter()
+        .take(considered)
+        .filter(|row| {
+            profiles.iter().any(|profile| {
+                profile.is_active
+                    && !profile.disabled_exchanges.contains(&row.exchange_a)
+                    && !profile.disabled_exchanges.contains(&row.exchange_b)
+                    && row.spread >= profile.min_entry_spread
+                    && row.spread <= profile.max_entry_spread
+                    && row.vol_a >= profile.min_volume_millions * 1_000_000.0
+                    && row.vol_b >= profile.min_volume_millions * 1_000_000.0
+            })
+        })
+        .count();
+    e_ctx.scanner_status.clear();
+    for (key, value) in [
+        ("updated_ms", now.max(0) as u64),
+        ("spreads_available", spreads.len() as u64),
+        ("spreads_considered", considered as u64),
+        (
+            "active_profiles",
+            profiles.iter().filter(|profile| profile.is_active).count() as u64,
+        ),
+        ("profile_window_rows", profile_window_rows as u64),
+        ("signals_emitted", signals.len() as u64),
+    ] {
+        e_ctx.scanner_status.insert(key.to_string(), value);
+    }
     signals
 }

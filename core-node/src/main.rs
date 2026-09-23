@@ -364,9 +364,31 @@ async fn main() -> Result<()> {
                     {
                         t_e_ctx.l2_wanted.clear();
                         for key in t_e_ctx.owned_l2_wanted.read().await.iter() {t_e_ctx.l2_wanted.insert(key.clone());}
-                        for row in spreads.iter().take(200) {
+                        // L2 is expensive on Binance. Follow only routes which are close
+                        // to an active profile's entry window; open trades above remain
+                        // mandatory regardless of rank. The collector retains candidates
+                        // briefly, so a single L1 wobble cannot churn subscriptions.
+                        let mut candidate_rows = 0usize;
+                        for row in &spreads {
+                            let wanted = real_profiles.iter().any(|profile| {
+                                profile.is_active
+                                    && profile.strategy_type == "ema"
+                                    && !profile.disabled_exchanges.contains(&row.exchange_a)
+                                    && !profile.disabled_exchanges.contains(&row.exchange_b)
+                                    && row.spread >= profile.min_entry_spread * 0.8
+                                    && row.spread <= profile.max_entry_spread
+                                    && row.vol_a >= profile.min_volume_millions * 1_000_000.0
+                                    && row.vol_b >= profile.min_volume_millions * 1_000_000.0
+                            });
+                            if !wanted {
+                                continue;
+                            }
                             t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_a, row.pair));
                             t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_b, row.pair));
+                            candidate_rows += 1;
+                            if candidate_rows >= 24 {
+                                break;
+                            }
                         }
                     }
 
@@ -508,6 +530,11 @@ async fn handle_health(
                         && (0..=600_000).contains(&(now - s.fetched_ms))
                 })
                 .count();
+            let wanted_books = ctx
+                .l2_wanted
+                .iter()
+                .filter(|key| key.starts_with(&prefix))
+                .count();
             if fresh > 0 && specs > 0 {
                 market_ready_venues += 1;
             }
@@ -516,7 +543,7 @@ async fn handle_health(
                 .positions_updated_ms
                 .get(*ex)
                 .map(|stamp| now - *stamp);
-            serde_json::json!({"exchange":ex,"books":books,"fresh_books":fresh,"current_specs":specs,"balance_age_ms":balance_age_ms,"positions_age_ms":positions_age_ms})
+            serde_json::json!({"exchange":ex,"books":books,"fresh_books":fresh,"wanted_books":wanted_books,"current_specs":specs,"balance_age_ms":balance_age_ms,"positions_age_ms":positions_age_ms})
         })
         .collect();
     let market_ready = market_ready_venues >= 2;
@@ -539,6 +566,16 @@ async fn handle_health(
     let private_ready = private_ready_venues >= 2;
     let healthy = process_healthy && market_ready;
     let trading_ready = healthy && private_ready && !ctx.is_killed.load(std::sync::atomic::Ordering::Acquire);
+    let entry_decisions: std::collections::BTreeMap<String, u64> = ctx
+        .entry_decisions
+        .iter()
+        .map(|entry| (entry.key().clone(), *entry.value()))
+        .collect();
+    let scanner_status: std::collections::BTreeMap<String, u64> = ctx
+        .scanner_status
+        .iter()
+        .map(|entry| (entry.key().clone(), *entry.value()))
+        .collect();
     (
         if healthy {
             axum::http::StatusCode::OK
@@ -546,7 +583,7 @@ async fn handle_health(
             axum::http::StatusCode::SERVICE_UNAVAILABLE
         },
         Json(
-            serde_json::json!({"venues":venues,"healthy":healthy,"process_healthy":process_healthy,"market_ready":market_ready,"private_ready":private_ready,"trading_ready":trading_ready,"build_sha":option_env!("BUILD_SHA").unwrap_or("unknown"),"entries_halted":ctx.is_killed.load(std::sync::atomic::Ordering::Acquire),"supervisor_age_ms":age,"active_trades":active.ok().map(|v|v.len())}),
+            serde_json::json!({"venues":venues,"healthy":healthy,"process_healthy":process_healthy,"market_ready":market_ready,"private_ready":private_ready,"trading_ready":trading_ready,"build_sha":option_env!("BUILD_SHA").unwrap_or("unknown"),"entries_halted":ctx.is_killed.load(std::sync::atomic::Ordering::Acquire),"supervisor_age_ms":age,"active_trades":active.ok().map(|v|v.len()),"scanner_status":scanner_status,"entry_decisions":entry_decisions}),
         ),
     )
 }

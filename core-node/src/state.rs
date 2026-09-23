@@ -95,6 +95,11 @@ pub struct EngineContext {
     /// Populated by scanner (spread rows) + cycle (open trades).
     /// Collectors subscribe only to pairs present here.
     pub l2_wanted: Arc<DashSet<String>>,
+    /// Last scanner-cycle funnel snapshot (overwritten each cycle).
+    pub scanner_status: Arc<DashMap<String, u64>>,
+    /// Cumulative managed-entry funnel since process start. Exposed by /health so
+    /// production audits can distinguish "no signal" from a failed preflight.
+    pub entry_decisions: Arc<DashMap<String, u64>>,
     /// Per-trade MIRAGE cooldown: trade_id → last_mirage_log_ms.
     /// Prevents logging MIRAGE spam (was 10+ per second, now max 1 per 10s).
     pub mirage_cooldown: Arc<DashMap<i64, i64>>,
@@ -150,6 +155,8 @@ impl Default for EngineContext {
             price_history: Arc::new(DashMap::new()),
             l2_books: Arc::new(DashMap::new()),
             l2_wanted: Arc::new(DashSet::new()),
+            scanner_status: Arc::new(DashMap::new()),
+            entry_decisions: Arc::new(DashMap::new()),
             mirage_cooldown: Arc::new(DashMap::new()),
             position_missing_counter: Arc::new(DashMap::new()),
             asymmetric_fail_counter: Arc::new(DashMap::new()),

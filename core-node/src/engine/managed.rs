@@ -45,6 +45,10 @@ fn claim(ctx: &Arc<EngineContext>, id: i64) -> Option<TradeGuard> {
     }
 }
 
+fn record_entry_decision(ctx: &EngineContext, decision: &'static str) {
+    *ctx.entry_decisions.entry(decision.to_string()).or_insert(0) += 1;
+}
+
 pub async fn kill(ctx: &EngineContext, j: &Journal, reason: String) {
     ctx.is_killed.store(true, Ordering::Release);
     tracing::error!("[managed] NEW ENTRIES HALTED: {}", reason);
@@ -246,7 +250,10 @@ pub fn propose(
     ctx: Arc<EngineContext>,
     ts: TechnicalSettings,
 ) {
-    if ctx.is_killed.load(Ordering::Acquire)
+    // Empty engine ticks must not consume LAST_PREFLIGHT. Previously they advanced
+    // the two-second throttle continuously, delaying the first real short-lived signal.
+    if signals.is_empty()
+        || ctx.is_killed.load(Ordering::Acquire)
         || ENTRY_BUSY
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
@@ -273,11 +280,14 @@ async fn enter(
     // Existing unowned positions must be reconciled, not silently absorbed by a new trade.
     let now = now_ms();
     if now - LAST_PREFLIGHT.load(Ordering::Acquire) < 2_000 {
+        record_entry_decision(ctx, "preflight_throttled");
         return Ok(());
     }
     LAST_PREFLIGHT.store(now, Ordering::Release);
     for mut s in signals.into_iter().take(3) {
+        record_entry_decision(ctx, "signal_received");
         if ctx.is_killed.load(Ordering::Acquire) {
+            record_entry_decision(ctx, "rejected_kill_switch");
             break;
         }
         let p = match settings
@@ -285,7 +295,10 @@ async fn enter(
             .find(|p| p.id == s.profile_id && p.is_active)
         {
             Some(p) => p.clone(),
-            None => continue,
+            None => {
+                record_entry_decision(ctx, "rejected_profile_unavailable");
+                continue;
+            }
         };
         p.validate().map_err(anyhow::Error::msg)?;
         if p.daily_loss_limit_usdt > 0.0 {
@@ -296,16 +309,22 @@ async fn enter(
             }
         }
         if ts.entry_order_type != "ioc" || p.strategy_type != "ema" {
+            record_entry_decision(ctx, "rejected_execution_mode");
             continue;
         }
         let (ca, cb) = match (get_connector(&s.exchange_a), get_connector(&s.exchange_b)) {
             (Some(a), Some(b)) => (a, b),
-            _ => continue,
+            _ => {
+                record_entry_decision(ctx, "rejected_connector_unavailable");
+                continue;
+            }
         };
         if !ca.supports_managed_orders() || !cb.supports_managed_orders() {
+            record_entry_decision(ctx, "rejected_connector_capability");
             continue;
         }
         if !super::risk_manager::verify_trade_health(&s.exchange_a, &s.exchange_b, ctx) {
+            record_entry_decision(ctx, "rejected_exchange_health");
             continue;
         }
         if !super::risk_manager::has_sufficient_margin(
@@ -321,10 +340,12 @@ async fn enter(
             ctx,
             ts.margin_check_multiplier,
         ) {
+            record_entry_decision(ctx, "rejected_cached_margin");
             continue;
         }
         let cooldown = ctx.pair_cooldown.get(&s.pair).map(|v| *v).unwrap_or(0);
         if super::utils::cooldown_active(cooldown, now_ms(), ts.pair_cooldown_ms) {
+            record_entry_decision(ctx, "rejected_pair_cooldown");
             continue;
         }
         // Authoritative preflight, before the first leg. Errors fail closed.
@@ -334,13 +355,17 @@ async fn enter(
         );
         let (posa, posb) = match (posa, posb) {
             (Ok(a), Ok(b)) => (a, b),
-            _ => continue,
+            _ => {
+                record_entry_decision(ctx, "rejected_positions_fetch");
+                continue;
+            }
         };
         if posa
             .iter()
             .chain(posb.iter())
             .any(|x| super::utils::symbols_match(&x.symbol, &s.pair) && x.size.abs() > 1e-12)
         {
+            record_entry_decision(ctx, "rejected_existing_position");
             continue;
         }
         let (idle_a, idle_b) = tokio::join!(
@@ -348,6 +373,7 @@ async fn enter(
             cb.symbol_has_no_open_orders(http, keys, &s.pair)
         );
         if !matches!(idle_a, Ok(true)) || !matches!(idle_b, Ok(true)) {
+            record_entry_decision(ctx, "rejected_open_orders_check");
             continue;
         }
         let (fee_a, fee_b) = tokio::join!(
@@ -358,6 +384,7 @@ async fn enter(
             (Ok(a), Ok(b)) => (a, b),
             (a, b) => {
                 tracing::warn!("[managed] fee preflight failed for {} {}-{}: {:?} / {:?}",s.pair,s.exchange_a,s.exchange_b,a.err(),b.err());
+                record_entry_decision(ctx, "rejected_fee_fetch");
                 continue;
             }
         };
@@ -365,7 +392,10 @@ async fn enter(
         let (ba, bb) = tokio::join!(ca.fetch_balances(http, keys), cb.fetch_balances(http, keys));
         let (available_a, available_b) = match (ba, bb) {
             (Ok((_, a)), Ok((_, b))) if a.is_finite() && b.is_finite() => (a, b),
-            _ => continue,
+            _ => {
+                record_entry_decision(ctx, "rejected_balance_fetch");
+                continue;
+            }
         };
         let required_a = s.actual_vol_a_usd / (p.leverage as f64)
             * ts.margin_check_multiplier.max(1.0)
@@ -374,6 +404,7 @@ async fn enter(
             * ts.margin_check_multiplier.max(1.0)
             + s.actual_vol_b_usd * 0.002;
         if available_a < required_a || available_b < required_b {
+            record_entry_decision(ctx, "rejected_live_margin");
             continue;
         }
         // Configure both venues before taking exposure; failures cannot be ignored.
@@ -382,6 +413,7 @@ async fn enter(
             cb.ensure_leverage(http, keys, &s.pair, p.leverage as f64)
         );
         if la.is_err() || lb.is_err() {
+            record_entry_decision(ctx, "rejected_leverage_setup");
             continue;
         }
         let (fa, fb) = tokio::join!(
@@ -393,6 +425,7 @@ async fn enter(
             _ => None,
         };
         if funding_deadline_ms.is_none() {
+            record_entry_decision(ctx, "rejected_funding_fetch");
             continue;
         }
         let (pa, pb) = match (
@@ -414,7 +447,10 @@ async fn enter(
             ),
         ) {
             (Some(a), Some(b)) => (a, b),
-            _ => continue,
+            _ => {
+                record_entry_decision(ctx, "rejected_executable_l2");
+                continue;
+            }
         };
         let specs_ok = [
             (&s.exchange_a, s.target_qty_a, pa, s.mult_a, s.tick_a),
@@ -428,6 +464,7 @@ async fn enter(
                 .unwrap_or(false)
         });
         if !specs_ok {
+            record_entry_decision(ctx, "rejected_contract_specification");
             continue;
         }
         let gross = if s.is_a_higher {
@@ -444,11 +481,15 @@ async fn enter(
             s.break_even_pct,
         ) {
             Some(value) => value,
-            None => continue,
+            None => {
+                record_entry_decision(ctx, "rejected_entry_budget");
+                continue;
+            }
         };
         let required = gross - budget;
         let half = (budget / 2.0).min(p.slippage_percent);
         if half < 0.0 {
+            record_entry_decision(ctx, "rejected_slippage_budget");
             continue;
         }
         // Re-read entry authorization after REST preflight; a disabled profile must not
@@ -462,6 +503,7 @@ async fn enter(
             false
         };
         if !authorized || ctx.is_killed.load(Ordering::Acquire) {
+            record_entry_decision(ctx, "rejected_authorization");
             continue;
         }
         let id = match j
@@ -473,8 +515,12 @@ async fn enter(
             .await?
         {
             Some(id) => id,
-            None => continue,
+            None => {
+                record_entry_decision(ctx, "rejected_reservation");
+                continue;
+            }
         };
+        record_entry_decision(ctx, "trade_reserved");
         let _guard =
             claim(ctx, id).ok_or_else(|| anyhow::anyhow!("Trade already being supervised"))?;
         let t = ManagedTrade {

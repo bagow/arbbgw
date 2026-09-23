@@ -1,7 +1,7 @@
 //! Binance USDT Futures discovery plus bounded executable-liquidity streams.
 //! All-book-ticker finds candidates; bounded top-5 subscriptions verify them.
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
@@ -16,7 +16,23 @@ use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSigna
 // the 750 ms execution freshness budget while cutting message volume by roughly 4x.
 const DEPTH_STREAMS_PER_CONNECTION: usize = 5;
 const DEPTH_UPDATE_INTERVAL_MS: u64 = 500;
-const DEPTH_SUBSCRIPTION_REFRESH_SECS: u64 = 120;
+const DEPTH_SUBSCRIPTION_REFRESH_SECS: u64 = 1_800;
+const DYNAMIC_DEPTH_REFRESH_SECS: u64 = 1;
+const DYNAMIC_DEPTH_RETENTION_SECS: u64 = 30;
+// 24 ranked candidates plus the profile-wide maximum of 10 owned trades.
+const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
+
+const FALLBACK_DEPTH_SYMBOLS: &[&str] = &[
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "XRPUSDT", "PEPEUSDT",
+    "SUIUSDT", "ADAUSDT", "TRXUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "LTCUSDT",
+    "MATICUSDT", "ARBUSDT", "OPUSDT", "APTUSDT", "NEARUSDT", "FILUSDT", "WIFUSDT",
+    "SHIBUSDT", "BONKUSDT", "FLOKIUSDT", "WLDUSDT", "ORDIUSDT", "TIAUSDT", "SEIUSDT",
+    "INJUSDT", "FETUSDT", "RUNEUSDT", "JUPUSDT", "ENAUSDT", "ONDOUSDT", "RENDERUSDT",
+    "AAVEUSDT", "MKRUSDT", "LDOUSDT", "PENDLEUSDT", "TONUSDT", "NOTUSDT", "STXUSDT",
+    "KATUSDT", "SPKUSDT", "HYPEUSDT", "VIRTUSDT", "BOMEUSDT", "WUSDT", "APEUSDT",
+    "GMTUSDT", "GALAUSDT", "FTMUSDT", "HBARUSDT", "FLOWUSDT", "ICPUSDT", "SANDUSDT",
+    "MANAUSDT", "AXSUSDT", "CRVUSDT", "SNXUSDT", "ATOMUSDT", "XLMUSDT",
+];
 
 pub async fn run(
     prices: PriceMap,
@@ -102,19 +118,26 @@ pub async fn run(
         if children.is_empty() {
             let l2_books_for_depth = l2_books.clone();
             let prices_for_depth = prices.clone();
-            let l2_wanted_for_depth = l2_wanted.clone();
+            let l2_wanted_for_dynamic = l2_wanted.clone();
             let signal_for_depth = signal.clone();
+            let signal_for_dynamic = signal.clone();
             let discovery_for_depth = discovery_ready.clone();
             children.spawn(async move {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                run_l2_depth_stream(
-                    l2_books_for_depth,
-                    prices_for_depth,
-                    l2_wanted_for_depth,
-                    signal_for_depth,
-                    discovery_for_depth,
-                )
-                .await;
+                tokio::join!(
+                    run_l2_depth_stream(
+                        l2_books_for_depth.clone(),
+                        prices_for_depth.clone(),
+                        signal_for_depth,
+                        discovery_for_depth,
+                    ),
+                    run_dynamic_l2_depth_stream(
+                        l2_books_for_depth,
+                        prices_for_depth,
+                        l2_wanted_for_dynamic,
+                        signal_for_dynamic,
+                    )
+                );
             });
         }
 
@@ -345,77 +368,9 @@ fn apply_book_ticker(
 async fn run_l2_depth_stream(
     l2_books: L2OrderbookMap,
     price_map: crate::state::PriceMap,
-    l2_wanted: std::sync::Arc<dashmap::DashSet<String>>,
     signal: UpdateSignal,
     discovery_complete: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
-    // Hardcoded fallback covers common pairs when REST/price_map is empty
-    const FALLBACK: &[&str] = &[
-        "BTCUSDT",
-        "ETHUSDT",
-        "SOLUSDT",
-        "BNBUSDT",
-        "DOGEUSDT",
-        "XRPUSDT",
-        "PEPEUSDT",
-        "SUIUSDT",
-        "ADAUSDT",
-        "TRXUSDT",
-        "AVAXUSDT",
-        "LINKUSDT",
-        "DOTUSDT",
-        "LTCUSDT",
-        "MATICUSDT",
-        "ARBUSDT",
-        "OPUSDT",
-        "APTUSDT",
-        "NEARUSDT",
-        "FILUSDT",
-        "WIFUSDT",
-        "SHIBUSDT",
-        "BONKUSDT",
-        "FLOKIUSDT",
-        "WLDUSDT",
-        "ORDIUSDT",
-        "TIAUSDT",
-        "SEIUSDT",
-        "INJUSDT",
-        "FETUSDT",
-        "RUNEUSDT",
-        "JUPUSDT",
-        "ENAUSDT",
-        "ONDOUSDT",
-        "RENDERUSDT",
-        "AAVEUSDT",
-        "MKRUSDT",
-        "LDOUSDT",
-        "PENDLEUSDT",
-        "TONUSDT",
-        "NOTUSDT",
-        "STXUSDT",
-        "KATUSDT",
-        "SPKUSDT",
-        "HYPEUSDT",
-        "VIRTUSDT",
-        "BOMEUSDT",
-        "JUPUSDT",
-        "WUSDT",
-        "APEUSDT",
-        "GMTUSDT",
-        "GALAUSDT",
-        "FTMUSDT",
-        "HBARUSDT",
-        "FLOWUSDT",
-        "ICPUSDT",
-        "SANDUSDT",
-        "MANAUSDT",
-        "AXSUSDT",
-        "CRVUSDT",
-        "SNXUSDT",
-        "ATOMUSDT",
-        "XLMUSDT",
-    ];
-
     let _backoff = Duration::from_secs(1);
     loop {
         // The parent starts REST discovery concurrently. A one-second head start is
@@ -426,19 +381,11 @@ async fn run_l2_depth_stream(
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        // Build symbol list from l2_wanted (demand-driven) + fallback
-        let wanted_syms: std::collections::HashSet<String> = l2_wanted
-            .iter()
-            .filter(|k| k.starts_with("binance:"))
-            .map(|k| k[8..].to_string())
-            .collect();
-
-        // Depth at 100 ms for the full Binance universe overloads the host and queues
-        // seconds-old snapshots. Subscribe only to the cross-exchange candidates selected
-        // by the L1 discovery feed plus a small liquid baseline. Owned trades are always
-        // included in l2_wanted.
-        let mut universe = wanted_syms;
-        universe.extend(FALLBACK.iter().map(|s| s.to_string()));
+        // Keep the liquid baseline stable. Short-lived/owned candidates are handled by
+        // the separate dynamic stream, so they never force all baseline connections to
+        // restart or create duplicate subscriptions here.
+        let universe: std::collections::HashSet<String> =
+            FALLBACK_DEPTH_SYMBOLS.iter().map(|s| s.to_string()).collect();
         let mut symbols: Vec<String> = universe.into_iter().collect();
         symbols.sort_unstable();
 
@@ -523,79 +470,22 @@ async fn run_l2_depth_stream(
                                             );
                                             break;
                                         }
-                                        let (sym_str, depth_data) =
-                                            if let Some(stream) = data["stream"].as_str() {
-                                                let sym = stream
-                                                    .split('@')
-                                                    .next()
-                                                    .unwrap_or("")
-                                                    .to_uppercase();
-                                                (sym, data["data"].clone())
-                                            } else if let Some(s) = data["s"].as_str() {
-                                                (s.to_uppercase(), data.clone())
-                                            } else {
-                                                continue;
-                                            };
-
-                                        if sym_str.is_empty() || !sym_str.ends_with("USDT") {
-                                            continue;
-                                        }
-
-                                        let mut bids = parse_levels(&depth_data, "bids");
-                                        if bids.is_empty() {
-                                            bids = parse_levels(&depth_data, "b");
-                                        }
-                                        let mut asks = parse_levels(&depth_data, "asks");
-                                        if asks.is_empty() {
-                                            asks = parse_levels(&depth_data, "a");
-                                        }
-
-                                        if !bids.is_empty() && !asks.is_empty() {
-                                            let now_ms = std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .unwrap_or_default()
-                                                .as_millis()
-                                                as i64;
-                                            let exchange_ms = depth_data["E"].as_i64().unwrap_or(0);
-                                            last_lag_ms = now_ms - exchange_ms;
-                                            if !(0..=750).contains(&last_lag_ms)
-                                                || depth_data["st"].as_i64() == Some(2)
-                                            {
+                                        match apply_depth_update(
+                                            &data,
+                                            &l2_books_clone,
+                                            &prices,
+                                            &signal,
+                                        ) {
+                                            DepthUpdate::Accepted(lag_ms) => {
+                                                accepted += 1;
+                                                last_lag_ms = lag_ms;
+                                            }
+                                            DepthUpdate::Stale(lag_ms) => {
                                                 stale += 1;
-                                                continue;
+                                                last_lag_ms = lag_ms;
                                             }
-                                            if bids[0].0 >= asks[0].0 {
-                                                continue;
-                                            }
-                                            if l2_books_clone
-                                                .get(&format!("binance:{}", sym_str))
-                                                .map(|b| b.updated_ms >= exchange_ms)
-                                                .unwrap_or(false)
-                                            {
-                                                continue;
-                                            }
-                                            if let Some(mut venue) = prices.get_mut("binance") {
-                                                if let Some(t) = venue.get_mut(&sym_str) {
-                                                    t.price = (bids[0].0 + asks[0].0) / 2.0;
-                                                    t.bid = bids[0].0;
-                                                    t.ask = asks[0].0;
-                                                    t.bid_size = bids[0].0 * bids[0].1;
-                                                    t.ask_size = asks[0].0 * asks[0].1;
-                                                    t.last_updated = (exchange_ms / 1000) as u64;
-                                                }
-                                            }
-                                            l2_books_clone.insert(
-                                                format!("binance:{}", sym_str),
-                                                L2Snapshot {
-                                                    bids,
-                                                    asks,
-                                                    updated_ms: exchange_ms,
-                                                },
-                                            );
-                                            accepted += 1;
-                                            signal.notify_one();
-                                        } else {
-                                            invalid += 1;
+                                            DepthUpdate::Invalid => invalid += 1,
+                                            DepthUpdate::Ignored => {}
                                         }
                                     }
                                 }
@@ -625,10 +515,8 @@ async fn run_l2_depth_stream(
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // Keep the fallback transports stable too. Restarting them every ten seconds
-        // created a circular readiness failure: books were removed before they could
-        // produce stable spreads, so l2_wanted stayed empty and fallback mode restarted
-        // forever. The next refresh still picks up newly discovered candidates.
+        // Periodically recycle long-lived transports. Candidate changes do not affect
+        // this timer; the dynamic stream applies them independently within one second.
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(DEPTH_SUBSCRIPTION_REFRESH_SECS)) => {},
             _ = handles.join_next() => {},
@@ -636,6 +524,260 @@ async fn run_l2_depth_stream(
         handles.abort_all();
         while handles.join_next().await.is_some() {}
     }
+}
+
+/// A dedicated low-volume connection follows short-lived discovery candidates.
+/// Rebuilding the baseline combined streams is intentionally avoided: doing that
+/// creates multi-second gaps and used to miss opportunities that vanished before
+/// the 120-second baseline refresh.
+async fn run_dynamic_l2_depth_stream(
+    l2_books: L2OrderbookMap,
+    price_map: crate::state::PriceMap,
+    l2_wanted: std::sync::Arc<dashmap::DashSet<String>>,
+    signal: UpdateSignal,
+) {
+    let fallback: std::collections::HashSet<&str> =
+        FALLBACK_DEPTH_SYMBOLS.iter().copied().collect();
+    let mut backoff = Duration::from_secs(1);
+
+    loop {
+        let connection = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_async_tls_with_config(
+                "wss://fstream.binance.com/public/ws",
+                None,
+                false,
+                None,
+            ),
+        )
+        .await;
+        let (mut ws, _) = match connection {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                warn!("[binance_l2_dynamic] Connect failed: {}", error);
+                tokio::time::sleep(backoff).await;
+                backoff = next_backoff(backoff, false);
+                continue;
+            }
+            Err(_) => {
+                warn!("[binance_l2_dynamic] Connect timed out");
+                tokio::time::sleep(backoff).await;
+                backoff = next_backoff(backoff, false);
+                continue;
+            }
+        };
+
+        info!("[binance_l2_dynamic] Connected");
+        let session_start = std::time::Instant::now();
+        let mut refresh = tokio::time::interval(Duration::from_secs(DYNAMIC_DEPTH_REFRESH_SECS));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut active: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
+        let mut request_id = 1u64;
+        let mut received = 0u64;
+        let mut accepted = 0u64;
+        let mut stale = 0u64;
+        let mut invalid = 0u64;
+        let mut last_lag_ms = 0i64;
+        let mut report_at = std::time::Instant::now();
+
+        loop {
+            tokio::select! {
+                _ = refresh.tick() => {
+                    let now = std::time::Instant::now();
+                    let mut wanted: Vec<String> = l2_wanted
+                        .iter()
+                        .filter_map(|key| key.strip_prefix("binance:").map(str::to_owned))
+                        .filter(|symbol| symbol.ends_with("USDT") && !fallback.contains(symbol.as_str()))
+                        .collect();
+                    wanted.sort_unstable();
+                    wanted.dedup();
+                    wanted.truncate(MAX_DYNAMIC_DEPTH_SYMBOLS);
+
+                    let mut added = Vec::new();
+                    for symbol in wanted {
+                        if let Some(last_seen) = active.get_mut(&symbol) {
+                            *last_seen = now;
+                        } else if active.len() < MAX_DYNAMIC_DEPTH_SYMBOLS {
+                            active.insert(symbol.clone(), now);
+                            added.push(symbol);
+                        }
+                    }
+
+                    let expired: Vec<String> = active
+                        .iter()
+                        .filter(|(_, last_seen)| {
+                            now.duration_since(**last_seen)
+                                > Duration::from_secs(DYNAMIC_DEPTH_RETENTION_SECS)
+                        })
+                        .map(|(symbol, _)| symbol.clone())
+                        .collect();
+
+                    if !added.is_empty() {
+                        let params: Vec<String> = added
+                            .iter()
+                            .map(|symbol| format!("{}@depth5@{}ms", symbol.to_lowercase(), DEPTH_UPDATE_INTERVAL_MS))
+                            .collect();
+                        let request = serde_json::json!({"method":"SUBSCRIBE","params":params,"id":request_id});
+                        request_id += 1;
+                        if let Err(error) = ws.send(Message::Text(request.to_string())).await {
+                            warn!("[binance_l2_dynamic] Subscribe failed: {}", error);
+                            break;
+                        }
+                        info!("[binance_l2_dynamic] Subscribed {} candidates (active={})", added.len(), active.len());
+                    }
+
+                    if !expired.is_empty() {
+                        let params: Vec<String> = expired
+                            .iter()
+                            .map(|symbol| format!("{}@depth5@{}ms", symbol.to_lowercase(), DEPTH_UPDATE_INTERVAL_MS))
+                            .collect();
+                        let request = serde_json::json!({"method":"UNSUBSCRIBE","params":params,"id":request_id});
+                        request_id += 1;
+                        if let Err(error) = ws.send(Message::Text(request.to_string())).await {
+                            warn!("[binance_l2_dynamic] Unsubscribe failed: {}", error);
+                            break;
+                        }
+                        for symbol in &expired {
+                            active.remove(symbol);
+                            l2_books.remove(&format!("binance:{}", symbol));
+                        }
+                        info!("[binance_l2_dynamic] Unsubscribed {} expired candidates (active={})", expired.len(), active.len());
+                    }
+                }
+                message = ws.next() => {
+                    let message = match message {
+                        Some(Ok(Message::Text(text))) => text,
+                        Some(Ok(Message::Close(frame))) => {
+                            warn!("[binance_l2_dynamic] Closed: {:?}", frame);
+                            break;
+                        }
+                        Some(Ok(_)) => continue,
+                        Some(Err(error)) => {
+                            warn!("[binance_l2_dynamic] Receive failed: {}", error);
+                            break;
+                        }
+                        None => break,
+                    };
+                    received += 1;
+                    if let Ok(data) = serde_json::from_str::<Value>(&message) {
+                        if data.get("code").is_some() {
+                            warn!("[binance_l2_dynamic] Subscription rejected: {}", data);
+                            break;
+                        }
+                        match apply_depth_update(&data, &l2_books, &price_map, &signal) {
+                            DepthUpdate::Accepted(lag_ms) => {
+                                accepted += 1;
+                                last_lag_ms = lag_ms;
+                            }
+                            DepthUpdate::Stale(lag_ms) => {
+                                stale += 1;
+                                last_lag_ms = lag_ms;
+                            }
+                            DepthUpdate::Invalid => invalid += 1,
+                            DepthUpdate::Ignored => {}
+                        }
+                    } else {
+                        invalid += 1;
+                    }
+                    if report_at.elapsed() >= Duration::from_secs(30) {
+                        info!("[binance_l2_dynamic_quality] active={} received={} accepted={} stale={} invalid={} last_lag_ms={}",
+                              active.len(), received, accepted, stale, invalid, last_lag_ms);
+                        received = 0;
+                        accepted = 0;
+                        stale = 0;
+                        invalid = 0;
+                        report_at = std::time::Instant::now();
+                    }
+                }
+            }
+        }
+
+        for symbol in active.keys() {
+            l2_books.remove(&format!("binance:{}", symbol));
+        }
+        let stable = session_start.elapsed() >= Duration::from_secs(60);
+        if stable {
+            backoff = Duration::from_secs(1);
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = next_backoff(backoff, stable);
+    }
+}
+
+enum DepthUpdate {
+    Accepted(i64),
+    Stale(i64),
+    Invalid,
+    Ignored,
+}
+
+fn apply_depth_update(
+    data: &Value,
+    l2_books: &L2OrderbookMap,
+    prices: &PriceMap,
+    signal: &UpdateSignal,
+) -> DepthUpdate {
+    if data.get("code").is_some() || data.get("result").is_some() {
+        return DepthUpdate::Ignored;
+    }
+    let depth_data = data.get("data").unwrap_or(data);
+    let symbol = data["stream"]
+        .as_str()
+        .and_then(|stream| stream.split('@').next())
+        .or_else(|| depth_data["s"].as_str())
+        .unwrap_or("")
+        .to_uppercase();
+    if symbol.is_empty() || !symbol.ends_with("USDT") {
+        return DepthUpdate::Ignored;
+    }
+
+    let mut bids = parse_levels(depth_data, "bids");
+    if bids.is_empty() {
+        bids = parse_levels(depth_data, "b");
+    }
+    let mut asks = parse_levels(depth_data, "asks");
+    if asks.is_empty() {
+        asks = parse_levels(depth_data, "a");
+    }
+    if bids.is_empty() || asks.is_empty() || bids[0].0 >= asks[0].0 {
+        return DepthUpdate::Invalid;
+    }
+
+    let received_ms = crate::engine::utils::now_ms();
+    let exchange_ms = depth_data["E"].as_i64().unwrap_or(0);
+    let lag_ms = received_ms - exchange_ms;
+    if !(0..=750).contains(&lag_ms) || depth_data["st"].as_i64() == Some(2) {
+        return DepthUpdate::Stale(lag_ms);
+    }
+    if l2_books
+        .get(&format!("binance:{}", symbol))
+        .map(|book| book.updated_ms >= exchange_ms)
+        .unwrap_or(false)
+    {
+        return DepthUpdate::Ignored;
+    }
+
+    if let Some(mut venue) = prices.get_mut("binance") {
+        if let Some(ticker) = venue.get_mut(&symbol) {
+            ticker.price = (bids[0].0 + asks[0].0) / 2.0;
+            ticker.bid = bids[0].0;
+            ticker.ask = asks[0].0;
+            ticker.bid_size = bids[0].0 * bids[0].1;
+            ticker.ask_size = asks[0].0 * asks[0].1;
+            ticker.last_updated = (exchange_ms / 1000) as u64;
+        }
+    }
+    l2_books.insert(
+        format!("binance:{}", symbol),
+        L2Snapshot {
+            bids,
+            asks,
+            updated_ms: exchange_ms,
+        },
+    );
+    signal.notify_one();
+    DepthUpdate::Accepted(lag_ms)
 }
 
 fn depth_stream_url(symbols: &[String]) -> String {
@@ -709,6 +851,100 @@ mod tests {
             parse_levels(&serde_json::json!({"b": [["100", "2"], ["99", "3"]]}), "b"),
             vec![(100.0, 2.0), (99.0, 3.0)]
         );
+    }
+
+    #[test]
+    fn dynamic_depth_updates_executable_book_and_ticker() {
+        let prices = PriceMap::default();
+        prices.insert(
+            "binance".into(),
+            std::collections::HashMap::from([(
+                "AINUSDT".into(),
+                TickerData {
+                    vol: 9_000_000.0,
+                    ..Default::default()
+                },
+            )]),
+        );
+        let books = L2OrderbookMap::default();
+        let signal = UpdateSignal::default();
+        let now = crate::engine::utils::now_ms();
+        let message = serde_json::json!({
+            "E": now,
+            "s": "AINUSDT",
+            "b": [["0.1000", "200"]],
+            "a": [["0.1002", "300"]]
+        });
+
+        assert!(matches!(
+            apply_depth_update(&message, &books, &prices, &signal),
+            DepthUpdate::Accepted(_)
+        ));
+        let book = books.get("binance:AINUSDT").unwrap();
+        assert_eq!(book.bids, vec![(0.1, 200.0)]);
+        assert_eq!(book.asks, vec![(0.1002, 300.0)]);
+        let venue = prices.get("binance").unwrap();
+        let ticker = &venue["AINUSDT"];
+        assert_eq!(ticker.vol, 9_000_000.0);
+        assert_eq!(ticker.bid_size, 20.0);
+        assert_eq!(ticker.ask_size, 30.06);
+    }
+
+    #[test]
+    fn dynamic_depth_rejects_old_exchange_timestamp() {
+        let prices = PriceMap::default();
+        let books = L2OrderbookMap::default();
+        let signal = UpdateSignal::default();
+        let message = serde_json::json!({
+            "E": crate::engine::utils::now_ms() - 1_000,
+            "s": "AINUSDT",
+            "b": [["0.1000", "200"]],
+            "a": [["0.1002", "300"]]
+        });
+
+        assert!(matches!(
+            apply_depth_update(&message, &books, &prices, &signal),
+            DepthUpdate::Stale(_)
+        ));
+        assert!(!books.contains_key("binance:AINUSDT"));
+    }
+
+    #[tokio::test]
+    #[ignore = "live Binance connectivity check"]
+    async fn live_dynamic_subscription_receives_partial_depth() {
+        let (mut ws, _) = connect_async_tls_with_config(
+            "wss://fstream.binance.com/public/ws",
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        ws.send(Message::Text(
+            serde_json::json!({
+                "method": "SUBSCRIBE",
+                "params": ["btcusdt@depth5@500ms"],
+                "id": 1
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let message = tokio::time::timeout_at(deadline, ws.next())
+                .await
+                .expect("depth event timeout")
+                .expect("stream closed")
+                .expect("websocket error");
+            if let Message::Text(text) = message {
+                let data: Value = serde_json::from_str(&text).unwrap();
+                if data["s"] == "BTCUSDT" && data["b"].is_array() && data["a"].is_array() {
+                    break;
+                }
+            }
+        }
     }
 
     #[test]
