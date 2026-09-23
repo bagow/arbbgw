@@ -19,6 +19,8 @@ const DEPTH_UPDATE_INTERVAL_MS: u64 = 500;
 const DEPTH_SUBSCRIPTION_REFRESH_SECS: u64 = 1_800;
 const DYNAMIC_DEPTH_REFRESH_SECS: u64 = 1;
 const DYNAMIC_DEPTH_RETENTION_SECS: u64 = 30;
+const MAX_DEPTH_BACKLOG_MS: i64 = 2_000;
+const MAX_CONSECUTIVE_STALE_DEPTH: u32 = 3;
 // 24 ranked candidates plus the profile-wide maximum of 10 owned trades.
 const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
 // Binance's documented USD-M market-stream endpoints. The `/public/*` relay
@@ -413,6 +415,7 @@ async fn run_l2_depth_stream(
                     }
 
                     let session_start = std::time::Instant::now();
+                    let mut backlog_detected = false;
                     match tokio::time::timeout(
                         Duration::from_secs(10),
                         connect_async_tls_with_config(
@@ -428,6 +431,7 @@ async fn run_l2_depth_stream(
                             let mut received = 0u64;
                             let mut accepted = 0u64;
                             let mut stale = 0u64;
+                            let mut stale_streak = 0u32;
                             let mut invalid = 0u64;
                             let mut last_lag_ms = 0i64;
                             let mut report_at = std::time::Instant::now();
@@ -475,11 +479,18 @@ async fn run_l2_depth_stream(
                                         ) {
                                             DepthUpdate::Accepted(lag_ms) => {
                                                 accepted += 1;
+                                                stale_streak = 0;
                                                 last_lag_ms = lag_ms;
                                             }
                                             DepthUpdate::Stale(lag_ms) => {
                                                 stale += 1;
+                                                stale_streak += 1;
                                                 last_lag_ms = lag_ms;
+                                                if depth_backlog_detected(lag_ms, stale_streak) {
+                                                    backlog_detected = true;
+                                                    warn!("[binance_l2_chunk] Backlog detected: lag_ms={} stale_streak={}; reconnecting", lag_ms, stale_streak);
+                                                    break;
+                                                }
                                             }
                                             DepthUpdate::Invalid => invalid += 1,
                                             DepthUpdate::Ignored => {}
@@ -500,7 +511,7 @@ async fn run_l2_depth_stream(
                     for symbol in &chunk_symbols {
                         l2_books_clone.remove(&format!("binance:{}", symbol));
                     }
-                    let stable = session_start.elapsed() >= Duration::from_secs(60);
+                    let stable = backlog_detected || session_start.elapsed() >= Duration::from_secs(60);
                     if stable {
                         backoff = Duration::from_secs(1);
                     }
@@ -576,6 +587,8 @@ async fn run_dynamic_l2_depth_stream(
         let mut stale = 0u64;
         let mut invalid = 0u64;
         let mut last_lag_ms = 0i64;
+        let mut stale_streak = 0u32;
+        let mut backlog_detected = false;
         let mut report_at = std::time::Instant::now();
 
         loop {
@@ -665,11 +678,18 @@ async fn run_dynamic_l2_depth_stream(
                         match apply_depth_update(&data, &l2_books, &price_map, &signal) {
                             DepthUpdate::Accepted(lag_ms) => {
                                 accepted += 1;
+                                stale_streak = 0;
                                 last_lag_ms = lag_ms;
                             }
                             DepthUpdate::Stale(lag_ms) => {
                                 stale += 1;
+                                stale_streak += 1;
                                 last_lag_ms = lag_ms;
+                                if depth_backlog_detected(lag_ms, stale_streak) {
+                                    backlog_detected = true;
+                                    warn!("[binance_l2_dynamic] Backlog detected: lag_ms={} stale_streak={}; reconnecting", lag_ms, stale_streak);
+                                    break;
+                                }
                             }
                             DepthUpdate::Invalid => invalid += 1,
                             DepthUpdate::Ignored => {}
@@ -693,7 +713,7 @@ async fn run_dynamic_l2_depth_stream(
         for symbol in active.keys() {
             l2_books.remove(&format!("binance:{}", symbol));
         }
-        let stable = session_start.elapsed() >= Duration::from_secs(60);
+        let stable = backlog_detected || session_start.elapsed() >= Duration::from_secs(60);
         if stable {
             backoff = Duration::from_secs(1);
         }
@@ -707,6 +727,10 @@ enum DepthUpdate {
     Stale(i64),
     Invalid,
     Ignored,
+}
+
+fn depth_backlog_detected(lag_ms: i64, stale_streak: u32) -> bool {
+    lag_ms > MAX_DEPTH_BACKLOG_MS || stale_streak >= MAX_CONSECUTIVE_STALE_DEPTH
 }
 
 fn apply_depth_update(
@@ -837,6 +861,14 @@ mod tests {
     fn baseline_depth_fits_one_connection() {
         assert!(!FALLBACK_DEPTH_SYMBOLS.is_empty());
         assert!(FALLBACK_DEPTH_SYMBOLS.len() <= DEPTH_STREAMS_PER_CONNECTION);
+    }
+
+    #[test]
+    fn sustained_or_severe_depth_lag_reconnects() {
+        assert!(!depth_backlog_detected(MAX_DEPTH_BACKLOG_MS, 1));
+        assert!(!depth_backlog_detected(751, MAX_CONSECUTIVE_STALE_DEPTH - 1));
+        assert!(depth_backlog_detected(MAX_DEPTH_BACKLOG_MS + 1, 1));
+        assert!(depth_backlog_detected(751, MAX_CONSECUTIVE_STALE_DEPTH));
     }
 
     #[test]
