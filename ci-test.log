@@ -1,0 +1,466 @@
+[1m[92m   Compiling[0m shared v0.1.0 (/home/runner/work/arbbgw/arbbgw/shared)
+[1m[92m   Compiling[0m core-node v0.1.0 (/home/runner/work/arbbgw/arbbgw/core-node)
+[1m[92m   Compiling[0m vps-api v0.1.0 (/home/runner/work/arbbgw/arbbgw/vps-api)
+[1m[33mwarning[0m[1m: fields `rate` and `next_ts` are never read[0m
+  [1m[94m--> [0mcore-node/src/state.rs:40:9
+   [1m[94m|[0m
+[1m[94m39[0m [1m[94m|[0m pub struct FundingInfo {
+   [1m[94m|[0m            [1m[94m-----------[0m [1m[94mfields in this struct[0m
+[1m[94m40[0m [1m[94m|[0m     pub rate: f64,    // current funding rate (e.g. 0.0001 = 0.01%)
+   [1m[94m|[0m         [1m[33m^^^^[0m
+[1m[94m41[0m [1m[94m|[0m     pub next_ts: i64, // unix timestamp (ms) of next funding apply
+   [1m[94m|[0m         [1m[33m^^^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `FundingInfo` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+   [1m[94m= [0m[1mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: multiple fields are never read[0m
+   [1m[94m--> [0mcore-node/src/state.rs:67:9
+    [1m[94m|[0m
+[1m[94m 53[0m [1m[94m|[0m pub struct EngineContext {
+    [1m[94m|[0m            [1m[94m-------------[0m [1m[94mfields in this struct[0m
+[1m[94m...[0m
+[1m[94m 67[0m [1m[94m|[0m     pub funding_rates: Arc<DashMap<String, FundingInfo>>,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m 89[0m [1m[94m|[0m     pub high_latency_strikes: Arc<DashMap<String, u32>>,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m 90[0m [1m[94m|[0m     /// Market Regime Tracker: pair -> (price, timestamp_ms). Used to calculate spread velocity.
+[1m[94m 91[0m [1m[94m|[0m     pub price_history: Arc<DashMap<String, (f64, i64)>>,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m105[0m [1m[94m|[0m     pub mirage_cooldown: Arc<DashMap<i64, i64>>,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m108[0m [1m[94m|[0m     pub position_missing_counter: Arc<DashMap<i64, (u32, i64)>>,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m111[0m [1m[94m|[0m     pub asymmetric_fail_counter: Arc<DashMap<String, (u32, i64)>>,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m117[0m [1m[94m|[0m     pub ws_order_unhealthy_until: Arc<DashMap<String, i64>>,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m121[0m [1m[94m|[0m     pub zero_spread_confirms: Arc<DashMap<i64, (u32, i64)>>,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m122[0m [1m[94m|[0m     /// Per-exchange maker fee rates (e.g. "gate" → 0.00015).
+[1m[94m123[0m [1m[94m|[0m     pub maker_fee_rates: Arc<DashMap<String, f64>>,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^[0m
+[1m[94m124[0m [1m[94m|[0m     /// Unhedged orphan position confirmation counter: "exchange:pair:side" → (count, last_seen_ms).
+[1m[94m125[0m [1m[94m|[0m     pub orphan_confirm_counter: Arc<DashMap<String, (u32, i64)>>,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^^^^^^[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: `EngineContext` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+[1m[33mwarning[0m[1m: function `fmt` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ascendex.rs:82:4
+   [1m[94m|[0m
+[1m[94m82[0m [1m[94m|[0m fn fmt(v: f64) -> String {
+   [1m[94m|[0m    [1m[33m^^^[0m
+
+[1m[33mwarning[0m[1m: static `REST_FALLBACK_LEVERAGE_MS` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/binance.rs:30:8
+   [1m[94m|[0m
+[1m[94m30[0m [1m[94m|[0m static REST_FALLBACK_LEVERAGE_MS: AtomicI64 = AtomicI64::new(0);
+   [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `round_to_tick` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/bingx.rs:99:4
+   [1m[94m|[0m
+[1m[94m99[0m [1m[94m|[0m fn round_to_tick(price: f64, tick: f64) -> f64 {
+   [1m[94m|[0m    [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `fmt` is never used[0m
+   [1m[94m--> [0mcore-node/src/engine/exchanges/bingx.rs:104:4
+    [1m[94m|[0m
+[1m[94m104[0m [1m[94m|[0m fn fmt(v: f64) -> String {
+    [1m[94m|[0m    [1m[33m^^^[0m
+
+[1m[33mwarning[0m[1m: function `round_to_tick` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/bitget.rs:78:4
+   [1m[94m|[0m
+[1m[94m78[0m [1m[94m|[0m fn round_to_tick(price: f64, tick: f64) -> f64 {
+   [1m[94m|[0m    [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `format_price` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/bitget.rs:85:4
+   [1m[94m|[0m
+[1m[94m85[0m [1m[94m|[0m fn format_price(price: f64) -> String {
+   [1m[94m|[0m    [1m[33m^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `fmt` is never used[0m
+   [1m[94m--> [0mcore-node/src/engine/exchanges/bitmex.rs:114:4
+    [1m[94m|[0m
+[1m[94m114[0m [1m[94m|[0m fn fmt(v: f64) -> String {
+    [1m[94m|[0m    [1m[33m^^^[0m
+
+[1m[33mwarning[0m[1m: function `try_bybit_ws_order` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/bybit.rs:14:10
+   [1m[94m|[0m
+[1m[94m14[0m [1m[94m|[0m async fn try_bybit_ws_order(
+   [1m[94m|[0m          [1m[33m^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `try_gate_ws_order` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/gate.rs:14:10
+   [1m[94m|[0m
+[1m[94m14[0m [1m[94m|[0m async fn try_gate_ws_order(
+   [1m[94m|[0m          [1m[33m^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `fetch_gate_order_fee` is never used[0m
+   [1m[94m--> [0mcore-node/src/engine/exchanges/gate.rs:100:10
+    [1m[94m|[0m
+[1m[94m100[0m [1m[94m|[0m async fn fetch_gate_order_fee(
+    [1m[94m|[0m          [1m[33m^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `fmt` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/toobit.rs:83:4
+   [1m[94m|[0m
+[1m[94m83[0m [1m[94m|[0m fn fmt(v: f64) -> String {
+   [1m[94m|[0m    [1m[33m^^^[0m
+
+[1m[33mwarning[0m[1m: function `round_to_tick` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/toobit.rs:87:4
+   [1m[94m|[0m
+[1m[94m87[0m [1m[94m|[0m fn round_to_tick(price: f64, tick: f64) -> f64 {
+   [1m[94m|[0m    [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: struct `CloseReceipt` is never constructed[0m
+ [1m[94m--> [0mcore-node/src/engine/exchanges/traits.rs:9:12
+  [1m[94m|[0m
+[1m[94m9[0m [1m[94m|[0m pub struct CloseReceipt {
+  [1m[94m|[0m            [1m[33m^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: struct `TradeAuditResult` is never constructed[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/traits.rs:37:12
+   [1m[94m|[0m
+[1m[94m37[0m [1m[94m|[0m pub struct TradeAuditResult {
+   [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: multiple methods are never used[0m
+   [1m[94m--> [0mcore-node/src/engine/exchanges/traits.rs:99:8
+    [1m[94m|[0m
+[1m[94m 53[0m [1m[94m|[0m pub trait ExchangeConnector: Send + Sync {
+    [1m[94m|[0m           [1m[94m-----------------[0m [1m[94mmethods in this trait[0m
+[1m[94m...[0m
+[1m[94m 99[0m [1m[94m|[0m     fn name(&self) -> &'static str;
+    [1m[94m|[0m        [1m[33m^^^^[0m
+[1m[94m...[0m
+[1m[94m104[0m [1m[94m|[0m     async fn place_order(
+    [1m[94m|[0m              [1m[33m^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m123[0m [1m[94m|[0m     async fn close_position(
+    [1m[94m|[0m              [1m[33m^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m143[0m [1m[94m|[0m     async fn trim_position(
+    [1m[94m|[0m              [1m[33m^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m158[0m [1m[94m|[0m     async fn fetch_order(
+    [1m[94m|[0m              [1m[33m^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m199[0m [1m[94m|[0m     async fn place_maker_order(
+    [1m[94m|[0m              [1m[33m^^^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m217[0m [1m[94m|[0m     async fn cancel_order(
+    [1m[94m|[0m              [1m[33m^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m229[0m [1m[94m|[0m     async fn fetch_maker_fee(&self, http: &Client, keys: &ExchangeKeys, pair: &str) -> Result<f64, String> {
+    [1m[94m|[0m              [1m[33m^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m235[0m [1m[94m|[0m     async fn audit_trade(
+    [1m[94m|[0m              [1m[33m^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `get_cached_fill` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bybit.rs:34:8
+   [1m[94m|[0m
+[1m[94m34[0m [1m[94m|[0m pub fn get_cached_fill(order_id: &str) -> Option<(f64, f64, f64)> {
+   [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `send_kucoin_public` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_kucoin.rs:89:14
+   [1m[94m|[0m
+[1m[94m89[0m [1m[94m|[0m pub async fn send_kucoin_public(path: &str) -> Result<Value, String> {
+   [1m[94m|[0m              [1m[33m^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `fmt` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/xt.rs:83:4
+   [1m[94m|[0m
+[1m[94m83[0m [1m[94m|[0m fn fmt(v: f64) -> String {
+   [1m[94m|[0m    [1m[33m^^^[0m
+
+[1m[33mwarning[0m[1m: static `BINGX_ORDER_CACHE` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bingx_private.rs:13:12
+   [1m[94m|[0m
+[1m[94m13[0m [1m[94m|[0m pub static BINGX_ORDER_CACHE: OnceLock<Arc<DashMap<String, BingxOrderState>>> = OnceLock::new();
+   [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: struct `BingxOrderState` is never constructed[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bingx_private.rs:16:12
+   [1m[94m|[0m
+[1m[94m16[0m [1m[94m|[0m pub struct BingxOrderState {
+   [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `get_order_cache` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bingx_private.rs:23:8
+   [1m[94m|[0m
+[1m[94m23[0m [1m[94m|[0m pub fn get_order_cache() -> Arc<DashMap<String, BingxOrderState>> {
+   [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: static `WS_RUNNING` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bingx_private.rs:27:8
+   [1m[94m|[0m
+[1m[94m27[0m [1m[94m|[0m static WS_RUNNING: OnceLock<tokio::sync::Mutex<bool>> = OnceLock::new();
+   [1m[94m|[0m        [1m[33m^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `ensure_private_ws` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bingx_private.rs:29:14
+   [1m[94m|[0m
+[1m[94m29[0m [1m[94m|[0m pub async fn ensure_private_ws(api_key: &str, api_secret: &str) {
+   [1m[94m|[0m              [1m[33m^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `bingx_ws_sign` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bingx_private.rs:46:4
+   [1m[94m|[0m
+[1m[94m46[0m [1m[94m|[0m fn bingx_ws_sign(secret: &str, params: &str) -> String {
+   [1m[94m|[0m    [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `get_listen_key` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bingx_private.rs:54:10
+   [1m[94m|[0m
+[1m[94m54[0m [1m[94m|[0m async fn get_listen_key(api_key: &str, api_secret: &str) -> Result<String, String> {
+   [1m[94m|[0m          [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `bingx_private_ws_loop` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bingx_private.rs:87:10
+   [1m[94m|[0m
+[1m[94m87[0m [1m[94m|[0m async fn bingx_private_ws_loop(api_key: String, api_secret: String) {
+   [1m[94m|[0m          [1m[33m^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: static `BITGET_ORDER_CACHE` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitget_private.rs:13:12
+   [1m[94m|[0m
+[1m[94m13[0m [1m[94m|[0m pub static BITGET_ORDER_CACHE: OnceLock<Arc<DashMap<String, BitgetOrderState>>> = OnceLock::new();
+   [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: struct `BitgetOrderState` is never constructed[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitget_private.rs:16:12
+   [1m[94m|[0m
+[1m[94m16[0m [1m[94m|[0m pub struct BitgetOrderState {
+   [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `get_order_cache` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitget_private.rs:23:8
+   [1m[94m|[0m
+[1m[94m23[0m [1m[94m|[0m pub fn get_order_cache() -> Arc<DashMap<String, BitgetOrderState>> {
+   [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: static `WS_RUNNING` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitget_private.rs:27:8
+   [1m[94m|[0m
+[1m[94m27[0m [1m[94m|[0m static WS_RUNNING: OnceLock<tokio::sync::Mutex<bool>> = OnceLock::new();
+   [1m[94m|[0m        [1m[33m^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `ensure_private_ws` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitget_private.rs:29:14
+   [1m[94m|[0m
+[1m[94m29[0m [1m[94m|[0m pub async fn ensure_private_ws(api_key: &str, api_secret: &str, passphrase: &str) {
+   [1m[94m|[0m              [1m[33m^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `bitget_ws_sign` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitget_private.rs:47:4
+   [1m[94m|[0m
+[1m[94m47[0m [1m[94m|[0m fn bitget_ws_sign(secret: &str, timestamp: &str) -> String {
+   [1m[94m|[0m    [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `bitget_private_ws_loop` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitget_private.rs:57:10
+   [1m[94m|[0m
+[1m[94m57[0m [1m[94m|[0m async fn bitget_private_ws_loop(api_key: String, api_secret: String, passphrase: String) {
+   [1m[94m|[0m          [1m[33m^^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: static `BITMEX_ORDER_CACHE` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitmex_private.rs:12:12
+   [1m[94m|[0m
+[1m[94m12[0m [1m[94m|[0m pub static BITMEX_ORDER_CACHE: OnceLock<Arc<DashMap<String, BitmexOrderState>>> = OnceLock::new();
+   [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: struct `BitmexOrderState` is never constructed[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitmex_private.rs:15:12
+   [1m[94m|[0m
+[1m[94m15[0m [1m[94m|[0m pub struct BitmexOrderState {
+   [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `get_order_cache` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitmex_private.rs:22:8
+   [1m[94m|[0m
+[1m[94m22[0m [1m[94m|[0m pub fn get_order_cache() -> Arc<DashMap<String, BitmexOrderState>> {
+   [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: static `WS_RUNNING` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitmex_private.rs:26:8
+   [1m[94m|[0m
+[1m[94m26[0m [1m[94m|[0m static WS_RUNNING: OnceLock<tokio::sync::Mutex<bool>> = OnceLock::new();
+   [1m[94m|[0m        [1m[33m^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `ensure_private_ws` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitmex_private.rs:28:14
+   [1m[94m|[0m
+[1m[94m28[0m [1m[94m|[0m pub async fn ensure_private_ws(api_key: &str, api_secret: &str) {
+   [1m[94m|[0m              [1m[33m^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `bitmex_ws_sign` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitmex_private.rs:45:4
+   [1m[94m|[0m
+[1m[94m45[0m [1m[94m|[0m fn bitmex_ws_sign(secret: &str, expires: i64) -> String {
+   [1m[94m|[0m    [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `bitmex_private_ws_loop` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/exchanges/ws_bitmex_private.rs:54:10
+   [1m[94m|[0m
+[1m[94m54[0m [1m[94m|[0m async fn bitmex_private_ws_loop(api_key: String, api_secret: String) {
+   [1m[94m|[0m          [1m[33m^^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: struct `LivePnlState` is never constructed[0m
+   [1m[94m--> [0mcore-node/src/engine/pnl.rs:102:12
+    [1m[94m|[0m
+[1m[94m102[0m [1m[94m|[0m pub struct LivePnlState {
+    [1m[94m|[0m            [1m[33m^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `calculate_live_pnl_state` is never used[0m
+   [1m[94m--> [0mcore-node/src/engine/pnl.rs:118:8
+    [1m[94m|[0m
+[1m[94m118[0m [1m[94m|[0m pub fn calculate_live_pnl_state(
+    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `load_open_trades` is never used[0m
+   [1m[94m--> [0mcore-node/src/engine/real.rs:191:14
+    [1m[94m|[0m
+[1m[94m191[0m [1m[94m|[0m pub async fn load_open_trades(db: &Connection, p_id: &str) -> Vec<Trade> {
+    [1m[94m|[0m              [1m[33m^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `warmup_leverages` is never used[0m
+   [1m[94m--> [0mcore-node/src/engine/real.rs:241:8
+    [1m[94m|[0m
+[1m[94m241[0m [1m[94m|[0m pub fn warmup_leverages(
+    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `deduct_cached_balance` is never used[0m
+  [1m[94m--> [0mcore-node/src/engine/risk_manager.rs:96:8
+   [1m[94m|[0m
+[1m[94m96[0m [1m[94m|[0m pub fn deduct_cached_balance(
+   [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m: `core-node` (bin "core-node" test) generated 47 warnings
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 17.17s
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/core_node-d3405734c633dd2f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/main.rs (target/debug/deps/core_node-d653fea60f6aeaf4)
+
+running 71 tests
+test collector::binance::tests::baseline_depth_fits_one_connection ... ok
+test collector::binance::tests::depth_stream_uses_routed_combined_url ... ok
+test collector::binance::tests::discovery_ticker_preserves_volume_and_rejects_stale_data ... ok
+test collector::binance::tests::dynamic_depth_rejects_old_exchange_timestamp ... ok
+test collector::binance::tests::live_dynamic_subscription_receives_partial_depth ... ignored, live Binance connectivity check
+test collector::binance::tests::dynamic_depth_updates_executable_book_and_ticker ... ok
+test collector::binance::tests::malformed_level_rejects_entire_snapshot_side ... ok
+test collector::binance::tests::unstable_sessions_back_off_until_capped ... ok
+test engine::account_monitor::tests::contract_positions_and_base_positions_have_different_units ... ok
+test engine::book::tests::full_coverage_is_required ... ok
+test engine::book::tests::invalid_and_unsorted_books_are_rejected ... ok
+test engine::book::tests::ioc_limit_covers_the_last_level_in_both_directions ... ok
+test engine::book::tests::sizes_are_base_units_without_a_second_contract_multiplier ... ok
+test engine::exchanges::binance::fee_tests::parses_documented_rest_commission_response ... ok
+test engine::exchanges::binance::fee_tests::rejects_missing_or_out_of_range_commission ... ok
+test engine::exchanges::kucoin::cross_leverage_tests::leverage_requires_matching_symbol_and_authoritative_value ... ok
+test engine::exchanges::ws_gate::tests::ack_does_not_consume_final_response ... ok
+test engine::exchanges::ws_gate::tests::order_is_wrapped_in_api_payload ... ok
+test engine::funding_guard::tests::earliest_venue_controls_deadline_and_near_settlement_blocks_entry ... ok
+test engine::journal::tests::durable_identity_and_cumulative_receipts_cannot_double_count ... ok
+test engine::journal::tests::funding_reconciliation_is_idempotent_and_cannot_double_assign_events ... ok
+test engine::journal::tests::manual_close_request_survives_projection ... ok
+test engine::journal::tests::partial_close_cannot_be_reported_flat ... ok
+test engine::journal::tests::persistent_money_limits_block_new_reservations ... ok
+test engine::journal::tests::reservation_uses_real_schema_and_blocks_unresolved_entries ... ok
+test engine::managed::transport_tests::lost_ack_recovers_same_order_without_second_submission ... ok
+test engine::journal::tests::restart_preserves_unknown_identity_plan_and_partial_exposure ... ok
+test engine::orders::tests::acknowledgement_and_partial_are_not_terminal ... ok
+test engine::orders::tests::fee_reserve_uses_only_executed_quantity_and_preserves_confirmed_zero ... ok
+test engine::orders::tests::mixed_confirmed_and_pending_fees_keep_the_full_reserve ... ok
+test engine::orders::tests::positive_price_does_not_prove_full_fill ... ok
+test engine::orders::tests::tick_rounding_cannot_spend_extra_budget ... ok
+test engine::pnl::tests::current_spread_uses_optimistic_quotes ... ok
+test engine::pnl::tests::exit_spread_is_pessimistic_vs_current_spread ... ok
+test engine::pnl::tests::funding_cancels_out_when_both_rates_are_equal ... ok
+test engine::pnl::tests::funding_scales_linearly_with_time ... ok
+test engine::pnl::tests::funding_sign_follows_leg_direction ... ok
+test engine::pnl::tests::gross_pnl_converging_spread_is_profitable ... ok
+test engine::pnl::tests::gross_pnl_is_direction_symmetric ... ok
+test engine::pnl::tests::gross_pnl_scales_linearly_with_coin_size ... ok
+test engine::pnl::tests::gross_pnl_widening_spread_is_a_loss ... ok
+test engine::pnl::tests::net_pnl_ignores_slippage_to_avoid_double_counting ... ok
+test engine::pnl::tests::spread_helpers_never_return_inf_or_nan ... ok
+test engine::scanner_common::tests::depth_requirement_respects_profile_without_hidden_floor ... ok
+test engine::scanner_common::tests::different_multipliers_keep_both_legs_identical ... ok
+test engine::scanner_common::tests::entry_budget_preserves_enabled_structural_deviation ... ok
+test engine::scanner_common::tests::entry_budget_uses_profile_window_without_take_profit_threshold ... ok
+test engine::scanner_common::tests::equal_multipliers_produce_exact_target_volume ... ok
+test engine::scanner_common::tests::grid_invariants_across_decimal_steps ... ok
+test engine::scanner_common::tests::invalid_steps_fail_closed ... ok
+test engine::scanner_common::tests::ioc_break_even_uses_expected_cost_not_price_limit_ceiling ... ok
+test engine::scanner_common::tests::non_divisible_steps_preserve_common_grid ... ok
+test engine::scanner_common::tests::small_budget_is_rejected_instead_of_exceeded ... ok
+test engine::scanner_common::tests::volume_never_exceeds_tolerance_ceiling ... ok
+test engine::scanner_common::tests::volume_tolerance_applies_lower_and_upper_bounds_to_both_legs ... ok
+test engine::scanner_common::tests::zero_structural_deviation_really_disables_the_hidden_guard ... ok
+test engine::specification::tests::current_exchange_filters_override_generic_five_dollar_floor ... ok
+test engine::utils::tests::cooldown_active_for_blocked_until_marker ... ok
+test engine::utils::tests::cooldown_expires_exactly_at_window_edge ... ok
+test engine::utils::tests::cooldown_inactive_when_marker_unset ... ok
+test engine::utils::tests::detects_missing_position_errors_case_insensitively ... ok
+test engine::utils::tests::exchange_pair_key_is_stable ... ok
+test engine::utils::tests::liquidity_rank_orders_thin_exchanges_last ... ok
+test engine::utils::tests::normalize_symbol_maps_exchange_aliases ... ok
+test engine::utils::tests::normalize_symbol_strips_separators_and_case ... ok
+test engine::utils::tests::now_ms_and_now_secs_agree ... ok
+test engine::utils::tests::symbols_match_across_exchange_formats ... ok
+test engine::utils::tests::ws_freshness_tracks_reconnects ... ok
+test spreads::quality_tests::observation_gap_requires_new_continuous_history ... ok
+test spreads::quality_tests::repeated_cached_quote_cannot_warm_up_ema ... ok
+test engine::managed::transport_tests::timeout_is_persisted_as_unknown_never_zero_fill_success ... ok
+
+test result: ok. 70 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/shared-b1a61f0cfe73a4b8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/main.rs (target/debug/deps/vps_api-3dd1b8fc602e3047)
+
+running 6 tests
+test routes::integrity_api_tests::history_does_not_invent_net_pnl_before_reconciliation ... ok
+test routes::integrity_api_tests::old_development_bearer_does_not_authenticate ... ok
+test routes::integrity_api_tests::empty_ledger_reports_unknown_wallet_reconciliation_and_rejects_clear ... ok
+test routes::integrity_api_tests::settings_require_auth_and_respect_owner_and_named_columns ... ok
+test statistics::tests::legacy_and_pending_results_cannot_inflate_performance ... ok
+test statistics::tests::curve_uses_latest_thousand_in_chronological_order ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+[1m[92m   Doc-tests[0m core_node
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m shared
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
