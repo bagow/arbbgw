@@ -1,5 +1,5 @@
 {
   "enabled": true,
   "halt_only": true,
-  "reason": "halt after canary attempt 6 SSH transport loss"
+  "reason": "end attempt 7 before testing non-redundant raw spread floor"
 }
