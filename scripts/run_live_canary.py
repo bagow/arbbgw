@@ -67,7 +67,9 @@ def snapshot_profile():
         return dict(row)
 
 
-def restore_profile(snapshot):
+def restore_profile_halted(snapshot):
+    snapshot = dict(snapshot)
+    snapshot["is_active"] = 0
     columns = [name for name in snapshot if name != "id"]
     assignments = ",".join(f'"{name}"=?' for name in columns)
     values = [snapshot[name] for name in columns]
@@ -79,6 +81,10 @@ def restore_profile(snapshot):
         ).rowcount
         if updated != 1:
             raise RuntimeError("canary profile restore did not update exactly one row")
+        db.execute(
+            "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','1',0) "
+            "ON CONFLICT(key) DO UPDATE SET value='1'"
+        )
         db.commit()
 
 
@@ -144,6 +150,16 @@ def wait_for_readiness(config, report):
 
 
 def preflight(config):
+    current_health = health()
+    expected = config["expected_build_sha"]
+    if current_health.get("build_sha") != expected:
+        raise RuntimeError(f"build mismatch: {current_health.get('build_sha')} != {expected}")
+    if not all(current_health.get(key) for key in (
+        "process_healthy", "market_ready", "private_ready"
+    )):
+        raise RuntimeError("core dependencies are not healthy")
+    if current_health.get("entries_halted") is not True:
+        raise RuntimeError("canary must start from a persisted halted state")
     with trade_connection() as db:
         active = db.execute(
             "SELECT COUNT(*) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED')"
@@ -171,11 +187,11 @@ def preflight(config):
             "SELECT is_active,pending_commands FROM trading_profiles WHERE id=?",
             (PROFILE_ID,),
         ).fetchone()
-        if row is None or row[0] or row[1] is not None:
-            raise RuntimeError("profile must be inactive without pending commands")
+        if row is None or row[1] is not None:
+            raise RuntimeError("profile must exist without pending commands")
         kill = db.execute("SELECT value FROM server_cache WHERE key='kill_switch_active'").fetchone()
-        if kill and kill[0] == "1":
-            raise RuntimeError("kill switch is active")
+        if not kill or kill[0] != "1":
+            raise RuntimeError("persisted kill switch must be active before canary")
         cached = db.execute("SELECT value FROM server_cache WHERE key='exchange_maps'").fetchone()
         if not cached:
             raise RuntimeError("missing private account cache")
@@ -205,7 +221,8 @@ def preflight(config):
 def configure_and_enable(config):
     now = int(time.time() * 1000)
     with profile_connection() as db:
-        db.execute(
+        db.execute("BEGIN IMMEDIATE")
+        updated = db.execute(
             "UPDATE trading_profiles SET is_active=1,trade_volume=?,leverage=1,max_active_trades=1,"
             "min_entry_spread=?,max_entry_spread=?,take_profit_percent=?,trailing_stop_percent=?,"
             "hard_stop_percent=?,trailing_activation_percent=?,daily_loss_limit_usdt=?,"
@@ -223,7 +240,14 @@ def configure_and_enable(config):
                 config["min_structural_deviation"], config["min_depth_percent"],
                 config["max_holding_time_ms"], json.dumps(DISABLED), now, PROFILE_ID,
             ),
+        ).rowcount
+        if updated != 1:
+            raise RuntimeError("canary configuration did not update exactly one profile")
+        db.execute(
+            "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','0',0) "
+            "ON CONFLICT(key) DO UPDATE SET value='0'"
         )
+        db.commit()
 
 
 def collect_result(start_id):
@@ -280,12 +304,12 @@ def main():
     profile_before = None
     report = {"ok": False, "started_ms": int(time.time() * 1000), "config": config}
     try:
-        wait_for_readiness(config, report)
+        profile_before = snapshot_profile()
         start_id, before_accounts = preflight(config)
         report["balances_before"] = before_accounts.get("balances")
-        profile_before = snapshot_profile()
         report["backup"] = backup_databases(str(report["started_ms"]))
         configure_and_enable(config)
+        wait_for_readiness(config, report)
         deadline = time.monotonic() + monitor_seconds
         first_seen = False
         while time.monotonic() < deadline:
@@ -332,10 +356,12 @@ def main():
     finally:
         if profile_before is not None:
             try:
-                restore_profile(profile_before)
-                report["profile_restored"] = True
+                restore_profile_halted(profile_before)
+                report["profile_restored_inactive"] = True
+                report["kill_switch_restored"] = True
             except Exception as restore_exc:
-                report["profile_restored"] = False
+                report["profile_restored_inactive"] = False
+                report["kill_switch_restored"] = False
                 report["profile_restore_error"] = (
                     f"{type(restore_exc).__name__}: {restore_exc}"
                 )
