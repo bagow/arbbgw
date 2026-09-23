@@ -189,7 +189,46 @@ impl ExchangeConnector for KucoinConnector {
         if v["code"].as_str() != Some("200000") {
             return Err("KuCoin order lookup unresolved".into());
         }
-        parse_managed_kucoin(&v["data"], r)
+        let mut observation = parse_managed_kucoin(&v["data"], r)?;
+        if observation.filled_quantity > 0.0 && observation.fee.is_none() {
+            let order_id = observation
+                .order_id
+                .as_deref()
+                .ok_or("KuCoin filled order has no exchange id")?;
+            let path = format!("/api/v1/fills?orderId={order_id}");
+            match super::ws_kucoin::send_kucoin_request(
+                &keys.kucoin_key,
+                &keys.kucoin_secret,
+                &keys.kucoin_passphrase,
+                "GET",
+                &path,
+                "",
+                3000,
+            )
+            .await
+            {
+                Ok(fills) => match parse_kucoin_fill_fee(
+                    &fills,
+                    order_id,
+                    observation.filled_quantity,
+                    r.multiplier,
+                ) {
+                    Ok(Some(fee)) => observation.fee = Some(fee),
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        "[kucoin] managed fee evidence rejected for {}: {}",
+                        r.pair,
+                        error
+                    ),
+                },
+                Err(error) => tracing::warn!(
+                    "[kucoin] managed fee lookup failed for {}: {}",
+                    r.pair,
+                    error
+                ),
+            }
+        }
+        Ok(observation)
     }
     fn name(&self) -> &'static str {
         "kucoin"
@@ -1240,6 +1279,65 @@ fn parse_managed_kucoin(
     })
 }
 
+fn parse_kucoin_fill_fee(
+    response: &Value,
+    expected_order_id: &str,
+    expected_quantity: f64,
+    multiplier: f64,
+) -> Result<Option<f64>, String> {
+    use crate::engine::orders::{identity, number};
+    if response["code"].as_str() != Some("200000") {
+        return Err("KuCoin fills lookup rejected".into());
+    }
+    if !expected_quantity.is_finite()
+        || expected_quantity <= 0.0
+        || !multiplier.is_finite()
+        || multiplier <= 0.0
+    {
+        return Err("Invalid KuCoin fee reconciliation quantity".into());
+    }
+    let data = &response["data"];
+    let items = data["items"]
+        .as_array()
+        .or_else(|| data["data"].as_array())
+        .ok_or("KuCoin fills response has no items")?;
+    if items.is_empty() {
+        return Ok(None);
+    }
+    if data["totalNum"]
+        .as_u64()
+        .is_some_and(|total| total > items.len() as u64)
+    {
+        return Err("KuCoin fills response is paginated".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut filled_quantity = 0.0;
+    let mut fee = 0.0;
+    for fill in items {
+        let order_id = identity(fill, "orderId").ok_or("KuCoin fill has no order id")?;
+        if order_id != expected_order_id {
+            return Err("KuCoin fill order identity mismatch".into());
+        }
+        let trade_id = identity(fill, "tradeId").ok_or("KuCoin fill has no trade id")?;
+        if !seen.insert(trade_id) {
+            continue;
+        }
+        if fill["feeCurrency"].as_str() != Some("USDT") {
+            return Err("KuCoin fill fee is not denominated in USDT".into());
+        }
+        let size = number(fill, "size")?;
+        if size <= 0.0 {
+            return Err("KuCoin fill has non-positive size".into());
+        }
+        filled_quantity += size * multiplier;
+        fee += number(fill, "fee")?.abs();
+    }
+    if (filled_quantity - expected_quantity).abs() > expected_quantity * 1e-8 + 1e-10 {
+        return Ok(None);
+    }
+    Ok(Some(fee))
+}
+
 async fn kucoin_managed_call(
     keys: &ExchangeKeys,
     method: &str,
@@ -1292,5 +1390,51 @@ mod cross_leverage_tests {
             "XBTUSDTM",
             10.0
         ));
+    }
+
+    #[test]
+    fn fill_ledger_confirms_complete_usdt_fee() {
+        let response = json!({
+            "code": "200000",
+            "data": {
+                "totalNum": 2,
+                "items": [
+                    {"tradeId":"t1","orderId":"o1","size":"12","fee":"0.0012","feeCurrency":"USDT"},
+                    {"tradeId":"t2","orderId":"o1","size":"12","fee":"0.0013","feeCurrency":"USDT"}
+                ]
+            }
+        });
+        let fee = parse_kucoin_fill_fee(&response, "o1", 240.0, 10.0)
+            .unwrap()
+            .unwrap();
+        assert!((fee - 0.0025).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fill_ledger_rejects_wrong_identity_currency_or_partial_coverage() {
+        let valid_fill = json!({
+            "code": "200000",
+            "data": {"items": [
+                {"tradeId":"t1","orderId":"o1","size":"24","fee":"0.0025","feeCurrency":"USDT"}
+            ]}
+        });
+        assert_eq!(
+            parse_kucoin_fill_fee(&valid_fill, "o1", 250.0, 10.0).unwrap(),
+            None
+        );
+        let wrong_order = json!({
+            "code": "200000",
+            "data": {"items": [
+                {"tradeId":"t1","orderId":"other","size":"24","fee":"0.0025","feeCurrency":"USDT"}
+            ]}
+        });
+        assert!(parse_kucoin_fill_fee(&wrong_order, "o1", 240.0, 10.0).is_err());
+        let wrong_currency = json!({
+            "code": "200000",
+            "data": {"items": [
+                {"tradeId":"t1","orderId":"o1","size":"24","fee":"0.0025","feeCurrency":"KCS"}
+            ]}
+        });
+        assert!(parse_kucoin_fill_fee(&wrong_currency, "o1", 240.0, 10.0).is_err());
     }
 }
