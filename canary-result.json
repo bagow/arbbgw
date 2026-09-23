@@ -1,0 +1,88 @@
+{
+  "ok": false,
+  "started_ms": 1790199183838,
+  "config": {
+    "enabled": true,
+    "attempt": 4,
+    "expected_build_sha": "d5ca2205d2f7e4b75b0f9363619b1e471ce32eb7",
+    "notional_usdt": 6.0,
+    "monitor_seconds": 1800,
+    "min_entry_spread": 1.2,
+    "max_entry_spread": 2.5,
+    "take_profit_percent": 0.2,
+    "trailing_stop_percent": 0.1,
+    "hard_stop_percent": 0.5,
+    "trailing_activation_percent": 0.1,
+    "daily_loss_limit_usdt": 0.25,
+    "max_total_exposure_usdt": 7.0,
+    "slippage_percent": 0.05,
+    "min_structural_deviation": 0.5,
+    "min_depth_percent": 500.0,
+    "max_holding_time_ms": 600000
+  },
+  "balances_before": {
+    "binance": 9.56324081,
+    "kucoin": 8.5075514938
+  },
+  "backup": "/home/opc/core-node/canary-backups/1790199183838",
+  "preflight_health": {
+    "active_trades": 0,
+    "build_sha": "d5ca2205d2f7e4b75b0f9363619b1e471ce32eb7",
+    "entries_halted": false,
+    "entry_decisions": {
+      "preflight_throttled": 43,
+      "rejected_cached_margin": 4,
+      "signal_received": 5
+    },
+    "healthy": true,
+    "market_ready": true,
+    "private_ready": true,
+    "process_healthy": true,
+    "scanner_status": {
+      "active_profiles": 1,
+      "profile_window_rows": 1,
+      "signals_emitted": 0,
+      "spreads_available": 1,
+      "spreads_considered": 1,
+      "updated_ms": 1790199192251
+    },
+    "supervisor_age_ms": 427,
+    "trading_ready": true,
+    "venues": [
+      {
+        "balance_age_ms": 1396,
+        "books": 6,
+        "current_specs": 528,
+        "exchange": "binance",
+        "fresh_books": 6,
+        "positions_age_ms": 1128,
+        "wanted_books": 1
+      },
+      {
+        "balance_age_ms": null,
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "gate",
+        "fresh_books": 0,
+        "positions_age_ms": null,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": 827,
+        "books": 677,
+        "current_specs": 673,
+        "exchange": "kucoin",
+        "fresh_books": 327,
+        "positions_age_ms": 513,
+        "wanted_books": 1
+      }
+    ]
+  },
+  "readiness_consecutive_samples": 5,
+  "error": "URLError: <urlopen error [Errno 111] Connection refused>",
+  "cleanup_drained": true,
+  "cleanup_error": "URLError: <urlopen error [Errno 111] Connection refused>",
+  "profile_restored_inactive": true,
+  "kill_switch_restored": true,
+  "finished_ms": 1790200224752
+}
