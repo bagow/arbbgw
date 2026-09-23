@@ -21,6 +21,10 @@ const DYNAMIC_DEPTH_REFRESH_SECS: u64 = 1;
 const DYNAMIC_DEPTH_RETENTION_SECS: u64 = 30;
 // 24 ranked candidates plus the profile-wide maximum of 10 owned trades.
 const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
+// Binance's documented USD-M market-stream endpoints. The `/public/*` relay
+// accepts connections but has been observed delivering ever older events.
+const BINANCE_RAW_WS_URL: &str = "wss://fstream.binance.com/ws";
+const BINANCE_COMBINED_WS_URL: &str = "wss://fstream.binance.com/stream";
 
 // The baseline exists only as a stable health/liquidity probe. Discovery uses the
 // all-book ticker and every executable/owned symbol is followed by the dynamic
@@ -242,7 +246,7 @@ async fn handler(
     // depth5 at 100 ms for the entire futures universe. Fresh candidate depth is handled
     // by the bounded streams below and remains mandatory before an order can be sent.
     let (mut ws, _) = connect_async_tls_with_config(
-        "wss://fstream.binance.com/public/ws/!bookTicker",
+        &format!("{BINANCE_RAW_WS_URL}/!bookTicker"),
         None,
         false,
         None,
@@ -537,7 +541,7 @@ async fn run_dynamic_l2_depth_stream(
         let connection = tokio::time::timeout(
             Duration::from_secs(10),
             connect_async_tls_with_config(
-                "wss://fstream.binance.com/public/ws",
+                BINANCE_RAW_WS_URL,
                 None,
                 false,
                 None,
@@ -785,7 +789,7 @@ fn depth_stream_url(symbols: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join("/");
-    format!("wss://fstream.binance.com/public/stream?streams={streams}")
+    format!("{BINANCE_COMBINED_WS_URL}?streams={streams}")
 }
 
 /// Parse [[price, qty], ...] from depth snapshot
@@ -825,7 +829,7 @@ mod tests {
     fn depth_stream_uses_routed_combined_url() {
         assert_eq!(
             depth_stream_url(&["BTCUSDT".into(), "ETHUSDT".into()]),
-            "wss://fstream.binance.com/public/stream?streams=btcusdt@depth5@500ms/ethusdt@depth5@500ms"
+            "wss://fstream.binance.com/stream?streams=btcusdt@depth5@500ms/ethusdt@depth5@500ms"
         );
     }
 
@@ -912,7 +916,7 @@ mod tests {
     #[ignore = "live Binance connectivity check"]
     async fn live_dynamic_subscription_receives_partial_depth() {
         let (mut ws, _) = connect_async_tls_with_config(
-            "wss://fstream.binance.com/public/ws",
+            BINANCE_RAW_WS_URL,
             None,
             false,
             None,
@@ -940,6 +944,8 @@ mod tests {
             if let Message::Text(text) = message {
                 let data: Value = serde_json::from_str(&text).unwrap();
                 if data["s"] == "BTCUSDT" && data["b"].is_array() && data["a"].is_array() {
+                    let lag_ms = crate::engine::utils::now_ms() - data["E"].as_i64().unwrap();
+                    assert!((0..=750).contains(&lag_ms), "live depth lag was {lag_ms}ms");
                     break;
                 }
             }
