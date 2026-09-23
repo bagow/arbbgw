@@ -1,7 +1,7 @@
 {
   "enabled": true,
-  "attempt": 6,
-  "expected_build_sha": "3fdd060900f4521d4f38b52782884781c52b9982",
+  "attempt": 7,
+  "expected_build_sha": "b7a7372ea5cce6e7e5ac22c15af760c4746a5337",
   "notional_usdt": 6.0,
   "leverage": 2,
   "monitor_seconds": 1800,
