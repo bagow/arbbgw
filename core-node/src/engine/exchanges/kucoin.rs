@@ -195,7 +195,8 @@ impl ExchangeConnector for KucoinConnector {
                 .order_id
                 .as_deref()
                 .ok_or("KuCoin filled order has no exchange id")?;
-            let path = format!("/api/v1/fills?orderId={order_id}");
+            let created_ms = crate::engine::orders::number(&v["data"], "createdAt")? as i64;
+            let path = kucoin_fill_history_path(order_id, created_ms, now_ms())?;
             match super::ws_kucoin::send_kucoin_request(
                 &keys.kucoin_key,
                 &keys.kucoin_secret,
@@ -1302,7 +1303,7 @@ fn parse_kucoin_fill_fee(
         .or_else(|| data["data"].as_array())
         .ok_or("KuCoin fills response has no items")?;
     if items.is_empty() {
-        return Ok(None);
+        return Err("KuCoin fills response is empty".into());
     }
     if data["totalNum"]
         .as_u64()
@@ -1333,9 +1334,30 @@ fn parse_kucoin_fill_fee(
         fee += number(fill, "fee")?.abs();
     }
     if (filled_quantity - expected_quantity).abs() > expected_quantity * 1e-8 + 1e-10 {
-        return Ok(None);
+        return Err(format!(
+            "KuCoin fills quantity mismatch: expected={expected_quantity} observed={filled_quantity}"
+        ));
     }
     Ok(Some(fee))
+}
+
+fn kucoin_fill_history_path(
+    order_id: &str,
+    order_created_ms: i64,
+    current_ms: i64,
+) -> Result<String, String> {
+    if order_id.is_empty() || order_created_ms <= 0 || current_ms < order_created_ms {
+        return Err("Invalid KuCoin fill history window".into());
+    }
+    // KuCoin retains futures fills for three months, but each history query may
+    // cover no more than seven days. Anchor the bounded window to the order so
+    // reconciliation still works after the endpoint's default recent window.
+    const MAX_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+    let start_ms = order_created_ms.saturating_sub(60_000);
+    let end_ms = current_ms.min(start_ms.saturating_add(MAX_WINDOW_MS - 1));
+    Ok(format!(
+        "/api/v1/fills?orderId={order_id}&startAt={start_ms}&endAt={end_ms}"
+    ))
 }
 
 async fn kucoin_managed_call(
@@ -1418,10 +1440,7 @@ mod cross_leverage_tests {
                 {"tradeId":"t1","orderId":"o1","size":"24","fee":"0.0025","feeCurrency":"USDT"}
             ]}
         });
-        assert_eq!(
-            parse_kucoin_fill_fee(&valid_fill, "o1", 250.0, 10.0).unwrap(),
-            None
-        );
+        assert!(parse_kucoin_fill_fee(&valid_fill, "o1", 250.0, 10.0).is_err());
         let wrong_order = json!({
             "code": "200000",
             "data": {"items": [
@@ -1436,5 +1455,16 @@ mod cross_leverage_tests {
             ]}
         });
         assert!(parse_kucoin_fill_fee(&wrong_currency, "o1", 240.0, 10.0).is_err());
+    }
+
+    #[test]
+    fn historical_fill_query_is_anchored_and_bounded_to_seven_days() {
+        let created = 1_000_000_000;
+        let path = kucoin_fill_history_path("o1", created, created + 30 * 24 * 60 * 60 * 1000)
+            .unwrap();
+        assert!(path.contains("orderId=o1"));
+        assert!(path.contains("startAt=999940000"));
+        assert!(path.contains("endAt=1604739999"));
+        assert!(kucoin_fill_history_path("", created, created).is_err());
     }
 }
