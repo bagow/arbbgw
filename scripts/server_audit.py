@@ -380,6 +380,10 @@ def main():
         line.split("[spreads] ", 1)[1][:600]
         for line in lines if "[spreads] " in line
     ][-20:]
+    result["managed_fee_preflight_tail"] = [
+        line.split("[managed] fee preflight failed", 1)[1][:800]
+        for line in lines if "[managed] fee preflight failed" in line
+    ][-20:]
     # Only transport errors from the unauthenticated public market-data stream;
     # never export private order/account logs or service environments.
     prefix = "[binance_l2_chunk] Receive failed: "
