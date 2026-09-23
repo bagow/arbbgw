@@ -1,5 +1,5 @@
 {
   "enabled": true,
   "halt_only": true,
-  "reason": "supersede margin-rejected canary attempt 4"
+  "reason": "halt after canary attempt 6 SSH transport loss"
 }
