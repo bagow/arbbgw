@@ -386,6 +386,8 @@ def main():
         ("scanner_health_rejected", "health check failed"),
         ("managed_fee_preflight_failed", "[managed] fee preflight failed"),
         ("managed_binance_l2_refresh_failed", "[managed] Binance L2 refresh failed"),
+        ("kucoin_managed_fee_lookup_failed", "[kucoin] managed fee lookup failed"),
+        ("kucoin_managed_fee_evidence_rejected", "[kucoin] managed fee evidence rejected"),
         ("accounting_pending", "[accounting] trade="),
         ("managed_entries_halted", "[managed] NEW ENTRIES HALTED"),
     )}
@@ -417,6 +419,10 @@ def main():
     result["accounting_pending_tail"] = [
         line.split("[accounting] ", 1)[1][:800]
         for line in lines if "[accounting] trade=" in line
+    ][-30:]
+    result["kucoin_managed_fee_tail"] = [
+        line.split("[kucoin] managed fee ", 1)[1][:800]
+        for line in lines if "[kucoin] managed fee " in line
     ][-30:]
     # Only transport errors from the unauthenticated public market-data stream;
     # never export private order/account logs or service environments.
