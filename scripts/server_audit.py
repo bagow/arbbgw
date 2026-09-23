@@ -301,7 +301,9 @@ def inspect_database(path, kind):
             result["performance"] = summarize(rows)
             result["recent_trades"] = [dict(r) for r in db.execute(
                 "SELECT id,pair,exchange_a,exchange_b,status,accounting_status,entry_time,exit_time,"
-                "pnl,gross_pnl,commission_cost,funding_cost,close_reason FROM trades ORDER BY id DESC LIMIT 30"
+                "entry_price_a,entry_price_b,exit_price_a,exit_price_b,opened_qty_a,opened_qty_b,"
+                "closed_qty_a,closed_qty_b,pnl,gross_pnl,commission_cost,funding_cost,close_reason "
+                "FROM trades ORDER BY id DESC LIMIT 30"
             )]
             result["active_trades"] = [dict(r) for r in db.execute(
                 "SELECT id,pair,status,entry_time,opened_qty_a,opened_qty_b,closed_qty_a,closed_qty_b "
@@ -329,6 +331,26 @@ def inspect_database(path, kind):
                 "FROM execution_orders o JOIN trades t ON t.id=o.trade_id "
                 "WHERE t.status='CLOSED' AND t.accounting_status!='VERIFIED' "
                 "ORDER BY o.trade_id DESC,o.created_ms LIMIT 80"
+            )]
+            result["recent_managed_orders"] = [dict(r) for r in db.execute(
+                "SELECT o.trade_id,o.leg,o.exchange,"
+                "json_extract(o.request,'$.reduce_only') AS reduce_only,"
+                "json_extract(o.request,'$.is_buy') AS is_buy,"
+                "json_extract(o.request,'$.quantity') AS requested_quantity,"
+                "json_extract(o.request,'$.limit_price') AS limit_price,"
+                "json_extract(o.request,'$.multiplier') AS multiplier,"
+                "json_extract(o.observation,'$.state') AS state,"
+                "json_extract(o.observation,'$.filled_quantity') AS filled_quantity,"
+                "json_extract(o.observation,'$.average_price') AS average_price,"
+                "json_extract(o.observation,'$.fee') AS fee,o.created_ms,o.updated_ms "
+                "FROM execution_orders o WHERE o.trade_id IN "
+                "(SELECT trade_id FROM execution_plans ORDER BY trade_id DESC LIMIT 10) "
+                "ORDER BY o.trade_id DESC,o.created_ms LIMIT 80"
+            )]
+            result["recent_execution_events"] = [dict(r) for r in db.execute(
+                "SELECT trade_id,event,at_ms FROM execution_events WHERE trade_id IN "
+                "(SELECT trade_id FROM execution_plans ORDER BY trade_id DESC LIMIT 10) "
+                "ORDER BY trade_id DESC,at_ms LIMIT 160"
             )]
         elif kind == "profiles":
             result["profiles"] = [dict(r) for r in db.execute(
