@@ -1,0 +1,4 @@
+{
+  "ok": false,
+  "error": "Maintenance verify failed: RuntimeError: Refuse maintenance: active profile or pending command"
+}
