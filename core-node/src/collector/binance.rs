@@ -24,6 +24,7 @@ const MAX_BASELINE_CONSECUTIVE_STALE_DEPTH: u32 = 10;
 const MAX_DYNAMIC_DEPTH_BACKLOG_MS: i64 = 2_000;
 const MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH: u32 = 3;
 const BASELINE_HEALTH_REFRESH_AGE_MS: i64 = 250;
+const DISCOVERY_REST_REFRESH_SECS: u64 = 3;
 // 24 ranked candidates plus the profile-wide maximum of 10 owned trades.
 const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
 // Binance's documented USD-M market-stream endpoints. The `/public/*` relay
@@ -125,8 +126,10 @@ pub async fn run(
             let signal_for_depth = signal.clone();
             let signal_for_dynamic = signal.clone();
             let signal_for_health = signal.clone();
+            let signal_for_discovery = signal.clone();
             let discovery_for_depth = discovery_ready.clone();
             let settings_for_health = settings.clone();
+            let settings_for_discovery = settings.clone();
             children.spawn(async move {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 tokio::join!(
@@ -144,9 +147,14 @@ pub async fn run(
                     ),
                     run_l2_health_fallback(
                         l2_books_for_depth,
-                        prices_for_depth,
+                        prices_for_depth.clone(),
                         signal_for_health,
                         settings_for_health,
+                    ),
+                    run_l1_discovery_fallback(
+                        prices_for_depth,
+                        signal_for_discovery,
+                        settings_for_discovery,
                     )
                 );
             });
@@ -179,6 +187,80 @@ pub async fn run(
             _ = disable_watcher => {
                 info!("[binance] Exchange was disabled dynamically. Dropping connection.");
                 backoff = Duration::from_secs(1);
+            }
+        }
+    }
+}
+
+async fn fetch_all_book_tickers(http: &Client) -> Result<Vec<BinanceBookTicker>, String> {
+    crate::engine::exchanges::binance::check_before_binance_rest()?;
+    let response = http
+        .get("https://fapi.binance.com/fapi/v1/ticker/bookTicker")
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|error| format!("Binance book-ticker request failed: {error}"))?;
+    let status = response.status();
+    let headers = response.headers().clone();
+    crate::engine::exchanges::binance::record_binance_response(status.as_u16(), &headers);
+    if !status.is_success() {
+        return Err(format!(
+            "Binance book-ticker returned HTTP {}",
+            status.as_u16()
+        ));
+    }
+    response
+        .json::<Vec<BinanceBookTicker>>()
+        .await
+        .map_err(|error| format!("Invalid Binance book-ticker response: {error}"))
+}
+
+/// The VPS WebSocket route can leave most of `!bookTicker` stale while keeping
+/// the socket open. Poll the low-weight all-symbol best-book snapshot only for
+/// active profiles. Candidate depth and the final IOC quote remain independently
+/// verified by the dynamic stream and just-in-time depth endpoint.
+async fn run_l1_discovery_fallback(
+    price_map: crate::state::PriceMap,
+    signal: UpdateSignal,
+    settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
+) {
+    let http = Client::builder()
+        .user_agent("cryptoarb-binance-discovery/1")
+        .build()
+        .expect("Binance discovery client");
+    let mut timer = tokio::time::interval(Duration::from_secs(DISCOVERY_REST_REFRESH_SECS));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_warning = std::time::Instant::now();
+    loop {
+        timer.tick().await;
+        let active = settings.read().await.iter().any(|profile| {
+            profile.is_active
+                && !profile.disabled_exchanges.iter().any(|exchange| exchange == "binance")
+        });
+        if !active {
+            continue;
+        }
+        match fetch_all_book_tickers(&http).await {
+            Ok(tickers) => {
+                let received_ms = crate::engine::utils::now_ms();
+                let mut updated = 0usize;
+                let mut venue = price_map.entry("binance".to_string()).or_default();
+                for ticker in tickers {
+                    updated += usize::from(apply_book_ticker(&mut venue, ticker, received_ms));
+                }
+                drop(venue);
+                if updated > 0 {
+                    signal.notify_one();
+                } else if last_warning.elapsed() >= Duration::from_secs(30) {
+                    warn!("[binance_l1_rest] Snapshot contained no fresh valid tickers");
+                    last_warning = std::time::Instant::now();
+                }
+            }
+            Err(error) => {
+                if last_warning.elapsed() >= Duration::from_secs(30) {
+                    warn!("[binance_l1_rest] Refresh failed: {}", error);
+                    last_warning = std::time::Instant::now();
+                }
             }
         }
     }
@@ -386,17 +468,17 @@ async fn handler(
 
 #[derive(Deserialize)]
 struct BinanceBookTicker {
-    #[serde(rename = "E", default)]
+    #[serde(rename = "E", alias = "time", default)]
     event_ms: i64,
-    #[serde(rename = "s")]
+    #[serde(rename = "s", alias = "symbol")]
     symbol: String,
-    #[serde(rename = "b")]
+    #[serde(rename = "b", alias = "bidPrice")]
     bid: String,
-    #[serde(rename = "a")]
+    #[serde(rename = "a", alias = "askPrice")]
     ask: String,
-    #[serde(rename = "B")]
+    #[serde(rename = "B", alias = "bidQty")]
     bid_quantity: String,
-    #[serde(rename = "A")]
+    #[serde(rename = "A", alias = "askQty")]
     ask_quantity: String,
 }
 
@@ -440,6 +522,13 @@ fn apply_book_ticker(
     if !(0..=10_000).contains(&(received_ms - event_ms)) {
         return false;
     }
+    let event_secs = (event_ms / 1000) as u64;
+    if venue
+        .get(&ticker.symbol)
+        .is_some_and(|current| current.last_updated > event_secs)
+    {
+        return false;
+    }
     let mid = (bid + ask) / 2.0;
     let entry = venue.entry(ticker.symbol).or_default();
     entry.bid = bid;
@@ -447,7 +536,7 @@ fn apply_book_ticker(
     entry.price = mid;
     entry.bid_size = bid * bid_quantity;
     entry.ask_size = ask * ask_quantity;
-    entry.last_updated = (event_ms / 1000) as u64;
+    entry.last_updated = event_secs;
     true
 }
 
@@ -1108,6 +1197,19 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[ignore = "live Binance connectivity check"]
+    async fn live_rest_discovery_receives_fresh_all_symbol_book_tickers() {
+        let tickers = fetch_all_book_tickers(&Client::new()).await.unwrap();
+        let received_ms = crate::engine::utils::now_ms();
+        let mut venue = std::collections::HashMap::new();
+        let accepted = tickers
+            .into_iter()
+            .map(|ticker| usize::from(apply_book_ticker(&mut venue, ticker, received_ms)))
+            .sum::<usize>();
+        assert!(accepted > 100, "only {accepted} fresh discovery tickers");
+    }
+
     #[test]
     fn unstable_sessions_back_off_until_capped() {
         let mut delay = Duration::from_secs(1);
@@ -1156,5 +1258,54 @@ mod tests {
         };
         assert!(!apply_book_ticker(&mut venue, stale, 1_000_100));
         assert_eq!(venue["BTCUSDT"].bid, 100.0);
+    }
+
+    #[test]
+    fn rest_book_ticker_uses_exchange_time_and_preserves_volume() {
+        let ticker: BinanceBookTicker = serde_json::from_value(serde_json::json!({
+            "symbol": "BTCUSDT",
+            "bidPrice": "100.0",
+            "bidQty": "2.0",
+            "askPrice": "101.0",
+            "askQty": "3.0",
+            "time": 1_000_000
+        }))
+        .unwrap();
+        let mut venue = std::collections::HashMap::from([(
+            "BTCUSDT".to_string(),
+            TickerData {
+                vol: 42.0,
+                ..Default::default()
+            },
+        )]);
+        assert!(apply_book_ticker(&mut venue, ticker, 1_000_100));
+        assert_eq!(venue["BTCUSDT"].vol, 42.0);
+        assert_eq!(venue["BTCUSDT"].bid_size, 200.0);
+        assert_eq!(venue["BTCUSDT"].ask_size, 303.0);
+        assert_eq!(venue["BTCUSDT"].last_updated, 1_000);
+    }
+
+    #[test]
+    fn older_websocket_ticker_cannot_replace_newer_rest_snapshot() {
+        let mut venue = std::collections::HashMap::from([(
+            "BTCUSDT".to_string(),
+            TickerData {
+                bid: 100.0,
+                ask: 101.0,
+                last_updated: 1_002,
+                ..Default::default()
+            },
+        )]);
+        let delayed = BinanceBookTicker {
+            event_ms: 1_001_900,
+            symbol: "BTCUSDT".into(),
+            bid: "90".into(),
+            ask: "91".into(),
+            bid_quantity: "1".into(),
+            ask_quantity: "1".into(),
+        };
+        assert!(!apply_book_ticker(&mut venue, delayed, 1_002_100));
+        assert_eq!(venue["BTCUSDT"].bid, 100.0);
+        assert_eq!(venue["BTCUSDT"].last_updated, 1_002);
     }
 }
