@@ -451,6 +451,9 @@ def main():
         ("scanner_health_rejected", "health check failed"),
         ("managed_fee_preflight_failed", "[managed] fee preflight failed"),
         ("managed_binance_l2_refresh_failed", "[managed] Binance L2 refresh failed"),
+        ("managed_preflight_completed", "[managed] Authoritative preflight completed"),
+        ("managed_entry_budget_rejected", "[managed] Entry budget rejected"),
+        ("managed_contract_specification_rejected", "[managed] Contract specification rejected"),
         ("kucoin_managed_fee_lookup_failed", "[kucoin] managed fee lookup failed"),
         ("kucoin_managed_fee_evidence_rejected", "[kucoin] managed fee evidence rejected"),
         ("accounting_pending", "[accounting] trade="),
@@ -481,6 +484,14 @@ def main():
         line.split("[managed] fee preflight failed", 1)[1][:800]
         for line in lines if "[managed] fee preflight failed" in line
     ][-20:]
+    result["managed_preflight_tail"] = [
+        line.split("[managed] ", 1)[1][:1200]
+        for line in lines if any(marker in line for marker in (
+            "[managed] Authoritative preflight completed",
+            "[managed] Entry budget rejected",
+            "[managed] Contract specification rejected",
+        ))
+    ][-40:]
     result["accounting_pending_tail"] = [
         line.split("[accounting] ", 1)[1][:800]
         for line in lines if "[accounting] trade=" in line
