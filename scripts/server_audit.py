@@ -72,6 +72,26 @@ def sample_scanner_funnel(path, samples=60, delay=0.25):
         "distinct_snapshots": len(observations),
         "nonempty_snapshots": sum(bool(item.get("data")) for item in observations),
     }
+    # Baseline verification must remain observable while trading is safely
+    # disabled. Export only public spread fields from the newest snapshot.
+    latest_rows = next(
+        (item.get("data") or [] for item in reversed(observations) if item.get("data")),
+        [],
+    )
+    result["latest_public_rows"] = [
+        {
+            "pair": row.get("pair"),
+            "exchange_a": row.get("exchangeA"),
+            "exchange_b": row.get("exchangeB"),
+            "direction": row.get("direction"),
+            "spread_pct": row.get("spread"),
+            "structural_spread_pct": row.get("structural_spread"),
+            "structural_min_pct": row.get("structural_min"),
+            "structural_max_pct": row.get("structural_max"),
+            "structural_verified": row.get("structural_verified") is True,
+        }
+        for row in latest_rows[:30]
+    ]
     if not profile:
         result["error"] = "no active profile"
         return result
