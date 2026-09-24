@@ -1,0 +1,91 @@
+name: Collect detached guarded canary
+
+on:
+  push:
+    branches: ["fix/audit-risk-20260909"]
+    paths: [".github/canary-collect-request.json"]
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect completed report over SSH
+        env:
+          ARB_CANARY_HOST: ${{ secrets.VPS_SSH_HOST }}
+          ARB_CANARY_USER: ${{ secrets.VPS_SSH_USER }}
+          ARB_CANARY_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess
+          request = json.loads(pathlib.Path('.github/canary-collect-request.json').read_text())
+          task = request.get('task','')
+          if request.get('enabled') is not True or not task.startswith('arb-canary-detached-') or '/' in task:
+              raise RuntimeError('invalid detached canary collection request')
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'arb-canary-ssh'
+          directory.mkdir(mode=0o700)
+          key = directory / 'key'
+          fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, 'w') as stream:
+              stream.write(os.environ['ARB_CANARY_KEY'] + '\n')
+          destination = os.environ['ARB_CANARY_USER'] + '@' + os.environ['ARB_CANARY_HOST']
+          options = ['-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15',
+              '-o','StrictHostKeyChecking=accept-new','-o','UserKnownHostsFile='+str(directory/'known_hosts')]
+          collect = r'''
+          import base64,json,os,pathlib,shutil,sys
+          payload=json.load(sys.stdin)
+          directory=pathlib.Path('/tmp')/payload['task']
+          result=directory/'result.json'
+          if result.exists():
+              data=result.read_bytes()
+              if directory.parent==pathlib.Path('/tmp') and directory.name.startswith('arb-canary-detached-'):
+                  shutil.rmtree(directory,ignore_errors=True)
+              print(json.dumps({'status':'complete','result':base64.b64encode(data).decode()}))
+          elif (directory/'pid').exists():
+              pid=int((directory/'pid').read_text())
+              try:
+                  os.kill(pid,0)
+                  status='running'
+              except ProcessLookupError:
+                  status='failed'
+              print(json.dumps({'status':status}))
+          else:
+              print(json.dumps({'status':'missing'}))
+          '''
+          encoded = base64.b64encode(collect.encode()).decode()
+          command = "python3 -c 'import base64;exec(base64.b64decode(\"" + encoded + "\"))'"
+          try:
+              proc = subprocess.run(
+                  ['ssh',*options,destination,command], input=json.dumps({'task':task}),
+                  capture_output=True,text=True,timeout=60,
+              )
+              if proc.returncode:
+                  raise RuntimeError('remote collection failed with exit '+str(proc.returncode))
+              state=json.loads(proc.stdout)
+              if state.get('status') != 'complete':
+                  pathlib.Path('canary-result.json').write_text(json.dumps({
+                      'ok':False,'outcome':'detached_'+str(state.get('status')),'task':task,
+                  },indent=2))
+                  raise RuntimeError('detached canary is '+str(state.get('status')))
+              report=base64.b64decode(state['result']).decode()
+              parsed=json.loads(report)
+              pathlib.Path('canary-result.json').write_text(report)
+              if parsed.get('ok') is not True:
+                  raise RuntimeError('detached canary reported failure')
+          finally:
+              key.unlink(missing_ok=True)
+          PY
+      - name: Publish sanitized canary result
+        if: always() && hashFiles('canary-result.json') != ''
+        run: |
+          set -eu
+          export GIT_INDEX_FILE="$RUNNER_TEMP/arb-canary-result-index"
+          git read-tree --empty
+          git add -f canary-result.json
+          report_tree=$(git write-tree)
+          report_commit=$(git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit-tree "$report_tree" -m "Detached canary report for $GITHUB_SHA")
+          git push origin "$report_commit:refs/heads/canary-results/$GITHUB_SHA-$GITHUB_RUN_ID"

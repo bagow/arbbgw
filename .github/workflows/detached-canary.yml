@@ -1,0 +1,115 @@
+name: Start detached guarded canary
+
+on:
+  push:
+    branches: ["fix/audit-risk-20260909"]
+    paths: [".github/detached-canary-request.json"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: guarded-live-canary
+  cancel-in-progress: false
+
+jobs:
+  start:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start fail-closed canary over SSH
+        env:
+          ARB_CANARY_HOST: ${{ secrets.VPS_SSH_HOST }}
+          ARB_CANARY_USER: ${{ secrets.VPS_SSH_USER }}
+          ARB_CANARY_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess, time
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'arb-canary-ssh'
+          directory.mkdir(mode=0o700)
+          key = directory / 'key'
+          fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, 'w') as stream:
+              stream.write(os.environ['ARB_CANARY_KEY'] + '\n')
+          destination = os.environ['ARB_CANARY_USER'] + '@' + os.environ['ARB_CANARY_HOST']
+          options = ['-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15',
+              '-o','StrictHostKeyChecking=accept-new','-o','UserKnownHostsFile='+str(directory/'known_hosts')]
+          source = pathlib.Path('scripts/run_live_canary.py').read_text()
+          config = json.loads(pathlib.Path('.github/detached-canary-request.json').read_text())
+          if config.get('detached') is not True:
+              raise RuntimeError('explicit detached=true is required')
+          task = ('arb-canary-detached-' + os.environ['GITHUB_SHA'] + '-' +
+                  os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'])
+          bootstrap = r'''
+          import base64,json,pathlib,subprocess,sys
+          payload=json.load(sys.stdin)
+          directory=pathlib.Path('/tmp')/payload['task']
+          directory.mkdir(mode=0o700,exist_ok=False)
+          script=directory/'run.py'
+          config=directory/'config.json'
+          temporary=directory/'result.tmp'
+          result=directory/'result.json'
+          log=directory/'runner.log'
+          script.write_bytes(base64.b64decode(payload['source']))
+          config.write_text(json.dumps(payload['config']))
+          supervisor=r"""import os,pathlib,subprocess,sys
+          script,config,temporary,result,log=sys.argv[1:]
+          with open(config) as stdin,open(temporary,'w') as stdout,open(log,'w') as stderr:
+              completed=subprocess.run([sys.executable,script],stdin=stdin,stdout=stdout,stderr=stderr)
+          os.replace(temporary,result)
+          pathlib.Path(result+'.exit').write_text(str(completed.returncode))
+          """
+          process=subprocess.Popen(
+              [sys.executable,'-c',supervisor,str(script),str(config),str(temporary),str(result),str(log)],
+              stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+              start_new_session=True,close_fds=True,
+          )
+          (directory/'pid').write_text(str(process.pid))
+          print(json.dumps({'started':True,'pid':process.pid}))
+          '''
+          encoded = base64.b64encode(bootstrap.encode()).decode()
+          command = "python3 -c 'import base64;exec(base64.b64decode(\"" + encoded + "\"))'"
+          try:
+              started_ms = int(time.time() * 1000)
+              proc = subprocess.run(
+                  ['ssh',*options,destination,command],
+                  input=json.dumps({
+                      'task':task,
+                      'source':base64.b64encode(source.encode()).decode(),
+                      'config':config,
+                  }),
+                  capture_output=True,text=True,timeout=60,
+              )
+              if proc.returncode:
+                  raise RuntimeError('remote start failed with exit '+str(proc.returncode))
+              remote = json.loads(proc.stdout)
+              if remote.get('started') is not True:
+                  raise RuntimeError('remote supervisor did not start')
+              report = {
+                  'ok':True,
+                  'outcome':'detached_started',
+                  'task':task,
+                  'started_ms':started_ms,
+                  'expected_finish_ms':started_ms + int(config['monitor_seconds']) * 1000 + 480000,
+                  'config':config,
+              }
+              pathlib.Path('canary-launch.json').write_text(json.dumps(report,indent=2))
+          except Exception as exc:
+              pathlib.Path('canary-launch.json').write_text(json.dumps({
+                  'ok':False,'error':type(exc).__name__+': '+str(exc),
+              },indent=2))
+              raise
+          finally:
+              key.unlink(missing_ok=True)
+          PY
+      - name: Publish sanitized launch result
+        if: always() && hashFiles('canary-launch.json') != ''
+        run: |
+          set -eu
+          export GIT_INDEX_FILE="$RUNNER_TEMP/arb-canary-launch-index"
+          git read-tree --empty
+          git add -f canary-launch.json
+          report_tree=$(git write-tree)
+          report_commit=$(git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit-tree "$report_tree" -m "Detached canary launch for $GITHUB_SHA")
+          git push origin "$report_commit:refs/heads/canary-launch-results/$GITHUB_SHA-$GITHUB_RUN_ID"
