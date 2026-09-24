@@ -146,12 +146,13 @@ pub async fn run(
                         signal_for_dynamic,
                     ),
                     run_l2_health_fallback(
-                        l2_books_for_depth,
+                        l2_books_for_depth.clone(),
                         prices_for_depth.clone(),
                         signal_for_health,
                         settings_for_health,
                     ),
                     run_l1_discovery_fallback(
+                        l2_books_for_depth,
                         prices_for_depth,
                         signal_for_discovery,
                         settings_for_discovery,
@@ -176,7 +177,7 @@ pub async fn run(
         };
 
         tokio::select! {
-            res = handler(&prices, &signal, &discovery_ready) => {
+            res = handler(&prices, &signal, &discovery_ready, &l2_books) => {
                 match res {
                     Ok(_)  => { backoff = Duration::from_secs(1); }
                     Err(e) => warn!("[binance] WS disconnected: {}. Reconnecting in {:?}", e, backoff),
@@ -220,6 +221,7 @@ async fn fetch_all_book_tickers(http: &Client) -> Result<Vec<BinanceBookTicker>,
 /// active profiles. Candidate depth and the final IOC quote remain independently
 /// verified by the dynamic stream and just-in-time depth endpoint.
 async fn run_l1_discovery_fallback(
+    l2_books: L2OrderbookMap,
     price_map: crate::state::PriceMap,
     signal: UpdateSignal,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
@@ -246,7 +248,12 @@ async fn run_l1_discovery_fallback(
                 let mut updated = 0usize;
                 let mut venue = price_map.entry("binance".to_string()).or_default();
                 for ticker in tickers {
-                    updated += usize::from(apply_book_ticker(&mut venue, ticker, received_ms));
+                    updated += usize::from(apply_book_ticker(
+                        &mut venue,
+                        ticker,
+                        received_ms,
+                        Some(&l2_books),
+                    ));
                 }
                 drop(venue);
                 if updated > 0 {
@@ -347,6 +354,7 @@ async fn handler(
     price_map: &PriceMap,
     signal: &UpdateSignal,
     discovery_ready: &std::sync::atomic::AtomicBool,
+    l2_books: &L2OrderbookMap,
 ) -> Result<()> {
     // Seed 24h volume from REST miniTicker snapshot
     // Check ban before REST call (weight=40 for ticker/24hr!)
@@ -445,7 +453,7 @@ async fn handler(
                     let mut updated = false;
                     if let Some(mut venue) = price_map.get_mut("binance") {
                         for ticker in tickers {
-                            if apply_book_ticker(&mut venue, ticker, now_ms) {
+                            if apply_book_ticker(&mut venue, ticker, now_ms, Some(l2_books)) {
                                 updated = true;
                             }
                         }
@@ -493,8 +501,18 @@ fn apply_book_ticker(
     venue: &mut std::collections::HashMap<String, TickerData>,
     ticker: BinanceBookTicker,
     received_ms: i64,
+    l2_books: Option<&L2OrderbookMap>,
 ) -> bool {
     if !ticker.symbol.ends_with("USDT") {
+        return false;
+    }
+    // Once a bounded execution-depth stream owns a candidate, its top of book
+    // is authoritative for discovery too. The all-symbol REST/WS ticker can be
+    // internally older despite a later response/event timestamp; allowing it
+    // to overwrite depth creates a false signal that disappears at JIT refresh.
+    if l2_books.is_some_and(|books| {
+        books.contains_key(&format!("binance:{}", ticker.symbol))
+    }) {
         return false;
     }
     let bid = match ticker.bid.parse::<f64>() {
@@ -1205,7 +1223,7 @@ mod tests {
         let mut venue = std::collections::HashMap::new();
         let accepted = tickers
             .into_iter()
-            .map(|ticker| usize::from(apply_book_ticker(&mut venue, ticker, received_ms)))
+            .map(|ticker| usize::from(apply_book_ticker(&mut venue, ticker, received_ms, None)))
             .sum::<usize>();
         assert!(accepted > 100, "only {accepted} fresh discovery tickers");
     }
@@ -1242,7 +1260,7 @@ mod tests {
             BookTickerPayload::One(ticker) => ticker,
             BookTickerPayload::Many(_) => panic!("single ticker expected"),
         };
-        assert!(apply_book_ticker(&mut venue, ticker, 1_000_100));
+        assert!(apply_book_ticker(&mut venue, ticker, 1_000_100, None));
         let updated = &venue["BTCUSDT"];
         assert_eq!(updated.vol, 42.0);
         assert_eq!(updated.bid, 100.0);
@@ -1256,7 +1274,7 @@ mod tests {
             bid_quantity: "1".into(),
             ask_quantity: "1".into(),
         };
-        assert!(!apply_book_ticker(&mut venue, stale, 1_000_100));
+        assert!(!apply_book_ticker(&mut venue, stale, 1_000_100, None));
         assert_eq!(venue["BTCUSDT"].bid, 100.0);
     }
 
@@ -1278,7 +1296,7 @@ mod tests {
                 ..Default::default()
             },
         )]);
-        assert!(apply_book_ticker(&mut venue, ticker, 1_000_100));
+        assert!(apply_book_ticker(&mut venue, ticker, 1_000_100, None));
         assert_eq!(venue["BTCUSDT"].vol, 42.0);
         assert_eq!(venue["BTCUSDT"].bid_size, 200.0);
         assert_eq!(venue["BTCUSDT"].ask_size, 303.0);
@@ -1304,8 +1322,46 @@ mod tests {
             bid_quantity: "1".into(),
             ask_quantity: "1".into(),
         };
-        assert!(!apply_book_ticker(&mut venue, delayed, 1_002_100));
+        assert!(!apply_book_ticker(&mut venue, delayed, 1_002_100, None));
         assert_eq!(venue["BTCUSDT"].bid, 100.0);
         assert_eq!(venue["BTCUSDT"].last_updated, 1_002);
+    }
+
+    #[test]
+    fn discovery_ticker_cannot_overwrite_owned_execution_depth() {
+        let books = L2OrderbookMap::default();
+        books.insert(
+            "binance:HUSDT".into(),
+            L2Snapshot {
+                bids: vec![(0.0614, 1_000.0)],
+                asks: vec![(0.0615, 1_000.0)],
+                updated_ms: 1_000_000,
+            },
+        );
+        let mut venue = std::collections::HashMap::from([(
+            "HUSDT".to_string(),
+            TickerData {
+                bid: 0.0614,
+                ask: 0.0615,
+                last_updated: 1_000,
+                ..Default::default()
+            },
+        )]);
+        let ticker = BinanceBookTicker {
+            event_ms: 1_000_100,
+            symbol: "HUSDT".into(),
+            bid: "0.06199".into(),
+            ask: "0.06200".into(),
+            bid_quantity: "1000".into(),
+            ask_quantity: "1000".into(),
+        };
+        assert!(!apply_book_ticker(
+            &mut venue,
+            ticker,
+            1_000_200,
+            Some(&books),
+        ));
+        assert_eq!(venue["HUSDT"].bid, 0.0614);
+        assert_eq!(venue["HUSDT"].ask, 0.0615);
     }
 }
