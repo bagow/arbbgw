@@ -2,6 +2,12 @@ name: Read-only server audit
 on:
   push:
     branches: ["fix/audit-risk-20260909"]
+    paths:
+      - ".github/audit-request.json"
+      - ".github/workflows/audit.yml"
+      - "scripts/server_audit.py"
+      - "scripts/audit_performance.py"
+      - "scripts/audit_shadow.py"
   workflow_dispatch:
 permissions:
   contents: write

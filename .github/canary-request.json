@@ -1,10 +1,11 @@
 {
   "enabled": true,
-  "attempt": 19,
+  "attempt": 20,
   "expected_build_sha": "55d4c4196221aff505b3ac516c9ea6fd4c0a7211",
   "notional_usdt": 6.0,
   "leverage": 2,
-  "monitor_seconds": 1800,
+  "monitor_seconds": 300,
+  "min_volume_millions": 0.5,
   "min_entry_spread": 0.5,
   "max_entry_spread": 2.5,
   "take_profit_percent": 0.2,

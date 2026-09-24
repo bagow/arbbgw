@@ -294,6 +294,7 @@ def configure_and_enable(config, watchdog_token):
         db.execute("BEGIN IMMEDIATE")
         updated = db.execute(
             "UPDATE trading_profiles SET is_active=1,trade_volume=?,leverage=?,max_active_trades=1,"
+            "min_volume_millions=?,"
             "min_entry_spread=?,max_entry_spread=?,take_profit_percent=?,trailing_stop_percent=?,"
             "hard_stop_percent=?,trailing_activation_percent=?,daily_loss_limit_usdt=?,"
             "max_total_exposure_usdt=?,slippage_percent=?,min_structural_deviation=?,"
@@ -301,6 +302,7 @@ def configure_and_enable(config, watchdog_token):
             (
                 config["notional_usdt"],
                 config["leverage"],
+                config["min_volume_millions"],
                 config["min_entry_spread"],
                 config["max_entry_spread"],
                 config["take_profit_percent"],
@@ -351,7 +353,7 @@ def collect_result(start_id):
         accounts = json.loads(cache[0]) if cache else {}
         profile = dict(db.execute(
             "SELECT is_active,trade_volume,leverage,max_active_trades,min_entry_spread,take_profit_percent,"
-            "hard_stop_percent,daily_loss_limit_usdt,max_total_exposure_usdt,max_holding_time_ms "
+            "hard_stop_percent,daily_loss_limit_usdt,max_total_exposure_usdt,max_holding_time_ms,min_volume_millions "
             "FROM trading_profiles WHERE id=?", (PROFILE_ID,)
         ).fetchone())
     return {
@@ -375,6 +377,9 @@ def main():
         raise RuntimeError("explicit enabled=true and notional_usdt=6.0 are required")
     if config.get("leverage") not in (1, 2):
         raise RuntimeError("canary leverage must be 1 or 2")
+    min_volume_millions = float(config.get("min_volume_millions", 0))
+    if not 0.5 <= min_volume_millions <= 3.0:
+        raise RuntimeError("min_volume_millions outside 0.5..3.0")
     monitor_seconds = int(config.get("monitor_seconds", 1800))
     if not 60 <= monitor_seconds <= 2700:
         raise RuntimeError("monitor_seconds outside 60..2700")
