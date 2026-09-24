@@ -112,6 +112,12 @@ impl ExchangeConnector for KucoinConnector {
         r: &crate::engine::orders::OrderRequest,
     ) -> Result<crate::engine::orders::OrderObservation, String> {
         r.validate()?;
+        super::ws_kucoin_private::ensure_private_ws(
+            &keys.kucoin_key,
+            &keys.kucoin_secret,
+            &keys.kucoin_passphrase,
+        )
+        .await;
         let n = r.quantity / r.multiplier;
         if (n - n.round()).abs() > 1e-8 {
             return Err("Off-grid KuCoin quantity".into());
@@ -161,9 +167,21 @@ impl ExchangeConnector for KucoinConnector {
                 v["code"]
             ));
         }
-        Ok(crate::engine::orders::OrderObservation::pending(
-            crate::engine::orders::identity(&v["data"], "orderId"),
-        ))
+        let order_id = crate::engine::orders::identity(&v["data"], "orderId")
+            .ok_or("KuCoin accepted managed order without order id")?;
+        let cache = super::ws_kucoin_private::get_order_cache();
+        for _ in 0..15 {
+            if let Some(state) = cache.get(&order_id).map(|state| state.clone()) {
+                if let Some(observation) = managed_kucoin_ws_observation(&order_id, &state, r)? {
+                    cache.remove(&order_id);
+                    return Ok(observation);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok(crate::engine::orders::OrderObservation::pending(Some(
+            order_id,
+        )))
     }
     async fn query_managed(
         &self,
@@ -189,15 +207,29 @@ impl ExchangeConnector for KucoinConnector {
         if v["code"].as_str() != Some("200000") {
             return Err("KuCoin order lookup unresolved".into());
         }
-        let mut observation = parse_managed_kucoin(&v["data"], r)?;
+        // Do not block the hedge-critical path on a second fill-history request.
+        // A missing fee remains None (and therefore reserved conservatively) until
+        // the background exchange-ledger reconciliation verifies final accounting.
+        parse_managed_kucoin(&v["data"], r)
+    }
+    async fn reconcile_managed(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        r: &crate::engine::orders::OrderRequest,
+        oid: Option<&str>,
+    ) -> Result<crate::engine::orders::OrderObservation, String> {
+        let mut observation = self.query_managed(http, keys, r, oid).await?;
         if observation.filled_quantity > 0.0 && observation.fee.is_none() {
             let order_id = observation
                 .order_id
                 .as_deref()
                 .ok_or("KuCoin filled order has no exchange id")?;
-            let created_ms = crate::engine::orders::number(&v["data"], "createdAt")? as i64;
-            let path = kucoin_fill_history_path(order_id, created_ms, now_ms())?;
-            match super::ws_kucoin::send_kucoin_request(
+            let path = match oid {
+                Some(id) => format!("/api/v1/orders/{id}"),
+                None => format!("/api/v1/orders/byClientOid?clientOid={}", r.client_id),
+            };
+            let order = super::ws_kucoin::send_kucoin_request(
                 &keys.kucoin_key,
                 &keys.kucoin_secret,
                 &keys.kucoin_passphrase,
@@ -206,28 +238,28 @@ impl ExchangeConnector for KucoinConnector {
                 "",
                 3000,
             )
-            .await
-            {
-                Ok(fills) => match parse_kucoin_fill_fee(
-                    &fills,
-                    order_id,
-                    observation.filled_quantity,
-                    r.multiplier,
-                ) {
-                    Ok(Some(fee)) => observation.fee = Some(fee),
-                    Ok(None) => {}
-                    Err(error) => tracing::warn!(
-                        "[kucoin] managed fee evidence rejected for {}: {}",
-                        r.pair,
-                        error
-                    ),
-                },
-                Err(error) => tracing::warn!(
-                    "[kucoin] managed fee lookup failed for {}: {}",
-                    r.pair,
-                    error
-                ),
+            .await?;
+            if order["code"].as_str() != Some("200000") {
+                return Err("KuCoin order lookup unresolved during fee reconciliation".into());
             }
+            let created_ms = crate::engine::orders::number(&order["data"], "createdAt")? as i64;
+            let path = kucoin_fill_history_path(order_id, created_ms, now_ms())?;
+            let fills = super::ws_kucoin::send_kucoin_request(
+                &keys.kucoin_key,
+                &keys.kucoin_secret,
+                &keys.kucoin_passphrase,
+                "GET",
+                &path,
+                "",
+                3000,
+            )
+            .await?;
+            observation.fee = parse_kucoin_fill_fee(
+                &fills,
+                order_id,
+                observation.filled_quantity,
+                r.multiplier,
+            )?;
         }
         Ok(observation)
     }
@@ -1222,6 +1254,59 @@ fn managed_kucoin_symbol(pair: &str) -> String {
         format!("{}M", pair)
     }
 }
+
+fn managed_kucoin_ws_observation(
+    order_id: &str,
+    state: &super::ws_kucoin_private::KucoinOrderState,
+    request: &crate::engine::orders::OrderRequest,
+) -> Result<Option<crate::engine::orders::OrderObservation>, String> {
+    use crate::engine::orders::{OrderObservation, OrderState};
+    if state.status != "done" {
+        return Ok(None);
+    }
+    if !state.filled_size.is_finite()
+        || !state.deal_value.is_finite()
+        || !state.fee.is_finite()
+        || state.filled_size < 0.0
+        || state.deal_value < 0.0
+    {
+        return Err("Invalid KuCoin private-WS execution report".into());
+    }
+    let quantity = state.filled_size * request.multiplier;
+    if quantity > request.quantity + request.quantity * 1e-8 {
+        return Err("KuCoin private-WS fill exceeds requested quantity".into());
+    }
+    let average_price = if quantity > 0.0 {
+        if state.deal_value <= 0.0 {
+            return Err("KuCoin private-WS fill has no value".into());
+        }
+        Some(state.deal_value / state.filled_size)
+    } else {
+        None
+    };
+    let observation = OrderObservation {
+        order_id: Some(order_id.to_string()),
+        state: if quantity + request.quantity * 1e-8 >= request.quantity {
+            OrderState::Filled
+        } else {
+            OrderState::Cancelled
+        },
+        filled_quantity: quantity,
+        average_price,
+        // A zero in the WS cache can mean the fee event has not arrived. Keep
+        // it unknown so the PnL path reserves the configured taker fee.
+        fee: if quantity == 0.0 {
+            Some(0.0)
+        } else if state.fee != 0.0 {
+            Some(state.fee.abs())
+        } else {
+            None
+        },
+    };
+    observation.validate(request)?;
+    Ok(Some(observation))
+}
+
 fn parse_managed_kucoin(
     v: &Value,
     r: &crate::engine::orders::OrderRequest,
@@ -1358,6 +1443,60 @@ fn kucoin_fill_history_path(
     Ok(format!(
         "/api/v1/fills?orderId={order_id}&startAt={start_ms}&endAt={end_ms}"
     ))
+}
+
+#[cfg(test)]
+mod managed_ws_tests {
+    use super::*;
+    use crate::engine::exchanges::ws_kucoin_private::KucoinOrderState;
+    use crate::engine::orders::{OrderRequest, OrderState};
+
+    fn request() -> OrderRequest {
+        OrderRequest {
+            client_id: "managed-test".into(),
+            pair: "NILUSDT".into(),
+            is_buy: true,
+            quantity: 47.0,
+            limit_price: 0.13,
+            reduce_only: false,
+            multiplier: 1.0,
+            tick_size: 0.00001,
+            leverage: 2.0,
+        }
+    }
+
+    #[test]
+    fn private_ws_done_report_can_complete_managed_fill_without_rest_lookup() {
+        let state = KucoinOrderState {
+            filled_size: 47.0,
+            deal_value: 5.98592,
+            fee: 0.003591552,
+            status: "done".into(),
+        };
+        let observation = managed_kucoin_ws_observation("order-1", &state, &request())
+            .unwrap()
+            .unwrap();
+        assert_eq!(observation.state, OrderState::Filled);
+        assert_eq!(observation.filled_quantity, 47.0);
+        assert!((observation.average_price.unwrap() - 0.12736).abs() < 1e-12);
+        assert_eq!(observation.fee, Some(0.003591552));
+    }
+
+    #[test]
+    fn private_ws_report_waits_for_done_and_rejects_overfill() {
+        let mut state = KucoinOrderState {
+            filled_size: 47.0,
+            deal_value: 5.98592,
+            fee: 0.0,
+            status: "match".into(),
+        };
+        assert!(managed_kucoin_ws_observation("order-1", &state, &request())
+            .unwrap()
+            .is_none());
+        state.status = "done".into();
+        state.filled_size = 48.0;
+        assert!(managed_kucoin_ws_observation("order-1", &state, &request()).is_err());
+    }
 }
 
 async fn kucoin_managed_call(

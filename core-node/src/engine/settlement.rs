@@ -42,7 +42,7 @@ async fn reconcile(
             let c =
                 get_connector(&o.exchange).ok_or_else(|| anyhow::anyhow!("Missing connector"))?;
             let observed = c
-                .query_managed(http, keys, &o.request, o.observation.order_id.as_deref())
+                .reconcile_managed(http, keys, &o.request, o.observation.order_id.as_deref())
                 .await
                 .map_err(anyhow::Error::msg)?;
             j.observe(o, observed).await?;

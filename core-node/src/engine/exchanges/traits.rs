@@ -82,6 +82,18 @@ pub trait ExchangeConnector: Send + Sync {
         Err("Managed order reconciliation unsupported".into())
     }
 
+    /// Resolve final order accounting outside the hedge-critical path.
+    /// Connectors may perform extra ledger queries here to prove exact fees.
+    async fn reconcile_managed(
+        &self,
+        http: &Client,
+        keys: &ExchangeKeys,
+        request: &crate::engine::orders::OrderRequest,
+        order_id: Option<&str>,
+    ) -> Result<crate::engine::orders::OrderObservation, String> {
+        self.query_managed(http, keys, request, order_id).await
+    }
+
     /// Return the complete funding ledger for this symbol and inclusive time range.
     /// An incomplete page or unsupported ledger is an error, never an empty success.
     async fn funding_events(

@@ -589,9 +589,25 @@ async fn enter(
         } else {
             ("B", "A", pb, s.is_a_higher, s.target_qty_b)
         };
+        let second_exchange = if first_a {
+            &s.exchange_b
+        } else {
+            &s.exchange_a
+        };
         let limit = price * (1.0 + if buy { half / 100.0 } else { -half / 100.0 });
         let o = request(&t, first, qty, limit, false);
-        let v = submit(j, &o, http, keys).await?;
+        // KuCoin may need a short private-order confirmation before its fill is
+        // authoritative. Overlap that wait with the Binance REST depth refresh
+        // instead of leaving the hedge quote to age for the whole first leg.
+        let (v, binance_refresh) = if second_exchange == "binance" {
+            let (fill, refreshed) = tokio::join!(submit(j, &o, http, keys), async {
+                let result = refresh_binance_execution_book(&s.pair, prices, http, ctx).await;
+                (result, now_ms())
+            });
+            (fill?, Some(refreshed))
+        } else {
+            (submit(j, &o, http, keys).await?, None)
+        };
         if !v.state.terminal() {
             j.state(id, "RECONCILING", "ENTRY_UNKNOWN").await?;
             return Ok(());
@@ -603,16 +619,20 @@ async fn enter(
         let second_step = if first_a { s.mult_b } else { s.mult_a };
         let q = v.filled_quantity;
         let on_grid = (q / second_step - (q / second_step).round()).abs() < 1e-8;
-        let second_exchange = if first_a {
-            &s.exchange_b
-        } else {
-            &s.exchange_a
-        };
         // The first venue's submit/query round trip is commonly longer than
-        // the 750 ms execution-book freshness budget. Refresh Binance again
-        // immediately before pricing the hedge, not only before the first leg.
+        // the 750 ms execution-book freshness budget. The overlapping refresh
+        // above should normally be fresh; repeat it only when that refresh has
+        // already aged for 500 ms, preserving time to submit the bounded hedge.
         if on_grid && second_exchange == "binance" {
-            if let Err(error) = refresh_binance_execution_book(&s.pair, prices, http, ctx).await {
+            let Some((mut refresh_result, refreshed_ms)) = binance_refresh else {
+                j.state(id, "CLOSING", "HEDGE_MARKET_DATA_UNAVAILABLE")
+                    .await?;
+                return Ok(());
+            };
+            if refresh_result.is_ok() && now_ms() - refreshed_ms > 500 {
+                refresh_result = refresh_binance_execution_book(&s.pair, prices, http, ctx).await;
+            }
+            if let Err(error) = refresh_result {
                 tracing::warn!(
                     "[managed] Binance hedge L2 refresh failed for {}: {}",
                     s.pair,
