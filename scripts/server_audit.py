@@ -538,6 +538,31 @@ def main():
     )
     result["core_process_usage"] = process.stdout.strip()
     result["load_average"] = list(__import__("os").getloadavg())
+    clock = subprocess.run(
+        ["timedatectl", "show", "--property=NTPSynchronized,TimeUSec"],
+        capture_output=True, text=True, timeout=10,
+    )
+    result["system_clock"] = {
+        "unix_ms": time.time_ns() // 1_000_000,
+        "timedatectl": clock.stdout.strip(),
+    }
+    result["binance_time_samples"] = []
+    for _ in range(5):
+        started_ms = time.time_ns() // 1_000_000
+        try:
+            with urllib.request.urlopen(
+                "https://fapi.binance.com/fapi/v1/time", timeout=5
+            ) as response:
+                server_ms = int(json.load(response)["serverTime"])
+            finished_ms = time.time_ns() // 1_000_000
+            midpoint_ms = (started_ms + finished_ms) // 2
+            result["binance_time_samples"].append({
+                "round_trip_ms": finished_ms - started_ms,
+                "server_offset_ms": server_ms - midpoint_ms,
+            })
+        except Exception as exc:
+            result["binance_time_samples"].append({"error": type(exc).__name__})
+        time.sleep(0.2)
     print("AUDIT: process usage", file=sys.stderr, flush=True)
     for binary in ("core-node", "vps-api"):
         path = Path("/usr/local/bin") / binary
