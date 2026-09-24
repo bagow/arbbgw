@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use shared::{TradeSignal, TradingSettings};
 use tokio_rusqlite::{params, Connection};
 
+pub const PAIR_LOSS_QUARANTINE_MS: i64 = 86_400_000;
+pub const PAIR_LOSS_QUARANTINE_THRESHOLD: i64 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Plan {
     #[serde(default)]
@@ -65,6 +68,7 @@ impl Journal {
         let daily_limit = plan.settings.daily_loss_limit_usdt;
         let exposure_limit = plan.settings.max_total_exposure_usdt;
         let day_start = now - now.rem_euclid(86_400_000);
+        let pair_loss_start = now - PAIR_LOSS_QUARANTINE_MS;
         Ok(self.db.call(move |c| {
             let tx=c.transaction()?;
             let blocked:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED') AND (pair=? OR profile_id=?)",params![s.pair,s.profile_id],|r|r.get(0))?;
@@ -72,10 +76,12 @@ impl Journal {
             let unresolved:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status IN ('ENTRY','RECONCILING')",[],|r|r.get(0))?;
             let active_exposure:f64=tx.query_row("SELECT COALESCE(SUM(volume),0) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED') AND profile_id=?",[&s.profile_id],|r|r.get(0))?;
             let daily_pnl:f64=tx.query_row("SELECT COALESCE(SUM(pnl),0) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND profile_id=? AND exit_time>=?",params![s.profile_id,day_start],|r|r.get(0))?;
+            let recent_pair_losses:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND pair=? AND pnl<0 AND exit_time>=?",params![s.pair,pair_loss_start],|r|r.get(0))?;
             let unsettled:i64=tx.query_row("SELECT COUNT(*) FROM trades t JOIN execution_plans p ON p.trade_id=t.id WHERE t.status='CLOSED' AND t.accounting_status!='VERIFIED' AND t.profile_id=?",[&s.profile_id],|r|r.get(0))?;
             let loss_blocked=daily_limit>0.0 && daily_pnl<=-daily_limit;
+            let pair_loss_blocked=recent_pair_losses>=PAIR_LOSS_QUARANTINE_THRESHOLD;
             let exposure_blocked=exposure_limit>0.0 && active_exposure+s.actual_vol_a_usd>exposure_limit+1e-9;
-            if same>0 || blocked>=max || unresolved>0 || unsettled>0 || loss_blocked || exposure_blocked {return Ok(None);}
+            if same>0 || blocked>=max || unresolved>0 || unsettled>0 || loss_blocked || pair_loss_blocked || exposure_blocked {return Ok(None);}
             tx.execute("INSERT INTO trades(pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,status,profile_id,structural_spread,accounting_status,commission_cost,funding_cost,highest_spread_reached) VALUES(?,?,?,?,?,0,0,?,?,'ENTRY',?,?,'PENDING',0,0,0)",params![s.pair,s.exchange_a,s.exchange_b,s.direction,s.actual_vol_a_usd,s.spread,now,s.profile_id,s.structural_spread])?;
             let id=tx.last_insert_rowid();tx.execute("INSERT INTO execution_plans(trade_id,plan) VALUES(?,?)",params![id,json])?;
             tx.commit()?;Ok(Some(id))
@@ -87,6 +93,13 @@ impl Journal {
         let day_start = now - now.rem_euclid(86_400_000);
         Ok(self.db.call(move |c| {
             c.query_row("SELECT COALESCE(SUM(pnl),0) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND profile_id=? AND exit_time>=?",params![profile_id,day_start],|r|r.get(0)).map_err(Into::into)
+        }).await?)
+    }
+    pub async fn recent_verified_pair_losses(&self, pair: &str) -> anyhow::Result<i64> {
+        let pair = pair.to_string();
+        let since = super::utils::now_ms() - PAIR_LOSS_QUARANTINE_MS;
+        Ok(self.db.call(move |c| {
+            c.query_row("SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND pair=? AND pnl<0 AND exit_time>=?",params![pair,since],|r|r.get(0)).map_err(Into::into)
         }).await?)
     }
     pub async fn active(&self) -> anyhow::Result<Vec<ManagedTrade>> {
@@ -535,6 +548,25 @@ mod tests {
         let mut after_loss = plan();
         after_loss.settings.daily_loss_limit_usdt = 0.5;
         assert!(j.reserve(after_loss).await.unwrap().is_none());
+    }
+    #[tokio::test]
+    async fn repeated_verified_pair_losses_are_quarantined_for_a_day() {
+        let j = setup().await;
+        let now = super::super::utils::now_ms();
+        let first = j.reserve(plan()).await.unwrap().unwrap();
+        j.db.call(move |c| {
+            c.execute("UPDATE trades SET status='CLOSED',accounting_status='VERIFIED',pnl=-0.01,exit_time=? WHERE id=?",params![now,first])?;
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(j.recent_verified_pair_losses("TESTUSDT").await.unwrap(), 1);
+
+        let second = j.reserve(plan()).await.unwrap().unwrap();
+        j.db.call(move |c| {
+            c.execute("UPDATE trades SET status='CLOSED',accounting_status='VERIFIED',pnl=-0.01,exit_time=? WHERE id=?",params![now,second])?;
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(j.recent_verified_pair_losses("TESTUSDT").await.unwrap(), 2);
+        assert!(j.reserve(plan()).await.unwrap().is_none());
     }
     #[tokio::test]
     async fn durable_identity_and_cumulative_receipts_cannot_double_count() {

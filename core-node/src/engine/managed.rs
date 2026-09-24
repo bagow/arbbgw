@@ -385,6 +385,16 @@ async fn enter(
             record_entry_decision(ctx, "rejected_pair_cooldown");
             continue;
         }
+        let recent_pair_losses = j.recent_verified_pair_losses(&s.pair).await?;
+        if recent_pair_losses >= super::journal::PAIR_LOSS_QUARANTINE_THRESHOLD {
+            tracing::info!(
+                "[managed] Pair loss quarantine rejected {}: {} VERIFIED losses in the last 24h",
+                s.pair,
+                recent_pair_losses,
+            );
+            record_entry_decision(ctx, "rejected_pair_loss_quarantine");
+            continue;
+        }
         // These checks are independent and all happen before the first leg. Run
         // them together so a short-lived edge is not consumed by the sum of six
         // REST round trips. Every result is still required and errors fail closed.
