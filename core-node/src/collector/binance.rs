@@ -30,10 +30,11 @@ const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
 const BINANCE_RAW_WS_URL: &str = "wss://fstream.binance.com/ws";
 const BINANCE_COMBINED_WS_URL: &str = "wss://fstream.binance.com/stream";
 
-// The baseline exists only as a stable health/liquidity probe. Discovery uses the
+// The baseline exists only as a stable transport-health probe. Discovery uses the
 // all-book ticker and every executable/owned symbol is followed by the dynamic
-// stream below, so keeping more than one baseline connection only adds queueing.
-const FALLBACK_DEPTH_SYMBOLS: &[&str] = &["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"];
+// stream below. One liquid symbol is sufficient for health and avoids the VPS
+// receive backlog observed even on a five-symbol combined stream.
+const FALLBACK_DEPTH_SYMBOLS: &[&str] = &["BTCUSDT"];
 
 pub async fn run(
     prices: PriceMap,
@@ -830,7 +831,11 @@ fn depth_stream_url(symbols: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join("/");
-    format!("{BINANCE_COMBINED_WS_URL}?streams={streams}")
+    if symbols.len() == 1 {
+        format!("{BINANCE_RAW_WS_URL}/{streams}")
+    } else {
+        format!("{BINANCE_COMBINED_WS_URL}?streams={streams}")
+    }
 }
 
 /// Parse [[price, qty], ...] from depth snapshot
@@ -871,6 +876,14 @@ mod tests {
         assert_eq!(
             depth_stream_url(&["BTCUSDT".into(), "ETHUSDT".into()]),
             "wss://fstream.binance.com/stream?streams=btcusdt@depth5@500ms/ethusdt@depth5@500ms"
+        );
+    }
+
+    #[test]
+    fn single_baseline_depth_uses_raw_stream() {
+        assert_eq!(
+            depth_stream_url(&["BTCUSDT".into()]),
+            "wss://fstream.binance.com/ws/btcusdt@depth5@500ms"
         );
     }
 
