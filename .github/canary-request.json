@@ -1,7 +1,7 @@
 {
   "enabled": true,
-  "attempt": 9,
-  "expected_build_sha": "b7a7372ea5cce6e7e5ac22c15af760c4746a5337",
+  "attempt": 10,
+  "expected_build_sha": "e5459c189d98e6a8ec4fc22288d26599addb26c8",
   "notional_usdt": 6.0,
   "leverage": 2,
   "monitor_seconds": 1800,
@@ -11,7 +11,7 @@
   "trailing_stop_percent": 0.1,
   "hard_stop_percent": 0.5,
   "trailing_activation_percent": 0.1,
-  "daily_loss_limit_usdt": 0.25,
+  "daily_loss_limit_usdt": 0.1,
   "max_total_exposure_usdt": 7.0,
   "slippage_percent": 0.05,
   "min_structural_deviation": 0.5,

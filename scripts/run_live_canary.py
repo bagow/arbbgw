@@ -215,10 +215,15 @@ def preflight(config):
     expected = config["expected_build_sha"]
     if current_health.get("build_sha") != expected:
         raise RuntimeError(f"build mismatch: {current_health.get('build_sha')} != {expected}")
+    # With the profile deliberately inactive, dynamic public subscriptions have
+    # no wanted symbols after a process restart.  Requiring market_ready here
+    # would make a safely halted canary impossible to start.  Full market and
+    # trading readiness is still required for five consecutive samples by
+    # wait_for_readiness() after the one-pair profile is enabled.
     if not all(current_health.get(key) for key in (
-        "process_healthy", "market_ready", "private_ready"
+        "process_healthy", "private_ready"
     )):
-        raise RuntimeError("core dependencies are not healthy")
+        raise RuntimeError("core process or private dependencies are not healthy")
     if current_health.get("entries_halted") is not True:
         raise RuntimeError("canary must start from a persisted halted state")
     with trade_connection() as db:
