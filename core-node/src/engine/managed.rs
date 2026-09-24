@@ -385,10 +385,23 @@ async fn enter(
             record_entry_decision(ctx, "rejected_pair_cooldown");
             continue;
         }
-        // Authoritative preflight, before the first leg. Errors fail closed.
-        let (posa, posb) = tokio::join!(
+        // These checks are independent and all happen before the first leg. Run
+        // them together so a short-lived edge is not consumed by the sum of six
+        // REST round trips. Every result is still required and errors fail closed.
+        let preflight_started_ms = now_ms();
+        let (posa, posb, idle_a, idle_b, fee_a, fee_b, ba, bb, la, lb, fa, fb) = tokio::join!(
             ca.fetch_positions(http, keys),
-            cb.fetch_positions(http, keys)
+            cb.fetch_positions(http, keys),
+            ca.symbol_has_no_open_orders(http, keys, &s.pair),
+            cb.symbol_has_no_open_orders(http, keys, &s.pair),
+            actual_taker_fee(ca.as_ref(), &s.exchange_a, &s.pair, http, keys, ctx),
+            actual_taker_fee(cb.as_ref(), &s.exchange_b, &s.pair, http, keys, ctx),
+            ca.fetch_balances(http, keys),
+            cb.fetch_balances(http, keys),
+            ca.ensure_leverage(http, keys, &s.pair, p.leverage as f64),
+            cb.ensure_leverage(http, keys, &s.pair, p.leverage as f64),
+            super::funding_guard::next(http, &s.exchange_a, &s.pair),
+            super::funding_guard::next(http, &s.exchange_b, &s.pair),
         );
         let (posa, posb) = match (posa, posb) {
             (Ok(a), Ok(b)) => (a, b),
@@ -405,18 +418,10 @@ async fn enter(
             record_entry_decision(ctx, "rejected_existing_position");
             continue;
         }
-        let (idle_a, idle_b) = tokio::join!(
-            ca.symbol_has_no_open_orders(http, keys, &s.pair),
-            cb.symbol_has_no_open_orders(http, keys, &s.pair)
-        );
         if !matches!(idle_a, Ok(true)) || !matches!(idle_b, Ok(true)) {
             record_entry_decision(ctx, "rejected_open_orders_check");
             continue;
         }
-        let (fee_a, fee_b) = tokio::join!(
-            actual_taker_fee(ca.as_ref(), &s.exchange_a, &s.pair, http, keys, ctx),
-            actual_taker_fee(cb.as_ref(), &s.exchange_b, &s.pair, http, keys, ctx)
-        );
         let (fee_a, fee_b) = match (fee_a, fee_b) {
             (Ok(a), Ok(b)) => (a, b),
             (a, b) => {
@@ -426,7 +431,6 @@ async fn enter(
             }
         };
         s.break_even_pct = super::scanner_common::ioc_break_even_pct(fee_a, fee_b);
-        let (ba, bb) = tokio::join!(ca.fetch_balances(http, keys), cb.fetch_balances(http, keys));
         let (available_a, available_b) = match (ba, bb) {
             (Ok((_, a)), Ok((_, b))) if a.is_finite() && b.is_finite() => (a, b),
             _ => {
@@ -444,19 +448,11 @@ async fn enter(
             record_entry_decision(ctx, "rejected_live_margin");
             continue;
         }
-        // Configure both venues before taking exposure; failures cannot be ignored.
-        let (la, lb) = tokio::join!(
-            ca.ensure_leverage(http, keys, &s.pair, p.leverage as f64),
-            cb.ensure_leverage(http, keys, &s.pair, p.leverage as f64)
-        );
+        // Both venues were configured before taking exposure; failures cannot be ignored.
         if la.is_err() || lb.is_err() {
             record_entry_decision(ctx, "rejected_leverage_setup");
             continue;
         }
-        let (fa, fb) = tokio::join!(
-            super::funding_guard::next(http, &s.exchange_a, &s.pair),
-            super::funding_guard::next(http, &s.exchange_b, &s.pair)
-        );
         let funding_deadline_ms = match (fa, fb) {
             (Ok(a), Ok(b)) => super::funding_guard::deadline(a, b, now_ms()),
             _ => None,
@@ -465,6 +461,11 @@ async fn enter(
             record_entry_decision(ctx, "rejected_funding_fetch");
             continue;
         }
+        tracing::info!(
+            "[managed] Authoritative preflight completed for {} in {}ms",
+            s.pair,
+            now_ms().saturating_sub(preflight_started_ms)
+        );
         // The Binance public WS occasionally queues seconds-old frames on the VPS.
         // Refresh its top-5 snapshot after all slower private/funding checks, so the
         // final IOC quote is based on authoritative data inside the 750 ms budget.
@@ -511,6 +512,30 @@ async fn enter(
                 .unwrap_or(false)
         });
         if !specs_ok {
+            let spec_a = ctx
+                .specifications
+                .get(&format!("{}:{}", s.exchange_a, s.pair))
+                .map(|spec| spec.value().clone());
+            let spec_b = ctx
+                .specifications
+                .get(&format!("{}:{}", s.exchange_b, s.pair))
+                .map(|spec| spec.value().clone());
+            tracing::info!(
+                "[managed] Contract specification rejected {}: {} qty={} price={} step={} tick={} spec={:?}; {} qty={} price={} step={} tick={} spec={:?}",
+                s.pair,
+                s.exchange_a,
+                s.target_qty_a,
+                pa,
+                s.mult_a,
+                s.tick_a,
+                spec_a,
+                s.exchange_b,
+                s.target_qty_b,
+                pb,
+                s.mult_b,
+                s.tick_b,
+                spec_b,
+            );
             record_entry_decision(ctx, "rejected_contract_specification");
             continue;
         }
@@ -529,6 +554,20 @@ async fn enter(
         ) {
             Some(value) => value,
             None => {
+                let required_floor = p
+                    .min_entry_spread
+                    .max(s.structural_spread + p.min_structural_deviation.max(s.break_even_pct));
+                tracing::info!(
+                    "[managed] Entry budget rejected {}: signal={:.4}% fresh_l2={:.4}% required={:.4}% structural={:.4}% break_even={:.4}% window={:.4}%..={:.4}%",
+                    s.pair,
+                    s.spread,
+                    gross,
+                    required_floor,
+                    s.structural_spread,
+                    s.break_even_pct,
+                    p.min_entry_spread,
+                    p.max_entry_spread,
+                );
                 record_entry_decision(ctx, "rejected_entry_budget");
                 continue;
             }
