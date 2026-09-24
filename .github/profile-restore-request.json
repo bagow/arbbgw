@@ -1,5 +1,5 @@
 {
   "enabled": true,
   "halt_only": true,
-  "reason": "halt no-entry attempt 17 after validating the normalized production baseline"
+  "reason": "halt attempt 18 after isolating Binance REST discovery overwriting candidate depth"
 }
