@@ -1,5 +1,5 @@
 {
   "enabled": true,
   "halt_only": true,
-  "reason": "end attempt 7 before testing non-redundant raw spread floor"
+  "reason": "halt attempt 10 after persistent Binance L2 health failure"
 }
