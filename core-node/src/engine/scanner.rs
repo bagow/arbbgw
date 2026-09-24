@@ -15,6 +15,27 @@ fn signal_throttle() -> &'static DashMap<String, i64> {
 
 static LAST_DIAG_LOG: AtomicI64 = AtomicI64::new(0);
 
+fn execution_books_are_fresh(
+    e_ctx: &EngineContext,
+    key_a: &str,
+    key_b: &str,
+    now_ms: i64,
+) -> bool {
+    [key_a, key_b].iter().all(|key| {
+        e_ctx.l2_books.get(*key).is_some_and(|book| {
+            let age_ms = now_ms - book.updated_ms;
+            let top = book.bids.first().zip(book.asks.first());
+            (0..=750).contains(&age_ms)
+                && top.is_some_and(|(bid, ask)| {
+                    [bid.0, bid.1, ask.0, ask.1]
+                        .iter()
+                        .all(|value| value.is_finite() && *value > 0.0)
+                        && bid.0 < ask.0
+                })
+        })
+    })
+}
+
 /// Core logic of token analysis: translates bare `SpreadRow` into ready-to-execute `TradeSignal`.
 pub fn generate_signals(
     spreads: &[SpreadRow],
@@ -104,6 +125,21 @@ pub fn generate_signals(
             && profiles.iter().any(|p| {
                 p.is_active && row.spread >= p.min_entry_spread && row.spread <= p.max_entry_spread
             });
+
+        // Discovery quotes only nominate candidates. Do not create an order
+        // signal until both venues have a fresh executable-depth snapshot. In
+        // particular, this gives Binance's demand-driven L2 subscription one
+        // update cycle to replace an internally stale all-market book ticker.
+        if !execution_books_are_fresh(e_ctx, &key_a, &key_b, now) {
+            if worth_diag {
+                tracing::debug!(
+                    "[scanner] REJECT {} spread={:.4}% -> executable L2 pending or stale",
+                    row.pair,
+                    row.spread,
+                );
+            }
+            continue;
+        }
 
         if let (Some(ref da), Some(ref db)) = (&data_a, &data_b) {
 
@@ -475,4 +511,59 @@ pub fn generate_signals(
         e_ctx.scanner_status.insert(key.to_string(), value);
     }
     signals
+}
+
+#[cfg(test)]
+mod l2_gate_tests {
+    use super::*;
+    use crate::state::L2Snapshot;
+
+    fn book(updated_ms: i64) -> L2Snapshot {
+        L2Snapshot {
+            bids: vec![(100.0, 1.0)],
+            asks: vec![(101.0, 1.0)],
+            updated_ms,
+        }
+    }
+
+    #[test]
+    fn signals_wait_for_two_fresh_execution_books() {
+        let ctx = EngineContext::default();
+        let now = 10_000;
+        assert!(!execution_books_are_fresh(
+            &ctx,
+            "binance:TESTUSDT",
+            "kucoin:TESTUSDT",
+            now,
+        ));
+
+        ctx.l2_books
+            .insert("binance:TESTUSDT".into(), book(now - 750));
+        ctx.l2_books
+            .insert("kucoin:TESTUSDT".into(), book(now + 1));
+        assert!(!execution_books_are_fresh(
+            &ctx,
+            "binance:TESTUSDT",
+            "kucoin:TESTUSDT",
+            now,
+        ));
+
+        ctx.l2_books
+            .insert("kucoin:TESTUSDT".into(), book(now));
+        assert!(execution_books_are_fresh(
+            &ctx,
+            "binance:TESTUSDT",
+            "kucoin:TESTUSDT",
+            now,
+        ));
+
+        ctx.l2_books
+            .insert("binance:TESTUSDT".into(), book(now - 751));
+        assert!(!execution_books_are_fresh(
+            &ctx,
+            "binance:TESTUSDT",
+            "kucoin:TESTUSDT",
+            now,
+        ));
+    }
 }
