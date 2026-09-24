@@ -1,0 +1,201 @@
+{
+  "ok": true,
+  "started_ms": 1790267699455,
+  "config": {
+    "enabled": true,
+    "detached": true,
+    "attempt": 25,
+    "expected_build_sha": "741c4a81cafc983b2a9033b44aff35d0d7c3ee6f",
+    "notional_usdt": 6.0,
+    "leverage": 2,
+    "monitor_seconds": 2700,
+    "min_volume_millions": 0.5,
+    "min_entry_spread": 0.5,
+    "max_entry_spread": 4.0,
+    "take_profit_percent": 0.2,
+    "trailing_stop_percent": 0.1,
+    "hard_stop_percent": 0.5,
+    "trailing_activation_percent": 0.1,
+    "daily_loss_limit_usdt": 0.1,
+    "max_total_exposure_usdt": 7.0,
+    "slippage_percent": 0.05,
+    "min_structural_deviation": 0.3,
+    "min_depth_percent": 500.0,
+    "max_holding_time_ms": 600000
+  },
+  "balances_before": {
+    "binance": 9.5397465,
+    "kucoin": 8.4587455878
+  },
+  "backup": "/home/opc/core-node/canary-backups/1790267699455",
+  "watchdog_armed": true,
+  "preflight_health": {
+    "active_trades": 0,
+    "build_sha": "741c4a81cafc983b2a9033b44aff35d0d7c3ee6f",
+    "entries_halted": false,
+    "entry_decisions": {
+      "rejected_entry_budget": 1,
+      "signal_received": 1
+    },
+    "healthy": true,
+    "market_ready": true,
+    "private_ready": true,
+    "process_healthy": true,
+    "scanner_status": {
+      "active_profiles": 1,
+      "profile_window_rows": 0,
+      "signals_emitted": 0,
+      "spreads_available": 2,
+      "spreads_considered": 2,
+      "updated_ms": 1790267707355
+    },
+    "supervisor_age_ms": 780,
+    "trading_ready": true,
+    "venues": [
+      {
+        "balance_age_ms": 4604,
+        "books": 18,
+        "current_specs": 527,
+        "exchange": "binance",
+        "fresh_books": 1,
+        "positions_age_ms": 4383,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": null,
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "gate",
+        "fresh_books": 0,
+        "positions_age_ms": null,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": 3780,
+        "books": 679,
+        "current_specs": 675,
+        "exchange": "kucoin",
+        "fresh_books": 440,
+        "positions_age_ms": 3505,
+        "wanted_books": 0
+      }
+    ]
+  },
+  "readiness_consecutive_samples": 5,
+  "entry_decisions_before": {
+    "rejected_entry_budget": 1,
+    "signal_received": 1
+  },
+  "monitor_observation": {
+    "samples": 2667,
+    "scanner_max": {
+      "active_profiles": 1,
+      "profile_window_rows": 2,
+      "signals_emitted": 0,
+      "spreads_available": 6,
+      "spreads_considered": 6,
+      "updated_ms": 1790270406549
+    },
+    "venues_max": {
+      "binance": {
+        "books": 28,
+        "fresh_books": 4,
+        "wanted_books": 2,
+        "current_specs": 527
+      },
+      "gate": {
+        "books": 0,
+        "fresh_books": 0,
+        "wanted_books": 0,
+        "current_specs": 0
+      },
+      "kucoin": {
+        "books": 679,
+        "fresh_books": 635,
+        "wanted_books": 2,
+        "current_specs": 675
+      }
+    }
+  },
+  "outcome": "no_trade",
+  "trades": [],
+  "execution_events": [],
+  "orders": [],
+  "balances": {
+    "binance": 9.5397465,
+    "kucoin": 8.4587455878
+  },
+  "margin_balances": {
+    "binance": 9.5397465,
+    "kucoin": 8.4587455878
+  },
+  "profile": {
+    "is_active": 0,
+    "trade_volume": 6.0,
+    "leverage": 2,
+    "max_active_trades": 1,
+    "min_entry_spread": 0.5,
+    "take_profit_percent": 0.2,
+    "hard_stop_percent": 0.5,
+    "daily_loss_limit_usdt": 0.1,
+    "max_total_exposure_usdt": 7.0,
+    "max_holding_time_ms": 600000,
+    "min_volume_millions": 0.5
+  },
+  "health": {
+    "active_trades": 0,
+    "build_sha": "741c4a81cafc983b2a9033b44aff35d0d7c3ee6f",
+    "entries_halted": false,
+    "entry_decisions": {
+      "rejected_entry_budget": 1,
+      "signal_received": 1
+    },
+    "healthy": true,
+    "market_ready": true,
+    "private_ready": false,
+    "process_healthy": true,
+    "scanner_status": {
+      "active_profiles": 1,
+      "profile_window_rows": 1,
+      "signals_emitted": 0,
+      "spreads_available": 2,
+      "spreads_considered": 2,
+      "updated_ms": 1790270407559
+    },
+    "supervisor_age_ms": 973,
+    "trading_ready": false,
+    "venues": [
+      {
+        "balance_age_ms": 579,
+        "books": 26,
+        "current_specs": 527,
+        "exchange": "binance",
+        "fresh_books": 1,
+        "positions_age_ms": 297,
+        "wanted_books": 1
+      },
+      {
+        "balance_age_ms": null,
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "gate",
+        "fresh_books": 0,
+        "positions_age_ms": null,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": -2,
+        "books": 679,
+        "current_specs": 675,
+        "exchange": "kucoin",
+        "fresh_books": 391,
+        "positions_age_ms": 25835,
+        "wanted_books": 1
+      }
+    ]
+  },
+  "entry_decision_delta": {},
+  "profile_restored_inactive": true,
+  "kill_switch_restored": true,
+  "finished_ms": 1790270407640
+}
