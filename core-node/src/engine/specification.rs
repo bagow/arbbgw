@@ -92,8 +92,7 @@ impl Specification {
         })
     }
     pub fn permits(&self, now: i64, quantity: f64, price: f64, step: f64, tick: f64) -> bool {
-        let age = now - self.fetched_ms;
-        (0..=600_000).contains(&age)
+        super::utils::local_timestamp_is_fresh(now, self.fetched_ms, 600_000)
             && quantity.is_finite()
             && price.is_finite()
             && price > 0.0
@@ -115,6 +114,8 @@ mod tests {
         let s = Specification::parse("binance", &v, 1_000).unwrap();
         assert!(!s.permits(1_001, 0.001, 60_000.0, 0.001, 0.1));
         assert!(s.permits(1_001, 0.002, 60_000.0, 0.001, 0.1));
+        assert!(s.permits(999, 0.002, 60_000.0, 0.001, 0.1));
+        assert!(!s.permits(-1, 0.002, 60_000.0, 0.001, 0.1));
         assert!(!s.permits(601_001, 0.002, 60_000.0, 0.001, 0.1));
         assert!(!s.permits(1_001, 0.002, 60_000.0, 0.001, 0.01));
         assert!(!s.permits(1_001, 101.0, 60_000.0, 0.001, 0.1));

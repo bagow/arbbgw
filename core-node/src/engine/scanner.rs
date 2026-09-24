@@ -1,4 +1,6 @@
-use crate::engine::utils::{now_ms, now_secs, cooldown_active, get_exchange_fee};
+use crate::engine::utils::{
+    cooldown_active, get_exchange_fee, local_timestamp_is_fresh, now_ms, now_secs,
+};
 use crate::engine::real::ExchangeKeys;
 use crate::state::{EngineContext, PriceMap};
 use shared::{SpreadRow, TechnicalSettings, TradeSignal, TradingSettings};
@@ -23,9 +25,8 @@ fn execution_books_are_fresh(
 ) -> bool {
     [key_a, key_b].iter().all(|key| {
         e_ctx.l2_books.get(*key).is_some_and(|book| {
-            let age_ms = now_ms - book.updated_ms;
             let top = book.bids.first().zip(book.asks.first());
-            (0..=750).contains(&age_ms)
+            local_timestamp_is_fresh(now_ms, book.updated_ms, 750)
                 && top.is_some_and(|(bid, ask)| {
                     [bid.0, bid.1, ask.0, ask.1]
                         .iter()
@@ -541,6 +542,15 @@ mod l2_gate_tests {
             .insert("binance:TESTUSDT".into(), book(now - 750));
         ctx.l2_books
             .insert("kucoin:TESTUSDT".into(), book(now + 1));
+        assert!(execution_books_are_fresh(
+            &ctx,
+            "binance:TESTUSDT",
+            "kucoin:TESTUSDT",
+            now,
+        ));
+
+        ctx.l2_books
+            .insert("kucoin:TESTUSDT".into(), book(now + 1_001));
         assert!(!execution_books_are_fresh(
             &ctx,
             "binance:TESTUSDT",

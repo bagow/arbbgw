@@ -21,6 +21,22 @@ pub fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
+/// Check freshness of a timestamp written by another task in this process.
+///
+/// Callers commonly capture `now` and then read a concurrent DashMap. The
+/// writer can publish a newer timestamp between those operations, producing a
+/// tiny negative age for data that is actually the freshest available. Keep a
+/// bounded tolerance so that race is accepted without treating arbitrary
+/// future or stale timestamps as valid.
+pub fn local_timestamp_is_fresh(now: i64, updated: i64, max_age_ms: i64) -> bool {
+    const CONCURRENT_UPDATE_TOLERANCE_MS: i64 = 1_000;
+    if now <= 0 || updated <= 0 || max_age_ms < 0 {
+        return false;
+    }
+    (-CONCURRENT_UPDATE_TOLERANCE_MS..=max_age_ms)
+        .contains(&now.saturating_sub(updated))
+}
+
 /// Check if a cooldown is still active.
 /// Supports two contract modes:
 /// 1) `marker` = last event timestamp → active if `now - marker < cooldown_ms`
@@ -183,6 +199,17 @@ mod tests {
         assert!(cooldown_active(now - 4_999, now, 5_000));
         assert!(!cooldown_active(now - 5_000, now, 5_000));
         assert!(!cooldown_active(now - 10_000, now, 5_000));
+    }
+
+    #[test]
+    fn local_freshness_accepts_bounded_concurrent_updates() {
+        let now = 10_000;
+        assert!(local_timestamp_is_fresh(now, now - 750, 750));
+        assert!(!local_timestamp_is_fresh(now, now - 751, 750));
+        assert!(local_timestamp_is_fresh(now, now + 1, 750));
+        assert!(local_timestamp_is_fresh(now, now + 1_000, 750));
+        assert!(!local_timestamp_is_fresh(now, now + 1_001, 750));
+        assert!(!local_timestamp_is_fresh(now, 0, 750));
     }
 
     #[test]

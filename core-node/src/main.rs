@@ -497,13 +497,14 @@ async fn handle_close_position(
 async fn handle_health(
     State((journal, ctx)): State<(engine::journal::Journal, Arc<state::EngineContext>)>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
-    let age = engine::utils::now_ms()
-        - ctx
-            .supervisor_tick_ms
-            .load(std::sync::atomic::Ordering::Acquire);
-    let active = journal.active().await;
-    let process_healthy = active.is_ok() && age >= 0 && age < 5000;
     let now = engine::utils::now_ms();
+    let supervisor_tick_ms = ctx
+        .supervisor_tick_ms
+        .load(std::sync::atomic::Ordering::Acquire);
+    let age = now - supervisor_tick_ms;
+    let active = journal.active().await;
+    let process_healthy = active.is_ok()
+        && engine::utils::local_timestamp_is_fresh(now, supervisor_tick_ms, 4_999);
     let mut market_ready_venues = 0usize;
     let venues: Vec<_> = ["binance", "gate", "kucoin"]
         .iter()
@@ -519,7 +520,7 @@ async fn handle_health(
                 .iter()
                 .filter(|b| {
                     b.key().starts_with(&prefix)
-                        && (0..=750).contains(&(now - b.updated_ms))
+                        && engine::utils::local_timestamp_is_fresh(now, b.updated_ms, 750)
                 })
                 .count();
             let specs = ctx
@@ -527,7 +528,7 @@ async fn handle_health(
                 .iter()
                 .filter(|s| {
                     s.key().starts_with(&prefix)
-                        && (0..=600_000).contains(&(now - s.fetched_ms))
+                        && engine::utils::local_timestamp_is_fresh(now, s.fetched_ms, 600_000)
                 })
                 .count();
             let wanted_books = ctx
@@ -553,12 +554,12 @@ async fn handle_health(
             let balance_fresh = ctx
                 .balances_updated_ms
                 .get(**ex)
-                .map(|stamp| (0..=60_000).contains(&(now - *stamp)))
+                .map(|stamp| engine::utils::local_timestamp_is_fresh(now, *stamp, 60_000))
                 .unwrap_or(false);
             let positions_fresh = ctx
                 .positions_updated_ms
                 .get(**ex)
-                .map(|stamp| (0..=60_000).contains(&(now - *stamp)))
+                .map(|stamp| engine::utils::local_timestamp_is_fresh(now, *stamp, 60_000))
                 .unwrap_or(false);
             balance_fresh && positions_fresh
         })
