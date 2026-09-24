@@ -1,4 +1,4 @@
 {
-  "sequence": 1,
-  "reason": "verify short guarded canary after volume-floor calibration"
+  "sequence": 2,
+  "reason": "inspect attempt 20 final entry-budget rejection and halted state"
 }
