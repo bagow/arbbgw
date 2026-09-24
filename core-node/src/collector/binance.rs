@@ -23,6 +23,7 @@ const MAX_BASELINE_DEPTH_BACKLOG_MS: i64 = 5_000;
 const MAX_BASELINE_CONSECUTIVE_STALE_DEPTH: u32 = 10;
 const MAX_DYNAMIC_DEPTH_BACKLOG_MS: i64 = 2_000;
 const MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH: u32 = 3;
+const BASELINE_HEALTH_REFRESH_AGE_MS: i64 = 250;
 // 24 ranked candidates plus the profile-wide maximum of 10 owned trades.
 const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
 // Binance's documented USD-M market-stream endpoints. The `/public/*` relay
@@ -123,7 +124,9 @@ pub async fn run(
             let l2_wanted_for_dynamic = l2_wanted.clone();
             let signal_for_depth = signal.clone();
             let signal_for_dynamic = signal.clone();
+            let signal_for_health = signal.clone();
             let discovery_for_depth = discovery_ready.clone();
+            let settings_for_health = settings.clone();
             children.spawn(async move {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 tokio::join!(
@@ -134,10 +137,16 @@ pub async fn run(
                         discovery_for_depth,
                     ),
                     run_dynamic_l2_depth_stream(
-                        l2_books_for_depth,
-                        prices_for_depth,
+                        l2_books_for_depth.clone(),
+                        prices_for_depth.clone(),
                         l2_wanted_for_dynamic,
                         signal_for_dynamic,
+                    ),
+                    run_l2_health_fallback(
+                        l2_books_for_depth,
+                        prices_for_depth,
+                        signal_for_health,
+                        settings_for_health,
                     )
                 );
             });
@@ -170,6 +179,83 @@ pub async fn run(
             _ = disable_watcher => {
                 info!("[binance] Exchange was disabled dynamically. Dropping connection.");
                 backoff = Duration::from_secs(1);
+            }
+        }
+    }
+}
+
+fn baseline_health_refresh_due(active: bool, updated_ms: Option<i64>, now_ms: i64) -> bool {
+    active
+        && updated_ms
+            .map(|updated| {
+                now_ms < updated || now_ms - updated > BASELINE_HEALTH_REFRESH_AGE_MS
+            })
+            .unwrap_or(true)
+}
+
+/// Keep the Binance transport-health probe current when this VPS's WebSocket
+/// route delivers old batches. The probe runs only while a profile is active,
+/// obeys the centralized REST weight/ban guard, and accepts the same <=750 ms
+/// exchange timestamp as an executable snapshot.
+async fn run_l2_health_fallback(
+    l2_books: L2OrderbookMap,
+    price_map: crate::state::PriceMap,
+    signal: UpdateSignal,
+    settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
+) {
+    let http = Client::builder()
+        .user_agent("cryptoarb-binance-health/1")
+        .build()
+        .expect("Binance health client");
+    let key = "binance:BTCUSDT";
+    let mut last_warning = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let active = settings.read().await.iter().any(|profile| {
+            profile.is_active
+                && !profile.disabled_exchanges.iter().any(|exchange| exchange == "binance")
+        });
+        let now = crate::engine::utils::now_ms();
+        let updated_ms = l2_books.get(key).map(|book| book.updated_ms);
+        if !baseline_health_refresh_due(active, updated_ms, now) {
+            continue;
+        }
+        match crate::engine::exchanges::binance::fetch_public_depth_snapshot(
+            &http,
+            "BTCUSDT",
+        )
+        .await
+        {
+            Ok(book) => {
+                if l2_books
+                    .get(key)
+                    .map(|existing| existing.updated_ms >= book.updated_ms)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                if let (Some(bid), Some(ask), Some(mut venue)) = (
+                    book.bids.first(),
+                    book.asks.first(),
+                    price_map.get_mut("binance"),
+                ) {
+                    if let Some(ticker) = venue.get_mut("BTCUSDT") {
+                        ticker.bid = bid.0;
+                        ticker.ask = ask.0;
+                        ticker.price = (bid.0 + ask.0) / 2.0;
+                        ticker.bid_size = bid.0 * bid.1;
+                        ticker.ask_size = ask.0 * ask.1;
+                        ticker.last_updated = (book.updated_ms / 1000) as u64;
+                    }
+                }
+                l2_books.insert(key.to_string(), book);
+                signal.notify_one();
+            }
+            Err(error) => {
+                if last_warning.elapsed() >= Duration::from_secs(30) {
+                    warn!("[binance_l2_health_rest] Refresh failed: {}", error);
+                    last_warning = std::time::Instant::now();
+                }
             }
         }
     }
@@ -514,11 +600,10 @@ async fn run_l2_depth_stream(
                             warn!("[binance_l2_chunk] Connect timed out");
                         }
                     }
-                    // A successful handshake alone must not reset retry pacing.
-                    // Expire this connection's books immediately after losing the stream.
-                    for symbol in &chunk_symbols {
-                        l2_books_clone.remove(&format!("binance:{}", symbol));
-                    }
+                    // A successful handshake alone must not reset retry pacing. Keep
+                    // the last snapshot in the map: timestamp freshness expires it,
+                    // while an active profile's REST health fallback may already have
+                    // replaced it with a newer authoritative snapshot.
                     let stable = backlog_detected || session_start.elapsed() >= Duration::from_secs(60);
                     if stable {
                         backoff = Duration::from_secs(1);
@@ -891,6 +976,15 @@ mod tests {
     fn baseline_depth_fits_one_connection() {
         assert!(!FALLBACK_DEPTH_SYMBOLS.is_empty());
         assert!(FALLBACK_DEPTH_SYMBOLS.len() <= DEPTH_STREAMS_PER_CONNECTION);
+    }
+
+    #[test]
+    fn rest_health_fallback_runs_only_for_active_stale_baseline() {
+        assert!(!baseline_health_refresh_due(false, None, 10_000));
+        assert!(baseline_health_refresh_due(true, None, 10_000));
+        assert!(!baseline_health_refresh_due(true, Some(9_750), 10_000));
+        assert!(baseline_health_refresh_due(true, Some(9_749), 10_000));
+        assert!(baseline_health_refresh_due(true, Some(10_001), 10_000));
     }
 
     #[test]
