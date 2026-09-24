@@ -1,0 +1,43 @@
+{
+  "ok": true,
+  "halt_only": true,
+  "before": {
+    "id": "real-default",
+    "is_active": 1,
+    "trade_volume": 6.0,
+    "leverage": 2,
+    "min_entry_spread": 0.5,
+    "max_entry_spread": 4.0,
+    "take_profit_percent": 0.2,
+    "trailing_stop_percent": 0.1,
+    "max_active_trades": 1,
+    "min_volume_millions": 3.0,
+    "min_structural_deviation": 10.0,
+    "min_depth_percent": 500.0,
+    "slippage_percent": 0.05,
+    "daily_loss_limit_usdt": 0.1,
+    "max_total_exposure_usdt": 7.0,
+    "max_holding_time_ms": 600000,
+    "disabled_exchanges": "[\"htx\", \"toobit\", \"ascendex\", \"bingx\", \"bitget\", \"bitmex\", \"gate\", \"xt\", \"bybit\"]"
+  },
+  "after": {
+    "id": "real-default",
+    "is_active": 0,
+    "trade_volume": 6.0,
+    "leverage": 2,
+    "min_entry_spread": 0.5,
+    "max_entry_spread": 4.0,
+    "take_profit_percent": 0.2,
+    "trailing_stop_percent": 0.1,
+    "max_active_trades": 1,
+    "min_volume_millions": 3.0,
+    "min_structural_deviation": 10.0,
+    "min_depth_percent": 500.0,
+    "slippage_percent": 0.05,
+    "daily_loss_limit_usdt": 0.1,
+    "max_total_exposure_usdt": 7.0,
+    "max_holding_time_ms": 600000,
+    "disabled_exchanges": "[\"htx\", \"toobit\", \"ascendex\", \"bingx\", \"bitget\", \"bitmex\", \"gate\", \"xt\", \"bybit\"]"
+  },
+  "kill_switch": "1"
+}
