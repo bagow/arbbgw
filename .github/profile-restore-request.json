@@ -1,5 +1,5 @@
 {
   "enabled": true,
   "halt_only": true,
-  "reason": "halt attempt 18 after isolating Binance REST discovery overwriting candidate depth"
+  "reason": "halt attempt 19 after confirming the 3M volume floor excludes every eligible market"
 }
