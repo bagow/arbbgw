@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{info, warn};
 
-use crate::state::{L2OrderbookMap, PriceMap, TickerData, UpdateSignal};
+use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
 
 pub async fn run(
     prices: PriceMap,
@@ -151,6 +151,90 @@ async fn handler(
     Ok(())
 }
 
+fn number(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<f64>().ok()))
+        .filter(|value| value.is_finite())
+}
+
+fn parse_depth_side(
+    raw: &[Vec<serde_json::Value>],
+    multiplier: f64,
+) -> Option<Vec<(f64, f64)>> {
+    if !multiplier.is_finite() || multiplier <= 0.0 {
+        return None;
+    }
+    raw.iter()
+        .map(|level| {
+            let price = number(level.first()?)?;
+            let contracts = number(level.get(1)?)?;
+            let quantity = contracts * multiplier;
+            (price > 0.0 && quantity.is_finite() && quantity > 0.0)
+                .then_some((price, quantity))
+        })
+        .collect()
+}
+
+fn validated_depth_snapshot(
+    raw_bids: Option<&[Vec<serde_json::Value>]>,
+    raw_asks: Option<&[Vec<serde_json::Value>]>,
+    multiplier: f64,
+) -> Option<(Vec<(f64, f64)>, Vec<(f64, f64)>)> {
+    let bids = parse_depth_side(raw_bids?, multiplier)?;
+    let asks = parse_depth_side(raw_asks?, multiplier)?;
+    if bids.is_empty()
+        || asks.is_empty()
+        || bids[0].0 >= asks[0].0
+        || bids.windows(2).any(|levels| levels[1].0 > levels[0].0)
+        || asks.windows(2).any(|levels| levels[1].0 < levels[0].0)
+    {
+        return None;
+    }
+    Some((bids, asks))
+}
+
+fn price_update_is_newer(last: Option<(i64, bool)>, source_ms: i64, is_depth: bool) -> bool {
+    match last {
+        None => true,
+        Some((last_ms, last_was_depth)) => {
+            source_ms > last_ms || (source_ms == last_ms && is_depth && !last_was_depth)
+        }
+    }
+}
+
+fn apply_depth_ticker(
+    venue: &mut std::collections::HashMap<String, TickerData>,
+    symbol: &str,
+    bids: &[(f64, f64)],
+    asks: &[(f64, f64)],
+    source_ms: i64,
+) -> bool {
+    let (Some(&(bid, bid_quantity)), Some(&(ask, ask_quantity))) = (bids.first(), asks.first())
+    else {
+        return false;
+    };
+    if source_ms <= 0
+        || ![bid, ask, bid_quantity, ask_quantity]
+            .iter()
+            .all(|value| value.is_finite())
+        || bid <= 0.0
+        || ask <= bid
+        || bid_quantity <= 0.0
+        || ask_quantity <= 0.0
+    {
+        return false;
+    }
+    let entry = venue.entry(symbol.to_string()).or_default();
+    entry.bid = bid;
+    entry.ask = ask;
+    entry.price = (bid + ask) / 2.0;
+    entry.bid_size = bid * bid_quantity;
+    entry.ask_size = ask * ask_quantity;
+    entry.last_updated = (source_ms / 1000) as u64;
+    true
+}
+
 async fn run_ws(
     shard_idx: usize,
     symbols: &[String],
@@ -268,6 +352,10 @@ async fn run_ws(
 
     let mut ping = tokio::time::interval(Duration::from_secs(12));
     let mut sequences: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    // L1 ticker and depth5 are independent topics. Retain millisecond ordering
+    // across both and prefer executable depth when timestamps are equal.
+    let mut latest_prices: std::collections::HashMap<String, (i64, bool)> =
+        std::collections::HashMap::new();
     loop {
         // Reconnect periodically to refresh L2 subscriptions (new pairs may appear)
         if conn_start.elapsed() > max_conn_age {
@@ -289,26 +377,63 @@ async fn run_ws(
                                 if let Some((sym, mult)) = sym_map.get(raw_sym) {
                                     let now_ms = crate::engine::utils::now_ms();
                                     let depth = topic.starts_with("/contractMarket/level2Depth5:");
-                                    let source_ms = if depth {d.timestamp.or(d.ts)} else {d.ts.map(|n|n/1_000_000)};
+                                    let source_ms = if depth {
+                                        d.timestamp.or_else(|| d.ts.map(|n| n / 1_000_000))
+                                    } else {
+                                        d.ts.map(|n| n / 1_000_000)
+                                    };
                                     let Some(source_ms) = source_ms.filter(|t|(0..=750).contains(&(now_ms-*t))) else {continue;};
                                     if let Some(seq) = d.sequence {
                                         if sequences.get(topic).map(|old|seq<=*old).unwrap_or(false) {continue;}
                                         sequences.insert(topic.to_owned(),seq);
                                     } else {continue;}
-                                    if v.topic.as_deref().unwrap_or("").starts_with("/contractMarket/level2Depth5:") {
-                                        let parse_level = |arr: &Vec<Vec<serde_json::Value>>| -> Vec<(f64, f64)> {
-                                            arr.iter().filter_map(|x| {
-                                                let p = x.get(0)?.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| x.get(0)?.as_f64())?;
-                                                let q = x.get(1)?.as_f64().or_else(|| x.get(1)?.as_str().and_then(|s| s.parse::<f64>().ok()))?;
-                                                Some((p, q * mult))
-                                            }).collect()
-                                        };
-                                        let bids = d.bids.as_ref().map(parse_level).unwrap_or_default();
-                                        let asks = d.asks.as_ref().map(parse_level).unwrap_or_default();
-                                        if !bids.is_empty() || !asks.is_empty() {
-                                            l2_books.insert(format!("kucoin:{}", sym), crate::state::L2Snapshot { bids, asks, updated_ms: source_ms });
-                                            signal.notify_one();
+                                    if depth {
+                                        let Some((bids, asks)) = validated_depth_snapshot(
+                                            d.bids.as_deref(),
+                                            d.asks.as_deref(),
+                                            *mult,
+                                        ) else { continue; };
+                                        let book_key = format!("kucoin:{}", sym);
+                                        if l2_books
+                                            .get(&book_key)
+                                            .map(|book| book.updated_ms >= source_ms)
+                                            .unwrap_or(false)
+                                        {
+                                            continue;
                                         }
+                                        if price_update_is_newer(
+                                            latest_prices.get(sym).copied(),
+                                            source_ms,
+                                            true,
+                                        ) {
+                                            if let Some(mut venue) = price_map.get_mut("kucoin") {
+                                                if apply_depth_ticker(
+                                                    &mut venue,
+                                                    sym,
+                                                    &bids,
+                                                    &asks,
+                                                    source_ms,
+                                                ) {
+                                                    latest_prices.insert(sym.to_string(), (source_ms, true));
+                                                }
+                                            }
+                                        }
+                                        l2_books.insert(
+                                            book_key,
+                                            L2Snapshot {
+                                                bids,
+                                                asks,
+                                                updated_ms: source_ms,
+                                            },
+                                        );
+                                        signal.notify_one();
+                                        continue;
+                                    }
+                                    if l2_books
+                                        .get(&format!("kucoin:{}", sym))
+                                        .map(|book| book.updated_ms >= source_ms)
+                                        .unwrap_or(false)
+                                    {
                                         continue;
                                     }
                                     let bid: f64 = match d.bid { Some(v) if v.is_finite() && v > 0.0 => v, _ => continue };
@@ -317,6 +442,20 @@ async fn run_ws(
                                     let bid_qty = d.bid_qty.unwrap_or(0.0);
                                     let ask_qty = d.ask_qty.unwrap_or(0.0);
                                     let price = d.price.unwrap_or((bid+ask)/2.0);
+                                    if !bid_qty.is_finite()
+                                        || !ask_qty.is_finite()
+                                        || bid_qty < 0.0
+                                        || ask_qty < 0.0
+                                        || !price.is_finite()
+                                        || price <= 0.0
+                                        || !price_update_is_newer(
+                                            latest_prices.get(sym).copied(),
+                                            source_ms,
+                                            false,
+                                        )
+                                    {
+                                        continue;
+                                    }
 
                                     if let Some(mut ex_map) = price_map.get_mut("kucoin") {
                                         let ts = (source_ms / 1000) as u64;
@@ -334,6 +473,7 @@ async fn run_ws(
                                                 last_updated: ts
                                             });
                                         }
+                                        latest_prices.insert(sym.to_string(), (source_ms, false));
                                     }
                                     signal.notify_one();
                                 }
@@ -353,4 +493,66 @@ async fn run_ws(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn levels(value: serde_json::Value) -> Vec<Vec<serde_json::Value>> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn depth_snapshot_is_strict_sorted_and_converts_contracts_to_base_units() {
+        let bids = levels(serde_json::json!([["100", 2], ["99", "3"]]));
+        let asks = levels(serde_json::json!([["101", 4], ["102", "5"]]));
+        let (parsed_bids, parsed_asks) =
+            validated_depth_snapshot(Some(&bids), Some(&asks), 10.0).unwrap();
+        assert_eq!(parsed_bids, vec![(100.0, 20.0), (99.0, 30.0)]);
+        assert_eq!(parsed_asks, vec![(101.0, 40.0), (102.0, 50.0)]);
+
+        let malformed = levels(serde_json::json!([["100", 2], ["bad", 3]]));
+        assert!(validated_depth_snapshot(Some(&malformed), Some(&asks), 10.0).is_none());
+        let unsorted = levels(serde_json::json!([["99", 2], ["100", 3]]));
+        assert!(validated_depth_snapshot(Some(&unsorted), Some(&asks), 10.0).is_none());
+        let crossed = levels(serde_json::json!([["101", 2]]));
+        assert!(validated_depth_snapshot(Some(&crossed), Some(&asks), 10.0).is_none());
+    }
+
+    #[test]
+    fn depth_top_updates_discovery_price_without_losing_volume() {
+        let mut venue = std::collections::HashMap::from([(
+            "TAKEUSDT".to_string(),
+            TickerData {
+                vol: 42.0,
+                funding_rate: 0.001,
+                ..Default::default()
+            },
+        )]);
+        assert!(apply_depth_ticker(
+            &mut venue,
+            "TAKEUSDT",
+            &[(100.0, 2.0), (99.0, 3.0)],
+            &[(101.0, 4.0), (102.0, 5.0)],
+            1_000_100,
+        ));
+        let ticker = &venue["TAKEUSDT"];
+        assert_eq!(ticker.bid, 100.0);
+        assert_eq!(ticker.ask, 101.0);
+        assert_eq!(ticker.bid_size, 200.0);
+        assert_eq!(ticker.ask_size, 404.0);
+        assert_eq!(ticker.vol, 42.0);
+        assert_eq!(ticker.funding_rate, 0.001);
+        assert_eq!(ticker.last_updated, 1_000);
+    }
+
+    #[test]
+    fn newest_topic_wins_and_depth_wins_equal_timestamp() {
+        assert!(price_update_is_newer(None, 100, false));
+        assert!(price_update_is_newer(Some((100, false)), 100, true));
+        assert!(!price_update_is_newer(Some((100, true)), 100, false));
+        assert!(!price_update_is_newer(Some((101, true)), 100, true));
+        assert!(price_update_is_newer(Some((100, true)), 101, false));
+    }
 }
