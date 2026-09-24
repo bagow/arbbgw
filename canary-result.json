@@ -1,0 +1,159 @@
+{
+  "ok": true,
+  "started_ms": 1790245524947,
+  "config": {
+    "enabled": true,
+    "attempt": 15,
+    "expected_build_sha": "4beaaf32c70d0f28aaa9998bede14e662fb5a06a",
+    "notional_usdt": 6.0,
+    "leverage": 2,
+    "monitor_seconds": 1800,
+    "min_entry_spread": 0.5,
+    "max_entry_spread": 2.5,
+    "take_profit_percent": 0.2,
+    "trailing_stop_percent": 0.1,
+    "hard_stop_percent": 0.5,
+    "trailing_activation_percent": 0.1,
+    "daily_loss_limit_usdt": 0.1,
+    "max_total_exposure_usdt": 7.0,
+    "slippage_percent": 0.05,
+    "min_structural_deviation": 0.5,
+    "min_depth_percent": 500.0,
+    "max_holding_time_ms": 600000
+  },
+  "balances_before": {
+    "binance": 9.56324081,
+    "kucoin": 8.4764127718
+  },
+  "backup": "/home/opc/core-node/canary-backups/1790245524947",
+  "watchdog_armed": true,
+  "preflight_health": {
+    "active_trades": 0,
+    "build_sha": "4beaaf32c70d0f28aaa9998bede14e662fb5a06a",
+    "entries_halted": false,
+    "entry_decisions": {},
+    "healthy": true,
+    "market_ready": true,
+    "private_ready": true,
+    "process_healthy": true,
+    "scanner_status": {
+      "active_profiles": 1,
+      "profile_window_rows": 0,
+      "signals_emitted": 0,
+      "spreads_available": 3,
+      "spreads_considered": 3,
+      "updated_ms": 1790245531637
+    },
+    "supervisor_age_ms": 128,
+    "trading_ready": true,
+    "venues": [
+      {
+        "balance_age_ms": 21224,
+        "books": 1,
+        "current_specs": 527,
+        "exchange": "binance",
+        "fresh_books": 1,
+        "positions_age_ms": 20921,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": null,
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "gate",
+        "fresh_books": 0,
+        "positions_age_ms": null,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": 20625,
+        "books": 679,
+        "current_specs": 675,
+        "exchange": "kucoin",
+        "fresh_books": 401,
+        "positions_age_ms": 20377,
+        "wanted_books": 0
+      }
+    ]
+  },
+  "readiness_consecutive_samples": 5,
+  "outcome": "kill_switch",
+  "trades": [],
+  "execution_events": [],
+  "orders": [],
+  "balances": {
+    "binance": 9.56324081,
+    "kucoin": 8.4764127718
+  },
+  "margin_balances": {
+    "binance": 9.56324081,
+    "kucoin": 8.4764127718
+  },
+  "profile": {
+    "is_active": 0,
+    "trade_volume": 6.0,
+    "leverage": 2,
+    "max_active_trades": 1,
+    "min_entry_spread": 0.5,
+    "take_profit_percent": 0.2,
+    "hard_stop_percent": 0.5,
+    "daily_loss_limit_usdt": 0.1,
+    "max_total_exposure_usdt": 7.0,
+    "max_holding_time_ms": 600000
+  },
+  "health": {
+    "active_trades": 0,
+    "build_sha": "4beaaf32c70d0f28aaa9998bede14e662fb5a06a",
+    "entries_halted": true,
+    "entry_decisions": {
+      "rejected_entry_budget": 2,
+      "signal_received": 2
+    },
+    "healthy": true,
+    "market_ready": true,
+    "private_ready": true,
+    "process_healthy": true,
+    "scanner_status": {
+      "active_profiles": 0,
+      "profile_window_rows": 0,
+      "signals_emitted": 0,
+      "spreads_available": 1,
+      "spreads_considered": 1,
+      "updated_ms": 1790246048450
+    },
+    "supervisor_age_ms": 9,
+    "trading_ready": false,
+    "venues": [
+      {
+        "balance_age_ms": 24610,
+        "books": 2,
+        "current_specs": 527,
+        "exchange": "binance",
+        "fresh_books": 1,
+        "positions_age_ms": 20988,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": null,
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "gate",
+        "fresh_books": 0,
+        "positions_age_ms": null,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": 20407,
+        "books": 679,
+        "current_specs": 675,
+        "exchange": "kucoin",
+        "fresh_books": 394,
+        "positions_age_ms": 20110,
+        "wanted_books": 0
+      }
+    ]
+  },
+  "profile_restored_inactive": true,
+  "kill_switch_restored": true,
+  "finished_ms": 1790246048549
+}
