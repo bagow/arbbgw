@@ -1,5 +1,5 @@
 {
   "enabled": true,
   "halt_only": true,
-  "reason": "halt attempt 15 before a one-trade canary with an evidence-based 4 percent anomaly cap"
+  "reason": "halt no-entry attempt 17 after validating the normalized production baseline"
 }
