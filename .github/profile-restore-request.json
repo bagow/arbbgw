@@ -1,5 +1,5 @@
 {
   "enabled": true,
   "halt_only": true,
-  "reason": "halt attempt 10 after persistent Binance L2 health failure"
+  "reason": "halt attempt 12 after confirming Binance all-book discovery outage"
 }
