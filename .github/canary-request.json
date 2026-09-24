@@ -1,10 +1,10 @@
 {
   "enabled": true,
-  "attempt": 16,
-  "expected_build_sha": "4beaaf32c70d0f28aaa9998bede14e662fb5a06a",
+  "attempt": 17,
+  "expected_build_sha": "f754c143a38a8f898af381270f4805fc29aaddd7",
   "notional_usdt": 6.0,
   "leverage": 2,
-  "monitor_seconds": 1800,
+  "monitor_seconds": 600,
   "min_entry_spread": 0.5,
   "max_entry_spread": 4.0,
   "take_profit_percent": 0.2,
@@ -14,7 +14,7 @@
   "daily_loss_limit_usdt": 0.1,
   "max_total_exposure_usdt": 7.0,
   "slippage_percent": 0.05,
-  "min_structural_deviation": 0.5,
+  "min_structural_deviation": 10.0,
   "min_depth_percent": 500.0,
   "max_holding_time_ms": 600000
 }
