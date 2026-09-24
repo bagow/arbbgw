@@ -1,5 +1,5 @@
 {
   "enabled": true,
   "halt_only": true,
-  "reason": "halt attempt 14 after confirming KuCoin L1 versus L2 discovery mismatch"
+  "reason": "halt attempt 15 before a one-trade canary with an evidence-based 4 percent anomaly cap"
 }
