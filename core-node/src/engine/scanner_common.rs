@@ -38,9 +38,11 @@ pub fn configured_structural_reserve(
 
 /// Remaining two-leg price budget after preserving the configured entry rules.
 ///
-/// The entry spread window and structural deviation are independent profile
-/// controls. Take profit is deliberately absent: it is an exit trigger, not an
-/// extra entry threshold.
+/// `min_structural_deviation` is the required net excursion beyond both the
+/// structural baseline and round-trip execution costs. Treating it as a
+/// substitute for those costs (`max(deviation, break_even)`) overstates the
+/// available edge and can admit a trade that cannot retain the configured
+/// deviation after fees.
 pub fn entry_execution_budget(
     gross_spread: f64,
     min_entry_spread: f64,
@@ -69,7 +71,7 @@ pub fn entry_execution_budget(
     {
         return None;
     }
-    let structural_floor = structural_reserve + min_structural_deviation.max(break_even_pct);
+    let structural_floor = structural_reserve + break_even_pct + min_structural_deviation;
     let required = min_entry_spread.max(structural_floor);
     let budget = gross_spread - required;
     (budget > 0.0).then_some(budget)
@@ -277,19 +279,26 @@ mod tests {
     }
 
     #[test]
-    fn entry_budget_uses_profile_window_without_take_profit_threshold() {
-        let budget = entry_execution_budget(1.4, 1.2, 2.5, 0.0, 0.0, 0.28)
+    fn entry_budget_reserves_round_trip_costs_even_without_extra_deviation() {
+        let budget = entry_execution_budget(0.5, 0.1, 2.5, 0.0, 0.0, 0.28)
             .expect("configured entry spread should pass");
-        assert!((budget - 0.2).abs() < 1e-12);
+        assert!((budget - 0.22).abs() < 1e-12);
         assert!(entry_execution_budget(2.6, 1.2, 2.5, 0.0, 0.0, 0.28).is_none());
     }
 
     #[test]
-    fn entry_budget_preserves_enabled_structural_deviation() {
-        let budget = entry_execution_budget(1.8, 1.2, 2.5, 1.0, 0.7, 0.28)
+    fn entry_budget_adds_costs_to_enabled_structural_deviation() {
+        let budget = entry_execution_budget(2.1, 1.2, 2.5, 1.0, 0.7, 0.28)
             .expect("raw and structural profile limits should pass");
-        assert!((budget - 0.1).abs() < 1e-12);
-        assert!(entry_execution_budget(1.7, 1.2, 2.5, 1.0, 0.7, 0.28).is_none());
+        assert!((budget - 0.12).abs() < 1e-12);
+        assert!(entry_execution_budget(1.98, 1.2, 2.5, 1.0, 0.7, 0.28).is_none());
+    }
+
+    #[test]
+    fn one_canary_entry_is_rejected_after_costs_and_deviation_are_reserved() {
+        // Corrected 24h baseline ~= 2.64%, actual fee/slippage reserve 0.30%,
+        // configured extra deviation 0.50%; the 3.3217% fill had no such edge.
+        assert!(entry_execution_budget(3.3217, 0.5, 4.0, 2.64, 0.5, 0.30).is_none());
     }
 
     #[test]

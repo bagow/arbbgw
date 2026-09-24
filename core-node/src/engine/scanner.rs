@@ -197,6 +197,7 @@ pub fn generate_signals(
 
         let fee_a = get_exchange_fee(&row.exchange_a, &row.pair, ts.default_fee_rate, e_ctx);
         let fee_b = get_exchange_fee(&row.exchange_b, &row.pair, ts.default_fee_rate, e_ctx);
+        let break_even_pct = crate::engine::scanner_common::ioc_break_even_pct(fee_a, fee_b);
 
         // (Qty basis is now handled universally by sending phys_amount to exchange connectors)
 
@@ -249,29 +250,25 @@ pub fn generate_signals(
                         continue;
                     }
                 };
-            let structural_deviation = row.spread - structural_reserve;
+            let structural_deviation = row.spread - structural_reserve - break_even_pct;
 
-            // Enforce deviation filter if explicitly configured (> 0.0)
+            // The configured deviation is net of the verified structural
+            // baseline and round-trip costs; it is not a replacement for fees.
             if profile.min_structural_deviation > 0.0
                 && structural_deviation < profile.min_structural_deviation
             {
                 if let Some(p) = &diag_prefix {
                     tracing::info!(
-                        "{} -> ema deviation {:.4}% < {:.4}% req (base: {:.4}%)",
+                        "{} -> net ema deviation {:.4}% < {:.4}% req (base: {:.4}%, costs: {:.4}%)",
                         p,
                         structural_deviation,
                         profile.min_structural_deviation,
-                        row.structural_spread
+                        row.structural_spread,
+                        break_even_pct,
                     );
                 }
                 continue;
             }
-
-            // The profile slippage value is the maximum IOC price-limit movement, not
-            // an expected fill cost. Profitability uses the conservative expected cost
-            // while execution remains bounded by the user's configured maximum.
-            let break_even_pct =
-                crate::engine::scanner_common::ioc_break_even_pct(fee_a, fee_b);
 
             // ── ABSOLUTE STRUCTURAL GUARD (ALWAYS ACTIVE) ──
             // Blocks entry when spread - structural_spread < break_even (fees).

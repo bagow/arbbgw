@@ -67,6 +67,37 @@ fn reset_live_verification_after_gap(
     }
 }
 
+/// Estimate the EMA represented by a finite historical window without giving
+/// the oldest observation an artificial pre-history. Seeding the ordinary EMA
+/// recurrence with the first candle leaves it with `exp(-window / tau)` weight
+/// (36.8% for a 24h window and 24h tau), which can dominate the baseline during
+/// a regime change. Normalising the exponential weights conditions the estimate
+/// on the history we actually observed.
+fn normalized_finite_ema(rows: &[(f64, f64, f64)], tau_secs: f64) -> Option<(f64, f64)> {
+    let last = rows.last()?.0;
+    if !last.is_finite() || !tau_secs.is_finite() || tau_secs <= 0.0 {
+        return None;
+    }
+    let mut weight_sum = 0.0;
+    let mut weighted_12 = 0.0;
+    let mut weighted_21 = 0.0;
+    for (stamp, premium_12, premium_21) in rows {
+        if ![stamp, premium_12, premium_21]
+            .iter()
+            .all(|value| value.is_finite())
+            || *stamp > last
+        {
+            return None;
+        }
+        let weight = (-((last - stamp) / tau_secs)).exp();
+        weight_sum += weight;
+        weighted_12 += weight * premium_12;
+        weighted_21 += weight * premium_21;
+    }
+    (weight_sum.is_finite() && weight_sum > 0.0)
+        .then_some((weighted_12 / weight_sum, weighted_21 / weight_sum))
+}
+
 /// Compute spread opportunities from PriceMap.
 /// Called directly by the engine loop — zero serialization/HTTP overhead.
 ///
@@ -487,10 +518,13 @@ pub fn warmup_ema_from_premiums(
         {
             continue;
         }
+        let Some((warm_12, warm_21)) = normalized_finite_ema(&rows, ts.ema_tau_secs) else {
+            continue;
+        };
         let (first, a, b) = rows[0];
         let mut e = EmaEntry {
-            ema_12: a,
-            ema_21: b,
+            ema_12: warm_12,
+            ema_21: warm_21,
             max_12: a,
             min_12: a,
             max_21: b,
@@ -500,9 +534,6 @@ pub fn warmup_ema_from_premiums(
             last_ts: first,
         };
         for (stamp, a, b) in rows.into_iter().skip(1) {
-            let alpha = 1.0 - (-(stamp - e.last_ts) / ts.ema_tau_secs).exp();
-            e.ema_12 += alpha * (a - e.ema_12);
-            e.ema_21 += alpha * (b - e.ema_21);
             e.max_12 = e.max_12.max(a);
             e.min_12 = e.min_12.min(a);
             e.max_21 = e.max_21.max(b);
@@ -585,5 +616,24 @@ mod quality_tests {
         assert!(!verified.contains("live"));
         assert!(!observations.contains_key("history"));
         assert!(!observations.contains_key("live"));
+    }
+
+    #[test]
+    fn finite_ema_normalizes_away_the_oldest_sample_seed_bias() {
+        let rows = vec![(0.0, -3.0, 3.0), (10.0, 3.0, -3.0)];
+        let (a, b) = normalized_finite_ema(&rows, 10.0).unwrap();
+        let expected = (-3.0 * (-1.0_f64).exp() + 3.0) / ((-1.0_f64).exp() + 1.0);
+        assert!((a - expected).abs() < 1e-12);
+        assert!((b + expected).abs() < 1e-12);
+        // A first-sample-seeded recurrence would be about 0.79 instead of 1.39.
+        assert!(a > 1.3);
+    }
+
+    #[test]
+    fn finite_ema_preserves_a_constant_baseline() {
+        let rows = vec![(0.0, 2.5, -2.5), (10.0, 2.5, -2.5), (20.0, 2.5, -2.5)];
+        let (a, b) = normalized_finite_ema(&rows, 86_400.0).unwrap();
+        assert!((a - 2.5).abs() < 1e-12);
+        assert!((b + 2.5).abs() < 1e-12);
     }
 }

@@ -556,7 +556,7 @@ async fn enter(
             None => {
                 let required_floor = p
                     .min_entry_spread
-                    .max(s.structural_spread + p.min_structural_deviation.max(s.break_even_pct));
+                    .max(s.structural_spread + s.break_even_pct + p.min_structural_deviation);
                 tracing::info!(
                     "[managed] Entry budget rejected {}: signal={:.4}% fresh_l2={:.4}% required={:.4}% structural={:.4}% break_even={:.4}% window={:.4}%..={:.4}%",
                     s.pair,
