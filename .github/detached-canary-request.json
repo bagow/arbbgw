@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "detached": true,
-  "attempt": 22,
+  "attempt": 23,
   "expected_build_sha": "741c4a81cafc983b2a9033b44aff35d0d7c3ee6f",
   "notional_usdt": 6.0,
   "leverage": 2,

@@ -35,6 +35,39 @@ def health():
         return json.load(response)
 
 
+def counter_delta(before, after):
+    """Return non-zero changes in process-local monotonic health counters."""
+    delta = {}
+    for key in sorted(set(before) | set(after)):
+        change = int(after.get(key, 0)) - int(before.get(key, 0))
+        if change:
+            delta[key] = change
+    return delta
+
+
+def observe_health(report, current):
+    """Keep compact maxima so the final post-disable snapshot is not misleading."""
+    observed = report.setdefault(
+        "monitor_observation",
+        {"samples": 0, "scanner_max": {}, "venues_max": {}},
+    )
+    observed["samples"] += 1
+    for key, value in (current.get("scanner_status") or {}).items():
+        if isinstance(value, (int, float)):
+            observed["scanner_max"][key] = max(
+                int(value), int(observed["scanner_max"].get(key, 0))
+            )
+    for venue in current.get("venues") or []:
+        exchange = venue.get("exchange")
+        if not exchange:
+            continue
+        maxima = observed["venues_max"].setdefault(exchange, {})
+        for key in ("books", "fresh_books", "wanted_books", "current_specs"):
+            value = venue.get(key)
+            if isinstance(value, (int, float)):
+                maxima[key] = max(int(value), int(maxima.get(key, 0)))
+
+
 def profile_connection():
     db = sqlite3.connect(PROFILE_DB, timeout=10)
     db.row_factory = sqlite3.Row
@@ -396,6 +429,10 @@ def main():
         configure_and_enable(config, watchdog_token)
         report["watchdog_armed"] = True
         wait_for_readiness(config, report)
+        entry_decisions_before = dict(
+            report["preflight_health"].get("entry_decisions") or {}
+        )
+        report["entry_decisions_before"] = entry_decisions_before
         deadline = time.monotonic() + monitor_seconds
         first_seen = False
         while time.monotonic() < deadline:
@@ -414,7 +451,9 @@ def main():
             ):
                 report["outcome"] = "verified_trade"
                 break
-            if health().get("entries_halted"):
+            current_health = health()
+            observe_health(report, current_health)
+            if current_health.get("entries_halted"):
                 disable_profile(start_id)
                 report["outcome"] = "kill_switch"
                 break
@@ -430,6 +469,10 @@ def main():
         else:
             disable_profile()
         report.update(collect_result(start_id))
+        report["entry_decision_delta"] = counter_delta(
+            entry_decisions_before,
+            report["health"].get("entry_decisions") or {},
+        )
         report["ok"] = True
     except Exception as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
