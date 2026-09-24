@@ -1,5 +1,5 @@
 {
   "enabled": true,
   "halt_only": true,
-  "reason": "halt attempt 12 after confirming Binance all-book discovery outage"
+  "reason": "halt attempt 14 after confirming KuCoin L1 versus L2 discovery mismatch"
 }
