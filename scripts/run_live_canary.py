@@ -435,6 +435,7 @@ def main():
         report["entry_decisions_before"] = entry_decisions_before
         deadline = time.monotonic() + monitor_seconds
         first_seen = False
+        readiness_lost_samples = 0
         while time.monotonic() < deadline:
             trades = active_canary_trades(start_id)
             if len(trades) > 1:
@@ -457,6 +458,15 @@ def main():
                 disable_profile(start_id)
                 report["outcome"] = "kill_switch"
                 break
+            if current_health.get("trading_ready") is not True:
+                readiness_lost_samples += 1
+                if readiness_lost_samples >= 5:
+                    disable_profile(start_id)
+                    report["outcome"] = "readiness_lost"
+                    report["readiness_lost_samples"] = readiness_lost_samples
+                    break
+            else:
+                readiness_lost_samples = 0
             time.sleep(1)
         else:
             report["outcome"] = "monitor_timeout" if first_seen else "no_trade"
