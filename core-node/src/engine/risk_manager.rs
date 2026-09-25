@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 static EXCHANGE_BANS: OnceLock<DashMap<String, i64>> = OnceLock::new();
 pub static LAST_MARGIN_LOG: AtomicI64 = AtomicI64::new(0);
+pub const PRIVATE_SNAPSHOT_MAX_AGE_MS: i64 = 60_000;
 
 fn ban_map() -> &'static DashMap<String, i64> {
     EXCHANGE_BANS.get_or_init(|| DashMap::new())
@@ -119,5 +120,61 @@ pub fn verify_trade_health(exa: &str, exb: &str, e_ctx: &EngineContext) -> bool 
         return false;
     }
 
+    // Cached balances and positions are part of entry authorization, not only
+    // health-page telemetry. A later private REST preflight remains mandatory,
+    // but a stale account cache must prevent a signal from reaching it at all.
+    let now = now_ms();
+    for exchange in [exa, exb] {
+        let balance_fresh = e_ctx
+            .balances_updated_ms
+            .get(exchange)
+            .map(|stamp| {
+                crate::engine::utils::local_timestamp_is_fresh(
+                    now,
+                    *stamp,
+                    PRIVATE_SNAPSHOT_MAX_AGE_MS,
+                )
+            })
+            .unwrap_or(false);
+        let positions_fresh = e_ctx
+            .positions_updated_ms
+            .get(exchange)
+            .map(|stamp| {
+                crate::engine::utils::local_timestamp_is_fresh(
+                    now,
+                    *stamp,
+                    PRIVATE_SNAPSHOT_MAX_AGE_MS,
+                )
+            })
+            .unwrap_or(false);
+        if !balance_fresh || !positions_fresh {
+            return false;
+        }
+    }
+
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trade_health_requires_fresh_private_snapshots_for_both_venues() {
+        let ctx = EngineContext::default();
+        let now = now_ms();
+        assert!(!verify_trade_health("venue-a", "venue-b", &ctx));
+
+        for exchange in ["venue-a", "venue-b"] {
+            ctx.balances_updated_ms.insert(exchange.into(), now);
+            ctx.positions_updated_ms.insert(exchange.into(), now);
+        }
+        assert!(verify_trade_health("venue-a", "venue-b", &ctx));
+
+        ctx.positions_updated_ms.insert(
+            "venue-b".into(),
+            now - PRIVATE_SNAPSHOT_MAX_AGE_MS - 1,
+        );
+        assert!(!verify_trade_health("venue-a", "venue-b", &ctx));
+    }
 }

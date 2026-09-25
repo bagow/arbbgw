@@ -306,7 +306,10 @@ function renderPanel(profile, active, history, stats, exchanges) {
         <!-- Scanner sub-panel (Integrated) -->
         <div class="mt-content" id="mt-sub-scanner" style="display:${activeSubTabId==='scanner'?'block':'none'};">
             <div class="panel-header" style="padding:10px 15px; border-bottom:1px solid var(--border-dim); background:var(--bg-panel);">
-                <h1 class="panel-title" style="font-size:1rem;">Live Spreads</h1>
+                <div>
+                    <h1 class="panel-title" style="font-size:1rem;">L1 Candidate Discovery</h1>
+                    <div class="panel-sub" style="font-size:0.72rem;margin-top:2px;">Screening only — entries require fresh full-size L2 VWAP, baseline and all round-trip costs.</div>
+                </div>
                 <span class="panel-sub" id="pair-count" style="margin-left:auto; font-size:0.8rem;">–</span>
             </div>
             <div id="exchange-filters" class="exchange-filters" style="padding:8px 15px; background:var(--bg-panel); border-bottom:1px solid var(--border-dim);"></div>
@@ -319,9 +322,9 @@ function renderPanel(profile, active, history, stats, exchanges) {
                             <th data-sort="exchangeB">Exch B</th>
                             <th data-sort="priceA">Price A</th>
                             <th data-sort="priceB">Price B</th>
-                            <th data-sort="spread" class="sorted-desc">Spread %</th>
-                            <th data-sort="structural_spread">Struc Spread %</th>
-                            <th data-sort="profit_pct">Profit %</th>
+                            <th data-sort="spread" class="sorted-desc" title="Best bid/ask upper bound used only to discover candidates">L1 Upper %</th>
+                            <th data-sort="structural_spread">Baseline %</th>
+                            <th data-sort="l1_deviation_pct" title="L1 upper bound minus baseline; this is not executable profit">L1 Δ %</th>
                             <th>Dir</th>
                         </tr>
                     </thead>

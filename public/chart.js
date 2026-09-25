@@ -366,7 +366,7 @@ async function fetchSnapshot() {
 
         // 3. Last update
         lastUpdate && (lastUpdate.textContent = fmtTime(json.snapshot?.ts || Date.now()));
-        setStatus('ok', `${scannerState.snapshot.length} pairs above ${scannerState.threshold}%`);
+        setStatus('ok', `${scannerState.snapshot.length} L1 candidates above ${scannerState.threshold}%`);
 
         // 4. (Optional) External state updates if needed (e.g. active trades badge)
     } catch (e) { setStatus('error', `Error: ${e.message}`); }
@@ -450,18 +450,20 @@ function renderTable() {
         });
     }
 
-    const minProfit = (parseFloat(currentProfile?.min_entry_spread) || 0);
+    const minCandidateDeviation = (parseFloat(currentProfile?.min_entry_spread) || 0);
     const maxSpread = (parseFloat(currentProfile?.max_entry_spread) || 100);
 
     const sorted = [...filtered]
-        .map(r => { r.profit_pct = r.spread - Math.abs(r.structural_spread || 0); return r; })
-        .filter(r => r.profit_pct >= minProfit && r.profit_pct <= maxSpread)
+        .map(r => { r.l1_deviation_pct = r.spread - Math.abs(r.structural_spread || 0); return r; })
+        .filter(r => r.l1_deviation_pct >= minCandidateDeviation && r.l1_deviation_pct <= maxSpread)
         .sort((a, b) => {
             const av = a[scannerState.sortKey] ?? 0, bv = b[scannerState.sortKey] ?? 0;
             return typeof av === 'string' ? av.localeCompare(bv) * scannerState.sortDir : (av - bv) * scannerState.sortDir;
         });
     const verifiedCount = sorted.filter(r => r.structural_verified !== false).length;
-    pairCount && (pairCount.textContent = verifiedCount < sorted.length ? `${verifiedCount} tradeable / ${sorted.length} pairs` : `${sorted.length} pairs`);
+    pairCount && (pairCount.textContent = verifiedCount < sorted.length
+        ? `${verifiedCount} baseline-verified / ${sorted.length} L1 candidates`
+        : `${sorted.length} L1 candidates`);
     refs.tableBody.innerHTML = '';
     if (!sorted.length) {
     refs.tableBody.innerHTML = `<tr class="placeholder-row"><td colspan="9">No pairs above threshold</td></tr>`;
@@ -480,12 +482,13 @@ function renderTable() {
         if (row.has_structural_spread) {
             scStruc = deviation >= 0.5 ? 'spread--high' : deviation >= 0.2 ? 'spread--medium' : 'spread--low';
         }
-        const strucTooltip = `Profit: ${fmtSpread(row.profit_pct)} (spread ${fmtSpread(row.spread)} - structural ${fmtSpread(row.structural_spread)})`;
+        const strucTooltip = `L1 deviation only: ${fmtSpread(row.l1_deviation_pct)} (L1 upper bound ${fmtSpread(row.spread)} - baseline ${fmtSpread(row.structural_spread)}). Executable profit is decided from fresh full-size L2 VWAP after fees.`;
         
-        // Profit already computed in filter stage (structural always ≥ 0 from backend)
-        const profitPct = row.profit_pct;
-        const profitClass = profitPct >= 0.5 ? 'spread--high' : profitPct >= 0.2 ? 'spread--medium' : 'spread--low';
-        const profitStyle = profitPct < 0 ? 'color:var(--red);opacity:0.6' : '';
+        // This is discovery telemetry, not executable profit. The engine gates
+        // every order on fresh full-size L2 VWAP and round-trip costs.
+        const l1DeviationPct = row.l1_deviation_pct;
+        const deviationClass = l1DeviationPct >= 0.5 ? 'spread--high' : l1DeviationPct >= 0.2 ? 'spread--medium' : 'spread--low';
+        const deviationStyle = l1DeviationPct < 0 ? 'color:var(--red);opacity:0.6' : '';
 
         const verifiedBadge = isVerified ? '' : '<span title="EMA warming up — not tradeable yet" style="cursor:help;margin-left:4px;">⏳</span>';
 
@@ -494,7 +497,7 @@ function renderTable() {
           <td>${fmtPrice(row.priceA)}</td><td>${fmtPrice(row.priceB)}</td>
           <td class="spread-cell ${sc}">${fmtSpread(row.spread)}</td>
           <td class="spread-cell ${scStruc}" title="${strucTooltip}">${row.has_structural_spread ? fmtSpread(row.structural_spread) : '<span style="color:var(--text-sub);">~' + fmtSpread(row.structural_spread) + '</span>'}</td>
-          <td class="spread-cell ${profitClass}" style="${profitStyle}">${fmtSpread(profitPct)}</td>
+          <td class="spread-cell ${deviationClass}" style="${deviationStyle}">${fmtSpread(l1DeviationPct)}</td>
           <td class="dir-cell">${row.direction || '\u2013'}</td>`;
         tr.addEventListener('click', () => openModal(row));
         refs.tableBody.appendChild(tr);

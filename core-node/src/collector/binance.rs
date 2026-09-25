@@ -21,7 +21,11 @@ const DYNAMIC_DEPTH_REFRESH_SECS: u64 = 1;
 const DYNAMIC_DEPTH_RETENTION_SECS: u64 = 30;
 const MAX_BASELINE_DEPTH_BACKLOG_MS: i64 = 5_000;
 const MAX_BASELINE_CONSECUTIVE_STALE_DEPTH: u32 = 10;
-const MAX_DYNAMIC_DEPTH_BACKLOG_MS: i64 = 2_000;
+// A stale frame is always dropped by apply_depth_update's 750 ms execution
+// gate. Reconnect only for a sustained backlog or a catastrophic one-off lag;
+// restarting on an isolated 2-4 second exchange timestamp removes an otherwise
+// healthy candidate book and creates a larger blind window than the bad frame.
+const MAX_DYNAMIC_DEPTH_BACKLOG_MS: i64 = 10_000;
 const MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH: u32 = 3;
 const BASELINE_HEALTH_REFRESH_AGE_MS: i64 = 250;
 const DISCOVERY_REST_REFRESH_SECS: u64 = 3;
@@ -1100,6 +1104,28 @@ mod tests {
         assert!(!depth_backlog_detected(751, 2, 2_000, 3));
         assert!(depth_backlog_detected(2_001, 1, 2_000, 3));
         assert!(depth_backlog_detected(751, 3, 2_000, 3));
+    }
+
+    #[test]
+    fn dynamic_depth_ignores_an_isolated_multi_second_frame() {
+        assert!(!depth_backlog_detected(
+            4_361,
+            1,
+            MAX_DYNAMIC_DEPTH_BACKLOG_MS,
+            MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+        ));
+        assert!(depth_backlog_detected(
+            751,
+            MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+            MAX_DYNAMIC_DEPTH_BACKLOG_MS,
+            MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+        ));
+        assert!(depth_backlog_detected(
+            MAX_DYNAMIC_DEPTH_BACKLOG_MS + 1,
+            1,
+            MAX_DYNAMIC_DEPTH_BACKLOG_MS,
+            MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+        ));
     }
 
     #[test]

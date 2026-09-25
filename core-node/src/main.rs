@@ -554,12 +554,24 @@ async fn handle_health(
             let balance_fresh = ctx
                 .balances_updated_ms
                 .get(**ex)
-                .map(|stamp| engine::utils::local_timestamp_is_fresh(now, *stamp, 60_000))
+                .map(|stamp| {
+                    engine::utils::local_timestamp_is_fresh(
+                        now,
+                        *stamp,
+                        engine::risk_manager::PRIVATE_SNAPSHOT_MAX_AGE_MS,
+                    )
+                })
                 .unwrap_or(false);
             let positions_fresh = ctx
                 .positions_updated_ms
                 .get(**ex)
-                .map(|stamp| engine::utils::local_timestamp_is_fresh(now, *stamp, 60_000))
+                .map(|stamp| {
+                    engine::utils::local_timestamp_is_fresh(
+                        now,
+                        *stamp,
+                        engine::risk_manager::PRIVATE_SNAPSHOT_MAX_AGE_MS,
+                    )
+                })
                 .unwrap_or(false);
             balance_fresh && positions_fresh
         })
