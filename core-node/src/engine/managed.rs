@@ -9,6 +9,7 @@ use super::{
 use crate::state::{EngineContext, PriceMap};
 use reqwest::Client;
 use shared::{TechnicalSettings, TradeSignal, TradingSettings};
+use std::future::Future;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -19,6 +20,12 @@ static LAST_PREFLIGHT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI
 const FEE_TTL_MS: i64 = 3_600_000;
 const NORMAL_EXIT_PAIR_COOLDOWN_MS: i64 = 60_000;
 const RISK_EXIT_PAIR_COOLDOWN_MS: i64 = 30 * 60_000;
+
+async fn timed_preflight<F: Future>(future: F) -> (F::Output, i64) {
+    let started_ms = now_ms();
+    let output = future.await;
+    (output, now_ms().saturating_sub(started_ms))
+}
 
 fn pair_cooldown_after_close(reason: &str) -> i64 {
     if matches!(reason, "TP" | "MANUAL_CLOSE") {
@@ -515,19 +522,74 @@ async fn enter(
         // them together so a short-lived edge is not consumed by the sum of six
         // REST round trips. Every result is still required and errors fail closed.
         let preflight_started_ms = now_ms();
-        let (posa, posb, idle_a, idle_b, fee_a, fee_b, ba, bb, la, lb, fa, fb) = tokio::join!(
-            ca.fetch_positions(http, keys),
-            cb.fetch_positions(http, keys),
-            ca.symbol_has_no_open_orders(http, keys, &s.pair),
-            cb.symbol_has_no_open_orders(http, keys, &s.pair),
-            actual_taker_fee(ca.as_ref(), &s.exchange_a, &s.pair, http, keys, ctx),
-            actual_taker_fee(cb.as_ref(), &s.exchange_b, &s.pair, http, keys, ctx),
-            ca.fetch_balances(http, keys),
-            cb.fetch_balances(http, keys),
-            ca.ensure_leverage(http, keys, &s.pair, p.leverage as f64),
-            cb.ensure_leverage(http, keys, &s.pair, p.leverage as f64),
-            super::funding_guard::next(http, &s.exchange_a, &s.pair),
-            super::funding_guard::next(http, &s.exchange_b, &s.pair),
+        let (
+            (posa, posa_ms),
+            (posb, posb_ms),
+            (idle_a, idle_a_ms),
+            (idle_b, idle_b_ms),
+            (fee_a, fee_a_ms),
+            (fee_b, fee_b_ms),
+            (ba, ba_ms),
+            (bb, bb_ms),
+            (la, la_ms),
+            (lb, lb_ms),
+            (fa, fa_ms),
+            (fb, fb_ms),
+        ) = tokio::join!(
+            timed_preflight(ca.fetch_positions(http, keys)),
+            timed_preflight(cb.fetch_positions(http, keys)),
+            timed_preflight(ca.symbol_has_no_open_orders(http, keys, &s.pair)),
+            timed_preflight(cb.symbol_has_no_open_orders(http, keys, &s.pair)),
+            timed_preflight(actual_taker_fee(
+                ca.as_ref(),
+                &s.exchange_a,
+                &s.pair,
+                http,
+                keys,
+                ctx,
+            )),
+            timed_preflight(actual_taker_fee(
+                cb.as_ref(),
+                &s.exchange_b,
+                &s.pair,
+                http,
+                keys,
+                ctx,
+            )),
+            timed_preflight(ca.fetch_balances(http, keys)),
+            timed_preflight(cb.fetch_balances(http, keys)),
+            timed_preflight(ca.ensure_leverage(http, keys, &s.pair, p.leverage as f64)),
+            timed_preflight(cb.ensure_leverage(http, keys, &s.pair, p.leverage as f64)),
+            timed_preflight(super::funding_guard::next(http, &s.exchange_a, &s.pair,)),
+            timed_preflight(super::funding_guard::next(http, &s.exchange_b, &s.pair,)),
+        );
+        tracing::info!(
+            "[managed] Preflight timings for {}: positions {}={}ms {}={}ms; open_orders {}={}ms {}={}ms; fees {}={}ms {}={}ms; balances {}={}ms {}={}ms; leverage {}={}ms {}={}ms; funding {}={}ms {}={}ms",
+            s.pair,
+            s.exchange_a,
+            posa_ms,
+            s.exchange_b,
+            posb_ms,
+            s.exchange_a,
+            idle_a_ms,
+            s.exchange_b,
+            idle_b_ms,
+            s.exchange_a,
+            fee_a_ms,
+            s.exchange_b,
+            fee_b_ms,
+            s.exchange_a,
+            ba_ms,
+            s.exchange_b,
+            bb_ms,
+            s.exchange_a,
+            la_ms,
+            s.exchange_b,
+            lb_ms,
+            s.exchange_a,
+            fa_ms,
+            s.exchange_b,
+            fb_ms,
         );
         let (posa, posb) = match (posa, posb) {
             (Ok(a), Ok(b)) => (a, b),
@@ -577,6 +639,7 @@ async fn enter(
         // A transient setup request must not consume a short-lived edge. Retry only
         // the failed venue once, while there is still no exposure, then re-price the
         // complete trade from fresh L2 below. Persistent failures remain fail-closed.
+        let leverage_retry_started_ms = now_ms();
         let (la, lb) = tokio::join!(
             confirm_leverage_with_retry(
                 la,
@@ -597,6 +660,7 @@ async fn enter(
                 keys,
             ),
         );
+        let leverage_retry_ms = now_ms().saturating_sub(leverage_retry_started_ms);
         // Both venues must be authoritatively configured before taking exposure.
         if la.is_err() || lb.is_err() {
             tracing::warn!(
@@ -620,9 +684,10 @@ async fn enter(
             continue;
         }
         tracing::info!(
-            "[managed] Authoritative preflight completed for {} in {}ms",
+            "[managed] Authoritative preflight completed for {} in {}ms (leverage retry phase {}ms)",
             s.pair,
-            now_ms().saturating_sub(preflight_started_ms)
+            now_ms().saturating_sub(preflight_started_ms),
+            leverage_retry_ms,
         );
         // The Binance public WS occasionally queues seconds-old frames on the VPS.
         // Refresh its top-5 snapshot after all slower private/funding checks, so the

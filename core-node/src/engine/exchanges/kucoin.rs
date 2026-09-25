@@ -1051,18 +1051,21 @@ impl ExchangeConnector for KucoinConnector {
         leverage: f64,
     ) -> Result<(), String> {
         let symbol = managed_kucoin_symbol(pair);
-        let position_mode =
-            kucoin_managed_call(keys, "GET", "/api/v2/position/getPositionMode", "").await?;
+        let margin_path = format!("/api/v2/position/getMarginMode?symbol={symbol}");
+        let leverage_path = format!("/api/v2/getCrossUserLeverage?symbol={symbol}");
+        // These are independent, read-only confirmations. Starting them together
+        // avoids consuming a short-lived edge with three sequential network trips.
+        let (position_mode, mode, current) = tokio::join!(
+            kucoin_managed_call(keys, "GET", "/api/v2/position/getPositionMode", ""),
+            kucoin_managed_call(keys, "GET", &margin_path, ""),
+            kucoin_managed_call(keys, "GET", &leverage_path, ""),
+        );
+        let position_mode = position_mode?;
+        let mode = mode?;
+        let current = current?;
         if position_mode["positionMode"].as_i64() != Some(0) {
             return Err("Managed execution requires KuCoin one-way mode".into());
         }
-        let mode = kucoin_managed_call(
-            keys,
-            "GET",
-            &format!("/api/v2/position/getMarginMode?symbol={symbol}"),
-            "",
-        )
-        .await?;
         if mode["symbol"].as_str() != Some(symbol.as_str()) {
             return Err("KuCoin margin symbol mismatch".into());
         }
@@ -1083,8 +1086,6 @@ impl ExchangeConnector for KucoinConnector {
                 return Err("KuCoin cross margin not confirmed".into());
             }
         }
-        let path = format!("/api/v2/getCrossUserLeverage?symbol={symbol}");
-        let current = kucoin_managed_call(keys, "GET", &path, "").await?;
         if !kucoin_leverage_matches(&current, &symbol, leverage) {
             let changed = kucoin_managed_call(
                 keys,
@@ -1096,7 +1097,7 @@ impl ExchangeConnector for KucoinConnector {
             if changed.as_bool() != Some(true) {
                 return Err("KuCoin leverage change not acknowledged".into());
             }
-            let confirmed = kucoin_managed_call(keys, "GET", &path, "").await?;
+            let confirmed = kucoin_managed_call(keys, "GET", &leverage_path, "").await?;
             if !kucoin_leverage_matches(&confirmed, &symbol, leverage) {
                 return Err("KuCoin cross leverage not confirmed".into());
             }
