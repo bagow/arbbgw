@@ -205,14 +205,25 @@ pub fn start_multiplier_fetcher(
                                             continue;
                                         }
                                         let key = format!("binance:{}", sym);
-                                        match crate::engine::specification::Specification::parse("binance", s, crate::engine::utils::now_ms()) {
-                                            Ok(spec) => {e_ctx.specifications.insert(key, spec);},
-                                            Err(_) => {e_ctx.specifications.remove(&key);},
-                                        }
-                                        let ct = s["contractType"].as_str().unwrap_or("");
-                                        if ct != "PERPETUAL" && ct != "TRADIFI_PERPETUAL" {
-                                            continue;
-                                        }
+                                        let specification = match crate::engine::specification::Specification::parse(
+                                            "binance",
+                                            s,
+                                            crate::engine::utils::now_ms(),
+                                        ) {
+                                            Ok(specification) => specification,
+                                            Err(_) => {
+                                                // A same-named TradFi perpetual is not the
+                                                // same asset as a crypto token on KuCoin.
+                                                // Remove any previously cached routing data
+                                                // so unsupported contracts cannot reach L2.
+                                                e_ctx.specifications.remove(&key);
+                                                map.remove(&key);
+                                                tmap.remove(&key);
+                                                lmap.remove(&key);
+                                                continue;
+                                            }
+                                        };
+                                        e_ctx.specifications.insert(key.clone(), specification);
                                         if let Some(filters) = s["filters"].as_array() {
                                             for f in filters {
                                                 if f["filterType"].as_str() == Some("LOT_SIZE") {
@@ -856,4 +867,3 @@ pub fn start_multiplier_fetcher(
         }
     });
 }
-

@@ -120,4 +120,20 @@ mod tests {
         assert!(!s.permits(1_001, 0.002, 60_000.0, 0.001, 0.01));
         assert!(!s.permits(1_001, 101.0, 60_000.0, 0.001, 0.1));
     }
+
+    #[test]
+    fn rejects_tradifi_contract_with_a_crypto_ticker_collision() {
+        let tradifi = serde_json::json!({
+            "symbol": "BBXUSDT",
+            "status": "TRADING",
+            "contractType": "TRADIFI_PERPETUAL",
+            "marginAsset": "USDT",
+            "filters": [
+                {"filterType":"LOT_SIZE","stepSize":"0.01","minQty":"0.01","maxQty":"460000"},
+                {"filterType":"PRICE_FILTER","tickSize":"0.001"},
+                {"filterType":"MIN_NOTIONAL","notional":"5"}
+            ]
+        });
+        assert!(Specification::parse("binance", &tradifi, 1_000).is_err());
+    }
 }
