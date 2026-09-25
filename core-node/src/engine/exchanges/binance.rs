@@ -285,9 +285,46 @@ fn parse_public_depth_snapshot(body: &Value, received_ms: i64) -> Result<crate::
         .as_i64()
         .ok_or("Binance depth response missing exchange timestamp")?;
     if !(0..=750).contains(&(received_ms - exchange_ms)) {
-        return Err(format!("Stale Binance REST depth snapshot: {}ms", received_ms - exchange_ms));
+        return Err(format!("Stale Binance depth snapshot: {}ms", received_ms - exchange_ms));
     }
     Ok(crate::state::L2Snapshot { bids, asks, updated_ms: exchange_ms })
+}
+
+fn parse_public_depth_ws_response(
+    body: &Value,
+    received_ms: i64,
+) -> Result<crate::state::L2Snapshot, String> {
+    if body["status"].as_i64() != Some(200) {
+        return Err(format!(
+            "Binance public WS depth returned status {:?}: {}",
+            body["status"].as_i64(),
+            body.get("error").unwrap_or(&Value::Null)
+        ));
+    }
+    let result = body["result"]
+        .as_object()
+        .ok_or("Binance public WS depth response missing result")?;
+    // Binance's current USD-M schema documents E/T inside result while bids
+    // and asks are top-level. Accept nested levels too so a schema correction
+    // cannot silently remove the independent hedge snapshot.
+    let normalized = json!({
+        "E": result
+            .get("E")
+            .or_else(|| body.get("E"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "bids": body
+            .get("bids")
+            .or_else(|| result.get("bids"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "asks": body
+            .get("asks")
+            .or_else(|| result.get("asks"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    });
+    parse_public_depth_snapshot(&normalized, received_ms)
 }
 
 /// Fetch a just-in-time public top-5 snapshot for the final IOC preflight.
@@ -313,6 +350,26 @@ pub async fn fetch_public_depth_snapshot(http: &Client, pair: &str) -> Result<cr
         return Err(format!("Binance public depth returned HTTP {}", status.as_u16()));
     }
     parse_public_depth_snapshot(&body, now_ms() as i64)
+}
+
+/// Fetch the same bounded top-5 snapshot through Binance's independent
+/// request/response WebSocket API. The public `depth` method needs no API key.
+pub async fn fetch_public_depth_snapshot_ws(
+    pair: &str,
+) -> Result<crate::state::L2Snapshot, String> {
+    use crate::engine::exchanges::ws_trader::send_ws_request;
+
+    let response = send_ws_request(json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "method": "depth",
+        "params": {
+            "symbol": crate::engine::utils::normalize_symbol(pair),
+            "limit": 5,
+        }
+    }))
+    .await
+    .map_err(|error| format!("Binance public WS depth request failed: {error}"))?;
+    parse_public_depth_ws_response(&response, now_ms() as i64)
 }
 
 // ── Private helpers (used internally by connector methods) ───────────────────
@@ -1820,12 +1877,58 @@ mod fee_tests {
         assert!(parse_public_depth_snapshot(&missing_exchange_time, 10_000).is_err());
     }
 
+    #[test]
+    fn parses_documented_public_ws_depth_response() {
+        let snapshot = parse_public_depth_ws_response(
+            &serde_json::json!({
+                "id": "request-1",
+                "status": 200,
+                "result": {"lastUpdateId": 42, "E": 9_750, "T": 9_749},
+                "bids": [["100.0", "2.0"], ["99.0", "3.0"]],
+                "asks": [["101.0", "4.0"], ["102.0", "5.0"]]
+            }),
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(snapshot.updated_ms, 9_750);
+        assert_eq!(snapshot.bids[0], (100.0, 2.0));
+        assert_eq!(snapshot.asks[0], (101.0, 4.0));
+    }
+
+    #[test]
+    fn public_ws_depth_parser_accepts_nested_levels_but_rejects_errors() {
+        let nested = serde_json::json!({
+            "id": "request-1",
+            "status": 200,
+            "result": {
+                "E": 10_000,
+                "bids": [["100.0", "2.0"]],
+                "asks": [["101.0", "4.0"]]
+            }
+        });
+        assert!(parse_public_depth_ws_response(&nested, 10_000).is_ok());
+        assert!(parse_public_depth_ws_response(
+            &serde_json::json!({"status": 400, "error": {"code": -1}}),
+            10_000,
+        )
+        .is_err());
+    }
+
     #[tokio::test]
     #[ignore = "live Binance public depth check"]
     async fn live_public_depth_is_fresh_and_valid() {
         let snapshot = fetch_public_depth_snapshot(&Client::new(), "BTCUSDT")
             .await
             .unwrap();
+        assert!(!snapshot.bids.is_empty());
+        assert!(!snapshot.asks.is_empty());
+        assert!((0..=750).contains(&(now_ms() - snapshot.updated_ms)));
+    }
+
+    #[tokio::test]
+    #[ignore = "live Binance public WS depth check"]
+    async fn live_public_ws_depth_is_fresh_and_valid() {
+        let snapshot = fetch_public_depth_snapshot_ws("BTCUSDT").await.unwrap();
         assert!(!snapshot.bids.is_empty());
         assert!(!snapshot.asks.is_empty());
         assert!((0..=750).contains(&(now_ms() - snapshot.updated_ms)));

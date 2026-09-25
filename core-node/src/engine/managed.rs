@@ -155,9 +155,37 @@ async fn refresh_binance_execution_book(
     http: &Client,
     ctx: &EngineContext,
 ) -> Result<(), String> {
-    let book = super::exchanges::binance::fetch_public_depth_snapshot(http, pair).await?;
-    let bid = book.bids.first().ok_or("Binance REST depth has no bid")?;
-    let ask = book.asks.first().ok_or("Binance REST depth has no ask")?;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+    let rest_sender = sender.clone();
+    let rest_http = http.clone();
+    let rest_pair = pair.to_string();
+    tokio::spawn(async move {
+        let result =
+            super::exchanges::binance::fetch_public_depth_snapshot(&rest_http, &rest_pair).await;
+        let _ = rest_sender.send(("REST", result)).await;
+    });
+    let ws_pair = pair.to_string();
+    tokio::spawn(async move {
+        let result = super::exchanges::binance::fetch_public_depth_snapshot_ws(&ws_pair).await;
+        let _ = sender.send(("WS API", result)).await;
+    });
+
+    let mut errors = Vec::with_capacity(2);
+    let (source, book) = loop {
+        let Some((source, result)) = receiver.recv().await else {
+            return Err(format!(
+                "Binance REST and WS API depth unavailable: {}",
+                errors.join("; ")
+            ));
+        };
+        match result {
+            Ok(book) => break (source, book),
+            Err(error) => errors.push(format!("{source}: {error}")),
+        }
+    };
+    tracing::debug!("[managed] Binance hedge depth refreshed through {source}");
+    let bid = book.bids.first().ok_or("Binance depth has no bid")?;
+    let ask = book.asks.first().ok_or("Binance depth has no ask")?;
     if let Some(mut venue) = prices.get_mut("binance") {
         if let Some(ticker) = venue.get_mut(pair) {
             ticker.bid = bid.0;
@@ -770,8 +798,9 @@ async fn enter(
         let limit = entry_ioc_limit(quote, buy, half);
         let o = request(&t, first, qty, limit, false);
         // KuCoin may need a short private-order confirmation before its fill is
-        // authoritative. Overlap that wait with the Binance REST depth refresh
-        // instead of leaving the hedge quote to age for the whole first leg.
+        // authoritative. Overlap that wait with independent Binance REST and
+        // WS API depth requests instead of leaving the hedge quote to age for
+        // the whole first leg.
         let (v, binance_refresh) = if second_exchange == "binance" {
             let (fill, refreshed) = tokio::join!(submit(j, &o, http, keys), async {
                 let result = refresh_binance_execution_book(&s.pair, prices, http, ctx).await;
@@ -808,7 +837,7 @@ async fn enter(
             }
             if let Err(error) = refresh_result {
                 tracing::warn!(
-                    "[managed] Binance hedge REST L2 refresh failed for {}: {}; requiring a fresh WS L2 book",
+                    "[managed] Binance hedge L2 refresh failed for {}: {}; requiring a fresh streaming L2 book",
                     s.pair,
                     error
                 );
@@ -837,7 +866,7 @@ async fn enter(
         }
         if let Some(error) = binance_refresh_error {
             tracing::info!(
-                "[managed] Using fresh Binance WS L2 for {} hedge after REST refresh error: {}",
+                "[managed] Using fresh Binance streaming L2 for {} hedge after snapshot refresh error: {}",
                 s.pair,
                 error
             );
