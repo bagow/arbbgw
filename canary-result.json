@@ -1,0 +1,321 @@
+{
+  "ok": true,
+  "started_ms": 1790356647938,
+  "config": {
+    "enabled": true,
+    "attempt": 42,
+    "expected_build_sha": "6f2fd8d102b58389c0388dac6a4fc8281d6cfc97",
+    "notional_usdt": 6.0,
+    "leverage": 2,
+    "monitor_seconds": 2700,
+    "min_volume_millions": 0.5,
+    "min_entry_spread": 0.5,
+    "max_entry_spread": 4.0,
+    "take_profit_percent": 0.1,
+    "trailing_stop_percent": 0.1,
+    "hard_stop_percent": 0.5,
+    "trailing_activation_percent": 0.1,
+    "daily_loss_limit_usdt": 0.1,
+    "max_total_exposure_usdt": 7.0,
+    "slippage_percent": 0.05,
+    "min_structural_deviation": 0.2,
+    "min_depth_percent": 500.0,
+    "max_holding_time_ms": 600000
+  },
+  "balances_before": {
+    "binance": 9.5397465,
+    "kucoin": 8.4210361878
+  },
+  "backup": "/home/opc/core-node/canary-backups/1790356647938",
+  "watchdog_armed": true,
+  "preflight_health": {
+    "active_trades": 0,
+    "build_sha": "6f2fd8d102b58389c0388dac6a4fc8281d6cfc97",
+    "entries_halted": false,
+    "entry_decisions": {},
+    "healthy": true,
+    "market_ready": true,
+    "private_ready": true,
+    "process_healthy": true,
+    "scanner_status": {
+      "active_profiles": 1,
+      "profile_window_rows": 4,
+      "signals_emitted": 0,
+      "spreads_available": 5,
+      "spreads_considered": 5,
+      "updated_ms": 1790356653460
+    },
+    "supervisor_age_ms": 502,
+    "trading_ready": true,
+    "venues": [
+      {
+        "balance_age_ms": 12992,
+        "books": 4,
+        "current_specs": 527,
+        "exchange": "binance",
+        "fresh_books": 4,
+        "positions_age_ms": 12992,
+        "wanted_books": 4
+      },
+      {
+        "balance_age_ms": null,
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "gate",
+        "fresh_books": 0,
+        "positions_age_ms": null,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": 13024,
+        "books": 679,
+        "current_specs": 675,
+        "exchange": "kucoin",
+        "fresh_books": 352,
+        "positions_age_ms": 13024,
+        "wanted_books": 4
+      }
+    ]
+  },
+  "readiness_consecutive_samples": 5,
+  "entry_decisions_before": {},
+  "monitor_observation": {
+    "samples": 1464,
+    "scanner_max": {
+      "active_profiles": 1,
+      "profile_window_rows": 5,
+      "signals_emitted": 1,
+      "spreads_available": 7,
+      "spreads_considered": 7,
+      "updated_ms": 1790358136549
+    },
+    "venues_max": {
+      "binance": {
+        "books": 6,
+        "fresh_books": 6,
+        "wanted_books": 5,
+        "current_specs": 527
+      },
+      "gate": {
+        "books": 0,
+        "fresh_books": 0,
+        "wanted_books": 0,
+        "current_specs": 0
+      },
+      "kucoin": {
+        "books": 679,
+        "fresh_books": 620,
+        "wanted_books": 5,
+        "current_specs": 675
+      }
+    }
+  },
+  "market_readiness_max_gap_samples": 3,
+  "first_trade_seen_ms": 1790358061047,
+  "outcome": "verified_trade",
+  "trades": [
+    {
+      "id": 2041,
+      "pair": "ONEUSDT",
+      "exchange_a": "binance",
+      "exchange_b": "kucoin",
+      "status": "CLOSED",
+      "accounting_status": "VERIFIED",
+      "entry_time": 1790358060739,
+      "exit_time": 1790358064142,
+      "pnl": -0.03891017399999871,
+      "gross_pnl": -0.02562999999999871,
+      "commission_cost": 0.013280174,
+      "funding_cost": 0.0,
+      "close_reason": "HARD_STOP",
+      "current_net_estimate": -0.03974238599999965,
+      "valuation_ms": 1790358062959
+    }
+  ],
+  "execution_events": [
+    {
+      "trade_id": 2041,
+      "event": "SEND_STARTED",
+      "at_ms": 1790358060754,
+      "detail": null
+    },
+    {
+      "trade_id": 2041,
+      "event": "SUBMIT_RETURNED",
+      "at_ms": 1790358061153,
+      "detail": "state=Filled;filled=2620"
+    },
+    {
+      "trade_id": 2041,
+      "event": "SEND_STARTED",
+      "at_ms": 1790358061160,
+      "detail": null
+    },
+    {
+      "trade_id": 2041,
+      "event": "SUBMIT_UNKNOWN",
+      "at_ms": 1790358061439,
+      "detail": "Missing numeric field cumQuote"
+    },
+    {
+      "trade_id": 2041,
+      "event": "QUERY_RETURNED",
+      "at_ms": 1790358062042,
+      "detail": "state=Filled;filled=2620"
+    },
+    {
+      "trade_id": 2041,
+      "event": "SEND_STARTED",
+      "at_ms": 1790358062971,
+      "detail": null
+    },
+    {
+      "trade_id": 2041,
+      "event": "SUBMIT_RETURNED",
+      "at_ms": 1790358063254,
+      "detail": "state=Filled;filled=2620"
+    },
+    {
+      "trade_id": 2041,
+      "event": "SEND_STARTED",
+      "at_ms": 1790358063258,
+      "detail": null
+    },
+    {
+      "trade_id": 2041,
+      "event": "SUBMIT_UNKNOWN",
+      "at_ms": 1790358063537,
+      "detail": "Missing numeric field cumQuote"
+    },
+    {
+      "trade_id": 2041,
+      "event": "QUERY_RETURNED",
+      "at_ms": 1790358064139,
+      "detail": "state=Filled;filled=2620"
+    }
+  ],
+  "orders": [
+    {
+      "trade_id": 2041,
+      "leg": "B",
+      "exchange": "kucoin",
+      "state": "Filled",
+      "filled_quantity": 2620.0,
+      "average_price": 0.002311,
+      "fee": 0.003632892
+    },
+    {
+      "trade_id": 2041,
+      "leg": "A",
+      "exchange": "binance",
+      "state": "Filled",
+      "filled_quantity": 2620.0,
+      "average_price": 0.0022941,
+      "fee": 0.00300527
+    },
+    {
+      "trade_id": 2041,
+      "leg": "B",
+      "exchange": "kucoin",
+      "state": "Filled",
+      "filled_quantity": 2620.0,
+      "average_price": 0.0023167824427480915,
+      "fee": 0.003641982
+    },
+    {
+      "trade_id": 2041,
+      "leg": "A",
+      "exchange": "binance",
+      "state": "Filled",
+      "filled_quantity": 2620.0,
+      "average_price": 0.0022901,
+      "fee": 0.00300003
+    }
+  ],
+  "balances": {
+    "binance": 9.5232612,
+    "kucoin": 8.3986113138
+  },
+  "margin_balances": {
+    "binance": 9.5232612,
+    "kucoin": 8.3986113138
+  },
+  "profile": {
+    "is_active": 0,
+    "trade_volume": 6.0,
+    "leverage": 2,
+    "max_active_trades": 1,
+    "min_entry_spread": 0.5,
+    "take_profit_percent": 0.1,
+    "hard_stop_percent": 0.5,
+    "daily_loss_limit_usdt": 0.1,
+    "max_total_exposure_usdt": 7.0,
+    "max_holding_time_ms": 600000,
+    "min_volume_millions": 0.5
+  },
+  "health": {
+    "active_trades": 0,
+    "build_sha": "6f2fd8d102b58389c0388dac6a4fc8281d6cfc97",
+    "entries_halted": false,
+    "entry_decisions": {
+      "preflight_throttled": 4,
+      "rejected_entry_budget": 6,
+      "rejected_pair_loss_quarantine": 2,
+      "signal_received": 9,
+      "trade_reserved": 1
+    },
+    "healthy": false,
+    "market_ready": false,
+    "private_ready": true,
+    "process_healthy": true,
+    "scanner_status": {
+      "active_profiles": 0,
+      "profile_window_rows": 0,
+      "signals_emitted": 0,
+      "spreads_available": 0,
+      "spreads_considered": 0,
+      "updated_ms": 1790358137560
+    },
+    "supervisor_age_ms": 700,
+    "trading_ready": false,
+    "venues": [
+      {
+        "balance_age_ms": 21282,
+        "books": 4,
+        "current_specs": 527,
+        "exchange": "binance",
+        "fresh_books": 0,
+        "positions_age_ms": 21282,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": null,
+        "books": 0,
+        "current_specs": 0,
+        "exchange": "gate",
+        "fresh_books": 0,
+        "positions_age_ms": null,
+        "wanted_books": 0
+      },
+      {
+        "balance_age_ms": 22008,
+        "books": 679,
+        "current_specs": 675,
+        "exchange": "kucoin",
+        "fresh_books": 358,
+        "positions_age_ms": 22008,
+        "wanted_books": 0
+      }
+    ]
+  },
+  "entry_decision_delta": {
+    "preflight_throttled": 4,
+    "rejected_entry_budget": 6,
+    "rejected_pair_loss_quarantine": 2,
+    "signal_received": 9,
+    "trade_reserved": 1
+  },
+  "profile_restored_inactive": true,
+  "kill_switch_restored": true,
+  "finished_ms": 1790358137661
+}
