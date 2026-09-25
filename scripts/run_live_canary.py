@@ -458,7 +458,16 @@ def main():
                 disable_profile(start_id)
                 report["outcome"] = "kill_switch"
                 break
-            if current_health.get("trading_ready") is not True:
+            # Once the first trade is seen we deliberately disable the profile,
+            # so trading_ready becomes false by design. Continue requiring the
+            # process and private account dependencies while exposure drains.
+            dependencies_ready = (
+                current_health.get("process_healthy") is True
+                and current_health.get("private_ready") is True
+                if first_seen
+                else current_health.get("trading_ready") is True
+            )
+            if not dependencies_ready:
                 readiness_lost_samples += 1
                 if readiness_lost_samples >= 5:
                     disable_profile(start_id)
