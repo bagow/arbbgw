@@ -45,6 +45,8 @@ options = [
     "-o",
     "ServerAliveCountMax=6",
     "-o",
+    "IPQoS=none",
+    "-o",
     "StrictHostKeyChecking=accept-new",
     "-o",
     "UserKnownHostsFile=" + str(directory / "known_hosts"),
@@ -70,7 +72,10 @@ try:
                     stdin=archive_stream,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    timeout=600,
+                    # Keep all three attempts inside the enclosing 12-minute
+                    # Actions step. A dead SSH data channel previously consumed
+                    # ten minutes on attempt one, so retries never ran.
+                    timeout=180,
                     check=True,
                 )
             subprocess.run(

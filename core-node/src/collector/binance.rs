@@ -78,13 +78,17 @@ async fn connect_market_ws(
             .await
             .map_err(|_| anyhow!("TLS/WebSocket timeout via {address}"))?
             .with_context(|| format!("TLS/WebSocket failure via {address}"))
+            .map(|connection| (connection, address))
         });
     }
 
     let mut failures = Vec::new();
     while let Some(attempt) = attempts.next().await {
         match attempt {
-            Ok(connection) => return Ok(connection),
+            Ok((connection, address)) => {
+                info!("[binance_market_ws] connected via {}", address);
+                return Ok(connection);
+            }
             Err(error) => failures.push(error.to_string()),
         }
     }
