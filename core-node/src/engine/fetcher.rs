@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 use dashmap::DashMap;
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use std::sync::OnceLock;
 
 use crate::engine::exchanges::get_connector;
@@ -47,6 +48,75 @@ fn record_fetch_error(ex: &str, e_ctx: &crate::state::EngineContext) {
     }
 }
 
+async fn refresh_exchange(
+    ex: &'static str,
+    http: Client,
+    keys: Arc<ExchangeKeys>,
+    e_ctx: Arc<crate::state::EngineContext>,
+) {
+    let Some(conn) = get_connector(ex) else {
+        return;
+    };
+    // Balance and position endpoints are independent. Running them together
+    // prevents one slow endpoint from consuming the freshness budget of the
+    // other, while each connector keeps its own bounded request timeout.
+    let (balances, positions) = tokio::join!(
+        conn.fetch_balances(&http, &keys),
+        conn.fetch_positions(&http, &keys),
+    );
+    let mut had_error = false;
+
+    match balances {
+        Ok((wallet, available)) => {
+            e_ctx.balances.insert(ex.to_string(), wallet);
+            e_ctx.margin_balances.insert(ex.to_string(), available);
+            e_ctx
+                .balances_updated_ms
+                .insert(ex.to_string(), crate::engine::utils::now_ms());
+            e_ctx.balance_low.insert(ex.to_string(), wallet <= 1.0);
+        }
+        Err(error) => {
+            had_error = true;
+            let message = error.to_string();
+            if message.contains("banned") || message.contains("ban") {
+                tracing::debug!("[{}] balance fetch skipped (banned)", ex);
+            } else {
+                error!("[{}] balance fetch err: {}", ex, message);
+            }
+        }
+    }
+
+    match positions {
+        Ok(positions) => {
+            let previous_count = e_ctx
+                .positions
+                .get(ex)
+                .map(|value| value.value().len())
+                .unwrap_or(0);
+            if positions.len() != previous_count {
+                info!("[{}] positions: {} → {}", ex, previous_count, positions.len());
+            }
+            e_ctx.positions.insert(ex.to_string(), positions);
+            e_ctx
+                .positions_updated_ms
+                .insert(ex.to_string(), crate::engine::utils::now_ms());
+        }
+        Err(error) => {
+            had_error = true;
+            warn!(
+                "[{}] fetch_positions err: {} — keeping previous cache",
+                ex, error
+            );
+        }
+    }
+
+    if had_error {
+        record_fetch_error(ex, &e_ctx);
+    } else {
+        record_fetch_success(ex);
+    }
+}
+
 /// Spawn background task that refreshes balances and fee rates.
 /// Adaptive intervals:
 ///   - Normal mode : every 25s — full refresh (balance + fee rates) for all exchanges
@@ -59,14 +129,16 @@ pub fn start_balance_fetcher(
     settings: Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     tokio::spawn(async move {
-        let _fast_interval_ms = 5_000u64;
         let normal_interval_s = 25u64;
         let all_exchanges = [
             "binance", "gate", "kucoin", "bybit", "bitget",
             "bingx", "bitmex", "ascendex", "xt", "toobit",
         ];
+        let mut refresh_timer = tokio::time::interval(Duration::from_secs(normal_interval_s));
+        refresh_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            refresh_timer.tick().await;
             // Check which exchanges are explicitly enabled
             let active_exchanges: Vec<&str> = {
                 let p = settings.read().await;
@@ -88,65 +160,19 @@ pub fn start_balance_fetcher(
                 }
             }
 
+            let mut refreshes = FuturesUnordered::new();
             for &ex in &active_exchanges {
                 if !keys.supports(ex) {
                     continue;
                 }
-
-                let conn = match get_connector(ex) {
-                    Some(c) => c,
-                    None => continue,
-                };
-
-                let mut had_error = false;
-
-                match conn.fetch_balances(&http, &keys).await {
-                    Ok((w, a)) => {
-                        e_ctx.balances.insert(ex.to_string(), w);
-                        e_ctx.margin_balances.insert(ex.to_string(), a);
-                        e_ctx.balances_updated_ms.insert(ex.to_string(), crate::engine::utils::now_ms());
-                        if w > 1.0 {
-                            e_ctx.balance_low.insert(ex.to_string(), false);
-                        } else {
-                            e_ctx.balance_low.insert(ex.to_string(), true);
-                        }
-                    }
-                    Err(e) => {
-                        had_error = true;
-                        let msg = e.to_string();
-                        if msg.contains("banned") || msg.contains("ban") {
-                            tracing::debug!("[{}] balance fetch skipped (banned)", ex);
-                        } else {
-                            error!("[{}] balance fetch err: {}", ex, msg);
-                        }
-                    }
-                }
-
-                match conn.fetch_positions(&http, &keys).await {
-                    Ok(pos) => {
-                        let prev_count = e_ctx.positions.get(ex)
-                            .map(|v| v.value().len())
-                            .unwrap_or(0);
-                        let new_count = pos.len();
-                        if new_count != prev_count {
-                            info!("[{}] positions: {} → {}", ex, prev_count, new_count);
-                        }
-                        e_ctx.positions.insert(ex.to_string(), pos);
-                        e_ctx.positions_updated_ms.insert(ex.to_string(), crate::engine::utils::now_ms());
-                    }
-                    Err(e) => {
-                        had_error = true;
-                        warn!("[{}] fetch_positions err: {} — keeping previous cache", ex, e);
-                    }
-                }
-
-                // Track consecutive errors for auto-ban
-                if had_error {
-                    record_fetch_error(ex, &e_ctx);
-                } else {
-                    record_fetch_success(ex);
-                }
-
+                refreshes.push(refresh_exchange(
+                    ex,
+                    http.clone(),
+                    keys.clone(),
+                    e_ctx.clone(),
+                ));
+            }
+            while refreshes.next().await.is_some() {
             }
 
             // Diagnostic: log current fee_rates and balances
@@ -161,8 +187,6 @@ pub fn start_balance_fetcher(
                 }
                 info!("{}{}", fee_diag, bal_diag);
             }
-
-            tokio::time::sleep(Duration::from_secs(normal_interval_s)).await;
         }
     });
 }
