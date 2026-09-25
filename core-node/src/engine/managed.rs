@@ -31,6 +31,30 @@ fn pair_cooldown_after_close(reason: &str) -> i64 {
 fn trailing_stop_reached(percent: f64, peak: f64, activation: f64, distance: f64) -> bool {
     distance > 0.0 && peak >= activation && percent <= (peak - distance).max(0.0)
 }
+
+fn entry_ioc_limit(quote: super::book::DepthQuote, buy: bool, movement_budget_pct: f64) -> f64 {
+    quote.worst_price
+        * (1.0
+            + if buy {
+                movement_budget_pct / 100.0
+            } else {
+                -movement_budget_pct / 100.0
+            })
+}
+
+fn hedge_quote_fits_bound(
+    quote: super::book::DepthQuote,
+    first_leg_buy: bool,
+    bound: f64,
+) -> bool {
+    bound.is_finite()
+        && bound > 0.0
+        && if first_leg_buy {
+            quote.vwap >= bound && quote.worst_price >= bound
+        } else {
+            quote.vwap <= bound && quote.worst_price <= bound
+        }
+}
 struct BusyGuard;
 impl Drop for BusyGuard {
     fn drop(&mut self) {
@@ -70,18 +94,6 @@ pub async fn kill(ctx: &EngineContext, j: &Journal, reason: String) {
     if let Some(db) = &ctx.profiles_db {
         if let Err(e)=db.call(|c|{c.execute("INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','1',0) ON CONFLICT(key) DO UPDATE SET value='1'",[])?;Ok(())}).await {tracing::error!("Cannot persist kill switch: {}",e);}
     }
-}
-
-/// A fresh, uncrossed book with full depth coverage, in base quantities.
-pub fn executable(
-    prices: &PriceMap,
-    ctx: &EngineContext,
-    ex: &str,
-    pair: &str,
-    buy: bool,
-    qty: f64,
-) -> Option<f64> {
-    executable_quote(prices, ctx, ex, pair, buy, qty).map(|q| q.vwap)
 }
 
 fn executable_quote(
@@ -489,8 +501,8 @@ async fn enter(
                 continue;
             }
         }
-        let (pa, pb) = match (
-            executable(
+        let (quote_a, quote_b) = match (
+            executable_quote(
                 prices,
                 ctx,
                 &s.exchange_a,
@@ -498,7 +510,7 @@ async fn enter(
                 !s.is_a_higher,
                 s.target_qty_a,
             ),
-            executable(
+            executable_quote(
                 prices,
                 ctx,
                 &s.exchange_b,
@@ -513,6 +525,7 @@ async fn enter(
                 continue;
             }
         };
+        let (pa, pb) = (quote_a.vwap, quote_b.vwap);
         let specs_ok = [
             (&s.exchange_a, s.target_qty_a, pa, s.mult_a, s.tick_a),
             (&s.exchange_b, s.target_qty_b, pb, s.mult_b, s.tick_b),
@@ -636,17 +649,20 @@ async fn enter(
         // Liquidity ranking only selects sequence; both legs have hard price bounds.
         let first_a = super::utils::liquidity_rank(&s.exchange_a)
             >= super::utils::liquidity_rank(&s.exchange_b);
-        let (first, second, price, buy, qty) = if first_a {
-            ("A", "B", pa, !s.is_a_higher, s.target_qty_a)
+        let (first, second, quote, buy, qty) = if first_a {
+            ("A", "B", quote_a, !s.is_a_higher, s.target_qty_a)
         } else {
-            ("B", "A", pb, s.is_a_higher, s.target_qty_b)
+            ("B", "A", quote_b, s.is_a_higher, s.target_qty_b)
         };
         let second_exchange = if first_a {
             &s.exchange_b
         } else {
             &s.exchange_a
         };
-        let limit = price * (1.0 + if buy { half / 100.0 } else { -half / 100.0 });
+        // A VWAP is not an executable IOC limit when the quantity spans more
+        // than one level. Reach the last observed level, then reserve only the
+        // remaining movement budget for races after the snapshot.
+        let limit = entry_ioc_limit(quote, buy, half);
         let o = request(&t, first, qty, limit, false);
         // KuCoin may need a short private-order confirmation before its fill is
         // authoritative. Overlap that wait with the Binance REST depth refresh
@@ -695,7 +711,7 @@ async fn enter(
                 return Ok(());
             }
         }
-        let px = executable(
+        let hedge_quote = executable_quote(
             prices,
             ctx,
             if first_a {
@@ -707,7 +723,7 @@ async fn enter(
             !buy,
             q,
         );
-        if !on_grid || px.is_none() {
+        if !on_grid || hedge_quote.is_none() {
             j.state(id, "CLOSING", "HEDGE_UNAVAILABLE").await?;
             return Ok(());
         }
@@ -718,8 +734,10 @@ async fn enter(
         } else {
             actual / (1.0 + required / 100.0)
         };
-        let px = px.unwrap();
-        if (!buy && px > bound) || (buy && px < bound) {
+        let hedge_quote = hedge_quote.unwrap();
+        // Both average and last consumed level must fit inside the profit
+        // boundary. Otherwise an IOC at `bound` can partially hedge again.
+        if !hedge_quote_fits_bound(hedge_quote, buy, bound) {
             j.state(id, "CLOSING", "HEDGE_BUDGET_EXHAUSTED").await?;
             return Ok(());
         }
@@ -1032,6 +1050,39 @@ mod transport_tests {
         assert!(trailing_stop_reached(-0.01, 0.60, 0.10, 1.0));
         assert!(trailing_stop_reached(0.29, 0.60, 0.10, 0.30));
         assert!(!trailing_stop_reached(-0.50, 0.05, 0.10, 0.30));
+    }
+
+    #[test]
+    fn entry_ioc_limit_reaches_the_last_consumed_depth_level() {
+        let buy = crate::engine::book::DepthQuote {
+            vwap: 101.0,
+            worst_price: 102.0,
+        };
+        let sell = crate::engine::book::DepthQuote {
+            vwap: 99.0,
+            worst_price: 98.0,
+        };
+        assert_eq!(entry_ioc_limit(buy, true, 0.0), 102.0);
+        assert_eq!(entry_ioc_limit(sell, false, 0.0), 98.0);
+        assert!(entry_ioc_limit(buy, true, 0.05) > buy.worst_price);
+        assert!(entry_ioc_limit(sell, false, 0.05) < sell.worst_price);
+    }
+
+    #[test]
+    fn hedge_rejects_when_vwap_fits_but_last_level_does_not() {
+        let sell = crate::engine::book::DepthQuote {
+            vwap: 100.0,
+            worst_price: 99.0,
+        };
+        assert!(!hedge_quote_fits_bound(sell, true, 99.5));
+        assert!(hedge_quote_fits_bound(sell, true, 98.5));
+
+        let buy = crate::engine::book::DepthQuote {
+            vwap: 100.0,
+            worst_price: 101.0,
+        };
+        assert!(!hedge_quote_fits_bound(buy, false, 100.5));
+        assert!(hedge_quote_fits_bound(buy, false, 101.5));
     }
 
     struct LostAck {
