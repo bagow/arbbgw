@@ -100,11 +100,19 @@ try:
                 archive_stream.seek(remote_size)
                 if remote_size < archive_size:
                     subprocess.run(
-                        ["ssh", *options, destination, "cat >> " + remote_upload],
+                        [
+                            "ssh",
+                            *options,
+                            destination,
+                            "timeout --signal=TERM --kill-after=5 130 sh -c 'cat >> "
+                            + remote_upload + "'",
+                        ],
                         stdin=archive_stream,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
-                        timeout=140,
+                        # The remote deadline prevents an orphaned writer from
+                        # racing the next resumable attempt.
+                        timeout=145,
                         check=True,
                     )
             size_result = subprocess.run(
