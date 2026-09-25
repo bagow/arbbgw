@@ -198,6 +198,61 @@ async fn actual_taker_fee(
     Ok(value)
 }
 
+async fn retry_once<F, Fut>(
+    initial: Result<(), String>,
+    deadline: std::time::Duration,
+    retry: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let first_error = match initial {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    match tokio::time::timeout(deadline, retry()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(retry_error)) => Err(format!(
+            "initial: {}; retry: {}",
+            first_error, retry_error
+        )),
+        Err(_) => Err(format!("initial: {}; retry timed out", first_error)),
+    }
+}
+
+async fn confirm_leverage_with_retry(
+    initial: Result<(), String>,
+    connector: &dyn ExchangeConnector,
+    exchange: &str,
+    pair: &str,
+    leverage: f64,
+    http: &Client,
+    keys: &ExchangeKeys,
+) -> Result<(), String> {
+    let Some(first_error) = initial.as_ref().err() else {
+        return Ok(());
+    };
+    tracing::warn!(
+        "[managed] Initial leverage setup failed for {} on {}: {}; retrying once before exposure",
+        pair,
+        exchange,
+        first_error,
+    );
+    let result = retry_once(initial, std::time::Duration::from_secs(5), || {
+        connector.ensure_leverage(http, keys, pair, leverage)
+    })
+    .await;
+    if result.is_ok() {
+        tracing::info!(
+            "[managed] Leverage setup retry recovered for {} on {}",
+            pair,
+            exchange,
+        );
+    }
+    result
+}
+
 fn request(t: &ManagedTrade, leg: &str, qty: f64, price: f64, reduce: bool) -> JournalOrder {
     let s = &t.plan.signal;
     let a = leg == "A";
@@ -491,8 +546,40 @@ async fn enter(
             record_entry_decision(ctx, "rejected_live_margin");
             continue;
         }
-        // Both venues were configured before taking exposure; failures cannot be ignored.
+        // A transient setup request must not consume a short-lived edge. Retry only
+        // the failed venue once, while there is still no exposure, then re-price the
+        // complete trade from fresh L2 below. Persistent failures remain fail-closed.
+        let (la, lb) = tokio::join!(
+            confirm_leverage_with_retry(
+                la,
+                ca.as_ref(),
+                &s.exchange_a,
+                &s.pair,
+                p.leverage as f64,
+                http,
+                keys,
+            ),
+            confirm_leverage_with_retry(
+                lb,
+                cb.as_ref(),
+                &s.exchange_b,
+                &s.pair,
+                p.leverage as f64,
+                http,
+                keys,
+            ),
+        );
+        // Both venues must be authoritatively configured before taking exposure.
         if la.is_err() || lb.is_err() {
+            tracing::warn!(
+                "[managed] leverage setup failed for {} on {} / {} on {}: {:?} / {:?}",
+                s.pair,
+                s.exchange_a,
+                s.pair,
+                s.exchange_b,
+                la.as_ref().err(),
+                lb.as_ref().err(),
+            );
             record_entry_decision(ctx, "rejected_leverage_setup");
             continue;
         }
@@ -1123,6 +1210,45 @@ mod transport_tests {
         assert_eq!(
             hedge_unavailable_reason(false, true, true),
             Some("HEDGE_UNAVAILABLE")
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_leverage_setup_is_not_repeated() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let result = retry_once(Ok(()), std::time::Duration::from_millis(10), || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Err("unexpected retry".into())
+        })
+        .await;
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_leverage_setup_gets_one_bounded_retry() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let recovered = retry_once(
+            Err("initial transport failure".into()),
+            std::time::Duration::from_millis(10),
+            || async {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(recovered, Ok(()));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        let rejected = retry_once(
+            Err("initial transport failure".into()),
+            std::time::Duration::from_millis(10),
+            || async { Err("still unavailable".into()) },
+        )
+        .await;
+        assert_eq!(
+            rejected,
+            Err("initial: initial transport failure; retry: still unavailable".into())
         );
     }
 
