@@ -16,6 +16,7 @@ CREATE TABLE trading_profiles(
     trade_volume REAL,
     leverage INTEGER,
     max_active_trades INTEGER,
+    min_volume_millions REAL,
     min_entry_spread REAL,
     max_entry_spread REAL,
     take_profit_percent REAL,
@@ -34,7 +35,7 @@ CREATE TABLE trading_profiles(
 CREATE TABLE server_cache(key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);
 CREATE TABLE technical_settings(key TEXT PRIMARY KEY, value TEXT);
 INSERT INTO trading_profiles VALUES(
-    'real-default',1,NULL,6,10,7,1.2,2.5,2,1,1,.1,5,300,2,0,200,1800000,'[]',1
+    'real-default',1,NULL,6,10,7,.5,1.2,2.5,2,1,1,.1,5,300,2,0,200,1800000,'[]',1
 );
 INSERT INTO server_cache VALUES('kill_switch_active','1',0);
 INSERT INTO technical_settings VALUES('margin_check_multiplier','1.5');
@@ -77,6 +78,7 @@ class CanarySafetyTests(unittest.TestCase):
         config = {
             "notional_usdt": 6.0,
             "leverage": 2,
+            "min_volume_millions": 0.5,
             "min_entry_spread": 1.2,
             "max_entry_spread": 2.5,
             "take_profit_percent": 0.2,

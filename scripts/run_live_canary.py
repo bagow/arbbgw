@@ -19,6 +19,8 @@ PROFILE_ID = "real-default"
 MANAGED_VENUES = ("binance", "kucoin")
 DISABLED = ["htx", "toobit", "ascendex", "bingx", "bitget", "bitmex", "gate", "xt", "bybit"]
 WATCHDOG_CACHE_KEY = "canary_watchdog_token"
+DEPENDENCY_READINESS_LOSS_LIMIT = 5
+MARKET_READINESS_LOSS_LIMIT = 30
 
 
 def abort_on_signal(signum, _frame):
@@ -435,7 +437,9 @@ def main():
         report["entry_decisions_before"] = entry_decisions_before
         deadline = time.monotonic() + monitor_seconds
         first_seen = False
-        readiness_lost_samples = 0
+        dependency_readiness_lost_samples = 0
+        market_readiness_lost_samples = 0
+        market_readiness_max_gap_samples = 0
         while time.monotonic() < deadline:
             trades = active_canary_trades(start_id)
             if len(trades) > 1:
@@ -458,24 +462,51 @@ def main():
                 disable_profile(start_id)
                 report["outcome"] = "kill_switch"
                 break
-            # Once the first trade is seen we deliberately disable the profile,
-            # so trading_ready becomes false by design. Continue requiring the
-            # process and private account dependencies while exposure drains.
+            # Process and private account dependencies are always critical.
+            # Once the first trade is seen the profile is deliberately disabled,
+            # so trading_ready and market_ready may become false by design while
+            # exposure drains.
             dependencies_ready = (
                 current_health.get("process_healthy") is True
                 and current_health.get("private_ready") is True
-                if first_seen
-                else current_health.get("trading_ready") is True
             )
             if not dependencies_ready:
-                readiness_lost_samples += 1
-                if readiness_lost_samples >= 5:
+                dependency_readiness_lost_samples += 1
+                if (
+                    dependency_readiness_lost_samples
+                    >= DEPENDENCY_READINESS_LOSS_LIMIT
+                ):
                     disable_profile(start_id)
                     report["outcome"] = "readiness_lost"
-                    report["readiness_lost_samples"] = readiness_lost_samples
+                    report["readiness_component"] = "dependencies"
+                    report["readiness_lost_samples"] = (
+                        dependency_readiness_lost_samples
+                    )
                     break
             else:
-                readiness_lost_samples = 0
+                dependency_readiness_lost_samples = 0
+
+            # A short exchange-wide market-data interruption cannot create an
+            # entry: the engine independently rejects every book older than
+            # 750 ms. Keep the observer alive long enough to verify recovery,
+            # but still fail closed if the interruption persists.
+            if not first_seen and current_health.get("market_ready") is not True:
+                market_readiness_lost_samples += 1
+                market_readiness_max_gap_samples = max(
+                    market_readiness_max_gap_samples,
+                    market_readiness_lost_samples,
+                )
+                report["market_readiness_max_gap_samples"] = (
+                    market_readiness_max_gap_samples
+                )
+                if market_readiness_lost_samples >= MARKET_READINESS_LOSS_LIMIT:
+                    disable_profile(start_id)
+                    report["outcome"] = "readiness_lost"
+                    report["readiness_component"] = "market"
+                    report["readiness_lost_samples"] = market_readiness_lost_samples
+                    break
+            else:
+                market_readiness_lost_samples = 0
             time.sleep(1)
         else:
             report["outcome"] = "monitor_timeout" if first_seen else "no_trade"
