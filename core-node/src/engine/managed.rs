@@ -55,6 +55,24 @@ fn hedge_quote_fits_bound(
             quote.vwap <= bound && quote.worst_price <= bound
         }
 }
+
+fn hedge_unavailable_reason(
+    on_grid: bool,
+    has_fresh_quote: bool,
+    binance_refresh_failed: bool,
+) -> Option<&'static str> {
+    if !on_grid {
+        Some("HEDGE_UNAVAILABLE")
+    } else if !has_fresh_quote {
+        Some(if binance_refresh_failed {
+            "HEDGE_MARKET_DATA_UNAVAILABLE"
+        } else {
+            "HEDGE_UNAVAILABLE"
+        })
+    } else {
+        None
+    }
+}
 struct BusyGuard;
 impl Drop for BusyGuard {
     fn drop(&mut self) {
@@ -691,6 +709,7 @@ async fn enter(
         // the 750 ms execution-book freshness budget. The overlapping refresh
         // above should normally be fresh; repeat it only when that refresh has
         // already aged for 500 ms, preserving time to submit the bounded hedge.
+        let mut binance_refresh_error = None;
         if on_grid && second_exchange == "binance" {
             let Some((mut refresh_result, refreshed_ms)) = binance_refresh else {
                 j.state(id, "CLOSING", "HEDGE_MARKET_DATA_UNAVAILABLE")
@@ -702,13 +721,11 @@ async fn enter(
             }
             if let Err(error) = refresh_result {
                 tracing::warn!(
-                    "[managed] Binance hedge L2 refresh failed for {}: {}",
+                    "[managed] Binance hedge REST L2 refresh failed for {}: {}; requiring a fresh WS L2 book",
                     s.pair,
                     error
                 );
-                j.state(id, "CLOSING", "HEDGE_MARKET_DATA_UNAVAILABLE")
-                    .await?;
-                return Ok(());
+                binance_refresh_error = Some(error);
             }
         }
         let hedge_quote = executable_quote(
@@ -723,9 +740,20 @@ async fn enter(
             !buy,
             q,
         );
-        if !on_grid || hedge_quote.is_none() {
-            j.state(id, "CLOSING", "HEDGE_UNAVAILABLE").await?;
+        if let Some(reason) = hedge_unavailable_reason(
+            on_grid,
+            hedge_quote.is_some(),
+            binance_refresh_error.is_some(),
+        ) {
+            j.state(id, "CLOSING", reason).await?;
             return Ok(());
+        }
+        if let Some(error) = binance_refresh_error {
+            tracing::info!(
+                "[managed] Using fresh Binance WS L2 for {} hedge after REST refresh error: {}",
+                s.pair,
+                error
+            );
         }
         let actual = v.average_price.unwrap();
         // Solve spread inequality using the actual first fill. This preserves the total budget.
@@ -1083,6 +1111,19 @@ mod transport_tests {
         };
         assert!(!hedge_quote_fits_bound(buy, false, 100.5));
         assert!(hedge_quote_fits_bound(buy, false, 101.5));
+    }
+
+    #[test]
+    fn fresh_ws_hedge_quote_survives_a_rest_refresh_failure() {
+        assert_eq!(hedge_unavailable_reason(true, true, true), None);
+        assert_eq!(
+            hedge_unavailable_reason(true, false, true),
+            Some("HEDGE_MARKET_DATA_UNAVAILABLE")
+        );
+        assert_eq!(
+            hedge_unavailable_reason(false, true, true),
+            Some("HEDGE_UNAVAILABLE")
+        );
     }
 
     struct LostAck {
