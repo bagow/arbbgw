@@ -1063,6 +1063,8 @@ impl ExchangeConnector for KucoinConnector {
         let position_mode = position_mode?;
         let mode = mode?;
         let current = current?;
+        // Only the independent reads are concurrent; any required account
+        // mutation below remains ordered and is authoritatively re-verified.
         if position_mode["positionMode"].as_i64() != Some(0) {
             return Err("Managed execution requires KuCoin one-way mode".into());
         }

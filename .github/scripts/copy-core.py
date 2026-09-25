@@ -61,8 +61,22 @@ try:
         timeout=60,
         check=True,
     )
+    # Bound each SSH stream to a small chunk. Healthy connections finish a chunk
+    # quickly; a stalled route loses only one short interval, and the next stream
+    # resumes from the exact remote byte count. Keep two minutes of the Actions
+    # step for digest verification and installation.
+    transfer_deadline = time.monotonic() + 600
+    chunk_size = 256 * 1024
+    attempt = 0
+    remote_size = 0
     last_error = "transfer did not run"
-    for attempt in range(1, 5):
+    while True:
+        if time.monotonic() >= transfer_deadline:
+            raise TimeoutError(
+                "core transfer deadline reached at " + str(remote_size) + "/"
+                + str(archive_size) + " bytes; last error: " + last_error
+            )
+        attempt += 1
         try:
             size_result = subprocess.run(
                 [
@@ -74,7 +88,7 @@ try:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=30,
                 check=True,
             )
             remote_size = int(size_result.stdout.strip() or "0")
@@ -83,75 +97,66 @@ try:
                     ["ssh", *options, destination, "rm -f " + remote_upload],
                     capture_output=True,
                     text=True,
-                    timeout=60,
+                    timeout=30,
                     check=True,
                 )
                 remote_size = 0
+            if remote_size == archive_size:
+                break
+            if transfer_deadline - time.monotonic() < 60:
+                raise TimeoutError(
+                    "core transfer deadline reached at " + str(remote_size) + "/"
+                    + str(archive_size) + " bytes; last error: " + last_error
+                )
             print(
-                "core transfer attempt " + str(attempt) + ": resuming at "
+                "core transfer stream " + str(attempt) + ": resuming at "
                 + str(remote_size) + "/" + str(archive_size) + " bytes",
                 flush=True,
             )
-
-            # Preserve the verified TCP prefix after a timeout and resume from its
-            # exact byte count. The runner-to-VPS route can be consistently slow;
-            # restarting from byte zero made every otherwise healthy attempt fail.
             with archive.open("rb") as archive_stream:
                 archive_stream.seek(remote_size)
-                if remote_size < archive_size:
-                    subprocess.run(
-                        [
-                            "ssh",
-                            *options,
-                            destination,
-                            "timeout --signal=TERM --kill-after=5 130 sh -c 'cat >> "
-                            + remote_upload + "'",
-                        ],
-                        stdin=archive_stream,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        # The remote deadline prevents an orphaned writer from
-                        # racing the next resumable attempt.
-                        timeout=145,
-                        check=True,
-                    )
-            size_result = subprocess.run(
-                ["ssh", *options, destination, "wc -c < " + remote_upload],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=True,
-            )
-            if int(size_result.stdout.strip()) != archive_size:
-                raise RuntimeError("incomplete resumable transfer")
+                payload = archive_stream.read(min(chunk_size, archive_size - remote_size))
             subprocess.run(
                 [
                     "ssh",
                     *options,
                     destination,
-                    "gzip -dc " + remote_upload + " > " + remote_staged
-                    + " && printf '%s  %s\\n' " + expected_digest + " " + remote_staged
-                    + " | sha256sum -c -"
-                    + " && chmod 700 " + remote_staged
-                    + " && mv " + remote_staged + " " + remote_binary
-                    + " && rm -f " + remote_upload,
+                    "timeout --signal=TERM --kill-after=5 45 sh -c 'cat >> "
+                    + remote_upload + "'",
                 ],
-                capture_output=True,
-                text=True,
-                timeout=60,
+                input=payload,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                # The remote deadline prevents an orphaned writer from racing
+                # the next resumable stream.
+                timeout=55,
                 check=True,
             )
-            print("core transfer verified: " + expected_digest)
-            break
         except (subprocess.SubprocessError, RuntimeError) as exc:
             last_error = type(exc).__name__
             print(
-                "core transfer attempt " + str(attempt) + " interrupted: " + last_error,
+                "core transfer stream " + str(attempt) + " interrupted: " + last_error,
                 flush=True,
             )
-            if attempt == 4:
-                raise RuntimeError("core transfer failed after four attempts: " + last_error) from None
-            time.sleep(5 * attempt)
+            time.sleep(2)
+    subprocess.run(
+        [
+            "ssh",
+            *options,
+            destination,
+            "gzip -dc " + remote_upload + " > " + remote_staged
+            + " && printf '%s  %s\\n' " + expected_digest + " " + remote_staged
+            + " | sha256sum -c -"
+            + " && chmod 700 " + remote_staged
+            + " && mv " + remote_staged + " " + remote_binary
+            + " && rm -f " + remote_upload,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    print("core transfer verified: " + expected_digest)
 finally:
     key.unlink(missing_ok=True)
     archive.unlink(missing_ok=True)
