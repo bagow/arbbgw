@@ -519,8 +519,8 @@ async fn enter(
             continue;
         }
         // These checks are independent and all happen before the first leg. Run
-        // them together so a short-lived edge is not consumed by the sum of six
-        // REST round trips. Every result is still required and errors fail closed.
+        // them together so serial exchange requests do not consume a short-lived
+        // edge. Every result is still required and errors fail closed.
         let preflight_started_ms = now_ms();
         let (
             (posa, posa_ms),

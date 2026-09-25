@@ -33,6 +33,7 @@ remote_directory = "/tmp/arb-core-" + sha
 remote_upload = remote_directory + "/core-node.gz.upload"
 remote_binary = remote_directory + "/core-node"
 remote_staged = remote_directory + "/core-node.staged"
+archive_size = archive.stat().st_size
 options = [
     "-i",
     str(key),
@@ -61,23 +62,60 @@ try:
         check=True,
     )
     last_error = "transfer did not run"
-    for attempt in range(1, 4):
+    for attempt in range(1, 5):
         try:
-            # Stream the already-compressed artifact over plain SSH. This avoids
-            # SCP's end-of-transfer stalls on the VPS link while retaining the
-            # same keepalives, timeout and end-to-end digest verification.
-            with archive.open("rb") as archive_stream:
+            size_result = subprocess.run(
+                [
+                    "ssh",
+                    *options,
+                    destination,
+                    "if [ -f " + remote_upload + " ]; then wc -c < "
+                    + remote_upload + "; else printf 0; fi",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
+            remote_size = int(size_result.stdout.strip() or "0")
+            if not 0 <= remote_size <= archive_size:
                 subprocess.run(
-                    ["ssh", *options, destination, "cat > " + remote_upload],
-                    stdin=archive_stream,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    # Keep all three attempts inside the enclosing 12-minute
-                    # Actions step. A dead SSH data channel previously consumed
-                    # ten minutes on attempt one, so retries never ran.
-                    timeout=180,
+                    ["ssh", *options, destination, "rm -f " + remote_upload],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
                     check=True,
                 )
+                remote_size = 0
+            print(
+                "core transfer attempt " + str(attempt) + ": resuming at "
+                + str(remote_size) + "/" + str(archive_size) + " bytes",
+                flush=True,
+            )
+
+            # Preserve the verified TCP prefix after a timeout and resume from its
+            # exact byte count. The runner-to-VPS route can be consistently slow;
+            # restarting from byte zero made every otherwise healthy attempt fail.
+            with archive.open("rb") as archive_stream:
+                archive_stream.seek(remote_size)
+                if remote_size < archive_size:
+                    subprocess.run(
+                        ["ssh", *options, destination, "cat >> " + remote_upload],
+                        stdin=archive_stream,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=140,
+                        check=True,
+                    )
+            size_result = subprocess.run(
+                ["ssh", *options, destination, "wc -c < " + remote_upload],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
+            if int(size_result.stdout.strip()) != archive_size:
+                raise RuntimeError("incomplete resumable transfer")
             subprocess.run(
                 [
                     "ssh",
@@ -99,8 +137,12 @@ try:
             break
         except (subprocess.SubprocessError, RuntimeError) as exc:
             last_error = type(exc).__name__
-            if attempt == 3:
-                raise RuntimeError("core transfer failed after three attempts: " + last_error) from None
+            print(
+                "core transfer attempt " + str(attempt) + " interrupted: " + last_error,
+                flush=True,
+            )
+            if attempt == 4:
+                raise RuntimeError("core transfer failed after four attempts: " + last_error) from None
             time.sleep(5 * attempt)
 finally:
     key.unlink(missing_ok=True)
