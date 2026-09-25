@@ -1,13 +1,13 @@
+use crate::engine::real::ExchangeKeys;
 use crate::engine::utils::{
     cooldown_active, get_exchange_fee, local_timestamp_is_fresh, now_ms, now_secs,
 };
-use crate::engine::real::ExchangeKeys;
 use crate::state::{EngineContext, PriceMap};
+use dashmap::DashMap;
 use shared::{SpreadRow, TechnicalSettings, TradeSignal, TradingSettings};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
-use dashmap::DashMap;
 
 /// Throttle map for SIGNAL log messages: key = "pair:exa:exb" → last_log_ms
 static SIGNAL_LOG_THROTTLE: OnceLock<DashMap<String, i64>> = OnceLock::new();
@@ -35,6 +35,44 @@ fn execution_books_are_fresh(
                 })
         })
     })
+}
+
+/// Price the complete physical quantity against both executable books.
+/// L1 quotes are only candidate discovery; a signal must be profitable at L2
+/// VWAP in the same direction before any private REST preflight is attempted.
+fn executable_l2_spread(
+    e_ctx: &EngineContext,
+    key_a: &str,
+    key_b: &str,
+    is_a_higher: bool,
+    quantity: f64,
+    now_ms: i64,
+) -> Option<(f64, f64, f64)> {
+    if !execution_books_are_fresh(e_ctx, key_a, key_b, now_ms) {
+        return None;
+    }
+    let book_a = e_ctx.l2_books.get(key_a)?;
+    let book_b = e_ctx.l2_books.get(key_b)?;
+    let quote_a = crate::engine::book::quote(
+        &book_a.bids,
+        &book_a.asks,
+        !is_a_higher,
+        quantity,
+    )?;
+    let quote_b = crate::engine::book::quote(
+        &book_b.bids,
+        &book_b.asks,
+        is_a_higher,
+        quantity,
+    )?;
+    let spread = if is_a_higher {
+        (quote_a.vwap - quote_b.vwap) / quote_b.vwap * 100.0
+    } else {
+        (quote_b.vwap - quote_a.vwap) / quote_a.vwap * 100.0
+    };
+    spread
+        .is_finite()
+        .then_some((quote_a.vwap, quote_b.vwap, spread))
 }
 
 /// Core logic of token analysis: translates bare `SpreadRow` into ready-to-execute `TradeSignal`.
@@ -110,7 +148,6 @@ pub fn generate_signals(
 
         let is_a_higher = row.direction.starts_with(&row.exchange_a);
         let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
-        let entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
 
         // ── LIQUIDITY DEPTH FILTER ──
         let data_a = prices
@@ -324,40 +361,6 @@ pub fn generate_signals(
                 }
             }
 
-            // ── L1 DEPTH FILTER (Zero-Latency Fake Liquidity Protection) ──
-            // Uses exact websocket Bid/Ask volume received in the same tick as the price.
-            if let Some(min_depth_usd) = crate::engine::scanner_common::required_depth_usd(
-                profile.trade_volume,
-                profile.min_depth_percent,
-            ) {
-
-                // bid_size from collectors is ALREADY in TRUE USD (for all exchanges, natively calculated in the collectors).
-                // If A is higher, we SELL A (hit bid) and BUY B (hit ask).
-                let depth_a_usd = if is_a_higher {
-                    data_a.as_ref().unwrap().bid_size
-                } else {
-                    data_a.as_ref().unwrap().ask_size
-                };
-                let depth_b_usd = if is_a_higher {
-                    data_b.as_ref().unwrap().ask_size
-                } else {
-                    data_b.as_ref().unwrap().bid_size
-                };
-
-                if depth_a_usd < min_depth_usd || depth_b_usd < min_depth_usd {
-                    if let Some(p) = &diag_prefix {
-                        tracing::info!(
-                            "{} -> L1 depth shallow: A_USD={:.2}, B_USD={:.2} < REQUIRED={:.2}",
-                            p,
-                            depth_a_usd,
-                            depth_b_usd,
-                            min_depth_usd
-                        );
-                    }
-                    continue; // Skip spread, orderbook is too thin to absorb full IOC cleanly
-                }
-            }
-
             // ENSURE PERFECT PHYSICAL BALANCE (0.0% COIN DUST)
             let lot = match crate::engine::scanner_common::compute_lot_size(
                 profile.trade_volume, entry_a, mult_a, mult_b, ts.vol_tolerance_pct,
@@ -374,6 +377,75 @@ pub fn generate_signals(
             let phys_qty = lot.phys_qty;
             let contracts_a = lot.contracts_a;
             let contracts_b = lot.contracts_b;
+
+            // The configured liquidity cushion must be present cumulatively in
+            // executable L2, not merely at a possibly misleading top level.
+            if let Some(min_depth_usd) = crate::engine::scanner_common::required_depth_usd(
+                profile.trade_volume,
+                profile.min_depth_percent,
+            ) {
+                let reserve_qty = min_depth_usd / entry_a;
+                if executable_l2_spread(
+                    e_ctx,
+                    &key_a,
+                    &key_b,
+                    is_a_higher,
+                    reserve_qty,
+                    now,
+                )
+                .is_none()
+                {
+                    if let Some(p) = &diag_prefix {
+                        tracing::info!(
+                            "{} -> cumulative L2 depth cannot cover ${:.2}",
+                            p,
+                            min_depth_usd,
+                        );
+                    }
+                    continue;
+                }
+            }
+
+            let (entry_a, entry_b, executable_spread) = match executable_l2_spread(
+                e_ctx,
+                &key_a,
+                &key_b,
+                is_a_higher,
+                phys_qty,
+                now,
+            ) {
+                Some(quote) => quote,
+                None => {
+                    if let Some(p) = &diag_prefix {
+                        tracing::info!("{} -> no full-quantity executable L2 quote", p);
+                    }
+                    continue;
+                }
+            };
+            if crate::engine::scanner_common::entry_execution_budget(
+                executable_spread,
+                profile.min_entry_spread,
+                profile.max_entry_spread,
+                structural_reserve,
+                profile.min_structural_deviation,
+                break_even_pct,
+            )
+            .is_none()
+            {
+                if let Some(p) = &diag_prefix {
+                    let required = profile.min_entry_spread.max(
+                        structural_reserve + break_even_pct + profile.min_structural_deviation,
+                    );
+                    tracing::info!(
+                        "{} -> L2 VWAP spread {:.4}% below executable budget {:.4}% (L1 {:.4}%)",
+                        p,
+                        executable_spread,
+                        required,
+                        row.spread,
+                    );
+                }
+                continue;
+            }
 
             let actual_vol_a = phys_qty * entry_a;
             let actual_vol_b = phys_qty * entry_b;
@@ -449,7 +521,7 @@ pub fn generate_signals(
                 actual_vol_b_usd: actual_vol_b,
 
                 break_even_pct,
-                spread: row.spread,
+                spread: executable_spread,
                 // Carry only the baseline that this profile explicitly enabled.
                 structural_spread: structural_reserve,
                 is_a_higher,
@@ -466,8 +538,8 @@ pub fn generate_signals(
                 if now - last > 5_000 {
                     throttle.insert(sig_key, now);
                     tracing::info!(
-                        "[scanner] SIGNAL {}: {} vs {} spread={:.4}% BE={:.4}% (fee_a={:.6} fee_b={:.6})",
-                        row.pair, row.exchange_a, row.exchange_b, row.spread, break_even_pct,
+                        "[scanner] SIGNAL {}: {} vs {} L2_VWAP={:.4}% L1={:.4}% BE={:.4}% (fee_a={:.6} fee_b={:.6})",
+                        row.pair, row.exchange_a, row.exchange_b, executable_spread, row.spread, break_even_pct,
                         fee_a, fee_b
                     );
                 }
@@ -575,5 +647,48 @@ mod l2_gate_tests {
             "kucoin:TESTUSDT",
             now,
         ));
+    }
+
+    #[test]
+    fn executable_spread_uses_full_depth_instead_of_top_quotes() {
+        let ctx = EngineContext::default();
+        let now = 10_000;
+        ctx.l2_books.insert(
+            "binance:TESTUSDT".into(),
+            L2Snapshot {
+                bids: vec![(110.0, 0.02), (99.0, 1.0)],
+                asks: vec![(111.0, 1.0)],
+                updated_ms: now,
+            },
+        );
+        ctx.l2_books.insert(
+            "kucoin:TESTUSDT".into(),
+            L2Snapshot {
+                bids: vec![(98.0, 1.0)],
+                asks: vec![(100.0, 0.02), (101.0, 1.0)],
+                updated_ms: now,
+            },
+        );
+
+        let (sell_a, buy_b, spread) = executable_l2_spread(
+            &ctx,
+            "binance:TESTUSDT",
+            "kucoin:TESTUSDT",
+            true,
+            1.0,
+            now,
+        )
+        .unwrap();
+        assert!(sell_a < buy_b);
+        assert!(spread < 0.0, "full-depth spread must reject fake L1 edge");
+        assert!(executable_l2_spread(
+            &ctx,
+            "binance:TESTUSDT",
+            "kucoin:TESTUSDT",
+            true,
+            2.0,
+            now,
+        )
+        .is_none());
     }
 }

@@ -98,13 +98,16 @@ fn executable_quote(
     let now = now_ms();
     let d = prices.get(ex).and_then(|m| m.get(pair).cloned())?;
     if d.last_updated == 0
-        || now / 1000 < d.last_updated as i64
-        || now / 1000 - d.last_updated as i64 > 1
+        || !super::utils::local_timestamp_is_fresh(
+            now,
+            (d.last_updated as i64).saturating_mul(1_000),
+            1_999,
+        )
     {
         return None;
     }
     if let Some(book) = ctx.l2_books.get(&format!("{}:{}", ex, pair)) {
-        if now >= book.updated_ms && now - book.updated_ms <= 750 {
+        if super::utils::local_timestamp_is_fresh(now, book.updated_ms, 750) {
             let bid = book.bids.first()?.0;
             let ask = book.asks.first()?.0;
             if !bid.is_finite() || !ask.is_finite() || bid <= 0.0 || bid >= ask {

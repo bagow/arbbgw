@@ -77,7 +77,7 @@ pub fn entry_execution_budget(
     (budget > 0.0).then_some(budget)
 }
 
-/// Return the exact user-configured L1 depth requirement. Zero disables it.
+/// Return the exact user-configured cumulative L2 depth requirement. Zero disables it.
 pub fn required_depth_usd(trade_volume: f64, min_depth_percent: f64) -> Option<f64> {
     if trade_volume.is_finite()
         && min_depth_percent.is_finite()
@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn depth_requirement_respects_profile_without_hidden_floor() {
+    fn l2_depth_requirement_respects_profile_without_hidden_floor() {
         assert_eq!(required_depth_usd(6.0, 200.0), Some(12.0));
         assert_eq!(required_depth_usd(6.0, 0.0), None);
     }
