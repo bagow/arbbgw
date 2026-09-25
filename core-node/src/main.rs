@@ -252,8 +252,8 @@ async fn main() -> Result<()> {
 
     // ── Pre-init Trading WebSockets (Binance + Gate) ─────────────────────────
     if exchange_keys.supports("binance") {
-        info!("[startup] Pre-initializing Binance WS trading API...");
-        let _ = engine::exchanges::ws_trader::get_or_init_ws();
+        info!("[startup] Pre-initializing Binance query and order WS APIs...");
+        engine::exchanges::ws_trader::prewarm_ws_connections();
     }
     if exchange_keys.supports("gate") {
         info!("[startup] Pre-initializing Gate WS trading API...");
