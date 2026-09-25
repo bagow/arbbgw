@@ -1,9 +1,9 @@
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{client_async_tls, tungstenite::protocol::Message};
 
 type ResponseSender = oneshot::Sender<Value>;
 
@@ -40,13 +40,63 @@ fn get_or_init_lane(lane: WsLane) -> RequestSender {
         WsLane::Query => &WS_QUERY_TX,
         WsLane::Order => &WS_ORDER_TX,
     };
-    slot
-        .get_or_init(|| {
-            let (tx, rx) = mpsc::channel(1000);
-            tokio::spawn(ws_trader_loop(rx, lane));
-            tx
-        })
-        .clone()
+    slot.get_or_init(|| {
+        let (tx, rx) = mpsc::channel(1000);
+        tokio::spawn(ws_trader_loop(rx, lane));
+        tx
+    })
+    .clone()
+}
+
+async fn connect_binance_ws() -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    String,
+> {
+    const HOST: &str = "ws-fapi.binance.com";
+    const URL: &str = "wss://ws-fapi.binance.com/ws-fapi/v1";
+
+    let addresses = tokio::net::lookup_host((HOST, 443))
+        .await
+        .map_err(|error| format!("Binance WS DNS lookup failed: {error}"))?;
+    let mut attempts = FuturesUnordered::new();
+    for address in addresses {
+        attempts.push(async move {
+            let socket = tokio::time::timeout(
+                tokio::time::Duration::from_secs(4),
+                tokio::net::TcpStream::connect(address),
+            )
+            .await
+            .map_err(|_| format!("TCP timeout via {address}"))?
+            .map_err(|error| format!("TCP failure via {address}: {error}"))?;
+            socket
+                .set_nodelay(true)
+                .map_err(|error| format!("TCP_NODELAY failed via {address}: {error}"))?;
+            tokio::time::timeout(
+                tokio::time::Duration::from_secs(6),
+                client_async_tls(URL, socket),
+            )
+            .await
+            .map_err(|_| format!("TLS/WebSocket timeout via {address}"))?
+            .map_err(|error| format!("TLS/WebSocket failure via {address}: {error}"))
+        });
+    }
+
+    let mut failures = Vec::new();
+    while let Some(attempt) = attempts.next().await {
+        match attempt {
+            Ok(connection) => return Ok(connection),
+            Err(error) => failures.push(error),
+        }
+    }
+    Err(format!(
+        "all Binance WS addresses failed: {}",
+        failures.join("; ")
+    ))
 }
 
 /// Establish the critical order lane before any opportunity reaches execution.
@@ -59,11 +109,9 @@ pub fn prewarm_ws_connections() {
 async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>, lane: WsLane) {
     let mut backoff_secs: u64 = 2;
     loop {
-        let url = "wss://ws-fapi.binance.com/ws-fapi/v1";
-
         let (ws_stream, _) = match tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            connect_async(url),
+            tokio::time::Duration::from_secs(12),
+            connect_binance_ws(),
         )
         .await
         {
@@ -99,7 +147,7 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>, lane: W
             }
             Err(_) => {
                 tracing::error!(
-                    "[binance_ws] lane={} connect_async TIMEOUT after 10s. Retrying in {}s...",
+                    "[binance_ws] lane={} connection race TIMEOUT after 12s. Retrying in {}s...",
                     lane.label(),
                     backoff_secs
                 );
@@ -174,14 +222,13 @@ pub async fn send_ws_request(req: Value) -> Result<Value, String> {
 
     // try_send: if the WS is disconnected and channel is full, fail immediately
     // instead of blocking the entire trade cycle forever
-    tx.try_send((req, resp_tx))
-        .map_err(|e| {
-            format!(
-                "WS {} channel full/closed (is Binance WS connected?): {}",
-                lane.label(),
-                e
-            )
-        })?;
+    tx.try_send((req, resp_tx)).map_err(|e| {
+        format!(
+            "WS {} channel full/closed (is Binance WS connected?): {}",
+            lane.label(),
+            e
+        )
+    })?;
 
     match tokio::time::timeout(tokio::time::Duration::from_millis(2500), resp_rx).await {
         Ok(Ok(val)) => Ok(val),
