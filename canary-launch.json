@@ -1,0 +1,29 @@
+{
+  "ok": true,
+  "outcome": "detached_started",
+  "task": "arb-canary-detached-feefa404f7c78619bb5af8908945cdd6fb0fcf76-36102428994-1",
+  "started_ms": 1790317238514,
+  "expected_finish_ms": 1790320418514,
+  "config": {
+    "enabled": true,
+    "detached": true,
+    "attempt": 27,
+    "expected_build_sha": "d0abae7a95388a731f74810efe314dce892cc468",
+    "notional_usdt": 6.0,
+    "leverage": 2,
+    "monitor_seconds": 2700,
+    "min_volume_millions": 0.5,
+    "min_entry_spread": 0.5,
+    "max_entry_spread": 4.0,
+    "take_profit_percent": 0.2,
+    "trailing_stop_percent": 0.1,
+    "hard_stop_percent": 0.5,
+    "trailing_activation_percent": 0.1,
+    "daily_loss_limit_usdt": 0.1,
+    "max_total_exposure_usdt": 7.0,
+    "slippage_percent": 0.05,
+    "min_structural_deviation": 0.3,
+    "min_depth_percent": 500.0,
+    "max_holding_time_ms": 600000
+  }
+}
