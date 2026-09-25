@@ -23,10 +23,13 @@ const MAX_BASELINE_DEPTH_BACKLOG_MS: i64 = 5_000;
 const MAX_BASELINE_CONSECUTIVE_STALE_DEPTH: u32 = 10;
 // A stale frame is always dropped by apply_depth_update's 750 ms execution
 // gate. Reconnect only for a sustained backlog or a catastrophic one-off lag;
-// restarting on an isolated 2-4 second exchange timestamp removes an otherwise
-// healthy candidate book and creates a larger blind window than the bad frame.
+// restarting on a short burst of delayed frames removes every candidate book
+// and creates a larger blind window than the rejected frames. The dynamic
+// connection multiplexes several symbols, so three consecutive stale messages
+// can arrive in much less than one update interval; require the same sustained
+// ten-frame evidence as the baseline stream.
 const MAX_DYNAMIC_DEPTH_BACKLOG_MS: i64 = 10_000;
-const MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH: u32 = 3;
+const MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH: u32 = 10;
 const BASELINE_HEALTH_REFRESH_AGE_MS: i64 = 250;
 const DISCOVERY_REST_REFRESH_SECS: u64 = 3;
 // 24 ranked candidates plus the profile-wide maximum of 10 owned trades.
@@ -1107,10 +1110,16 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_depth_ignores_an_isolated_multi_second_frame() {
+    fn dynamic_depth_ignores_short_delayed_bursts() {
         assert!(!depth_backlog_detected(
             4_361,
             1,
+            MAX_DYNAMIC_DEPTH_BACKLOG_MS,
+            MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+        ));
+        assert!(!depth_backlog_detected(
+            751,
+            3,
             MAX_DYNAMIC_DEPTH_BACKLOG_MS,
             MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
         ));
