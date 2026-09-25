@@ -102,17 +102,28 @@ jobs:
               shutil.rmtree(directory,ignore_errors=True)
           '''
           try:
-              started = remote_python(bootstrap, {
-                  'task':task,
-                  'source':base64.b64encode(source.encode()).decode(),
-                  'config':config,
-              })
-              if started.returncode:
-                  detail=(started.stderr or started.stdout or 'no diagnostic').strip().splitlines()[-1][:500]
-                  raise RuntimeError(
-                      'could not start detached remote canary '
-                      f'(exit {started.returncode}): {detail}'
-                  )
+              try:
+                  started = remote_python(bootstrap, {
+                      'task':task,
+                      'source':base64.b64encode(source.encode()).decode(),
+                      'config':config,
+                  })
+              except subprocess.TimeoutExpired:
+                  # The SSH channel can outlive a successfully detached child.
+                  # Resolve that ambiguous result by probing the unique task
+                  # directory instead of abandoning a live guarded canary.
+                  checked=remote_python(poll,{'task':task},timeout=45)
+                  state=json.loads(checked.stdout) if checked.returncode == 0 else {}
+                  if state.get('status') not in ('running','complete'):
+                      raise
+                  print('bootstrap SSH timed out; detached canary is '+state['status'])
+              else:
+                  if started.returncode:
+                      detail=(started.stderr or started.stdout or 'no diagnostic').strip().splitlines()[-1][:500]
+                      raise RuntimeError(
+                          'could not start detached remote canary '
+                          f'(exit {started.returncode}): {detail}'
+                      )
               deadline=time.monotonic()+3200
               consecutive_poll_errors=0
               while time.monotonic()<deadline:
