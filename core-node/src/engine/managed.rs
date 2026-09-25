@@ -20,6 +20,8 @@ static LAST_PREFLIGHT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI
 const FEE_TTL_MS: i64 = 3_600_000;
 const NORMAL_EXIT_PAIR_COOLDOWN_MS: i64 = 60_000;
 const RISK_EXIT_PAIR_COOLDOWN_MS: i64 = 30 * 60_000;
+const ENTRY_DIRECTION_CONFIRMATION_MS: u64 = 500;
+const ENTRY_WIDENING_EPSILON_PCT: f64 = 0.000001;
 
 async fn timed_preflight<F: Future>(future: F) -> (F::Output, i64) {
     let started_ms = now_ms();
@@ -37,6 +39,10 @@ fn pair_cooldown_after_close(reason: &str) -> i64 {
 
 fn trailing_stop_reached(percent: f64, peak: f64, activation: f64, distance: f64) -> bool {
     distance > 0.0 && peak >= activation && percent <= (peak - distance).max(0.0)
+}
+
+fn entry_spread_is_widening(initial_pct: f64, confirmed_pct: f64) -> bool {
+    confirmed_pct > initial_pct + ENTRY_WIDENING_EPSILON_PCT
 }
 
 fn entry_ioc_limit(quote: super::book::DepthQuote, buy: bool, movement_budget_pct: f64) -> f64 {
@@ -768,7 +774,7 @@ async fn enter(
         } else {
             (pb - pa) / pa * 100.0
         };
-        let budget = match super::scanner_common::entry_execution_budget(
+        let _initial_budget = match super::scanner_common::entry_execution_budget(
             gross,
             p.min_entry_spread,
             p.max_entry_spread,
@@ -793,6 +799,91 @@ async fn enter(
                     p.max_entry_spread,
                 );
                 record_entry_decision(ctx, "rejected_entry_budget");
+                continue;
+            }
+        };
+        // A large cross-venue deviation that is still expanding is momentum,
+        // not confirmed mean reversion. Trade 2041 entered while executable L2
+        // widened from 0.6481% to 0.7367% and then 0.8469%, immediately reaching
+        // the hard stop. Re-sample after several Binance depth cycles and require
+        // the edge to be stable or narrowing while still clearing the full budget.
+        let initial_gross = gross;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            ENTRY_DIRECTION_CONFIRMATION_MS,
+        ))
+        .await;
+        if s.exchange_a == "binance" || s.exchange_b == "binance" {
+            if let Err(error) = refresh_binance_execution_book(&s.pair, prices, http, ctx).await {
+                tracing::warn!(
+                    "[managed] Binance L2 confirmation refresh failed for {}: {}",
+                    s.pair,
+                    error,
+                );
+                record_entry_decision(ctx, "rejected_direction_confirmation_refresh");
+                continue;
+            }
+        }
+        let (quote_a, quote_b) = match (
+            executable_quote(
+                prices,
+                ctx,
+                &s.exchange_a,
+                &s.pair,
+                !s.is_a_higher,
+                s.target_qty_a,
+            ),
+            executable_quote(
+                prices,
+                ctx,
+                &s.exchange_b,
+                &s.pair,
+                s.is_a_higher,
+                s.target_qty_b,
+            ),
+        ) {
+            (Some(a), Some(b)) => (a, b),
+            _ => {
+                record_entry_decision(ctx, "rejected_direction_confirmation_l2");
+                continue;
+            }
+        };
+        let (pa, pb) = (quote_a.vwap, quote_b.vwap);
+        let gross = if s.is_a_higher {
+            (pa - pb) / pb * 100.0
+        } else {
+            (pb - pa) / pa * 100.0
+        };
+        if entry_spread_is_widening(initial_gross, gross) {
+            tracing::info!(
+                "[managed] Direction confirmation rejected {}: executable L2 widened {:.4}% -> {:.4}%",
+                s.pair,
+                initial_gross,
+                gross,
+            );
+            record_entry_decision(ctx, "rejected_widening_l2");
+            continue;
+        }
+        let budget = match super::scanner_common::entry_execution_budget(
+            gross,
+            p.min_entry_spread,
+            p.max_entry_spread,
+            s.structural_spread,
+            p.min_structural_deviation,
+            s.break_even_pct,
+        ) {
+            Some(value) => value,
+            None => {
+                let required_floor = p
+                    .min_entry_spread
+                    .max(s.structural_spread + s.break_even_pct + p.min_structural_deviation);
+                tracing::info!(
+                    "[managed] Direction confirmation budget rejected {}: initial_l2={:.4}% confirmed_l2={:.4}% required={:.4}%",
+                    s.pair,
+                    initial_gross,
+                    gross,
+                    required_floor,
+                );
+                record_entry_decision(ctx, "rejected_direction_confirmation_budget");
                 continue;
             }
         };
@@ -1259,6 +1350,13 @@ mod transport_tests {
         assert!(trailing_stop_reached(-0.01, 0.60, 0.10, 1.0));
         assert!(trailing_stop_reached(0.29, 0.60, 0.10, 0.30));
         assert!(!trailing_stop_reached(-0.50, 0.05, 0.10, 0.30));
+    }
+
+    #[test]
+    fn entry_direction_confirmation_rejects_an_expanding_l2_spread() {
+        assert!(entry_spread_is_widening(0.693082, 0.736672));
+        assert!(!entry_spread_is_widening(0.736672, 0.693082));
+        assert!(!entry_spread_is_widening(0.693082, 0.693082));
     }
 
     #[test]
