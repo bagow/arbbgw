@@ -31,18 +31,12 @@ static REST_FALLBACK_LEVERAGE_MS: AtomicI64 = AtomicI64::new(0);
 static WS_CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
 
 const REST_FALLBACK_COOLDOWN_MS: i64 = 3_000; // 1 REST fallback per 3 seconds per method
-const WS_DEAD_THRESHOLD: u32 = 5; // WS is declared dead after 5 consecutive failures
+const WS_UNHEALTHY_LOG_THRESHOLD: u32 = 5;
 
 /// Check if REST fallback is allowed for a given method.
-/// Returns Ok(()) if allowed, Err if on cooldown or WS is dead.
+/// A dead WS is exactly when the bounded REST fallback is needed. The shared
+/// Binance weight guard and this per-method cooldown limit REST traffic.
 fn check_rest_fallback_allowed(last_call: &AtomicI64, method: &str) -> Result<(), String> {
-    let ws_fails = WS_CONSECUTIVE_FAILURES.load(Ordering::Relaxed);
-    if ws_fails >= WS_DEAD_THRESHOLD {
-        return Err(format!(
-            "Binance WS dead ({} failures) — REST fallback {} blocked",
-            ws_fails, method
-        ));
-    }
     let now = now_ms() as i64;
     let last = last_call.load(Ordering::Relaxed);
     if now - last < REST_FALLBACK_COOLDOWN_MS {
@@ -64,9 +58,9 @@ fn record_ws_success() {
 /// Record a WS failure.
 fn record_ws_failure() {
     let prev = WS_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed);
-    if prev + 1 >= WS_DEAD_THRESHOLD {
+    if prev + 1 == WS_UNHEALTHY_LOG_THRESHOLD {
         tracing::warn!(
-            "[binance] WS declared DEAD after {} consecutive failures — REST fallbacks blocked to prevent weight exhaustion",
+            "[binance] WS unhealthy after {} consecutive failures; bounded REST fallbacks remain enabled",
             prev + 1
         );
     }
@@ -75,9 +69,9 @@ fn record_ws_failure() {
 /// PUBLIC: Reset WS failure counter (called when WS successfully reconnects).
 pub fn reset_ws_failures() {
     let prev = WS_CONSECUTIVE_FAILURES.swap(0, Ordering::Relaxed);
-    if prev >= WS_DEAD_THRESHOLD {
+    if prev >= WS_UNHEALTHY_LOG_THRESHOLD {
         tracing::info!(
-            "[binance] WS failure counter reset (was {}) — REST fallbacks re-enabled",
+            "[binance] WS failure counter reset after reconnect (was {})",
             prev
         );
     }

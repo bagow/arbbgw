@@ -75,7 +75,7 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>) {
         crate::engine::exchanges::binance::reset_ws_failures();
         let mut ws = ws_stream;
         let mut pending: HashMap<String, ResponseSender> = HashMap::new();
-        let mut cleanup = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        let mut cleanup = tokio::time::interval(tokio::time::Duration::from_secs(1));
         let mut last_received = tokio::time::Instant::now();
         loop {
             tokio::select! {
@@ -98,7 +98,12 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>) {
                     if !matches!(tokio::time::timeout(tokio::time::Duration::from_secs(1),ws.send(Message::Text(req.to_string()))).await,Ok(Ok(()))){break;}
                 },
                 _=cleanup.tick()=>{
+                    let response_waiter_timed_out = pending.values().any(ResponseSender::is_closed);
                     pending.retain(|_,sender|!sender.is_closed());
+                    if response_waiter_timed_out {
+                        tracing::warn!("[binance_ws] response waiter timed out; reconnecting stale request channel");
+                        break;
+                    }
                     if last_received.elapsed()>tokio::time::Duration::from_secs(240){break;}
                 }
             }
@@ -123,5 +128,20 @@ pub async fn send_ws_request(req: Value) -> Result<Value, String> {
         Ok(Ok(val)) => Ok(val),
         Ok(Err(_)) => Err("Response sender dropped".to_string()),
         Err(_) => Err("Timeout waiting for WS response".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closed_response_waiter_marks_request_channel_stale() {
+        let (sender, receiver) = oneshot::channel();
+        drop(receiver);
+        let mut pending = HashMap::new();
+        pending.insert("request-1".to_string(), sender);
+
+        assert!(pending.values().any(ResponseSender::is_closed));
     }
 }
