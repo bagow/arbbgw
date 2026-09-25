@@ -1,8 +1,8 @@
 {
   "enabled": true,
   "detached": true,
-  "attempt": 27,
-  "expected_build_sha": "d0abae7a95388a731f74810efe314dce892cc468",
+  "attempt": 28,
+  "expected_build_sha": "b620e6b095309a28a255a61f92991c5a64cc01b0",
   "notional_usdt": 6.0,
   "leverage": 2,
   "monitor_seconds": 2700,
