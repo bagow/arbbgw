@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use shared::{TradeSignal, TradingSettings};
 use tokio_rusqlite::{params, Connection};
 
-pub const PAIR_LOSS_QUARANTINE_MS: i64 = 86_400_000;
+pub const PAIR_LOSS_QUARANTINE_MS: i64 = 7 * 86_400_000;
 pub const PAIR_LOSS_QUARANTINE_THRESHOLD: i64 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -550,12 +550,13 @@ mod tests {
         assert!(j.reserve(after_loss).await.unwrap().is_none());
     }
     #[tokio::test]
-    async fn repeated_verified_pair_losses_are_quarantined_for_a_day() {
+    async fn repeated_verified_pair_losses_are_quarantined_for_a_week() {
         let j = setup().await;
         let now = super::super::utils::now_ms();
+        let older_loss = now - 2 * 86_400_000;
         let first = j.reserve(plan()).await.unwrap().unwrap();
         j.db.call(move |c| {
-            c.execute("UPDATE trades SET status='CLOSED',accounting_status='VERIFIED',pnl=-0.01,exit_time=? WHERE id=?",params![now,first])?;
+            c.execute("UPDATE trades SET status='CLOSED',accounting_status='VERIFIED',pnl=-0.01,exit_time=? WHERE id=?",params![older_loss,first])?;
             Ok(())
         }).await.unwrap();
         assert_eq!(j.recent_verified_pair_losses("TESTUSDT").await.unwrap(), 1);

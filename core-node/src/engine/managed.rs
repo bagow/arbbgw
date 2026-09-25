@@ -511,7 +511,7 @@ async fn enter(
         let recent_pair_losses = j.recent_verified_pair_losses(&s.pair).await?;
         if recent_pair_losses >= super::journal::PAIR_LOSS_QUARANTINE_THRESHOLD {
             tracing::info!(
-                "[managed] Pair loss quarantine rejected {}: {} VERIFIED losses in the last 24h",
+                "[managed] Pair loss quarantine rejected {}: {} VERIFIED losses in the last 7d",
                 s.pair,
                 recent_pair_losses,
             );

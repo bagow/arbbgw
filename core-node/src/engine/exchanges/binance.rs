@@ -627,7 +627,33 @@ impl ExchangeConnector for BinanceConnector {
         if v["managed_rejection"].as_bool() == Some(true) {
             return Ok(crate::engine::orders::OrderObservation::rejected());
         }
-        parse_managed_binance(&v, r)
+        match parse_managed_binance(&v, r) {
+            Ok(observation) => Ok(observation),
+            Err(parse_error) => {
+                let order_id = filled_order_missing_average(&v, &parse_error);
+                let Some(order_id) = order_id else {
+                    return Err(parse_error);
+                };
+                // Binance can acknowledge a filled IOC with executedQty and an
+                // orderId while omitting both avgPrice and cumQuote. The order is
+                // already live exchange state, so recover it immediately by its
+                // authoritative identity instead of discarding that identity and
+                // waiting for generic unknown-submit reconciliation.
+                tracing::warn!(
+                    "[binance] Filled order.place response omitted average price for {}; querying orderId={} immediately",
+                    r.client_id,
+                    order_id,
+                );
+                self.query_managed(http, keys, r, Some(&order_id))
+                    .await
+                    .map_err(|query_error| {
+                        format!(
+                            "{}; immediate orderId={} recovery failed: {}",
+                            parse_error, order_id, query_error
+                        )
+                    })
+            }
+        }
     }
     async fn query_managed(
         &self,
@@ -1766,6 +1792,16 @@ fn parse_managed_binance(
         },
     })
 }
+
+fn filled_order_missing_average(v: &Value, parse_error: &str) -> Option<String> {
+    if parse_error != "Missing numeric field cumQuote"
+        || v["status"].as_str() != Some("FILLED")
+        || crate::engine::orders::number(v, "executedQty").ok()? <= 0.0
+    {
+        return None;
+    }
+    crate::engine::orders::identity(v, "orderId")
+}
 async fn managed_binance_get(
     http: &Client,
     keys: &ExchangeKeys,
@@ -1830,6 +1866,24 @@ mod fee_tests {
             "takerCommissionRate": "0.02"
         }))
         .is_err());
+    }
+
+    #[test]
+    fn filled_ioc_without_average_keeps_identity_for_immediate_query() {
+        let response = serde_json::json!({
+            "status": "FILLED",
+            "executedQty": "2620",
+            "avgPrice": "0",
+            "orderId": 8413195446_i64
+        });
+        assert_eq!(
+            filled_order_missing_average(&response, "Missing numeric field cumQuote"),
+            Some("8413195446".to_string())
+        );
+        assert_eq!(
+            filled_order_missing_average(&response, "Order identity mismatch"),
+            None
+        );
     }
 
     #[test]
