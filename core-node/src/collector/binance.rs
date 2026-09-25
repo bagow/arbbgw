@@ -1,12 +1,12 @@
 //! Binance USDT Futures discovery plus bounded executable-liquidity streams.
 //! All-book-ticker finds candidates; bounded top-5 subscriptions verify them.
-use anyhow::{Context, Result};
-use futures_util::{SinkExt, StreamExt};
+use anyhow::{anyhow, Context, Result};
+use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
-use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
+use tokio_tungstenite::{client_async_tls, tungstenite::Message};
 use tracing::{error, info, warn};
 
 use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
@@ -38,6 +38,61 @@ const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
 // accepts connections but has been observed delivering ever older events.
 const BINANCE_RAW_WS_URL: &str = "wss://fstream.binance.com/ws";
 const BINANCE_COMBINED_WS_URL: &str = "wss://fstream.binance.com/stream";
+
+async fn connect_market_ws(
+    url: &str,
+) -> Result<(
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+)> {
+    const HOST: &str = "fstream.binance.com";
+    let addresses =
+        tokio::time::timeout(Duration::from_secs(3), tokio::net::lookup_host((HOST, 443)))
+            .await
+            .map_err(|_| anyhow!("Binance market WS DNS lookup timed out"))?
+            .context("Binance market WS DNS lookup failed")?;
+
+    // Oracle-to-Binance routing is asymmetric: individual DNS targets can
+    // black-hole TCP or TLS while their siblings remain healthy. Race complete
+    // TLS/WebSocket handshakes so one bad address cannot consume the caller's
+    // entire reconnect budget. The original hostname stays in `url`, preserving
+    // the correct TLS SNI and HTTP Host header.
+    let mut attempts = FuturesUnordered::new();
+    for address in addresses {
+        let request_url = url.to_string();
+        attempts.push(async move {
+            let socket = tokio::time::timeout(
+                Duration::from_secs(4),
+                tokio::net::TcpStream::connect(address),
+            )
+            .await
+            .map_err(|_| anyhow!("TCP timeout via {address}"))?
+            .with_context(|| format!("TCP failure via {address}"))?;
+            socket
+                .set_nodelay(true)
+                .with_context(|| format!("TCP_NODELAY failed via {address}"))?;
+            tokio::time::timeout(
+                Duration::from_secs(6),
+                client_async_tls(request_url, socket),
+            )
+            .await
+            .map_err(|_| anyhow!("TLS/WebSocket timeout via {address}"))?
+            .with_context(|| format!("TLS/WebSocket failure via {address}"))
+        });
+    }
+
+    let mut failures = Vec::new();
+    while let Some(attempt) = attempts.next().await {
+        match attempt {
+            Ok(connection) => return Ok(connection),
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+    Err(anyhow!(
+        "all Binance market WS addresses failed: {}",
+        failures.join("; ")
+    ))
+}
 
 // The baseline exists only as a stable transport-health probe. Discovery uses the
 // all-book ticker and every executable/owned symbol is followed by the dynamic
@@ -433,14 +488,9 @@ async fn handler(
     // every five seconds, which is too slow for execution but much cheaper than running
     // depth5 at 100 ms for the entire futures universe. Fresh candidate depth is handled
     // by the bounded streams below and remains mandatory before an order can be sent.
-    let (mut ws, _) = connect_async_tls_with_config(
-        &format!("{BINANCE_RAW_WS_URL}/!bookTicker"),
-        None,
-        false,
-        None,
-    )
-    .await
-    .context("Binance all-book-ticker connect failed")?;
+    let (mut ws, _) = connect_market_ws(&format!("{BINANCE_RAW_WS_URL}/!bookTicker"))
+        .await
+        .context("Binance all-book-ticker connect failed")?;
     info!("[binance] Connected (all bookTicker discovery)");
     price_map.entry("binance".to_string()).or_default();
     let connected_at = std::time::Instant::now();
@@ -621,12 +671,7 @@ async fn run_l2_depth_stream(
                     let mut backlog_detected = false;
                     match tokio::time::timeout(
                         Duration::from_secs(10),
-                        connect_async_tls_with_config(
-                            &stream_url,
-                            None,
-                            false,
-                            None,
-                        ),
+                        connect_market_ws(&stream_url),
                     )
                     .await
                     {
@@ -758,12 +803,7 @@ async fn run_dynamic_l2_depth_stream(
     loop {
         let connection = tokio::time::timeout(
             Duration::from_secs(10),
-            connect_async_tls_with_config(
-                BINANCE_RAW_WS_URL,
-                None,
-                false,
-                None,
-            ),
+            connect_market_ws(BINANCE_RAW_WS_URL),
         )
         .await;
         let (mut ws, _) = match connection {
@@ -1213,14 +1253,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live Binance connectivity check"]
     async fn live_dynamic_subscription_receives_partial_depth() {
-        let (mut ws, _) = connect_async_tls_with_config(
-            BINANCE_RAW_WS_URL,
-            None,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
+        let (mut ws, _) = connect_market_ws(BINANCE_RAW_WS_URL).await.unwrap();
         ws.send(Message::Text(
             serde_json::json!({
                 "method": "SUBSCRIBE",
