@@ -35,6 +35,7 @@ jobs:
           destination = os.environ['ARB_CANARY_USER'] + '@' + os.environ['ARB_CANARY_HOST']
           options = ['-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15',
               '-o','ServerAliveInterval=10','-o','ServerAliveCountMax=5',
+              '-o','IPQoS=none',
               '-o','StrictHostKeyChecking=accept-new','-o','UserKnownHostsFile='+str(directory/'known_hosts')]
           source = pathlib.Path('scripts/run_live_canary.py').read_text()
           config = json.loads(pathlib.Path('.github/canary-request.json').read_text())
@@ -107,7 +108,7 @@ jobs:
                       'task':task,
                       'source':base64.b64encode(source.encode()).decode(),
                       'config':config,
-                  })
+                  }, timeout=120)
               except subprocess.TimeoutExpired:
                   # The SSH channel can outlive a successfully detached child.
                   # Resolve that ambiguous result by probing the unique task
