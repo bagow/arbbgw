@@ -168,7 +168,6 @@ jobs:
         with:
           filters: |
             vps_api:
-              - '.github/workflows/deploy.yml'
               - 'vps-api/**'
               - 'vps-api.service'
               - '.github/scripts/migrate-vps-env.py'
@@ -177,6 +176,7 @@ jobs:
               - 'Cargo.lock'
             core:
               - '.github/workflows/deploy.yml'
+              - '.github/scripts/copy-core.py'
               - 'core-node/**'
               - 'core-node.service'
               - 'shared/**'
@@ -185,7 +185,6 @@ jobs:
             cloudflared:
               - 'cloudflared.service'
             cloudflare:
-              - '.github/workflows/deploy.yml'
               - 'src/**'
               - 'public/**'
               - 'wrangler.toml'
@@ -261,7 +260,7 @@ jobs:
           name: release-${{ github.sha }}
           path: target/release
       - name: Copy core to VPS and verify transfer digest
-        timeout-minutes: 12
+        timeout-minutes: 30
         env:
           ARB_DEPLOY_HOST: ${{ secrets.VPS_SSH_HOST }}
           ARB_DEPLOY_USER: ${{ secrets.VPS_SSH_USER }}

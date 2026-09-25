@@ -63,9 +63,10 @@ try:
     )
     # Bound each SSH stream to a small chunk. Healthy connections finish a chunk
     # quickly; a stalled route loses only one short interval, and the next stream
-    # resumes from the exact remote byte count. Keep two minutes of the Actions
-    # step for digest verification and installation.
-    transfer_deadline = time.monotonic() + 600
+    # resumes from the exact remote byte count. Allow slow VPS routes enough
+    # time to finish while retaining five minutes for digest verification and
+    # installation inside the bounded Actions step.
+    transfer_deadline = time.monotonic() + 1500
     chunk_size = 256 * 1024
     attempt = 0
     remote_size = 0
