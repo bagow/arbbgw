@@ -21,6 +21,9 @@ DISABLED = ["htx", "toobit", "ascendex", "bingx", "bitget", "bitmex", "gate", "x
 WATCHDOG_CACHE_KEY = "canary_watchdog_token"
 DEPENDENCY_READINESS_LOSS_LIMIT = 5
 MARKET_READINESS_LOSS_LIMIT = 30
+MIN_MONITOR_SECONDS = 60
+MAX_MONITOR_SECONDS = 21_600
+CANARY_SHUTDOWN_GRACE_SECONDS = 450
 
 
 def abort_on_signal(signum, _frame):
@@ -45,6 +48,16 @@ def counter_delta(before, after):
         if change:
             delta[key] = change
     return delta
+
+
+def configured_monitor_seconds(config):
+    """Validate the bounded observation window before arming any watchdog."""
+    monitor_seconds = int(config.get("monitor_seconds", 1800))
+    if not MIN_MONITOR_SECONDS <= monitor_seconds <= MAX_MONITOR_SECONDS:
+        raise RuntimeError(
+            f"monitor_seconds outside {MIN_MONITOR_SECONDS}..{MAX_MONITOR_SECONDS}"
+        )
+    return monitor_seconds
 
 
 def observe_health(report, current):
@@ -406,7 +419,6 @@ def main():
     signal.signal(signal.SIGALRM, abort_on_signal)
     signal.signal(signal.SIGTERM, abort_on_signal)
     signal.signal(signal.SIGHUP, abort_on_signal)
-    signal.alarm(3150)
     config = json.load(sys.stdin)
     if config.get("enabled") is not True or config.get("notional_usdt") != 6.0:
         raise RuntimeError("explicit enabled=true and notional_usdt=6.0 are required")
@@ -415,9 +427,10 @@ def main():
     min_volume_millions = float(config.get("min_volume_millions", 0))
     if not 0.5 <= min_volume_millions <= 3.0:
         raise RuntimeError("min_volume_millions outside 0.5..3.0")
-    monitor_seconds = int(config.get("monitor_seconds", 1800))
-    if not 60 <= monitor_seconds <= 2700:
-        raise RuntimeError("monitor_seconds outside 60..2700")
+    monitor_seconds = configured_monitor_seconds(config)
+    # Leave enough time for a trade first seen at the end of the observation
+    # window to drain through the existing 420-second fail-closed close path.
+    signal.alarm(monitor_seconds + CANARY_SHUTDOWN_GRACE_SECONDS)
     start_id = None
     profile_before = None
     watchdog_token = None

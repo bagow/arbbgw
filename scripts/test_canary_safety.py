@@ -74,6 +74,16 @@ class CanarySafetyTests(unittest.TestCase):
         self.assertEqual(volume, 6)
         self.assertEqual(kill, "1")
 
+    def test_long_detached_monitor_window_remains_bounded(self):
+        self.assertEqual(
+            canary.configured_monitor_seconds({"monitor_seconds": 21_600}),
+            21_600,
+        )
+        with self.assertRaisesRegex(RuntimeError, "60..21600"):
+            canary.configured_monitor_seconds({"monitor_seconds": 21_601})
+        with self.assertRaisesRegex(RuntimeError, "60..21600"):
+            canary.configured_monitor_seconds({"monitor_seconds": 59})
+
     def test_canary_configuration_and_resume_are_one_transaction(self):
         config = {
             "notional_usdt": 6.0,
