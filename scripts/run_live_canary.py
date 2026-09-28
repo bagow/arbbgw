@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guarded one-trade production canary. Never prints or reads exchange secrets."""
+"""Guarded bounded production canary. Never prints or reads exchange secrets."""
 import json
 import secrets
 import signal
@@ -61,11 +61,31 @@ def configured_monitor_seconds(config):
 
 
 def configured_filled_trade_limit(config):
-    """Bound sequential exposure while keeping one open trade at a time."""
+    """Bound the total number of filled trades created by this run."""
     limit = int(config.get("max_filled_trades", 1))
     if not 1 <= limit <= 10:
         raise RuntimeError("max_filled_trades outside 1..10")
     return limit
+
+
+def configured_active_trade_limit(config):
+    """Bound simultaneous canary exposure independently of the batch target."""
+    limit = int(config.get("max_active_trades", 1))
+    if not 1 <= limit <= 5:
+        raise RuntimeError("max_active_trades outside 1..5")
+    return limit
+
+
+def required_canary_margin(config, margin_multiplier):
+    """Reserve enough venue margin for every permitted simultaneous leg."""
+    total_notional = (
+        float(config["notional_usdt"])
+        * configured_active_trade_limit(config)
+    )
+    return (
+        total_notional / float(config["leverage"]) * margin_multiplier
+        + total_notional * 0.002
+    )
 
 
 def observe_health(report, current):
@@ -341,10 +361,7 @@ def preflight(config):
                 raise RuntimeError(f"stale private snapshot for {venue}")
             if accounts.get("positions", {}).get(venue):
                 raise RuntimeError(f"existing exchange position on {venue}")
-            required_margin = (
-                config["notional_usdt"] / config["leverage"] * margin_multiplier
-                + config["notional_usdt"] * 0.002
-            )
+            required_margin = required_canary_margin(config, margin_multiplier)
             available = float(accounts.get("margin_balances", {}).get(venue, 0))
             if available < required_margin:
                 raise RuntimeError(f"insufficient {venue} margin: {available:.4f} < {required_margin:.4f}")
@@ -358,7 +375,7 @@ def configure_and_enable(config, watchdog_token):
     with profile_connection() as db:
         db.execute("BEGIN IMMEDIATE")
         updated = db.execute(
-            "UPDATE trading_profiles SET is_active=1,trade_volume=?,leverage=?,max_active_trades=1,"
+            "UPDATE trading_profiles SET is_active=1,trade_volume=?,leverage=?,max_active_trades=?,"
             "min_volume_millions=?,"
             "min_entry_spread=?,max_entry_spread=?,take_profit_percent=?,trailing_stop_percent=?,"
             "hard_stop_percent=?,trailing_activation_percent=?,daily_loss_limit_usdt=?,"
@@ -367,6 +384,7 @@ def configure_and_enable(config, watchdog_token):
             (
                 config["notional_usdt"],
                 config["leverage"],
+                configured_active_trade_limit(config),
                 config["min_volume_millions"],
                 config["min_entry_spread"],
                 config["max_entry_spread"],
@@ -439,13 +457,22 @@ def main():
     config = json.load(sys.stdin)
     if config.get("enabled") is not True or config.get("notional_usdt") != 6.0:
         raise RuntimeError("explicit enabled=true and notional_usdt=6.0 are required")
-    if config.get("leverage") not in (1, 2):
-        raise RuntimeError("canary leverage must be 1 or 2")
+    leverage = config.get("leverage")
+    if isinstance(leverage, bool) or not isinstance(leverage, int) or not 1 <= leverage <= 10:
+        raise RuntimeError("canary leverage must be an integer in 1..10")
     min_volume_millions = float(config.get("min_volume_millions", 0))
     if not 0.5 <= min_volume_millions <= 3.0:
         raise RuntimeError("min_volume_millions outside 0.5..3.0")
     monitor_seconds = configured_monitor_seconds(config)
     max_filled_trades = configured_filled_trade_limit(config)
+    max_active_trades = configured_active_trade_limit(config)
+    if max_filled_trades < max_active_trades:
+        raise RuntimeError("max_filled_trades must be at least max_active_trades")
+    required_exposure = float(config["notional_usdt"]) * max_active_trades
+    if float(config["max_total_exposure_usdt"]) < required_exposure:
+        raise RuntimeError(
+            "max_total_exposure_usdt is below simultaneous canary notional"
+        )
     # Leave enough time for a trade first seen at the end of the observation
     # window to drain through the existing 420-second fail-closed close path.
     signal.alarm(monitor_seconds + CANARY_SHUTDOWN_GRACE_SECONDS)
