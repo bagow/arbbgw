@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Guarded one-trade production canary. Never prints or reads exchange secrets."""
 import json
+import secrets
 import signal
 import sqlite3
+import subprocess
 import sys
 import time
 import urllib.error
@@ -16,6 +18,12 @@ TRADE_DB = ROOT / "real-trader.db"
 PROFILE_ID = "real-default"
 MANAGED_VENUES = ("binance", "kucoin")
 DISABLED = ["htx", "toobit", "ascendex", "bingx", "bitget", "bitmex", "gate", "xt", "bybit"]
+WATCHDOG_CACHE_KEY = "canary_watchdog_token"
+DEPENDENCY_READINESS_LOSS_LIMIT = 5
+MARKET_READINESS_LOSS_LIMIT = 30
+MIN_MONITOR_SECONDS = 60
+MAX_MONITOR_SECONDS = 21_600
+CANARY_SHUTDOWN_GRACE_SECONDS = 450
 
 
 def abort_on_signal(signum, _frame):
@@ -30,6 +38,49 @@ def health():
         response = exc
     with response:
         return json.load(response)
+
+
+def counter_delta(before, after):
+    """Return non-zero changes in process-local monotonic health counters."""
+    delta = {}
+    for key in sorted(set(before) | set(after)):
+        change = int(after.get(key, 0)) - int(before.get(key, 0))
+        if change:
+            delta[key] = change
+    return delta
+
+
+def configured_monitor_seconds(config):
+    """Validate the bounded observation window before arming any watchdog."""
+    monitor_seconds = int(config.get("monitor_seconds", 1800))
+    if not MIN_MONITOR_SECONDS <= monitor_seconds <= MAX_MONITOR_SECONDS:
+        raise RuntimeError(
+            f"monitor_seconds outside {MIN_MONITOR_SECONDS}..{MAX_MONITOR_SECONDS}"
+        )
+    return monitor_seconds
+
+
+def observe_health(report, current):
+    """Keep compact maxima so the final post-disable snapshot is not misleading."""
+    observed = report.setdefault(
+        "monitor_observation",
+        {"samples": 0, "scanner_max": {}, "venues_max": {}},
+    )
+    observed["samples"] += 1
+    for key, value in (current.get("scanner_status") or {}).items():
+        if isinstance(value, (int, float)):
+            observed["scanner_max"][key] = max(
+                int(value), int(observed["scanner_max"].get(key, 0))
+            )
+    for venue in current.get("venues") or []:
+        exchange = venue.get("exchange")
+        if not exchange:
+            continue
+        maxima = observed["venues_max"].setdefault(exchange, {})
+        for key in ("books", "fresh_books", "wanted_books", "current_specs"):
+            value = venue.get(key)
+            if isinstance(value, (int, float)):
+                maxima[key] = max(int(value), int(maxima.get(key, 0)))
 
 
 def profile_connection():
@@ -55,6 +106,95 @@ def backup_databases(label):
         ) as dst:
             src.backup(dst)
     return str(destination)
+
+
+def snapshot_profile():
+    with profile_connection() as db:
+        row = db.execute(
+            "SELECT * FROM trading_profiles WHERE id=?", (PROFILE_ID,)
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("canary profile is missing")
+        return dict(row)
+
+
+def restore_profile_halted(snapshot, watchdog_token=None):
+    snapshot = dict(snapshot)
+    snapshot["is_active"] = 0
+    columns = [name for name in snapshot if name != "id"]
+    assignments = ",".join(f'"{name}"=?' for name in columns)
+    values = [snapshot[name] for name in columns]
+    with profile_connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        if watchdog_token is not None:
+            current = db.execute(
+                "SELECT value FROM server_cache WHERE key=?", (WATCHDOG_CACHE_KEY,)
+            ).fetchone()
+            if current is not None and current[0] != watchdog_token:
+                raise RuntimeError("canary watchdog lease belongs to a newer run")
+        updated = db.execute(
+            f"UPDATE trading_profiles SET {assignments} WHERE id=?",
+            (*values, snapshot["id"]),
+        ).rowcount
+        if updated != 1:
+            raise RuntimeError("canary profile restore did not update exactly one row")
+        db.execute(
+            "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','1',0) "
+            "ON CONFLICT(key) DO UPDATE SET value='1'"
+        )
+        if watchdog_token is not None:
+            db.execute(
+                "DELETE FROM server_cache WHERE key=? AND value=?",
+                (WATCHDOG_CACHE_KEY, watchdog_token),
+            )
+        db.commit()
+
+
+def watchdog_program(token, start_id, delay_seconds):
+    return f'''import sqlite3,time
+time.sleep({int(delay_seconds)})
+for _ in range(60):
+    profile = None
+    try:
+        profile = sqlite3.connect({str(PROFILE_DB)!r}, timeout=10)
+        profile.execute("PRAGMA busy_timeout=10000")
+        profile.execute("BEGIN IMMEDIATE")
+        row = profile.execute("SELECT value FROM server_cache WHERE key=?", ({WATCHDOG_CACHE_KEY!r},)).fetchone()
+        if row is None or row[0] != {token!r}:
+            profile.rollback()
+            break
+        with sqlite3.connect({str(TRADE_DB)!r}, timeout=10) as trades:
+            trades.execute("PRAGMA busy_timeout=10000")
+            trades.execute("UPDATE trades SET manual_close_requested=1 WHERE id>? AND status NOT IN ('CLOSED','CANCELLED')", ({int(start_id)},))
+        profile.execute("UPDATE trading_profiles SET is_active=0,updated_at=? WHERE id=?", (int(time.time()*1000), {PROFILE_ID!r}))
+        profile.execute("INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','1',0) ON CONFLICT(key) DO UPDATE SET value='1'")
+        profile.execute("DELETE FROM server_cache WHERE key=? AND value=?", ({WATCHDOG_CACHE_KEY!r}, {token!r}))
+        profile.commit()
+        break
+    except Exception:
+        if profile is not None:
+            try:
+                profile.rollback()
+            except Exception:
+                pass
+        time.sleep(5)
+    finally:
+        if profile is not None:
+            profile.close()
+'''
+
+
+def arm_fail_closed_watchdog(start_id, delay_seconds):
+    token = secrets.token_hex(16)
+    subprocess.Popen(
+        [sys.executable, "-c", watchdog_program(token, start_id, delay_seconds)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    return token
 
 
 def disable_profile(request_close_after=None):
@@ -92,11 +232,39 @@ def active_canary_trades(start_id):
         return [
             dict(row)
             for row in db.execute(
-                "SELECT id,pair,exchange_a,exchange_b,status,accounting_status,entry_time,exit_time,pnl,gross_pnl,commission_cost,funding_cost,close_reason,current_net_estimate,valuation_ms "
-                "FROM trades WHERE id>? ORDER BY id",
+                "SELECT t.id,t.pair,t.exchange_a,t.exchange_b,t.status,t.accounting_status,"
+                "t.entry_time,t.exit_time,t.pnl,t.gross_pnl,t.commission_cost,t.funding_cost,"
+                "t.close_reason,t.current_net_estimate,t.valuation_ms,t.opened_qty_a,t.opened_qty_b,"
+                "EXISTS(SELECT 1 FROM execution_orders o WHERE o.trade_id=t.id "
+                "AND COALESCE(CAST(json_extract(o.observation,'$.filled_quantity') AS REAL),0)>0) has_fill "
+                "FROM trades t WHERE t.id>? ORDER BY t.id",
                 (start_id,),
             )
         ]
+
+
+def filled_canary_trades(trades):
+    """Return attempts with exchange-confirmed exposure, excluding zero-fill IOC rows."""
+    return [trade for trade in trades if bool(trade.get("has_fill"))]
+
+
+def wait_for_readiness(config, report):
+    expected = config["expected_build_sha"]
+    deadline = time.monotonic() + 300
+    consecutive = 0
+    while time.monotonic() < deadline:
+        current = health()
+        report["preflight_health"] = current
+        if current.get("build_sha") != expected:
+            raise RuntimeError(f"build mismatch: {current.get('build_sha')} != {expected}")
+        consecutive = consecutive + 1 if current.get("trading_ready") else 0
+        if consecutive >= 5:
+            report["readiness_consecutive_samples"] = consecutive
+            return
+        time.sleep(1)
+    raise RuntimeError(
+        "core was not trading_ready for five consecutive samples within 300 seconds"
+    )
 
 
 def preflight(config):
@@ -104,8 +272,17 @@ def preflight(config):
     expected = config["expected_build_sha"]
     if current_health.get("build_sha") != expected:
         raise RuntimeError(f"build mismatch: {current_health.get('build_sha')} != {expected}")
-    if not current_health.get("trading_ready"):
-        raise RuntimeError("core health is not trading_ready")
+    # With the profile deliberately inactive, dynamic public subscriptions have
+    # no wanted symbols after a process restart.  Requiring market_ready here
+    # would make a safely halted canary impossible to start.  Full market and
+    # trading readiness is still required for five consecutive samples by
+    # wait_for_readiness() after the one-pair profile is enabled.
+    if not all(current_health.get(key) for key in (
+        "process_healthy", "private_ready"
+    )):
+        raise RuntimeError("core process or private dependencies are not healthy")
+    if current_health.get("entries_halted") is not True:
+        raise RuntimeError("canary must start from a persisted halted state")
     with trade_connection() as db:
         active = db.execute(
             "SELECT COUNT(*) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED')"
@@ -133,15 +310,19 @@ def preflight(config):
             "SELECT is_active,pending_commands FROM trading_profiles WHERE id=?",
             (PROFILE_ID,),
         ).fetchone()
-        if row is None or row[0] or row[1] is not None:
-            raise RuntimeError("profile must be inactive without pending commands")
+        if row is None or row[1] is not None:
+            raise RuntimeError("profile must exist without pending commands")
         kill = db.execute("SELECT value FROM server_cache WHERE key='kill_switch_active'").fetchone()
-        if kill and kill[0] == "1":
-            raise RuntimeError("kill switch is active")
+        if not kill or kill[0] != "1":
+            raise RuntimeError("persisted kill switch must be active before canary")
         cached = db.execute("SELECT value FROM server_cache WHERE key='exchange_maps'").fetchone()
         if not cached:
             raise RuntimeError("missing private account cache")
         accounts = json.loads(cached[0])
+        margin_row = db.execute(
+            "SELECT value FROM technical_settings WHERE key='margin_check_multiplier'"
+        ).fetchone()
+        margin_multiplier = max(1.0, float(margin_row[0]) if margin_row else 1.5)
         now = int(time.time() * 1000)
         balance_stamps = accounts.get("balances_ts_by_exchange") or {}
         position_stamps = accounts.get("positions_ts_by_exchange") or {}
@@ -153,7 +334,7 @@ def preflight(config):
             if accounts.get("positions", {}).get(venue):
                 raise RuntimeError(f"existing exchange position on {venue}")
             required_margin = (
-                config["notional_usdt"] * 1.2
+                config["notional_usdt"] / config["leverage"] * margin_multiplier
                 + config["notional_usdt"] * 0.002
             )
             available = float(accounts.get("margin_balances", {}).get(venue, 0))
@@ -161,20 +342,24 @@ def preflight(config):
                 raise RuntimeError(f"insufficient {venue} margin: {available:.4f} < {required_margin:.4f}")
         if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise RuntimeError("profile database quick_check failed")
-    return start_id, current_health, accounts
+    return start_id, accounts
 
 
-def configure_and_enable(config):
+def configure_and_enable(config, watchdog_token):
     now = int(time.time() * 1000)
     with profile_connection() as db:
-        db.execute(
-            "UPDATE trading_profiles SET is_active=1,trade_volume=?,leverage=1,max_active_trades=1,"
+        db.execute("BEGIN IMMEDIATE")
+        updated = db.execute(
+            "UPDATE trading_profiles SET is_active=1,trade_volume=?,leverage=?,max_active_trades=1,"
+            "min_volume_millions=?,"
             "min_entry_spread=?,max_entry_spread=?,take_profit_percent=?,trailing_stop_percent=?,"
             "hard_stop_percent=?,trailing_activation_percent=?,daily_loss_limit_usdt=?,"
             "max_total_exposure_usdt=?,slippage_percent=?,min_structural_deviation=?,"
             "min_depth_percent=?,max_holding_time_ms=?,disabled_exchanges=?,updated_at=? WHERE id=?",
             (
                 config["notional_usdt"],
+                config["leverage"],
+                config["min_volume_millions"],
                 config["min_entry_spread"],
                 config["max_entry_spread"],
                 config["take_profit_percent"],
@@ -185,7 +370,19 @@ def configure_and_enable(config):
                 config["min_structural_deviation"], config["min_depth_percent"],
                 config["max_holding_time_ms"], json.dumps(DISABLED), now, PROFILE_ID,
             ),
+        ).rowcount
+        if updated != 1:
+            raise RuntimeError("canary configuration did not update exactly one profile")
+        db.execute(
+            "INSERT INTO server_cache(key,value,expires_at) VALUES(?,?,0) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (WATCHDOG_CACHE_KEY, watchdog_token),
         )
+        db.execute(
+            "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','0',0) "
+            "ON CONFLICT(key) DO UPDATE SET value='0'"
+        )
+        db.commit()
 
 
 def collect_result(start_id):
@@ -213,7 +410,7 @@ def collect_result(start_id):
         accounts = json.loads(cache[0]) if cache else {}
         profile = dict(db.execute(
             "SELECT is_active,trade_volume,leverage,max_active_trades,min_entry_spread,take_profit_percent,"
-            "hard_stop_percent,daily_loss_limit_usdt,max_total_exposure_usdt,max_holding_time_ms "
+            "hard_stop_percent,daily_loss_limit_usdt,max_total_exposure_usdt,max_holding_time_ms,min_volume_millions "
             "FROM trading_profiles WHERE id=?", (PROFILE_ID,)
         ).fetchone())
     return {
@@ -231,43 +428,111 @@ def main():
     signal.signal(signal.SIGALRM, abort_on_signal)
     signal.signal(signal.SIGTERM, abort_on_signal)
     signal.signal(signal.SIGHUP, abort_on_signal)
-    signal.alarm(3150)
     config = json.load(sys.stdin)
     if config.get("enabled") is not True or config.get("notional_usdt") != 6.0:
         raise RuntimeError("explicit enabled=true and notional_usdt=6.0 are required")
-    monitor_seconds = int(config.get("monitor_seconds", 1800))
-    if not 60 <= monitor_seconds <= 2700:
-        raise RuntimeError("monitor_seconds outside 60..2700")
+    if config.get("leverage") not in (1, 2):
+        raise RuntimeError("canary leverage must be 1 or 2")
+    min_volume_millions = float(config.get("min_volume_millions", 0))
+    if not 0.5 <= min_volume_millions <= 3.0:
+        raise RuntimeError("min_volume_millions outside 0.5..3.0")
+    monitor_seconds = configured_monitor_seconds(config)
+    # Leave enough time for a trade first seen at the end of the observation
+    # window to drain through the existing 420-second fail-closed close path.
+    signal.alarm(monitor_seconds + CANARY_SHUTDOWN_GRACE_SECONDS)
     start_id = None
+    profile_before = None
+    watchdog_token = None
     report = {"ok": False, "started_ms": int(time.time() * 1000), "config": config}
     try:
-        start_id, before_health, before_accounts = preflight(config)
-        report["preflight_health"] = before_health
+        profile_before = snapshot_profile()
+        start_id, before_accounts = preflight(config)
         report["balances_before"] = before_accounts.get("balances")
         report["backup"] = backup_databases(str(report["started_ms"]))
-        configure_and_enable(config)
+        watchdog_token = arm_fail_closed_watchdog(start_id, monitor_seconds + 60)
+        configure_and_enable(config, watchdog_token)
+        report["watchdog_armed"] = True
+        wait_for_readiness(config, report)
+        entry_decisions_before = dict(
+            report["preflight_health"].get("entry_decisions") or {}
+        )
+        report["entry_decisions_before"] = entry_decisions_before
         deadline = time.monotonic() + monitor_seconds
         first_seen = False
+        dependency_readiness_lost_samples = 0
+        market_readiness_lost_samples = 0
+        market_readiness_max_gap_samples = 0
         while time.monotonic() < deadline:
             trades = active_canary_trades(start_id)
-            if len(trades) > 1:
+            filled_trades = filled_canary_trades(trades)
+            unfilled_attempts = len(trades) - len(filled_trades)
+            if unfilled_attempts:
+                report["unfilled_attempts_seen"] = unfilled_attempts
+            if len(filled_trades) > 1:
                 disable_profile(start_id)
-                raise RuntimeError("more than one canary trade was created")
-            if trades and not first_seen:
+                raise RuntimeError("more than one canary trade acquired exposure")
+            if filled_trades and not first_seen:
                 first_seen = True
                 disable_profile()
                 report["first_trade_seen_ms"] = int(time.time() * 1000)
             if (
-                trades
-                and trades[0]["status"] in ("CLOSED", "CANCELLED")
-                and trades[0]["accounting_status"] == "VERIFIED"
+                filled_trades
+                and filled_trades[0]["status"] in ("CLOSED", "CANCELLED")
+                and filled_trades[0]["accounting_status"] == "VERIFIED"
             ):
                 report["outcome"] = "verified_trade"
                 break
-            if health().get("entries_halted"):
+            current_health = health()
+            observe_health(report, current_health)
+            if current_health.get("entries_halted"):
                 disable_profile(start_id)
                 report["outcome"] = "kill_switch"
                 break
+            # Process and private account dependencies are always critical.
+            # Once the first trade is seen the profile is deliberately disabled,
+            # so trading_ready and market_ready may become false by design while
+            # exposure drains.
+            dependencies_ready = (
+                current_health.get("process_healthy") is True
+                and current_health.get("private_ready") is True
+            )
+            if not dependencies_ready:
+                dependency_readiness_lost_samples += 1
+                if (
+                    dependency_readiness_lost_samples
+                    >= DEPENDENCY_READINESS_LOSS_LIMIT
+                ):
+                    disable_profile(start_id)
+                    report["outcome"] = "readiness_lost"
+                    report["readiness_component"] = "dependencies"
+                    report["readiness_lost_samples"] = (
+                        dependency_readiness_lost_samples
+                    )
+                    break
+            else:
+                dependency_readiness_lost_samples = 0
+
+            # A short exchange-wide market-data interruption cannot create an
+            # entry: the engine independently rejects every book older than
+            # 750 ms. Keep the observer alive long enough to verify recovery,
+            # but still fail closed if the interruption persists.
+            if not first_seen and current_health.get("market_ready") is not True:
+                market_readiness_lost_samples += 1
+                market_readiness_max_gap_samples = max(
+                    market_readiness_max_gap_samples,
+                    market_readiness_lost_samples,
+                )
+                report["market_readiness_max_gap_samples"] = (
+                    market_readiness_max_gap_samples
+                )
+                if market_readiness_lost_samples >= MARKET_READINESS_LOSS_LIMIT:
+                    disable_profile(start_id)
+                    report["outcome"] = "readiness_lost"
+                    report["readiness_component"] = "market"
+                    report["readiness_lost_samples"] = market_readiness_lost_samples
+                    break
+            else:
+                market_readiness_lost_samples = 0
             time.sleep(1)
         else:
             report["outcome"] = "monitor_timeout" if first_seen else "no_trade"
@@ -280,6 +545,10 @@ def main():
         else:
             disable_profile()
         report.update(collect_result(start_id))
+        report["entry_decision_delta"] = counter_delta(
+            entry_decisions_before,
+            report["health"].get("entry_decisions") or {},
+        )
         report["ok"] = True
     except Exception as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
@@ -290,6 +559,18 @@ def main():
             except Exception as cleanup_exc:
                 report["cleanup_error"] = f"{type(cleanup_exc).__name__}: {cleanup_exc}"
     finally:
+        if profile_before is not None:
+            try:
+                restore_profile_halted(profile_before, watchdog_token)
+                report["profile_restored_inactive"] = True
+                report["kill_switch_restored"] = True
+            except Exception as restore_exc:
+                report["profile_restored_inactive"] = False
+                report["kill_switch_restored"] = False
+                report["profile_restore_error"] = (
+                    f"{type(restore_exc).__name__}: {restore_exc}"
+                )
+                report["ok"] = False
         signal.alarm(0)
         report["finished_ms"] = int(time.time() * 1000)
         print(json.dumps(report, indent=2, allow_nan=False))
