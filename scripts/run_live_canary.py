@@ -60,6 +60,14 @@ def configured_monitor_seconds(config):
     return monitor_seconds
 
 
+def configured_filled_trade_limit(config):
+    """Bound sequential exposure while keeping one open trade at a time."""
+    limit = int(config.get("max_filled_trades", 1))
+    if not 1 <= limit <= 10:
+        raise RuntimeError("max_filled_trades outside 1..10")
+    return limit
+
+
 def observe_health(report, current):
     """Keep compact maxima so the final post-disable snapshot is not misleading."""
     observed = report.setdefault(
@@ -437,6 +445,7 @@ def main():
     if not 0.5 <= min_volume_millions <= 3.0:
         raise RuntimeError("min_volume_millions outside 0.5..3.0")
     monitor_seconds = configured_monitor_seconds(config)
+    max_filled_trades = configured_filled_trade_limit(config)
     # Leave enough time for a trade first seen at the end of the observation
     # window to drain through the existing 420-second fail-closed close path.
     signal.alarm(monitor_seconds + CANARY_SHUTDOWN_GRACE_SECONDS)
@@ -465,22 +474,34 @@ def main():
         while time.monotonic() < deadline:
             trades = active_canary_trades(start_id)
             filled_trades = filled_canary_trades(trades)
+            report["filled_trades_seen"] = len(filled_trades)
             unfilled_attempts = len(trades) - len(filled_trades)
             if unfilled_attempts:
                 report["unfilled_attempts_seen"] = unfilled_attempts
-            if len(filled_trades) > 1:
+            if len(filled_trades) > max_filled_trades:
                 disable_profile(start_id)
-                raise RuntimeError("more than one canary trade acquired exposure")
+                raise RuntimeError("canary exceeded its filled-trade limit")
             if filled_trades and not first_seen:
                 first_seen = True
-                disable_profile()
                 report["first_trade_seen_ms"] = int(time.time() * 1000)
+            target_reached = len(filled_trades) >= max_filled_trades
+            if target_reached:
+                # No additional entries after the requested batch size. Existing
+                # exposure remains owned by the engine and drains below.
+                disable_profile()
             if (
-                filled_trades
-                and filled_trades[0]["status"] in ("CLOSED", "CANCELLED")
-                and filled_trades[0]["accounting_status"] == "VERIFIED"
+                target_reached
+                and all(
+                    trade["status"] in ("CLOSED", "CANCELLED")
+                    and trade["accounting_status"] == "VERIFIED"
+                    for trade in filled_trades
+                )
             ):
-                report["outcome"] = "verified_trade"
+                report["outcome"] = (
+                    "verified_trade"
+                    if max_filled_trades == 1
+                    else "verified_trade_batch"
+                )
                 break
             current_health = health()
             observe_health(report, current_health)
@@ -489,9 +510,6 @@ def main():
                 report["outcome"] = "kill_switch"
                 break
             # Process and private account dependencies are always critical.
-            # Once the first trade is seen the profile is deliberately disabled,
-            # so trading_ready and market_ready may become false by design while
-            # exposure drains.
             dependencies_ready = (
                 current_health.get("process_healthy") is True
                 and current_health.get("private_ready") is True
@@ -516,7 +534,7 @@ def main():
             # entry: the engine independently rejects every book older than
             # 750 ms. Keep the observer alive long enough to verify recovery,
             # but still fail closed if the interruption persists.
-            if not first_seen and current_health.get("market_ready") is not True:
+            if not target_reached and current_health.get("market_ready") is not True:
                 market_readiness_lost_samples += 1
                 market_readiness_max_gap_samples = max(
                     market_readiness_max_gap_samples,
