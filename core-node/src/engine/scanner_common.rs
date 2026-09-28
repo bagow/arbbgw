@@ -77,6 +77,34 @@ pub fn entry_execution_budget(
     (budget > 0.0).then_some(budget)
 }
 
+/// Budget used only to decide whether an executable L2 stream is worth warming.
+///
+/// Keep the verified structural baseline and round-trip costs fully reserved;
+/// discount only user-configured entry/deviation margins. This creates useful
+/// headroom before a real signal without subscribing to a persistent venue
+/// premium which cannot become profitable at the configured entry rules.
+pub fn prewarm_execution_budget(
+    gross_spread: f64,
+    min_entry_spread: f64,
+    max_entry_spread: f64,
+    structural_reserve: f64,
+    min_structural_deviation: f64,
+    break_even_pct: f64,
+    prewarm_ratio: f64,
+) -> Option<f64> {
+    if !prewarm_ratio.is_finite() || !(0.0..=1.0).contains(&prewarm_ratio) {
+        return None;
+    }
+    entry_execution_budget(
+        gross_spread,
+        min_entry_spread * prewarm_ratio,
+        max_entry_spread,
+        structural_reserve,
+        min_structural_deviation * prewarm_ratio,
+        break_even_pct,
+    )
+}
+
 /// Return the exact user-configured cumulative L2 depth requirement. Zero disables it.
 pub fn required_depth_usd(trade_volume: f64, min_depth_percent: f64) -> Option<f64> {
     if trade_volume.is_finite()
@@ -299,6 +327,21 @@ mod tests {
         // Corrected 24h baseline ~= 2.64%, actual fee/slippage reserve 0.30%,
         // configured extra deviation 0.50%; the 3.3217% fill had no such edge.
         assert!(entry_execution_budget(3.3217, 0.5, 4.0, 2.64, 0.5, 0.30).is_none());
+    }
+
+    #[test]
+    fn prewarm_keeps_structural_baseline_and_costs_fully_reserved() {
+        // Live ONEUSDT snapshot: raw 3.1652%, baseline 2.7613%. Even an 80%
+        // prewarm margin cannot turn the persistent premium into usable edge.
+        assert!(prewarm_execution_budget(3.1652, 0.5, 4.0, 2.7613, 0.5, 0.28, 0.8)
+            .is_none());
+        assert!(prewarm_execution_budget(3.45, 0.5, 4.0, 2.7613, 0.5, 0.28, 0.8)
+            .is_some());
+
+        // Prewarm still starts before the full 0.78% executable floor.
+        assert!(entry_execution_budget(0.69, 0.5, 4.0, 0.0, 0.5, 0.28).is_none());
+        assert!(prewarm_execution_budget(0.69, 0.5, 4.0, 0.0, 0.5, 0.28, 0.8)
+            .is_some());
     }
 
     #[test]

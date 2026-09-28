@@ -398,6 +398,39 @@ async fn main() -> Result<()> {
                                     && row.spread <= profile.max_entry_spread
                                     && row.vol_a >= profile.min_volume_millions * 1_000_000.0
                                     && row.vol_b >= profile.min_volume_millions * 1_000_000.0
+                                    && engine::scanner_common::configured_structural_reserve(
+                                        profile.min_structural_deviation,
+                                        row.structural_verified,
+                                        row.structural_spread,
+                                    )
+                                    .is_some_and(|structural_reserve| {
+                                        let fee_a = engine::utils::get_exchange_fee(
+                                            &row.exchange_a,
+                                            &row.pair,
+                                            ts.default_fee_rate,
+                                            &t_e_ctx,
+                                        );
+                                        let fee_b = engine::utils::get_exchange_fee(
+                                            &row.exchange_b,
+                                            &row.pair,
+                                            ts.default_fee_rate,
+                                            &t_e_ctx,
+                                        );
+                                        let break_even_pct =
+                                            engine::scanner_common::ioc_break_even_pct(
+                                                fee_a, fee_b,
+                                            );
+                                        engine::scanner_common::prewarm_execution_budget(
+                                            row.spread,
+                                            profile.min_entry_spread,
+                                            profile.max_entry_spread,
+                                            structural_reserve,
+                                            profile.min_structural_deviation,
+                                            break_even_pct,
+                                            DISCOVERY_PREWARM_RATIO,
+                                        )
+                                        .is_some()
+                                    })
                             });
                             if !wanted {
                                 continue;
