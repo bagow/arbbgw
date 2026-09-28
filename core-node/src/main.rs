@@ -376,6 +376,18 @@ async fn main() -> Result<()> {
                         // briefly, so a single L1 wobble cannot churn subscriptions.
                         let mut candidate_rows = 0usize;
                         for row in &spreads {
+                            let pair_cooldown = t_e_ctx
+                                .pair_cooldown
+                                .get(&row.pair)
+                                .map(|value| *value)
+                                .unwrap_or(0);
+                            if engine::utils::cooldown_active(
+                                pair_cooldown,
+                                now_ms as i64,
+                                ts.pair_cooldown_ms,
+                            ) {
+                                continue;
+                            }
                             let wanted = real_profiles.iter().any(|profile| {
                                 profile.is_active
                                     && profile.strategy_type == "ema"

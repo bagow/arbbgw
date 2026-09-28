@@ -511,6 +511,11 @@ async fn enter(
         }
         let recent_pair_losses = j.recent_verified_pair_losses(&s.pair).await?;
         if recent_pair_losses >= super::journal::PAIR_LOSS_QUARANTINE_THRESHOLD {
+            // The durable seven-day quarantine remains authoritative in SQLite.
+            // This short in-process marker prevents the same persistent spread
+            // from re-querying that verdict and retaining scarce L2 capacity on
+            // every 100 ms engine tick; it is rechecked after pair_cooldown_ms.
+            ctx.pair_cooldown.insert(s.pair.clone(), now_ms());
             tracing::info!(
                 "[managed] Pair loss quarantine rejected {}: {} VERIFIED losses in the last 7d",
                 s.pair,
