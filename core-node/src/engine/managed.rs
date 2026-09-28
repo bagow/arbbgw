@@ -444,12 +444,7 @@ async fn enter(
     ts: &TechnicalSettings,
 ) -> anyhow::Result<()> {
     // Existing unowned positions must be reconciled, not silently absorbed by a new trade.
-    let now = now_ms();
-    if now - LAST_PREFLIGHT.load(Ordering::Acquire) < 2_000 {
-        record_entry_decision(ctx, "preflight_throttled");
-        return Ok(());
-    }
-    LAST_PREFLIGHT.store(now, Ordering::Release);
+    let mut preflight_slot_claimed = false;
     for mut s in signals.into_iter().take(3) {
         record_entry_decision(ctx, "signal_received");
         if ctx.is_killed.load(Ordering::Acquire) {
@@ -523,6 +518,20 @@ async fn enter(
             );
             record_entry_decision(ctx, "rejected_pair_loss_quarantine");
             continue;
+        }
+        // Only an eligible signal may consume the private-REST throttle. A pair
+        // rejected by a cheap local guard (notably the loss quarantine) must not
+        // delay a different, executable opportunity arriving on the next tick.
+        // Once claimed, the same bounded batch may still inspect its remaining
+        // signals, preserving the existing at-most-three behavior.
+        if !preflight_slot_claimed {
+            let now = now_ms();
+            if now - LAST_PREFLIGHT.load(Ordering::Acquire) < 2_000 {
+                record_entry_decision(ctx, "preflight_throttled");
+                return Ok(());
+            }
+            LAST_PREFLIGHT.store(now, Ordering::Release);
+            preflight_slot_claimed = true;
         }
         // These checks are independent and all happen before the first leg. Run
         // them together so serial exchange requests do not consume a short-lived
