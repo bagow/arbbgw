@@ -345,7 +345,12 @@ async fn main() -> Result<()> {
                         > 1000
                     {
                         LAST_SNAP.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                        let _ = t_shadow_tx.try_send(engine::shadow::capture(&spreads, &t_e_ctx, now_ms as i64));
+                        let _ = t_shadow_tx.try_send(engine::shadow::capture(
+                            &spreads,
+                            &t_e_ctx,
+                            now_ms as i64,
+                            ts.default_fee_rate,
+                        ));
                         let snapshot_spreads: Vec<_> = spreads.iter().take(500).cloned().collect();
                         let snapshot_val =
                             serde_json::json!({ "ts": now_ms as i64, "data": snapshot_spreads })

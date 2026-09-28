@@ -58,7 +58,7 @@ static FIRST_SEEN: OnceLock<DashMap<String, ObservationQuality>> = OnceLock::new
 /// Subscribe executable books before a raw spread reaches the trading window.
 /// This is discovery-only: the scanner still enforces the profile's full entry
 /// threshold and all structural, fee, freshness, and depth budgets.
-pub const DISCOVERY_PREWARM_RATIO: f64 = 0.8;
+pub const DISCOVERY_PREWARM_RATIO: f64 = 0.5;
 
 pub fn discovery_spread_threshold(configured_threshold: f64, profiles: &[TradingSettings]) -> f64 {
     profiles
@@ -603,7 +603,7 @@ mod quality_tests {
         profile.min_entry_spread = 0.5;
 
         let threshold = discovery_spread_threshold(0.5, &[profile.clone()]);
-        assert!((threshold - 0.4).abs() < 1e-12);
+        assert!((threshold - 0.25).abs() < 1e-12);
         assert_eq!(profile.min_entry_spread, 0.5);
 
         profile.is_active = false;

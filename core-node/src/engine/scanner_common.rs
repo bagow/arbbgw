@@ -331,16 +331,16 @@ mod tests {
 
     #[test]
     fn prewarm_keeps_structural_baseline_and_costs_fully_reserved() {
-        // Live ONEUSDT snapshot: raw 3.1652%, baseline 2.7613%. Even an 80%
+        // Live ONEUSDT snapshot: raw 3.1652%, baseline 2.7613%. Even a 50%
         // prewarm margin cannot turn the persistent premium into usable edge.
-        assert!(prewarm_execution_budget(3.1652, 0.5, 4.0, 2.7613, 0.5, 0.28, 0.8)
+        assert!(prewarm_execution_budget(3.1652, 0.5, 4.0, 2.7613, 0.5, 0.28, 0.5)
             .is_none());
-        assert!(prewarm_execution_budget(3.45, 0.5, 4.0, 2.7613, 0.5, 0.28, 0.8)
+        assert!(prewarm_execution_budget(3.45, 0.5, 4.0, 2.7613, 0.5, 0.28, 0.5)
             .is_some());
 
         // Prewarm still starts before the full 0.78% executable floor.
         assert!(entry_execution_budget(0.69, 0.5, 4.0, 0.0, 0.5, 0.28).is_none());
-        assert!(prewarm_execution_budget(0.69, 0.5, 4.0, 0.0, 0.5, 0.28, 0.8)
+        assert!(prewarm_execution_budget(0.69, 0.5, 4.0, 0.0, 0.5, 0.28, 0.5)
             .is_some());
     }
 

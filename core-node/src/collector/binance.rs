@@ -885,7 +885,12 @@ async fn run_dynamic_l2_depth_stream(
                             warn!("[binance_l2_dynamic] Subscribe failed: {}", error);
                             break;
                         }
-                        info!("[binance_l2_dynamic] Subscribed {} candidates (active={})", added.len(), active.len());
+                        info!(
+                            "[binance_l2_dynamic] Subscribed {} candidates [{}] (active={})",
+                            added.len(),
+                            added.join(","),
+                            active.len(),
+                        );
                     }
 
                     if !expired.is_empty() {
@@ -903,7 +908,12 @@ async fn run_dynamic_l2_depth_stream(
                             active.remove(symbol);
                             l2_books.remove(&format!("binance:{}", symbol));
                         }
-                        info!("[binance_l2_dynamic] Unsubscribed {} expired candidates (active={})", expired.len(), active.len());
+                        info!(
+                            "[binance_l2_dynamic] Unsubscribed {} expired candidates [{}] (active={})",
+                            expired.len(),
+                            expired.join(","),
+                            active.len(),
+                        );
                     }
                 }
                 message = ws.next() => {

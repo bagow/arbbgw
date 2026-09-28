@@ -30,10 +30,22 @@ pub async fn start(path: std::path::PathBuf) -> anyhow::Result<mpsc::Sender<Vec<
     });
     Ok(tx)
 }
-pub fn capture(spreads: &[SpreadRow], ctx: &EngineContext, now: i64) -> Vec<String> {
-    spreads.iter().filter(|s| [&s.exchange_a,&s.exchange_b].iter().all(|ex|
-        super::exchanges::get_connector(ex).map(|c|c.supports_managed_orders()).unwrap_or(false)))
-        .take(20).filter_map(|s| {
+pub fn capture(
+    spreads: &[SpreadRow],
+    ctx: &EngineContext,
+    now: i64,
+    default_fee_rate: f64,
+) -> Vec<String> {
+    spreads
+        .iter()
+        .filter(|s| {
+            [&s.exchange_a, &s.exchange_b].iter().all(|ex| {
+                super::exchanges::get_connector(ex)
+                    .map(|c| c.supports_managed_orders())
+                    .unwrap_or(false)
+            })
+        })
+        .filter_map(|s| {
             let a=ctx.l2_books.get(&format!("{}:{}",s.exchange_a,s.pair))?.clone();
             let b=ctx.l2_books.get(&format!("{}:{}",s.exchange_b,s.pair))?.clone();
             let key_a=format!("{}:{}",s.exchange_a,s.pair);
@@ -47,10 +59,12 @@ pub fn capture(spreads: &[SpreadRow], ctx: &EngineContext, now: i64) -> Vec<Stri
                 "book_a":{"updated_ms":a.updated_ms,"age_ms":now-a.updated_ms,"bids":a.bids,"asks":a.asks},
                 "book_b":{"updated_ms":b.updated_ms,"age_ms":now-b.updated_ms,"bids":b.bids,"asks":b.asks},
                 "spec_a":spec_json(&key_a),"spec_b":spec_json(&key_b),
-                "fee_a":super::utils::get_exchange_fee(&s.exchange_a,&s.pair,0.001,ctx),
-                "fee_b":super::utils::get_exchange_fee(&s.exchange_b,&s.pair,0.001,ctx),
+                "fee_a":super::utils::get_exchange_fee(&s.exchange_a,&s.pair,default_fee_rate,ctx),
+                "fee_b":super::utils::get_exchange_fee(&s.exchange_b,&s.pair,default_fee_rate,ctx),
                 "fee_a_updated_ms":ctx.fee_updated_ms.get(&key_a).map(|v|*v),
                 "fee_b_updated_ms":ctx.fee_updated_ms.get(&key_b).map(|v|*v)
             }).to_string())
-        }).collect()
+        })
+        .take(20)
+        .collect()
 }
