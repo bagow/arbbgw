@@ -162,11 +162,6 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>, lane: W
             lane.label()
         );
         crate::engine::utils::record_ws_connected("binance");
-        // The counter describes query health. A quiet order connection must not
-        // hide failures from account monitoring.
-        if lane == WsLane::Query {
-            crate::engine::exchanges::binance::reset_ws_failures();
-        }
         let mut ws = ws_stream;
         let mut pending: HashMap<String, ResponseSender> = HashMap::new();
         let mut cleanup = tokio::time::interval(tokio::time::Duration::from_secs(1));

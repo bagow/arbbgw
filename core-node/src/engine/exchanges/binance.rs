@@ -22,60 +22,6 @@ fn margin_type_cache() -> &'static DashSet<String> {
     MARGIN_TYPE_CACHE.get_or_init(|| DashSet::new())
 }
 
-// ── REST FALLBACK RATE LIMITER ──────────────────────────────────────────────
-// Prevents REST fallback spam when WS is dead.
-// Each method gets its own cooldown (last REST call timestamp).
-static REST_FALLBACK_BALANCE_MS: AtomicI64 = AtomicI64::new(0);
-static REST_FALLBACK_POSITIONS_MS: AtomicI64 = AtomicI64::new(0);
-static REST_FALLBACK_LEVERAGE_MS: AtomicI64 = AtomicI64::new(0);
-static WS_CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
-
-const REST_FALLBACK_COOLDOWN_MS: i64 = 3_000; // 1 REST fallback per 3 seconds per method
-const WS_UNHEALTHY_LOG_THRESHOLD: u32 = 5;
-
-/// Check if REST fallback is allowed for a given method.
-/// A dead WS is exactly when the bounded REST fallback is needed. The shared
-/// Binance weight guard and this per-method cooldown limit REST traffic.
-fn check_rest_fallback_allowed(last_call: &AtomicI64, method: &str) -> Result<(), String> {
-    let now = now_ms() as i64;
-    let last = last_call.load(Ordering::Relaxed);
-    if now - last < REST_FALLBACK_COOLDOWN_MS {
-        let remaining = (REST_FALLBACK_COOLDOWN_MS - (now - last)) / 1000;
-        return Err(format!(
-            "Binance REST fallback {} on cooldown ({}s remaining)",
-            method, remaining
-        ));
-    }
-    last_call.store(now, Ordering::Relaxed);
-    Ok(())
-}
-
-/// Record a successful WS response (resets failure counter).
-fn record_ws_success() {
-    WS_CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
-}
-
-/// Record a WS failure.
-fn record_ws_failure() {
-    let prev = WS_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed);
-    if prev + 1 == WS_UNHEALTHY_LOG_THRESHOLD {
-        tracing::warn!(
-            "[binance] WS unhealthy after {} consecutive failures; bounded REST fallbacks remain enabled",
-            prev + 1
-        );
-    }
-}
-
-/// PUBLIC: Reset WS failure counter (called when WS successfully reconnects).
-pub fn reset_ws_failures() {
-    let prev = WS_CONSECUTIVE_FAILURES.swap(0, Ordering::Relaxed);
-    if prev >= WS_UNHEALTHY_LOG_THRESHOLD {
-        tracing::info!(
-            "[binance] WS failure counter reset after reconnect (was {})",
-            prev
-        );
-    }
-}
 use crate::engine::real::{binance_sign, now_ms, ExchangeKeys};
 
 pub struct BinanceConnector;
@@ -1333,72 +1279,42 @@ impl ExchangeConnector for BinanceConnector {
 
     async fn fetch_balances(
         &self,
-        _http: &Client,
+        http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<(f64, f64), String> {
-        check_ip_ban()?;
-        use crate::engine::exchanges::ws_trader::send_ws_request;
-        let ts = now_ms();
-        let qs = format!("apiKey={}&timestamp={}", keys.binance_key, ts);
-        let sig = binance_sign(&keys.binance_secret, &qs);
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "id": req_id,
-            "method": "v2/account.balance",
-            "params": {
-                "apiKey": keys.binance_key,
-                "timestamp": ts,
-                "signature": sig
-            }
-        });
-        let result_arr = match send_ws_request(ws_req).await {
-            Ok(resp) => {
-                record_ws_success();
-                if let Some(err) = resp.get("error") {
-                    detect_ban_from_response(err);
-                    return Err(format!("Binance WS balance error: {}", err));
-                }
-                resp["result"].as_array().cloned().unwrap_or_default()
-            }
-            Err(e) => {
-                record_ws_failure();
-                // Check ban + REST fallback cooldown before making REST request
-                check_ip_ban()?;
-                check_rest_fallback_allowed(&REST_FALLBACK_BALANCE_MS, "balance")?;
-                tracing::warn!(
-                    "[binance] WS balance fetch failed ({}). Trying REST fallback...",
-                    e
-                );
-                // CRITICAL: use fresh timestamp — the original `ts` may be 5+ seconds stale
-                // after WS timeout, causing Binance -1021 recvWindow errors
-                let fresh_ts = now_ms();
-                let rest_qs = format!("timestamp={}", fresh_ts);
-                let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
-                let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
-                let url = format!("https://fapi.binance.com/fapi/v2/balance?{}", full_qs);
-                let resp = _http
-                    .get(&url)
-                    .header("X-MBX-APIKEY", &keys.binance_key)
-                    .timeout(std::time::Duration::from_millis(5000))
-                    .send()
-                    .await
-                    .map_err(|e| format!("Binance REST balance HTTP error: {}", e))?;
-
-                // Track weight from REST response headers
-                let status = resp.status();
-                let headers = resp.headers().clone();
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| format!("Binance REST balance JSON error: {}", e))?;
-                record_binance_response(status.as_u16(), &headers);
-                detect_ban_from_response(&body);
-                if let Some(_code) = body.get("code") {
-                    return Err(format!("Binance REST balance API error: {}", body));
-                }
-                body.as_array().cloned().unwrap_or_default()
-            }
-        };
+        // The VPS route to Binance's request/response WebSocket is unstable:
+        // account queries regularly consume the full 2.5s WS timeout before a
+        // fast REST fallback succeeds.  An arbitrage edge cannot survive that
+        // delay.  These read-only endpoints have modest request weight and are
+        // already protected by the shared ban/weight guard, so query them over
+        // REST directly.  The isolated WS order lane remains the execution path.
+        check_before_binance_rest()?;
+        let timestamp = now_ms();
+        let query = format!("timestamp={timestamp}");
+        let signature = binance_sign(&keys.binance_secret, &query);
+        let response = http
+            .get(format!(
+                "https://fapi.binance.com/fapi/v2/balance?{query}&signature={signature}"
+            ))
+            .header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .map_err(|error| format!("Binance REST balance HTTP error: {error}"))?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("Binance REST balance JSON error: {error}"))?;
+        check_rate_limits(status, &headers, Some(&body)).await?;
+        if !status.is_success() || body.get("code").is_some() {
+            return Err(format!("Binance REST balance API error: {body}"));
+        }
+        let result_arr = body
+            .as_array()
+            .cloned()
+            .ok_or("Malformed Binance balance list")?;
 
         let mut total_balance = 0.0f64;
         let mut available_balance = 0.0f64;
@@ -1522,76 +1438,36 @@ impl ExchangeConnector for BinanceConnector {
 
     async fn fetch_positions(
         &self,
-        _http: &Client,
+        http: &Client,
         keys: &ExchangeKeys,
     ) -> Result<Vec<PositionInfo>, String> {
-        check_ip_ban()?;
-        use crate::engine::exchanges::ws_trader::send_ws_request;
-        let ts = now_ms();
-        let qs = format!("apiKey={}&timestamp={}", keys.binance_key, ts);
-        let sig = binance_sign(&keys.binance_secret, &qs);
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let ws_req = serde_json::json!({
-            "id": req_id,
-            "method": "v2/account.position",
-            "params": {
-                "apiKey": keys.binance_key,
-                "timestamp": ts,
-                "signature": sig
-            }
-        });
-        let result_arr = match send_ws_request(ws_req).await {
-            Ok(resp) => {
-                record_ws_success();
-                if let Some(err) = resp.get("error") {
-                    detect_ban_from_response(err);
-                    return Err(format!("Binance WS position error: {}", err));
-                }
-                resp["result"]
-                    .as_array()
-                    .cloned()
-                    .ok_or("Malformed Binance position list")?
-            }
-            Err(e) => {
-                record_ws_failure();
-                // Check ban + REST fallback cooldown before making REST request
-                check_ip_ban()?;
-                check_rest_fallback_allowed(&REST_FALLBACK_POSITIONS_MS, "positions")?;
-                tracing::warn!(
-                    "[binance] WS positions fetch failed ({}). Trying REST fallback...",
-                    e
-                );
-                // CRITICAL: use fresh timestamp to avoid -1021 recvWindow errors
-                let fresh_ts = now_ms();
-                let rest_qs = format!("timestamp={}", fresh_ts);
-                let sig_rest = binance_sign(&keys.binance_secret, &rest_qs);
-                let full_qs = format!("{}&signature={}", rest_qs, sig_rest);
-                let url = format!("https://fapi.binance.com/fapi/v2/positionRisk?{}", full_qs);
-                let resp = _http
-                    .get(&url)
-                    .header("X-MBX-APIKEY", &keys.binance_key)
-                    .timeout(std::time::Duration::from_millis(5000))
-                    .send()
-                    .await
-                    .map_err(|e| format!("Binance REST positions HTTP error: {}", e))?;
-
-                // Track weight from REST response headers
-                let status = resp.status();
-                let headers = resp.headers().clone();
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| format!("Binance REST positions JSON error: {}", e))?;
-                record_binance_response(status.as_u16(), &headers);
-                detect_ban_from_response(&body);
-                if let Some(_code) = body.get("code") {
-                    return Err(format!("Binance REST positions API error: {}", body));
-                }
-                body.as_array()
-                    .cloned()
-                    .ok_or("Malformed Binance position list")?
-            }
-        };
+        check_before_binance_rest()?;
+        let timestamp = now_ms();
+        let query = format!("timestamp={timestamp}");
+        let signature = binance_sign(&keys.binance_secret, &query);
+        let response = http
+            .get(format!(
+                "https://fapi.binance.com/fapi/v2/positionRisk?{query}&signature={signature}"
+            ))
+            .header("X-MBX-APIKEY", &keys.binance_key)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .map_err(|error| format!("Binance REST positions HTTP error: {error}"))?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("Binance REST positions JSON error: {error}"))?;
+        check_rate_limits(status, &headers, Some(&body)).await?;
+        if !status.is_success() || body.get("code").is_some() {
+            return Err(format!("Binance REST positions API error: {body}"));
+        }
+        let result_arr = body
+            .as_array()
+            .cloned()
+            .ok_or("Malformed Binance position list")?;
 
         let mut positions = Vec::new();
         for p in result_arr {
