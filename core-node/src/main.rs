@@ -382,6 +382,19 @@ async fn main() -> Result<()> {
                         let mut candidate_rows = 0usize;
                         let mut candidate_preflight_scheduled = false;
                         for row in &spreads {
+                            let key_a = format!("{}:{}", row.exchange_a, row.pair);
+                            let key_b = format!("{}:{}", row.exchange_b, row.pair);
+                            // Discovery feeds can contain same-named indices or
+                            // TradFi contracts which are not the crypto contract
+                            // available on the other venue. Only warm routes for
+                            // which both venues published executable metadata.
+                            if [&key_a, &key_b].iter().any(|key| {
+                                !t_e_ctx.specifications.contains_key(*key)
+                                    || !t_e_ctx.multipliers.contains_key(*key)
+                                    || !t_e_ctx.tick_sizes.contains_key(*key)
+                            }) {
+                                continue;
+                            }
                             let pair_cooldown = t_e_ctx
                                 .pair_cooldown
                                 .get(&row.pair)

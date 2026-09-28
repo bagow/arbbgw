@@ -6,6 +6,10 @@ use tokio_rusqlite::{params, Connection};
 
 pub const PAIR_LOSS_QUARANTINE_MS: i64 = 7 * 86_400_000;
 pub const PAIR_LOSS_QUARANTINE_THRESHOLD: i64 = 2;
+/// Increment only when entry/exit risk semantics materially change. Historical
+/// losses remain auditable, but cannot permanently quarantine a corrected
+/// strategy before it has produced any outcome under the new rules.
+pub const RISK_STRATEGY_REVISION: i64 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Plan {
@@ -53,7 +57,7 @@ impl Journal {
             let mut stmt=c.prepare("PRAGMA table_info(trades)")?;
             let cols=stmt.query_map([],|r|r.get::<_,String>(1))?.collect::<Result<Vec<_>,_>>()?;
             drop(stmt);
-            for (name,ty) in [("accounting_status","TEXT DEFAULT 'LEGACY_UNVERIFIED'"),("opened_qty_a","REAL"),("opened_qty_b","REAL"),("closed_qty_a","REAL"),("closed_qty_b","REAL"),("manual_close_requested","INTEGER NOT NULL DEFAULT 0"),("peak_net_percent","REAL NOT NULL DEFAULT 0"),("last_accounting_check","INTEGER NOT NULL DEFAULT 0"),("accounting_error","TEXT"),("fee_a","REAL"),("fee_b","REAL"),("net_pnl_a","REAL"),("net_pnl_b","REAL"),("current_net_estimate","REAL"),("valuation_ms","INTEGER")] {
+            for (name,ty) in [("accounting_status","TEXT DEFAULT 'LEGACY_UNVERIFIED'"),("opened_qty_a","REAL"),("opened_qty_b","REAL"),("closed_qty_a","REAL"),("closed_qty_b","REAL"),("manual_close_requested","INTEGER NOT NULL DEFAULT 0"),("peak_net_percent","REAL NOT NULL DEFAULT 0"),("last_accounting_check","INTEGER NOT NULL DEFAULT 0"),("accounting_error","TEXT"),("fee_a","REAL"),("fee_b","REAL"),("net_pnl_a","REAL"),("net_pnl_b","REAL"),("current_net_estimate","REAL"),("valuation_ms","INTEGER"),("strategy_revision","INTEGER NOT NULL DEFAULT 1")] {
                 if !cols.iter().any(|x|x==name) { c.execute_batch(&format!("ALTER TABLE trades ADD COLUMN {name} {ty}"))?; }
             }
             Ok(())
@@ -76,13 +80,13 @@ impl Journal {
             let unresolved:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status IN ('ENTRY','RECONCILING')",[],|r|r.get(0))?;
             let active_exposure:f64=tx.query_row("SELECT COALESCE(SUM(volume),0) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED') AND profile_id=?",[&s.profile_id],|r|r.get(0))?;
             let daily_pnl:f64=tx.query_row("SELECT COALESCE(SUM(pnl),0) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND profile_id=? AND exit_time>=?",params![s.profile_id,day_start],|r|r.get(0))?;
-            let recent_pair_losses:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND pair=? AND pnl<0 AND exit_time>=?",params![s.pair,pair_loss_start],|r|r.get(0))?;
+            let recent_pair_losses:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND pair=? AND pnl<0 AND exit_time>=? AND strategy_revision=?",params![s.pair,pair_loss_start,RISK_STRATEGY_REVISION],|r|r.get(0))?;
             let unsettled:i64=tx.query_row("SELECT COUNT(*) FROM trades t JOIN execution_plans p ON p.trade_id=t.id WHERE t.status='CLOSED' AND t.accounting_status!='VERIFIED' AND t.profile_id=?",[&s.profile_id],|r|r.get(0))?;
             let loss_blocked=daily_limit>0.0 && daily_pnl<=-daily_limit;
             let pair_loss_blocked=recent_pair_losses>=PAIR_LOSS_QUARANTINE_THRESHOLD;
             let exposure_blocked=exposure_limit>0.0 && active_exposure+s.actual_vol_a_usd>exposure_limit+1e-9;
             if same>0 || blocked>=max || unresolved>0 || unsettled>0 || loss_blocked || pair_loss_blocked || exposure_blocked {return Ok(None);}
-            tx.execute("INSERT INTO trades(pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,status,profile_id,structural_spread,accounting_status,commission_cost,funding_cost,highest_spread_reached) VALUES(?,?,?,?,?,0,0,?,?,'ENTRY',?,?,'PENDING',0,0,0)",params![s.pair,s.exchange_a,s.exchange_b,s.direction,s.actual_vol_a_usd,s.spread,now,s.profile_id,s.structural_spread])?;
+            tx.execute("INSERT INTO trades(pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,status,profile_id,structural_spread,accounting_status,commission_cost,funding_cost,highest_spread_reached,strategy_revision) VALUES(?,?,?,?,?,0,0,?,?,'ENTRY',?,?,'PENDING',0,0,0,?)",params![s.pair,s.exchange_a,s.exchange_b,s.direction,s.actual_vol_a_usd,s.spread,now,s.profile_id,s.structural_spread,RISK_STRATEGY_REVISION])?;
             let id=tx.last_insert_rowid();tx.execute("INSERT INTO execution_plans(trade_id,plan) VALUES(?,?)",params![id,json])?;
             tx.commit()?;Ok(Some(id))
         }).await?)
@@ -99,7 +103,7 @@ impl Journal {
         let pair = pair.to_string();
         let since = super::utils::now_ms() - PAIR_LOSS_QUARANTINE_MS;
         Ok(self.db.call(move |c| {
-            c.query_row("SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND pair=? AND pnl<0 AND exit_time>=?",params![pair,since],|r|r.get(0)).map_err(Into::into)
+            c.query_row("SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND pair=? AND pnl<0 AND exit_time>=? AND strategy_revision=?",params![pair,since,RISK_STRATEGY_REVISION],|r|r.get(0)).map_err(Into::into)
         }).await?)
     }
     pub async fn active(&self) -> anyhow::Result<Vec<ManagedTrade>> {
@@ -568,6 +572,20 @@ mod tests {
         }).await.unwrap();
         assert_eq!(j.recent_verified_pair_losses("TESTUSDT").await.unwrap(), 2);
         assert!(j.reserve(plan()).await.unwrap().is_none());
+    }
+    #[tokio::test]
+    async fn losses_from_an_older_risk_revision_do_not_quarantine_corrected_logic() {
+        let j = setup().await;
+        let now = super::super::utils::now_ms();
+        j.db.call(move |c| {
+            c.execute(
+                "INSERT INTO trades(pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,status,profile_id,structural_spread,accounting_status,commission_cost,funding_cost,highest_spread_reached,strategy_revision,pnl,exit_time) VALUES('TESTUSDT','gate','binance','test',10,1,1,1,?,'CLOSED','real-default',0,'VERIFIED',0,0,0,1,-0.01,?)",
+                params![now - 1_000, now],
+            )?;
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(j.recent_verified_pair_losses("TESTUSDT").await.unwrap(), 0);
+        assert!(j.reserve(plan()).await.unwrap().is_some());
     }
     #[tokio::test]
     async fn durable_identity_and_cumulative_receipts_cannot_double_count() {
