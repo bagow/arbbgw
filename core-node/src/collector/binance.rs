@@ -17,7 +17,12 @@ use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSigna
 const DEPTH_STREAMS_PER_CONNECTION: usize = 5;
 const DEPTH_UPDATE_INTERVAL_MS: u64 = 500;
 const DEPTH_SUBSCRIPTION_REFRESH_SECS: u64 = 1_800;
-const DYNAMIC_DEPTH_REFRESH_SECS: u64 = 1;
+// The engine recomputes the candidate set every 100 ms. Polling it once per
+// second can miss an entire short-lived edge between two refresh ticks, so the
+// local hand-off must be faster than the producer cadence. This does not send
+// extra exchange traffic: SUBSCRIBE/UNSUBSCRIBE messages are emitted only when
+// the deduplicated symbol set actually changes.
+const DYNAMIC_DEPTH_REFRESH_MS: u64 = 50;
 const DYNAMIC_DEPTH_RETENTION_SECS: u64 = 30;
 const MAX_BASELINE_DEPTH_BACKLOG_MS: i64 = 5_000;
 const MAX_BASELINE_CONSECUTIVE_STALE_DEPTH: u32 = 10;
@@ -828,7 +833,7 @@ async fn run_dynamic_l2_depth_stream(
 
         info!("[binance_l2_dynamic] Connected");
         let session_start = std::time::Instant::now();
-        let mut refresh = tokio::time::interval(Duration::from_secs(DYNAMIC_DEPTH_REFRESH_SECS));
+        let mut refresh = tokio::time::interval(Duration::from_millis(DYNAMIC_DEPTH_REFRESH_MS));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut active: std::collections::HashMap<String, std::time::Instant> =
             std::collections::HashMap::new();
@@ -1144,6 +1149,13 @@ mod tests {
     fn baseline_depth_fits_one_connection() {
         assert!(!FALLBACK_DEPTH_SYMBOLS.is_empty());
         assert!(FALLBACK_DEPTH_SYMBOLS.len() <= DEPTH_STREAMS_PER_CONNECTION);
+    }
+
+    #[test]
+    fn dynamic_candidate_handoff_is_faster_than_engine_ticks() {
+        // The producer cadence in main.rs is 100 ms. Sampling at the same or a
+        // slower cadence can miss a candidate that exists for exactly one tick.
+        assert!(DYNAMIC_DEPTH_REFRESH_MS < 100);
     }
 
     #[test]
