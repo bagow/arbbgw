@@ -3,7 +3,7 @@
 
 use crate::state::PriceMap;
 use dashmap::{DashMap, DashSet};
-use shared::{SpreadRow, TechnicalSettings};
+use shared::{SpreadRow, TechnicalSettings, TradingSettings};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -54,6 +54,22 @@ impl ObservationQuality {
     }
 }
 static FIRST_SEEN: OnceLock<DashMap<String, ObservationQuality>> = OnceLock::new();
+
+/// Subscribe executable books before a raw spread reaches the trading window.
+/// This is discovery-only: the scanner still enforces the profile's full entry
+/// threshold and all structural, fee, freshness, and depth budgets.
+pub const DISCOVERY_PREWARM_RATIO: f64 = 0.8;
+
+pub fn discovery_spread_threshold(configured_threshold: f64, profiles: &[TradingSettings]) -> f64 {
+    profiles
+        .iter()
+        .filter(|profile| profile.is_active && profile.strategy_type == "ema")
+        .filter_map(|profile| {
+            let threshold = profile.min_entry_spread * DISCOVERY_PREWARM_RATIO;
+            (threshold.is_finite() && threshold >= 0.0).then_some(threshold)
+        })
+        .fold(configured_threshold, f64::min)
+}
 
 fn reset_live_verification_after_gap(
     key: &str,
@@ -579,6 +595,30 @@ pub fn unverified_ema_keys() -> Vec<String> {
 #[cfg(test)]
 mod quality_tests {
     use super::*;
+
+    #[test]
+    fn active_profile_prewarms_below_entry_without_lowering_entry_setting() {
+        let mut profile = TradingSettings::default();
+        profile.is_active = true;
+        profile.min_entry_spread = 0.5;
+
+        let threshold = discovery_spread_threshold(0.5, &[profile.clone()]);
+        assert!((threshold - 0.4).abs() < 1e-12);
+        assert_eq!(profile.min_entry_spread, 0.5);
+
+        profile.is_active = false;
+        assert_eq!(discovery_spread_threshold(0.5, &[profile]), 0.5);
+    }
+
+    #[test]
+    fn more_permissive_diagnostic_threshold_is_preserved() {
+        let mut profile = TradingSettings::default();
+        profile.is_active = true;
+        profile.min_entry_spread = 0.5;
+
+        assert_eq!(discovery_spread_threshold(-1.0, &[profile]), -1.0);
+    }
+
     #[test]
     fn repeated_cached_quote_cannot_warm_up_ema() {
         let mut q = ObservationQuality::default();

@@ -22,7 +22,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 use settings::load_all_settings;
-use spreads::compute_spreads;
+use spreads::{compute_spreads, discovery_spread_threshold, DISCOVERY_PREWARM_RATIO};
 use state::{PriceMap, UpdateSignal};
 
 mod collector {
@@ -325,8 +325,14 @@ async fn main() -> Result<()> {
                     let real_profiles = t_real_cache.read().await.clone();
                     let ts = t_ts_cache.read().await.clone();
 
-                    // Compute spreads for all active pairs (per-profile min_volume is applied in engine::scanner)
-                    let spreads = compute_spreads(&t_prices, 0.0, &ts);
+                    // Candidate discovery must start before the actual entry threshold so
+                    // demand-driven L2 has time to subscribe and receive a fresh book.
+                    // The original settings and profile thresholds are still passed to
+                    // the scanner below, so this cannot authorize an early trade.
+                    let mut discovery_ts = ts.clone();
+                    discovery_ts.spread_threshold =
+                        discovery_spread_threshold(ts.spread_threshold, &real_profiles);
+                    let spreads = compute_spreads(&t_prices, 0.0, &discovery_ts);
 
                     // Writes to profiles_db since vps-api reads from it
                     static LAST_SNAP: std::sync::atomic::AtomicU64 =
@@ -375,7 +381,8 @@ async fn main() -> Result<()> {
                                     && profile.strategy_type == "ema"
                                     && !profile.disabled_exchanges.contains(&row.exchange_a)
                                     && !profile.disabled_exchanges.contains(&row.exchange_b)
-                                    && row.spread >= profile.min_entry_spread * 0.8
+                                    && row.spread
+                                        >= profile.min_entry_spread * DISCOVERY_PREWARM_RATIO
                                     && row.spread <= profile.max_entry_spread
                                     && row.vol_a >= profile.min_volume_millions * 1_000_000.0
                                     && row.vol_b >= profile.min_volume_millions * 1_000_000.0
