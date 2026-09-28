@@ -380,6 +380,7 @@ async fn main() -> Result<()> {
                         // mandatory regardless of rank. The collector retains candidates
                         // briefly, so a single L1 wobble cannot churn subscriptions.
                         let mut candidate_rows = 0usize;
+                        let mut candidate_preflight_scheduled = false;
                         for row in &spreads {
                             let pair_cooldown = t_e_ctx
                                 .pair_cooldown
@@ -393,7 +394,7 @@ async fn main() -> Result<()> {
                             ) {
                                 continue;
                             }
-                            let wanted = real_profiles.iter().any(|profile| {
+                            let wanted_profile = real_profiles.iter().find(|profile| {
                                 profile.is_active
                                     && profile.strategy_type == "ema"
                                     && !profile.disabled_exchanges.contains(&row.exchange_a)
@@ -437,11 +438,22 @@ async fn main() -> Result<()> {
                                         .is_some()
                                     })
                             });
-                            if !wanted {
+                            let Some(wanted_profile) = wanted_profile else {
                                 continue;
-                            }
+                            };
                             t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_a, row.pair));
                             t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_b, row.pair));
+                            if !candidate_preflight_scheduled {
+                                candidate_preflight_scheduled = engine::managed::prewarm_candidate(
+                                    &row.exchange_a,
+                                    &row.exchange_b,
+                                    &row.pair,
+                                    wanted_profile.leverage as f64,
+                                    t_http.clone(),
+                                    t_keys.clone(),
+                                    t_e_ctx.clone(),
+                                );
+                            }
                             candidate_rows += 1;
                             if candidate_rows >= 24 {
                                 break;

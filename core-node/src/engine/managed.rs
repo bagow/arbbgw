@@ -7,17 +7,24 @@ use super::{
     utils::now_ms,
 };
 use crate::state::{EngineContext, PriceMap};
+use dashmap::{DashMap, DashSet};
 use reqwest::Client;
 use shared::{TechnicalSettings, TradeSignal, TradingSettings};
 use std::future::Future;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 
 static ENTRY_BUSY: AtomicBool = AtomicBool::new(false);
 static LAST_PREFLIGHT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static LAST_CANDIDATE_PREWARM: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+static CANDIDATE_PREWARM_INFLIGHT: OnceLock<DashSet<String>> = OnceLock::new();
+static CANDIDATE_PREWARM_LAST_ATTEMPT: OnceLock<DashMap<String, i64>> = OnceLock::new();
 const FEE_TTL_MS: i64 = 3_600_000;
+const CANDIDATE_PREWARM_INTERVAL_MS: i64 = 1_000;
+const CANDIDATE_PREWARM_RETRY_MS: i64 = 30_000;
 const NORMAL_EXIT_PAIR_COOLDOWN_MS: i64 = 60_000;
 const RISK_EXIT_PAIR_COOLDOWN_MS: i64 = 30 * 60_000;
 const ENTRY_DIRECTION_CONFIRMATION_MS: u64 = 500;
@@ -237,6 +244,175 @@ async fn actual_taker_fee(
     ctx.fee_rates.insert(cache_key.clone(), value);
     ctx.fee_updated_ms.insert(cache_key, now_ms());
     Ok(value)
+}
+
+fn leverage_cache_key(exchange: &str, pair: &str, leverage: f64) -> String {
+    format!("{exchange}:{pair}:{leverage}")
+}
+
+async fn ensure_leverage_cached(
+    connector: &dyn ExchangeConnector,
+    exchange: &str,
+    pair: &str,
+    leverage: f64,
+    http: &Client,
+    keys: &ExchangeKeys,
+    ctx: &EngineContext,
+) -> Result<(), String> {
+    let key = leverage_cache_key(exchange, pair, leverage);
+    if ctx.leverage_set.get(&key).is_some_and(|value| *value) {
+        return Ok(());
+    }
+    connector.ensure_leverage(http, keys, pair, leverage).await?;
+    ctx.leverage_set.insert(key, true);
+    Ok(())
+}
+
+fn candidate_is_prepared(
+    exchange_a: &str,
+    exchange_b: &str,
+    pair: &str,
+    leverage: f64,
+    ctx: &EngineContext,
+) -> bool {
+    let now = now_ms();
+    [exchange_a, exchange_b].iter().all(|exchange| {
+        let fee_key = super::utils::exchange_pair_key(exchange, pair);
+        let fee_ready = ctx
+            .fee_updated_ms
+            .get(&fee_key)
+            .is_some_and(|stamp| now >= *stamp && now - *stamp <= FEE_TTL_MS)
+            && ctx.fee_rates.get(&fee_key).is_some_and(|value| {
+                value.is_finite() && (0.0..=0.01).contains(value.value())
+            });
+        fee_ready
+            && ctx
+                .leverage_set
+                .get(&leverage_cache_key(exchange, pair, leverage))
+                .is_some_and(|value| *value)
+            && super::funding_guard::is_cached(ctx, exchange, pair)
+    })
+}
+
+/// Warm the slow, pair-specific checks while L2 is approaching the entry
+/// threshold. This never opens exposure. The final entry still fetches live
+/// positions, orders and balances and re-prices both executable books.
+/// Returns true when this route consumed the single scheduling slot for the tick.
+pub fn prewarm_candidate(
+    exchange_a: &str,
+    exchange_b: &str,
+    pair: &str,
+    leverage: f64,
+    http: Client,
+    keys: Arc<ExchangeKeys>,
+    ctx: Arc<EngineContext>,
+) -> bool {
+    if candidate_is_prepared(exchange_a, exchange_b, pair, leverage, &ctx) {
+        return false;
+    }
+    let route_key = format!("{exchange_a}:{exchange_b}:{pair}:{leverage}");
+    let inflight = CANDIDATE_PREWARM_INFLIGHT.get_or_init(DashSet::new);
+    if inflight.contains(&route_key) {
+        return true;
+    }
+    let now = now_ms();
+    if CANDIDATE_PREWARM_LAST_ATTEMPT
+        .get_or_init(DashMap::new)
+        .get(&route_key)
+        .is_some_and(|stamp| now >= *stamp && now - *stamp < CANDIDATE_PREWARM_RETRY_MS)
+    {
+        // Let the caller consider the next candidate instead of allowing one
+        // persistently unsupported symbol to monopolize the prewarm lane.
+        return false;
+    }
+    let previous = LAST_CANDIDATE_PREWARM.load(Ordering::Acquire);
+    if now - previous < CANDIDATE_PREWARM_INTERVAL_MS
+        || LAST_CANDIDATE_PREWARM
+            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return true;
+    }
+    if !inflight.insert(route_key.clone()) {
+        return true;
+    }
+    CANDIDATE_PREWARM_LAST_ATTEMPT
+        .get_or_init(DashMap::new)
+        .insert(route_key.clone(), now);
+    let exchange_a = exchange_a.to_string();
+    let exchange_b = exchange_b.to_string();
+    let pair = pair.to_string();
+    tokio::spawn(async move {
+        let started_ms = now_ms();
+        let result = match (get_connector(&exchange_a), get_connector(&exchange_b)) {
+            (Some(ca), Some(cb)) => {
+                let (fee_a, fee_b, leverage_a, leverage_b, funding_a, funding_b) = tokio::join!(
+                    actual_taker_fee(ca.as_ref(), &exchange_a, &pair, &http, &keys, &ctx),
+                    actual_taker_fee(cb.as_ref(), &exchange_b, &pair, &http, &keys, &ctx),
+                    ensure_leverage_cached(
+                        ca.as_ref(),
+                        &exchange_a,
+                        &pair,
+                        leverage,
+                        &http,
+                        &keys,
+                        &ctx,
+                    ),
+                    ensure_leverage_cached(
+                        cb.as_ref(),
+                        &exchange_b,
+                        &pair,
+                        leverage,
+                        &http,
+                        &keys,
+                        &ctx,
+                    ),
+                    super::funding_guard::next(&http, &exchange_a, &pair, &ctx),
+                    super::funding_guard::next(&http, &exchange_b, &pair, &ctx),
+                );
+                if fee_a.is_ok()
+                    && fee_b.is_ok()
+                    && leverage_a.is_ok()
+                    && leverage_b.is_ok()
+                    && funding_a.is_ok()
+                    && funding_b.is_ok()
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "fees={:?}/{:?} leverage={:?}/{:?} funding={:?}/{:?}",
+                        fee_a.err(),
+                        fee_b.err(),
+                        leverage_a.err(),
+                        leverage_b.err(),
+                        funding_a.err(),
+                        funding_b.err(),
+                    ))
+                }
+            }
+            _ => Err("connector unavailable".to_string()),
+        };
+        match result {
+            Ok(()) => tracing::info!(
+                "[managed] Candidate prewarm ready for {} {}-{} in {}ms",
+                pair,
+                exchange_a,
+                exchange_b,
+                now_ms().saturating_sub(started_ms),
+            ),
+            Err(error) => tracing::warn!(
+                "[managed] Candidate prewarm incomplete for {} {}-{}: {}",
+                pair,
+                exchange_a,
+                exchange_b,
+                error,
+            ),
+        }
+        CANDIDATE_PREWARM_INFLIGHT
+            .get_or_init(DashSet::new)
+            .remove(&route_key);
+    });
+    true
 }
 
 async fn retry_once<F, Fut>(
@@ -578,10 +754,36 @@ async fn enter(
             )),
             timed_preflight(ca.fetch_balances(http, keys)),
             timed_preflight(cb.fetch_balances(http, keys)),
-            timed_preflight(ca.ensure_leverage(http, keys, &s.pair, p.leverage as f64)),
-            timed_preflight(cb.ensure_leverage(http, keys, &s.pair, p.leverage as f64)),
-            timed_preflight(super::funding_guard::next(http, &s.exchange_a, &s.pair,)),
-            timed_preflight(super::funding_guard::next(http, &s.exchange_b, &s.pair,)),
+            timed_preflight(ensure_leverage_cached(
+                ca.as_ref(),
+                &s.exchange_a,
+                &s.pair,
+                p.leverage as f64,
+                http,
+                keys,
+                ctx,
+            )),
+            timed_preflight(ensure_leverage_cached(
+                cb.as_ref(),
+                &s.exchange_b,
+                &s.pair,
+                p.leverage as f64,
+                http,
+                keys,
+                ctx,
+            )),
+            timed_preflight(super::funding_guard::next(
+                http,
+                &s.exchange_a,
+                &s.pair,
+                ctx,
+            )),
+            timed_preflight(super::funding_guard::next(
+                http,
+                &s.exchange_b,
+                &s.pair,
+                ctx,
+            )),
         );
         tracing::info!(
             "[managed] Preflight timings for {}: positions {}={}ms {}={}ms; open_orders {}={}ms {}={}ms; fees {}={}ms {}={}ms; balances {}={}ms {}={}ms; leverage {}={}ms {}={}ms; funding {}={}ms {}={}ms",
