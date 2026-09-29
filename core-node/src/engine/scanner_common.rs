@@ -36,6 +36,27 @@ pub fn configured_structural_reserve(
     structural_verified.then_some(observed_structural_spread.max(0.0))
 }
 
+/// Require the selected venue premium to have remained on the same side of
+/// zero for the complete structural observation window.
+///
+/// A verified EMA alone is not enough: after a basis direction flip its mean
+/// can be close to zero while the live spread is several percent. Treating that
+/// regime change as a mean-reverting excursion creates a fictitious entry
+/// budget. `has_structural_spread` becomes true only after roughly 24 hours in
+/// one direction.
+pub fn directional_structural_regime_is_stable(
+    structural_verified: bool,
+    has_structural_spread: bool,
+    structural_min: f64,
+    structural_max: f64,
+) -> bool {
+    structural_verified
+        && has_structural_spread
+        && structural_min.is_finite()
+        && structural_max.is_finite()
+        && structural_max >= structural_min
+}
+
 /// Remaining two-leg price budget after preserving the configured entry rules.
 ///
 /// `min_structural_deviation` is the required net excursion beyond both the
@@ -304,6 +325,22 @@ mod tests {
         assert_eq!(configured_structural_reserve(0.0, true, 1.65), Some(1.65));
         assert_eq!(configured_structural_reserve(0.5, false, 1.65), None);
         assert_eq!(configured_structural_reserve(0.5, true, 1.65), Some(1.65));
+    }
+
+    #[test]
+    fn direction_flip_cannot_be_treated_as_mean_reverting_edge() {
+        assert!(!directional_structural_regime_is_stable(
+            true, false, -5.1507, 4.5306
+        ));
+        assert!(directional_structural_regime_is_stable(
+            true, true, 0.1409, 4.6924
+        ));
+        assert!(!directional_structural_regime_is_stable(
+            false, true, 0.1409, 4.6924
+        ));
+        assert!(!directional_structural_regime_is_stable(
+            true, true, f64::NAN, 4.6924
+        ));
     }
 
     #[test]

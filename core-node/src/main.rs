@@ -419,6 +419,12 @@ async fn main() -> Result<()> {
                                     && row.spread <= profile.max_entry_spread
                                     && row.vol_a >= profile.min_volume_millions * 1_000_000.0
                                     && row.vol_b >= profile.min_volume_millions * 1_000_000.0
+                                    && engine::scanner_common::directional_structural_regime_is_stable(
+                                        row.structural_verified,
+                                        row.has_structural_spread,
+                                        row.structural_min,
+                                        row.structural_max,
+                                    )
                                     && engine::scanner_common::configured_structural_reserve(
                                         profile.min_structural_deviation,
                                         row.structural_verified,

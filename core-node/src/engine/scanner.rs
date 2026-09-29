@@ -316,24 +316,36 @@ pub fn generate_signals(
                 None
             };
 
-            let structural_reserve =
-                match crate::engine::scanner_common::configured_structural_reserve(
+            let stable_regime =
+                crate::engine::scanner_common::directional_structural_regime_is_stable(
+                    row.structural_verified,
+                    row.has_structural_spread,
+                    row.structural_min,
+                    row.structural_max,
+                );
+            let structural_reserve = match stable_regime.then(|| {
+                crate::engine::scanner_common::configured_structural_reserve(
                     profile.min_structural_deviation,
                     row.structural_verified,
                     row.structural_spread,
-                ) {
-                    Some(value) => value,
-                    None => {
-                        structural_rejections += 1;
-                        if let Some(p) = &diag_prefix {
-                            tracing::debug!(
-                                "{} -> structural filter enabled but baseline is not verified",
-                                p
-                            );
-                        }
-                        continue;
+                )
+            }) {
+                Some(Some(value)) => value,
+                _ => {
+                    structural_rejections += 1;
+                    if let Some(p) = &diag_prefix {
+                        tracing::debug!(
+                            "{} -> unstable structural regime (verified={}, persistent={}, range={:.4}%..{:.4}%)",
+                            p,
+                            row.structural_verified,
+                            row.has_structural_spread,
+                            row.structural_min,
+                            row.structural_max,
+                        );
                     }
-                };
+                    continue;
+                }
+            };
             let structural_deviation = row.spread - structural_reserve - break_even_pct;
 
             // The configured deviation is net of the verified structural

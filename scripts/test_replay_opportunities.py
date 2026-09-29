@@ -27,6 +27,24 @@ class ReplayOpportunityTests(unittest.TestCase):
     def test_break_even_reserves_four_fees_and_slippage_legs(self):
         self.assertAlmostEqual(replay.break_even_pct(0.0006, 0.0005), 0.30)
 
+    def test_structural_regime_requires_persistent_verified_direction(self):
+        stable = {
+            "structural_verified": True,
+            "has_structural_spread": True,
+            "structural_min": 0.1409,
+            "structural_max": 4.6924,
+        }
+        self.assertTrue(replay.directional_structural_regime_is_stable(stable))
+        self.assertFalse(replay.directional_structural_regime_is_stable({
+            **stable,
+            "has_structural_spread": False,
+            "structural_min": -5.1507,
+        }))
+        self.assertFalse(replay.directional_structural_regime_is_stable({
+            **stable,
+            "structural_max": float("nan"),
+        }))
+
     def test_crossing_cost_reserves_both_internal_spreads(self):
         cost = replay.crossing_cost_pct(True, 101.0, 100.0, 101.2, 99.8)
         self.assertAlmostEqual(cost, 0.4 / 101.0 * 100)

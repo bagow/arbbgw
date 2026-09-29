@@ -100,6 +100,20 @@ def break_even_pct(fee_a, fee_b):
     return 2 * (fee_a + fee_b) * 100 + 4 * EXPECTED_IOC_SLIPPAGE_PER_LEG_PCT
 
 
+def directional_structural_regime_is_stable(spread):
+    structural_min = spread.get("structural_min")
+    structural_max = spread.get("structural_max")
+    return (
+        spread.get("structural_verified") is True
+        and spread.get("has_structural_spread") is True
+        and isinstance(structural_min, (int, float))
+        and isinstance(structural_max, (int, float))
+        and math.isfinite(structural_min)
+        and math.isfinite(structural_max)
+        and structural_max >= structural_min
+    )
+
+
 def crossing_cost_pct(is_a_higher, entry_a, entry_b, exit_a, exit_b):
     values = (entry_a, entry_b, exit_a, exit_b)
     if not all(finite_positive(value) for value in values):
@@ -154,8 +168,8 @@ def evaluate(sample, profile):
     book_a, book_b = sample.get("book_a"), sample.get("book_b")
     if not valid_book(book_a, now_ms) or not valid_book(book_b, now_ms):
         return None, "book_freshness"
-    if spread.get("structural_verified") is not True:
-        return None, "structural_unverified"
+    if not directional_structural_regime_is_stable(spread):
+        return None, "structural_regime"
     gross_l1 = spread.get("spread")
     baseline = spread.get("structural_spread")
     if not all(isinstance(value, (int, float)) and math.isfinite(value)
