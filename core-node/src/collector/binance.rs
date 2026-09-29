@@ -36,7 +36,13 @@ const MAX_BASELINE_CONSECUTIVE_STALE_DEPTH: u32 = 10;
 const MAX_DYNAMIC_DEPTH_BACKLOG_MS: i64 = 10_000;
 const MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH: u32 = 10;
 const BASELINE_HEALTH_REFRESH_AGE_MS: i64 = 250;
-const DISCOVERY_REST_REFRESH_SECS: u64 = 3;
+// Binance documents the all-book websocket with a five-second update speed.
+// Refresh the current all-symbol best book once per second so a valid confirmed
+// edge is not hidden behind that discovery cadence. The endpoint costs weight
+// 5, i.e. 300/minute here, and all
+// Binance REST callers still share the 2,200/minute hard stop below the
+// documented 2,400/minute limit.
+const DISCOVERY_REST_REFRESH_SECS: u64 = 1;
 // 24 ranked candidates plus the profile-wide maximum of 10 owned trades.
 const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
 // Binance's documented USD-M market-stream endpoints. The `/public/*` relay
@@ -493,10 +499,10 @@ async fn handler(
         warn!("[binance] Skipping volume seed — IP banned.");
     }
 
-    // The all-market book ticker is intentionally discovery-only. Binance publishes it
-    // every five seconds, which is too slow for execution but much cheaper than running
-    // depth5 at 100 ms for the entire futures universe. Fresh candidate depth is handled
-    // by the bounded streams below and remains mandatory before an order can be sent.
+    // The all-market book ticker is intentionally discovery-only. Binance documents
+    // this aggregate stream with a five-second update speed, and execution needs full
+    // quantity depth rather than a top quote. Fresh candidate depth is handled by the
+    // bounded streams below and remains mandatory before an order can be sent.
     let (mut ws, _) = connect_market_ws(&format!("{BINANCE_RAW_WS_URL}/!bookTicker"))
         .await
         .context("Binance all-book-ticker connect failed")?;

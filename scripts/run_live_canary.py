@@ -19,7 +19,8 @@ PROFILE_ID = "real-default"
 MANAGED_VENUES = ("binance", "kucoin")
 DISABLED = ["htx", "toobit", "ascendex", "bingx", "bitget", "bitmex", "gate", "xt", "bybit"]
 WATCHDOG_CACHE_KEY = "canary_watchdog_token"
-DEPENDENCY_READINESS_LOSS_LIMIT = 5
+PROCESS_READINESS_LOSS_LIMIT = 5
+PRIVATE_READINESS_LOSS_LIMIT = 60
 MIN_MONITOR_SECONDS = 60
 MAX_MONITOR_SECONDS = 21_600
 CANARY_SHUTDOWN_GRACE_SECONDS = 450
@@ -128,6 +129,28 @@ def observe_market_readiness(report, current_gap_samples, market_ready):
     report["market_readiness_max_gap_samples"] = max(
         current_gap_samples,
         int(report.get("market_readiness_max_gap_samples", 0)),
+    )
+    return current_gap_samples
+
+
+def observe_private_readiness(report, current_gap_samples, private_ready):
+    """Record transient private-cache gaps; the core blocks entries meanwhile."""
+    if private_ready:
+        if current_gap_samples:
+            report["private_readiness_recoveries"] = (
+                int(report.get("private_readiness_recoveries", 0)) + 1
+            )
+            report["last_private_readiness_gap_samples"] = current_gap_samples
+        report["private_readiness_current_gap_samples"] = 0
+        return 0
+    current_gap_samples += 1
+    report["private_readiness_outages"] = int(
+        report.get("private_readiness_outages", 0)
+    ) + (1 if current_gap_samples == 1 else 0)
+    report["private_readiness_current_gap_samples"] = current_gap_samples
+    report["private_readiness_max_gap_samples"] = max(
+        current_gap_samples,
+        int(report.get("private_readiness_max_gap_samples", 0)),
     )
     return current_gap_samples
 
@@ -516,7 +539,8 @@ def main():
         report["entry_decisions_before"] = entry_decisions_before
         deadline = time.monotonic() + monitor_seconds
         first_seen = False
-        dependency_readiness_lost_samples = 0
+        process_readiness_lost_samples = 0
+        private_readiness_lost_samples = 0
         market_readiness_lost_samples = 0
         while time.monotonic() < deadline:
             trades = active_canary_trades(start_id)
@@ -556,26 +580,31 @@ def main():
                 disable_profile(start_id)
                 report["outcome"] = "kill_switch"
                 break
-            # Process and private account dependencies are always critical.
-            dependencies_ready = (
-                current_health.get("process_healthy") is True
-                and current_health.get("private_ready") is True
-            )
-            if not dependencies_ready:
-                dependency_readiness_lost_samples += 1
-                if (
-                    dependency_readiness_lost_samples
-                    >= DEPENDENCY_READINESS_LOSS_LIMIT
-                ):
+            if current_health.get("process_healthy") is not True:
+                process_readiness_lost_samples += 1
+                if process_readiness_lost_samples >= PROCESS_READINESS_LOSS_LIMIT:
                     disable_profile(start_id)
                     report["outcome"] = "readiness_lost"
-                    report["readiness_component"] = "dependencies"
-                    report["readiness_lost_samples"] = (
-                        dependency_readiness_lost_samples
-                    )
+                    report["readiness_component"] = "process"
+                    report["readiness_lost_samples"] = process_readiness_lost_samples
                     break
             else:
-                dependency_readiness_lost_samples = 0
+                process_readiness_lost_samples = 0
+
+            # Private snapshots can briefly age out during a REST timeout. The
+            # core independently blocks all entries until both venues recover;
+            # keep observing, but fail closed if the outage lasts a full minute.
+            private_readiness_lost_samples = observe_private_readiness(
+                report,
+                private_readiness_lost_samples,
+                target_reached or current_health.get("private_ready") is True,
+            )
+            if private_readiness_lost_samples >= PRIVATE_READINESS_LOSS_LIMIT:
+                disable_profile(start_id)
+                report["outcome"] = "readiness_lost"
+                report["readiness_component"] = "private"
+                report["readiness_lost_samples"] = private_readiness_lost_samples
+                break
 
             # Market-data loss is recoverable and cannot create an entry: the
             # engine requires trading_ready and independently rejects books

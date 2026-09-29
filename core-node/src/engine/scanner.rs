@@ -86,6 +86,12 @@ pub fn generate_signals(
 ) -> Vec<TradeSignal> {
     let mut signals = Vec::new();
     let mut emitted_pairs: HashSet<String> = HashSet::new();
+    let mut l2_pending_rows = 0u64;
+    let mut structural_rejections = 0u64;
+    let mut lot_grid_rejections = 0u64;
+    let mut depth_rejections = 0u64;
+    let mut l2_budget_rejections = 0u64;
+    let mut volume_rejections = 0u64;
     let now = now_ms();
     let now_s = now_secs();
 
@@ -159,16 +165,19 @@ pub fn generate_signals(
 
 
         // Check if this spread is worth diagnosing (exceeds any active profile's min)
-        let worth_diag = log_diag
-            && profiles.iter().any(|p| {
-                p.is_active && row.spread >= p.min_entry_spread && row.spread <= p.max_entry_spread
-            });
+        let in_profile_window = profiles.iter().any(|p| {
+            p.is_active && row.spread >= p.min_entry_spread && row.spread <= p.max_entry_spread
+        });
+        let worth_diag = log_diag && in_profile_window;
 
         // Discovery quotes only nominate candidates. Do not create an order
         // signal until both venues have a fresh executable-depth snapshot. In
         // particular, this gives Binance's demand-driven L2 subscription one
         // update cycle to replace an internally stale all-market book ticker.
         if !execution_books_are_fresh(e_ctx, &key_a, &key_b, now) {
+            if in_profile_window {
+                l2_pending_rows += 1;
+            }
             if worth_diag {
                 tracing::debug!(
                     "[scanner] REJECT {} spread={:.4}% -> executable L2 pending or stale",
@@ -315,6 +324,7 @@ pub fn generate_signals(
                 ) {
                     Some(value) => value,
                     None => {
+                        structural_rejections += 1;
                         if let Some(p) = &diag_prefix {
                             tracing::debug!(
                                 "{} -> structural filter enabled but baseline is not verified",
@@ -331,6 +341,7 @@ pub fn generate_signals(
             if profile.min_structural_deviation > 0.0
                 && structural_deviation < profile.min_structural_deviation
             {
+                structural_rejections += 1;
                 if let Some(p) = &diag_prefix {
                     tracing::info!(
                         "{} -> net ema deviation {:.4}% < {:.4}% req (base: {:.4}%, costs: {:.4}%)",
@@ -353,6 +364,7 @@ pub fn generate_signals(
             {
                 let profit_potential = row.spread - structural_reserve - break_even_pct;
                 if profit_potential <= 0.0 {
+                    structural_rejections += 1;
                     if let Some(p) = &diag_prefix {
                         tracing::debug!("{} -> structural_guard: profit impossible (spread={:.4}% - structural={:.4}% - BE={:.4}% = {:.4}%)",
                             p, row.spread, structural_reserve, break_even_pct, profit_potential);
@@ -367,6 +379,7 @@ pub fn generate_signals(
             ) {
                 Some(l) => l,
                 None => {
+                    lot_grid_rejections += 1;
                     if let Some(p) = &diag_prefix {
                         tracing::info!("{} -> physically impossible to balance lot sizes", p);
                     }
@@ -395,6 +408,7 @@ pub fn generate_signals(
                 )
                 .is_none()
                 {
+                    depth_rejections += 1;
                     if let Some(p) = &diag_prefix {
                         tracing::info!(
                             "{} -> cumulative L2 depth cannot cover ${:.2}",
@@ -416,6 +430,7 @@ pub fn generate_signals(
             ) {
                 Some(quote) => quote,
                 None => {
+                    depth_rejections += 1;
                     if let Some(p) = &diag_prefix {
                         tracing::info!("{} -> no full-quantity executable L2 quote", p);
                     }
@@ -432,6 +447,7 @@ pub fn generate_signals(
             )
             .is_none()
             {
+                l2_budget_rejections += 1;
                 if let Some(p) = &diag_prefix {
                     let required = profile.min_entry_spread.max(
                         structural_reserve + break_even_pct + profile.min_structural_deviation,
@@ -455,6 +471,7 @@ pub fn generate_signals(
                 actual_vol_a,
                 actual_vol_b,
             ) {
+                volume_rejections += 1;
                 let min_v =
                     profile.trade_volume * (1.0 - ts.vol_tolerance_pct / 100.0).max(0.0);
                 let max_v = profile.trade_volume * (1.0 + ts.vol_tolerance_pct / 100.0);
@@ -474,6 +491,7 @@ pub fn generate_signals(
             // Universal minimum notional check — all major CEXes reject orders below ~$5
             let min_notional = ts.binance_min_notional; // reuse setting as universal floor
             if actual_vol_a < min_notional || actual_vol_b < min_notional {
+                volume_rejections += 1;
                 if let Some(p) = &diag_prefix {
                     tracing::info!(
                         "{} -> below min_notional (A=${:.2} B=${:.2} < ${:.2})",
@@ -547,6 +565,7 @@ pub fn generate_signals(
         }
     }
     // Rank by executable net edge before retaining one route per profile/pair.
+    let signals_before_pair_dedupe = signals.len() as u64;
     signals.sort_by(|a, b| {
         let edge_a = a.spread - a.structural_spread - a.break_even_pct;
         let edge_b = b.spread - b.structural_spread - b.break_even_pct;
@@ -580,6 +599,13 @@ pub fn generate_signals(
         ),
         ("profile_window_rows", profile_window_rows as u64),
         ("signals_emitted", signals.len() as u64),
+        ("signals_before_pair_dedupe", signals_before_pair_dedupe),
+        ("l2_pending_rows", l2_pending_rows),
+        ("structural_rejections", structural_rejections),
+        ("lot_grid_rejections", lot_grid_rejections),
+        ("depth_rejections", depth_rejections),
+        ("l2_budget_rejections", l2_budget_rejections),
+        ("volume_rejections", volume_rejections),
     ] {
         e_ctx.scanner_status.insert(key.to_string(), value);
     }

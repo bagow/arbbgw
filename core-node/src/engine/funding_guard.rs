@@ -5,7 +5,9 @@ use reqwest::Client;
 use serde_json::Value;
 
 pub const EXIT_BUFFER_MS: i64 = 60_000;
-const CACHE_TTL_MS: i64 = 60_000;
+// Settlement schedules are stable for hours. Match the persisted five-minute
+// technical default so one hot candidate cannot monopolize the prewarm lane.
+const CACHE_TTL_MS: i64 = 300_000;
 
 fn cache_key(exchange: &str, pair: &str) -> String {
     format!("{exchange}:{pair}")

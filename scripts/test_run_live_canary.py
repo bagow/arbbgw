@@ -37,6 +37,18 @@ class MarketReadinessObservationTests(unittest.TestCase):
         self.assertEqual(gap, 1)
         self.assertEqual(report["market_readiness_outages"], 2)
 
+    def test_private_outage_is_recorded_until_recovery(self):
+        report = {}
+        gap = 0
+        for _ in range(7):
+            gap = CANARY.observe_private_readiness(report, gap, False)
+        self.assertEqual(gap, 7)
+        self.assertEqual(report["private_readiness_outages"], 1)
+        self.assertEqual(report["private_readiness_max_gap_samples"], 7)
+        gap = CANARY.observe_private_readiness(report, gap, True)
+        self.assertEqual(gap, 0)
+        self.assertEqual(report["private_readiness_recoveries"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,9 +22,15 @@ static LAST_CANDIDATE_PREWARM: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
 static CANDIDATE_PREWARM_INFLIGHT: OnceLock<DashSet<String>> = OnceLock::new();
 static CANDIDATE_PREWARM_LAST_ATTEMPT: OnceLock<DashMap<String, i64>> = OnceLock::new();
+static BINANCE_DEPTH_PREWARM_INFLIGHT: OnceLock<DashSet<String>> = OnceLock::new();
+static LAST_BINANCE_DEPTH_PREWARM: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
 const FEE_TTL_MS: i64 = 3_600_000;
 const CANDIDATE_PREWARM_INTERVAL_MS: i64 = 1_000;
-const CANDIDATE_PREWARM_RETRY_MS: i64 = 30_000;
+// A single transient venue timeout should not make a short-lived pair
+// untradeable for half a minute. Calls still share the one-per-second lane.
+const CANDIDATE_PREWARM_RETRY_MS: i64 = 5_000;
+const BINANCE_DEPTH_PREWARM_INTERVAL_MS: i64 = 500;
 const NORMAL_EXIT_PAIR_COOLDOWN_MS: i64 = 60_000;
 const RISK_EXIT_PAIR_COOLDOWN_MS: i64 = 30 * 60_000;
 const ENTRY_DIRECTION_CONFIRMATION_MS: u64 = 500;
@@ -292,6 +298,83 @@ fn candidate_is_prepared(
                 .is_some_and(|value| *value)
             && super::funding_guard::is_cached(ctx, exchange, pair)
     })
+}
+
+fn binance_depth_needs_prewarm(updated_ms: Option<i64>, now: i64) -> bool {
+    !updated_ms.is_some_and(|updated| {
+        super::utils::local_timestamp_is_fresh(now, updated, 500)
+    })
+}
+
+/// Fill a stale candidate book through Binance REST while the streaming route
+/// is catching up. This is bounded globally and never authorizes an entry: the
+/// scanner and final preflight still require a <=750 ms full-quantity quote.
+pub fn prewarm_binance_execution_book(
+    pair: &str,
+    prices: PriceMap,
+    signal: crate::state::UpdateSignal,
+    http: Client,
+    ctx: Arc<EngineContext>,
+) -> bool {
+    let key = format!("binance:{pair}");
+    let now = now_ms();
+    let updated_ms = ctx.l2_books.get(&key).map(|book| book.updated_ms);
+    if !binance_depth_needs_prewarm(updated_ms, now) {
+        return false;
+    }
+    let inflight = BINANCE_DEPTH_PREWARM_INFLIGHT.get_or_init(DashSet::new);
+    if inflight.contains(pair) || inflight.len() >= 2 {
+        return false;
+    }
+    let previous = LAST_BINANCE_DEPTH_PREWARM.load(Ordering::Acquire);
+    if now - previous < BINANCE_DEPTH_PREWARM_INTERVAL_MS
+        || LAST_BINANCE_DEPTH_PREWARM
+            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        || !inflight.insert(pair.to_string())
+    {
+        return false;
+    }
+    let pair = pair.to_string();
+    tokio::spawn(async move {
+        match super::exchanges::binance::fetch_public_depth_snapshot(&http, &pair).await {
+            Ok(book) => {
+                let key = format!("binance:{pair}");
+                let newer = ctx
+                    .l2_books
+                    .get(&key)
+                    .map(|existing| book.updated_ms > existing.updated_ms)
+                    .unwrap_or(true);
+                if newer {
+                    if let (Some(bid), Some(ask), Some(mut venue)) = (
+                        book.bids.first(),
+                        book.asks.first(),
+                        prices.get_mut("binance"),
+                    ) {
+                        if let Some(ticker) = venue.get_mut(&pair) {
+                            ticker.bid = bid.0;
+                            ticker.ask = ask.0;
+                            ticker.price = (bid.0 + ask.0) / 2.0;
+                            ticker.bid_size = bid.0 * bid.1;
+                            ticker.ask_size = ask.0 * ask.1;
+                            ticker.last_updated = (book.updated_ms / 1_000) as u64;
+                        }
+                    }
+                    ctx.l2_books.insert(key, book);
+                    signal.notify_one();
+                }
+            }
+            Err(error) => tracing::debug!(
+                "[managed] Binance candidate depth prewarm failed for {}: {}",
+                pair,
+                error,
+            ),
+        }
+        BINANCE_DEPTH_PREWARM_INFLIGHT
+            .get_or_init(DashSet::new)
+            .remove(&pair);
+    });
+    true
 }
 
 /// Warm the slow, pair-specific checks while L2 is approaching the entry
@@ -1573,6 +1656,14 @@ mod transport_tests {
         assert!(entry_spread_is_widening(0.693082, 0.736672));
         assert!(!entry_spread_is_widening(0.736672, 0.693082));
         assert!(!entry_spread_is_widening(0.693082, 0.693082));
+    }
+
+    #[test]
+    fn candidate_depth_prewarm_starts_before_execution_freshness_expires() {
+        assert!(!binance_depth_needs_prewarm(Some(9_500), 10_000));
+        assert!(binance_depth_needs_prewarm(Some(9_499), 10_000));
+        assert!(binance_depth_needs_prewarm(None, 10_000));
+        assert!(binance_depth_needs_prewarm(Some(11_001), 10_000));
     }
 
     #[test]

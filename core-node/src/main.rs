@@ -314,6 +314,7 @@ async fn main() -> Result<()> {
                 let t_real_cache = real_cache.clone();
                 let t_ts_cache = ts_cache.clone();
                 let t_http = http.clone();
+                let t_signal = signal.clone();
                 let t_journal = journal.clone();
                 let t_keys = keys.clone();
                 let t_e_ctx = e_ctx.clone();
@@ -381,6 +382,7 @@ async fn main() -> Result<()> {
                         // briefly, so a single L1 wobble cannot churn subscriptions.
                         let mut candidate_rows = 0usize;
                         let mut candidate_preflight_scheduled = false;
+                        let mut candidate_depth_prewarm_scheduled = false;
                         for row in &spreads {
                             let key_a = format!("{}:{}", row.exchange_a, row.pair);
                             let key_b = format!("{}:{}", row.exchange_b, row.pair);
@@ -456,6 +458,18 @@ async fn main() -> Result<()> {
                             };
                             t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_a, row.pair));
                             t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_b, row.pair));
+                            if !candidate_depth_prewarm_scheduled
+                                && (row.exchange_a == "binance" || row.exchange_b == "binance")
+                            {
+                                candidate_depth_prewarm_scheduled =
+                                    engine::managed::prewarm_binance_execution_book(
+                                        &row.pair,
+                                        t_prices.clone(),
+                                        t_signal.clone(),
+                                        t_http.clone(),
+                                        t_e_ctx.clone(),
+                                    );
+                            }
                             if !candidate_preflight_scheduled {
                                 candidate_preflight_scheduled = engine::managed::prewarm_candidate(
                                     &row.exchange_a,
