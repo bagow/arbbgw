@@ -20,7 +20,6 @@ MANAGED_VENUES = ("binance", "kucoin")
 DISABLED = ["htx", "toobit", "ascendex", "bingx", "bitget", "bitmex", "gate", "xt", "bybit"]
 WATCHDOG_CACHE_KEY = "canary_watchdog_token"
 DEPENDENCY_READINESS_LOSS_LIMIT = 5
-MARKET_READINESS_LOSS_LIMIT = 30
 MIN_MONITOR_SECONDS = 60
 MAX_MONITOR_SECONDS = 21_600
 CANARY_SHUTDOWN_GRACE_SECONDS = 450
@@ -109,6 +108,28 @@ def observe_health(report, current):
             value = venue.get(key)
             if isinstance(value, (int, float)):
                 maxima[key] = max(int(value), int(maxima.get(key, 0)))
+
+
+def observe_market_readiness(report, current_gap_samples, market_ready):
+    """Record recoverable market-data gaps without ending the bounded run."""
+    if market_ready:
+        if current_gap_samples:
+            report["market_readiness_recoveries"] = (
+                int(report.get("market_readiness_recoveries", 0)) + 1
+            )
+            report["last_market_readiness_gap_samples"] = current_gap_samples
+        report["market_readiness_current_gap_samples"] = 0
+        return 0
+    current_gap_samples += 1
+    report["market_readiness_outages"] = int(
+        report.get("market_readiness_outages", 0)
+    ) + (1 if current_gap_samples == 1 else 0)
+    report["market_readiness_current_gap_samples"] = current_gap_samples
+    report["market_readiness_max_gap_samples"] = max(
+        current_gap_samples,
+        int(report.get("market_readiness_max_gap_samples", 0)),
+    )
+    return current_gap_samples
 
 
 def profile_connection():
@@ -497,7 +518,6 @@ def main():
         first_seen = False
         dependency_readiness_lost_samples = 0
         market_readiness_lost_samples = 0
-        market_readiness_max_gap_samples = 0
         while time.monotonic() < deadline:
             trades = active_canary_trades(start_id)
             filled_trades = filled_canary_trades(trades)
@@ -557,27 +577,16 @@ def main():
             else:
                 dependency_readiness_lost_samples = 0
 
-            # A short exchange-wide market-data interruption cannot create an
-            # entry: the engine independently rejects every book older than
-            # 750 ms. Keep the observer alive long enough to verify recovery,
-            # but still fail closed if the interruption persists.
-            if not target_reached and current_health.get("market_ready") is not True:
-                market_readiness_lost_samples += 1
-                market_readiness_max_gap_samples = max(
-                    market_readiness_max_gap_samples,
-                    market_readiness_lost_samples,
-                )
-                report["market_readiness_max_gap_samples"] = (
-                    market_readiness_max_gap_samples
-                )
-                if market_readiness_lost_samples >= MARKET_READINESS_LOSS_LIMIT:
-                    disable_profile(start_id)
-                    report["outcome"] = "readiness_lost"
-                    report["readiness_component"] = "market"
-                    report["readiness_lost_samples"] = market_readiness_lost_samples
-                    break
-            else:
-                market_readiness_lost_samples = 0
+            # Market-data loss is recoverable and cannot create an entry: the
+            # engine requires trading_ready and independently rejects books
+            # older than 750 ms. Keep the bounded observer alive so a Binance
+            # reconnect does not permanently end the canary. Process/private
+            # dependency loss above remains fail-closed.
+            market_readiness_lost_samples = observe_market_readiness(
+                report,
+                market_readiness_lost_samples,
+                target_reached or current_health.get("market_ready") is True,
+            )
             time.sleep(1)
         else:
             report["outcome"] = "monitor_timeout" if first_seen else "no_trade"
