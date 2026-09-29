@@ -15,8 +15,20 @@ def verify_inactive(root=ROOT):
     with sqlite3.connect((root/'real-trader.db').as_uri()+'?mode=ro',uri=True,timeout=5) as db:
         if db.execute("SELECT COUNT(*) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED')").fetchone()[0]:
             raise RuntimeError('Refuse maintenance: active trade')
-        if db.execute('SELECT COUNT(*) FROM execution_orders').fetchone()[0]:
-            raise RuntimeError('Refuse maintenance: existing execution orders')
+        # Historical terminal orders are the durable audit trail and must not
+        # permanently disable maintenance after the first real trade. Refuse
+        # only orphaned, non-terminal, or active-trade order ownership.
+        unsafe_orders = db.execute("""
+            SELECT COUNT(*)
+            FROM execution_orders e
+            LEFT JOIN trades t ON t.id=e.trade_id
+            WHERE t.id IS NULL
+               OR t.status NOT IN ('CLOSED','CANCELLED')
+               OR json_extract(e.observation,'$.state')
+                    NOT IN ('Filled','Cancelled','Rejected')
+        """).fetchone()[0]
+        if unsafe_orders:
+            raise RuntimeError('Refuse maintenance: unresolved execution orders')
 
 
 def main():
