@@ -108,8 +108,13 @@ def classify(row, fees, config):
 
 
 def health():
-    with urllib.request.urlopen("http://127.0.0.1:3003/health", timeout=3) as response:
-        value = json.load(response)
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:3003/health", timeout=3
+        ) as response:
+            value = json.load(response)
+    except Exception as error:
+        return {"error": type(error).__name__, "detail": str(error)[:300]}
     return {
         key: value.get(key)
         for key in (
@@ -152,8 +157,20 @@ def main():
     }
     emit({"kind": "start", "started": int(started), "config": config})
     while time.time() - started < args.max_seconds:
-        snapshot = read_cache(root / "vps-api.db", "snapshot") or {}
-        accounts = read_cache(root / "vps-api.db", "exchange_maps") or {}
+        try:
+            snapshot = read_cache(root / "vps-api.db", "snapshot") or {}
+            accounts = read_cache(root / "vps-api.db", "exchange_maps") or {}
+        except Exception as error:
+            emit(
+                {
+                    "kind": "read_error",
+                    "ts": int(time.time() * 1000),
+                    "error": type(error).__name__,
+                    "detail": str(error)[:300],
+                }
+            )
+            time.sleep(max(0.1, args.interval))
+            continue
         snapshot_ts = snapshot.get("ts")
         if snapshot_ts != last_snapshot:
             last_snapshot = snapshot_ts
