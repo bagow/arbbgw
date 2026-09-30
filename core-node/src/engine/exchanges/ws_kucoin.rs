@@ -1,9 +1,9 @@
-//! KuCoin Futures private API transport layer
+//! KuCoin Futures REST reconciliation/bootstrap transport.
 //!
-//! KuCoin does NOT support a WebSocket Trading API for order management.
-//! All order/account operations require authenticated REST endpoints.
-//! This module encapsulates all HTTP transport so the connector itself
-//! has zero direct HTTP/REST dependencies.
+//! Live order submission belongs in `ws_kucoin_order`; this module must never
+//! be used as a fallback for placing an order because an ambiguous WebSocket
+//! result cannot be safely replayed.  These calls are retained for snapshots,
+//! ledger reconciliation and the Classic private-stream bootstrap token.
 //!
 //! The connector calls `send_kucoin_request()` which handles:
 //! - HMAC-SHA256 signing (KC-API-SIGN)

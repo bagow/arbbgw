@@ -130,13 +130,11 @@ impl ExchangeConnector for KucoinConnector {
             ));
             body["timeInForce"] = json!("IOC");
         }
-        let v = super::ws_kucoin::send_kucoin_request(
+        let v = super::ws_kucoin_order::send_order(
             &keys.kucoin_key,
             &keys.kucoin_secret,
             &keys.kucoin_passphrase,
-            "POST",
-            "/api/v1/orders",
-            &body.to_string(),
+            body,
             2000,
         )
         .await?;
@@ -285,7 +283,6 @@ impl ExchangeConnector for KucoinConnector {
     ) -> Result<(Option<String>, f64, f64), String> {
         let sym = format!("{}M", pair);
         let _ts = now_ms().to_string();
-        let path = "/api/v1/orders";
         let side = if is_buy { "buy" } else { "sell" };
 
         let lev_str = (leverage.max(1.0) as i64).to_string();
@@ -345,8 +342,6 @@ impl ExchangeConnector for KucoinConnector {
             })
         };
 
-        let body_str = body_json.to_string();
-
         if dry_run {
             return Ok((
                 Some(format!("dry_{}_{}", self.name(), now_ms())),
@@ -362,13 +357,11 @@ impl ExchangeConnector for KucoinConnector {
         )
         .await;
 
-        let v = super::ws_kucoin::send_kucoin_request(
+        let v = super::ws_kucoin_order::send_order(
             &keys.kucoin_key,
             &keys.kucoin_secret,
             &keys.kucoin_passphrase,
-            "POST",
-            path,
-            &body_str,
+            body_json.clone(),
             api_timeout_ms,
         )
         .await?;
@@ -378,7 +371,7 @@ impl ExchangeConnector for KucoinConnector {
         tracing::info!(
             "[kucoin] place_order {} req={} → orderId={} code={}",
             pair,
-            body_str,
+            body_json,
             resp_oid,
             v["code"]
         );
@@ -396,19 +389,16 @@ impl ExchangeConnector for KucoinConnector {
                 {
                     let mut retry_body = body_json.clone();
                     retry_body["price"] = serde_json::json!(clamped_str);
-                    let retry_body_str = retry_body.to_string();
                     tracing::warn!(
                         "[kucoin] ⚠️ Clamping order price to {} due to 300011 filter for {}",
                         clamped_str,
                         pair
                     );
-                    if let Ok(v_retry) = super::ws_kucoin::send_kucoin_request(
+                    if let Ok(v_retry) = super::ws_kucoin_order::send_order(
                         &keys.kucoin_key,
                         &keys.kucoin_secret,
                         &keys.kucoin_passphrase,
-                        "POST",
-                        path,
-                        &retry_body_str,
+                        retry_body,
                         api_timeout_ms,
                     )
                     .await
@@ -513,7 +503,6 @@ impl ExchangeConnector for KucoinConnector {
         api_timeout_ms: u64,
     ) -> Result<CloseReceipt, String> {
         let sym = format!("{}M", pair);
-        let path = "/api/v1/orders";
         let side = if is_buy { "buy" } else { "sell" };
 
         let lev_str = (leverage.max(1.0) as i64).to_string();
@@ -600,8 +589,6 @@ impl ExchangeConnector for KucoinConnector {
             })
         };
 
-        let body_str = body_json.to_string();
-
         if dry_run {
             return Ok(CloseReceipt {
                 final_price: target_price,
@@ -617,13 +604,11 @@ impl ExchangeConnector for KucoinConnector {
         )
         .await;
 
-        let v_resp = super::ws_kucoin::send_kucoin_request(
+        let v_resp = super::ws_kucoin_order::send_order(
             &keys.kucoin_key,
             &keys.kucoin_secret,
             &keys.kucoin_passphrase,
-            "POST",
-            path,
-            &body_str,
+            body_json,
             api_timeout_ms,
         )
         .await?;
@@ -708,15 +693,11 @@ impl ExchangeConnector for KucoinConnector {
                 "reduceOnly": true
             })
         };
-        let fb_str = fb_body.to_string();
-
-        let v_fb = super::ws_kucoin::send_kucoin_request(
+        let v_fb = super::ws_kucoin_order::send_order(
             &keys.kucoin_key,
             &keys.kucoin_secret,
             &keys.kucoin_passphrase,
-            "POST",
-            path,
-            &fb_str,
+            fb_body,
             api_timeout_ms,
         )
         .await?;

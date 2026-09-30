@@ -29,6 +29,16 @@ pub fn is_cached(ctx: &EngineContext, exchange: &str, pair: &str) -> bool {
         .is_some()
 }
 
+/// Read an already-authorized funding boundary without performing network I/O.
+/// The execution path uses only this accessor; refreshes happen during candidate
+/// preparation, before a signal is eligible for dispatch.
+pub fn cached_next(ctx: &EngineContext, exchange: &str, pair: &str) -> Option<i64> {
+    let now = now_ms();
+    ctx.funding_rates
+        .get(&cache_key(exchange, pair))
+        .and_then(|info| valid_cached_timestamp(info.value(), now))
+}
+
 pub fn deadline(next_a: i64, next_b: i64, now: i64) -> Option<i64> {
     let next = next_a.min(next_b);
     // No new exposure in the five minutes immediately before settlement.

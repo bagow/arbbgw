@@ -10,14 +10,12 @@ use crate::state::{EngineContext, PriceMap};
 use dashmap::{DashMap, DashSet};
 use reqwest::Client;
 use shared::{TechnicalSettings, TradeSignal, TradingSettings};
-use std::future::Future;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, OnceLock,
 };
 
 static ENTRY_BUSY: AtomicBool = AtomicBool::new(false);
-static LAST_PREFLIGHT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 static LAST_CANDIDATE_PREWARM: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
 static CANDIDATE_PREWARM_INFLIGHT: OnceLock<DashSet<String>> = OnceLock::new();
@@ -26,6 +24,7 @@ static BINANCE_DEPTH_PREWARM_INFLIGHT: OnceLock<DashSet<String>> = OnceLock::new
 static LAST_BINANCE_DEPTH_PREWARM: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
 const FEE_TTL_MS: i64 = 3_600_000;
+const OPEN_ORDERS_CLEAR_TTL_MS: i64 = 5_000;
 const CANDIDATE_PREWARM_INTERVAL_MS: i64 = 1_000;
 // A single transient venue timeout should not make a short-lived pair
 // untradeable for half a minute. Calls still share the one-per-second lane.
@@ -34,12 +33,6 @@ const BINANCE_DEPTH_PREWARM_INTERVAL_MS: i64 = 500;
 const NORMAL_EXIT_PAIR_COOLDOWN_MS: i64 = 60_000;
 const RISK_EXIT_PAIR_COOLDOWN_MS: i64 = 30 * 60_000;
 const ENTRY_WIDENING_EPSILON_PCT: f64 = 0.000001;
-
-async fn timed_preflight<F: Future>(future: F) -> (F::Output, i64) {
-    let started_ms = now_ms();
-    let output = future.await;
-    (output, now_ms().saturating_sub(started_ms))
-}
 
 fn pair_cooldown_after_close(reason: &str) -> i64 {
     if matches!(reason, "TP" | "MANUAL_CLOSE") {
@@ -67,37 +60,6 @@ fn entry_ioc_limit(quote: super::book::DepthQuote, buy: bool, movement_budget_pc
             })
 }
 
-fn hedge_quote_fits_bound(
-    quote: super::book::DepthQuote,
-    first_leg_buy: bool,
-    bound: f64,
-) -> bool {
-    bound.is_finite()
-        && bound > 0.0
-        && if first_leg_buy {
-            quote.vwap >= bound && quote.worst_price >= bound
-        } else {
-            quote.vwap <= bound && quote.worst_price <= bound
-        }
-}
-
-fn hedge_unavailable_reason(
-    on_grid: bool,
-    has_fresh_quote: bool,
-    binance_refresh_failed: bool,
-) -> Option<&'static str> {
-    if !on_grid {
-        Some("HEDGE_UNAVAILABLE")
-    } else if !has_fresh_quote {
-        Some(if binance_refresh_failed {
-            "HEDGE_MARKET_DATA_UNAVAILABLE"
-        } else {
-            "HEDGE_UNAVAILABLE"
-        })
-    } else {
-        None
-    }
-}
 struct BusyGuard;
 impl Drop for BusyGuard {
     fn drop(&mut self) {
@@ -174,57 +136,6 @@ fn executable_quote(
     None
 }
 
-async fn refresh_binance_execution_book(
-    pair: &str,
-    prices: &PriceMap,
-    http: &Client,
-    ctx: &EngineContext,
-) -> Result<(), String> {
-    let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
-    let rest_sender = sender.clone();
-    let rest_http = http.clone();
-    let rest_pair = pair.to_string();
-    tokio::spawn(async move {
-        let result =
-            super::exchanges::binance::fetch_public_depth_snapshot(&rest_http, &rest_pair).await;
-        let _ = rest_sender.send(("REST", result)).await;
-    });
-    let ws_pair = pair.to_string();
-    tokio::spawn(async move {
-        let result = super::exchanges::binance::fetch_public_depth_snapshot_ws(&ws_pair).await;
-        let _ = sender.send(("WS API", result)).await;
-    });
-
-    let mut errors = Vec::with_capacity(2);
-    let (source, book) = loop {
-        let Some((source, result)) = receiver.recv().await else {
-            return Err(format!(
-                "Binance REST and WS API depth unavailable: {}",
-                errors.join("; ")
-            ));
-        };
-        match result {
-            Ok(book) => break (source, book),
-            Err(error) => errors.push(format!("{source}: {error}")),
-        }
-    };
-    tracing::debug!("[managed] Binance hedge depth refreshed through {source}");
-    let bid = book.bids.first().ok_or("Binance depth has no bid")?;
-    let ask = book.asks.first().ok_or("Binance depth has no ask")?;
-    if let Some(mut venue) = prices.get_mut("binance") {
-        if let Some(ticker) = venue.get_mut(pair) {
-            ticker.bid = bid.0;
-            ticker.ask = ask.0;
-            ticker.price = (bid.0 + ask.0) / 2.0;
-            ticker.bid_size = bid.0 * bid.1;
-            ticker.ask_size = ask.0 * ask.1;
-            ticker.last_updated = (book.updated_ms / 1000) as u64;
-        }
-    }
-    ctx.l2_books.insert(format!("binance:{pair}"), book);
-    Ok(())
-}
-
 async fn actual_taker_fee(
     connector: &dyn ExchangeConnector,
     exchange: &str,
@@ -273,6 +184,43 @@ async fn ensure_leverage_cached(
     Ok(())
 }
 
+fn open_orders_cache_key(exchange: &str, pair: &str) -> String {
+    super::utils::exchange_pair_key(exchange, pair)
+}
+
+fn open_orders_are_clear(ctx: &EngineContext, exchange: &str, pair: &str, now: i64) -> bool {
+    ctx.open_orders_clear_ms
+        .get(&open_orders_cache_key(exchange, pair))
+        .is_some_and(|stamp| {
+            now >= *stamp && now - *stamp <= OPEN_ORDERS_CLEAR_TTL_MS
+        })
+}
+
+async fn refresh_open_orders_clear(
+    connector: &dyn ExchangeConnector,
+    exchange: &str,
+    pair: &str,
+    http: &Client,
+    keys: &ExchangeKeys,
+    ctx: &EngineContext,
+) -> Result<(), String> {
+    let key = open_orders_cache_key(exchange, pair);
+    match connector.symbol_has_no_open_orders(http, keys, pair).await {
+        Ok(true) => {
+            ctx.open_orders_clear_ms.insert(key, now_ms());
+            Ok(())
+        }
+        Ok(false) => {
+            ctx.open_orders_clear_ms.remove(&key);
+            Err(format!("{exchange}:{pair} has an open order"))
+        }
+        Err(error) => {
+            ctx.open_orders_clear_ms.remove(&key);
+            Err(error)
+        }
+    }
+}
+
 fn candidate_is_prepared(
     exchange_a: &str,
     exchange_b: &str,
@@ -296,7 +244,24 @@ fn candidate_is_prepared(
                 .get(&leverage_cache_key(exchange, pair, leverage))
                 .is_some_and(|value| *value)
             && super::funding_guard::is_cached(ctx, exchange, pair)
+            && open_orders_are_clear(ctx, exchange, pair, now)
     })
+}
+
+fn cached_pair_is_flat(ctx: &EngineContext, exchange: &str, pair: &str) -> bool {
+    ctx.positions.get(exchange).is_some_and(|positions| {
+        positions
+            .iter()
+            .all(|position| !super::utils::symbols_match(&position.symbol, pair) || position.size.abs() <= 1e-12)
+    })
+}
+
+fn order_ws_ready(exchange: &str) -> bool {
+    match exchange {
+        "binance" => super::exchanges::ws_trader::order_lane_ready(),
+        "kucoin" => super::exchanges::ws_kucoin_order::is_ready(),
+        _ => false,
+    }
 }
 
 fn binance_depth_needs_prewarm(updated_ms: Option<i64>, now: i64) -> bool {
@@ -312,7 +277,7 @@ pub fn prewarm_binance_execution_book(
     pair: &str,
     prices: PriceMap,
     signal: crate::state::UpdateSignal,
-    http: Client,
+    _http: Client,
     ctx: Arc<EngineContext>,
 ) -> bool {
     let key = format!("binance:{pair}");
@@ -336,7 +301,7 @@ pub fn prewarm_binance_execution_book(
     }
     let pair = pair.to_string();
     tokio::spawn(async move {
-        match super::exchanges::binance::fetch_public_depth_snapshot(&http, &pair).await {
+        match super::exchanges::binance::fetch_public_depth_snapshot_ws(&pair).await {
             Ok(book) => {
                 let key = format!("binance:{pair}");
                 let newer = ctx
@@ -428,7 +393,16 @@ pub fn prewarm_candidate(
         let started_ms = now_ms();
         let result = match (get_connector(&exchange_a), get_connector(&exchange_b)) {
             (Some(ca), Some(cb)) => {
-                let (fee_a, fee_b, leverage_a, leverage_b, funding_a, funding_b) = tokio::join!(
+                let (
+                    fee_a,
+                    fee_b,
+                    leverage_a,
+                    leverage_b,
+                    funding_a,
+                    funding_b,
+                    open_orders_a,
+                    open_orders_b,
+                ) = tokio::join!(
                     actual_taker_fee(ca.as_ref(), &exchange_a, &pair, &http, &keys, &ctx),
                     actual_taker_fee(cb.as_ref(), &exchange_b, &pair, &http, &keys, &ctx),
                     ensure_leverage_cached(
@@ -451,6 +425,22 @@ pub fn prewarm_candidate(
                     ),
                     super::funding_guard::next(&http, &exchange_a, &pair, &ctx),
                     super::funding_guard::next(&http, &exchange_b, &pair, &ctx),
+                    refresh_open_orders_clear(
+                        ca.as_ref(),
+                        &exchange_a,
+                        &pair,
+                        &http,
+                        &keys,
+                        &ctx,
+                    ),
+                    refresh_open_orders_clear(
+                        cb.as_ref(),
+                        &exchange_b,
+                        &pair,
+                        &http,
+                        &keys,
+                        &ctx,
+                    ),
                 );
                 if fee_a.is_ok()
                     && fee_b.is_ok()
@@ -458,17 +448,21 @@ pub fn prewarm_candidate(
                     && leverage_b.is_ok()
                     && funding_a.is_ok()
                     && funding_b.is_ok()
+                    && open_orders_a.is_ok()
+                    && open_orders_b.is_ok()
                 {
                     Ok(())
                 } else {
                     Err(format!(
-                        "fees={:?}/{:?} leverage={:?}/{:?} funding={:?}/{:?}",
+                        "fees={:?}/{:?} leverage={:?}/{:?} funding={:?}/{:?} open_orders={:?}/{:?}",
                         fee_a.err(),
                         fee_b.err(),
                         leverage_a.err(),
                         leverage_b.err(),
                         funding_a.err(),
                         funding_b.err(),
+                        open_orders_a.err(),
+                        open_orders_b.err(),
                     ))
                 }
             }
@@ -495,61 +489,6 @@ pub fn prewarm_candidate(
             .remove(&route_key);
     });
     true
-}
-
-async fn retry_once<F, Fut>(
-    initial: Result<(), String>,
-    deadline: std::time::Duration,
-    retry: F,
-) -> Result<(), String>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
-{
-    let first_error = match initial {
-        Ok(()) => return Ok(()),
-        Err(error) => error,
-    };
-    match tokio::time::timeout(deadline, retry()).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(retry_error)) => Err(format!(
-            "initial: {}; retry: {}",
-            first_error, retry_error
-        )),
-        Err(_) => Err(format!("initial: {}; retry timed out", first_error)),
-    }
-}
-
-async fn confirm_leverage_with_retry(
-    initial: Result<(), String>,
-    connector: &dyn ExchangeConnector,
-    exchange: &str,
-    pair: &str,
-    leverage: f64,
-    http: &Client,
-    keys: &ExchangeKeys,
-) -> Result<(), String> {
-    let Some(first_error) = initial.as_ref().err() else {
-        return Ok(());
-    };
-    tracing::warn!(
-        "[managed] Initial leverage setup failed for {} on {}: {}; retrying once before exposure",
-        pair,
-        exchange,
-        first_error,
-    );
-    let result = retry_once(initial, std::time::Duration::from_secs(5), || {
-        connector.ensure_leverage(http, keys, pair, leverage)
-    })
-    .await;
-    if result.is_ok() {
-        tracing::info!(
-            "[managed] Leverage setup retry recovered for {} on {}",
-            pair,
-            exchange,
-        );
-    }
-    result
 }
 
 fn request(t: &ManagedTrade, leg: &str, qty: f64, price: f64, reduce: bool) -> JournalOrder {
@@ -588,7 +527,6 @@ fn request(t: &ManagedTrade, leg: &str, qty: f64, price: f64, reduce: bool) -> J
 #[async_trait::async_trait]
 trait OrderTransport: Send + Sync {
     async fn submit(&self, r: &OrderRequest) -> Result<OrderObservation, String>;
-    async fn query(&self, r: &OrderRequest, id: Option<&str>) -> Result<OrderObservation, String>;
 }
 struct ConnectorTransport<'a> {
     connector: &'a dyn super::exchanges::traits::ExchangeConnector,
@@ -600,11 +538,6 @@ impl OrderTransport for ConnectorTransport<'_> {
     async fn submit(&self, r: &OrderRequest) -> Result<OrderObservation, String> {
         self.connector.submit_managed(self.http, self.keys, r).await
     }
-    async fn query(&self, r: &OrderRequest, id: Option<&str>) -> Result<OrderObservation, String> {
-        self.connector
-            .query_managed(self.http, self.keys, r, id)
-            .await
-    }
 }
 async fn submit(
     j: &Journal,
@@ -612,8 +545,26 @@ async fn submit(
     http: &Client,
     keys: &ExchangeKeys,
 ) -> anyhow::Result<OrderObservation> {
+    prepare_submission(j, o).await?;
+    dispatch_prepared(j, o, http, keys).await
+}
+
+async fn prepare_submission(j: &Journal, o: &JournalOrder) -> anyhow::Result<()> {
+    o.request.validate().map_err(anyhow::Error::msg)?;
+    j.prepare(o).await?;
+    j.execution_event(o.trade_id, &o.request.client_id, "SEND_STARTED", None)
+        .await?;
+    Ok(())
+}
+
+async fn dispatch_prepared(
+    j: &Journal,
+    o: &JournalOrder,
+    http: &Client,
+    keys: &ExchangeKeys,
+) -> anyhow::Result<OrderObservation> {
     let conn = get_connector(&o.exchange).ok_or_else(|| anyhow::anyhow!("Unknown connector"))?;
-    submit_using(
+    dispatch_using(
         j,
         o,
         &ConnectorTransport {
@@ -629,9 +580,15 @@ async fn submit_using(
     o: &JournalOrder,
     transport: &dyn OrderTransport,
 ) -> anyhow::Result<OrderObservation> {
-    o.request.validate().map_err(anyhow::Error::msg)?;
-    j.prepare(o).await?;
-    j.execution_event(o.trade_id, &o.request.client_id, "SEND_STARTED", None).await?;
+    prepare_submission(j, o).await?;
+    dispatch_using(j, o, transport).await
+}
+
+async fn dispatch_using(
+    j: &Journal,
+    o: &JournalOrder,
+    transport: &dyn OrderTransport,
+) -> anyhow::Result<OrderObservation> {
     let mut known = o.observation.clone();
     match transport.submit(&o.request).await {
         Ok(v) => {
@@ -649,17 +606,14 @@ async fn submit_using(
             );
         }
     }
-    // No resubmission, even after transport failure. Resolve this SAME identity.
-    for _ in 0..5 {
-        if known.state.terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if let Ok(v) = transport.query(&o.request, known.order_id.as_deref()).await {
-            j.observe(o, v.clone()).await?;
-            j.execution_event(o.trade_id, &o.request.client_id, "QUERY_RETURNED", Some(format!("state={:?};filled={}", v.state, v.filled_quantity))).await?;
-            known = v;
-        }
+    if !known.state.terminal() {
+        j.execution_event(
+            o.trade_id,
+            &o.request.client_id,
+            "RECONCILIATION_DEFERRED",
+            Some("hot path performs no REST lookup or order replay".into()),
+        )
+        .await?;
     }
     Ok(known)
 }
@@ -674,8 +628,6 @@ pub fn propose(
     ctx: Arc<EngineContext>,
     ts: TechnicalSettings,
 ) {
-    // Empty engine ticks must not consume LAST_PREFLIGHT. Previously they advanced
-    // the two-second throttle continuously, delaying the first real short-lived signal.
     if signals.is_empty()
         || ctx.is_killed.load(Ordering::Acquire)
         || ENTRY_BUSY
@@ -702,7 +654,6 @@ async fn enter(
     ts: &TechnicalSettings,
 ) -> anyhow::Result<()> {
     // Existing unowned positions must be reconciled, not silently absorbed by a new trade.
-    let mut preflight_slot_claimed = false;
     for mut s in signals.into_iter().take(3) {
         let signal_received_ms = now_ms();
         record_entry_decision(ctx, "signal_received");
@@ -741,6 +692,20 @@ async fn enter(
         };
         if !ca.supports_managed_orders() || !cb.supports_managed_orders() {
             record_entry_decision(ctx, "rejected_connector_capability");
+            continue;
+        }
+        if !order_ws_ready(&s.exchange_a) || !order_ws_ready(&s.exchange_b) {
+            record_entry_decision(ctx, "rejected_order_ws_not_ready");
+            continue;
+        }
+        if [&s.exchange_a, &s.exchange_b]
+            .iter()
+            .any(|exchange| {
+                exchange.as_str() == "kucoin"
+                    && !crate::collector::kucoin::pro_depth_is_fresh(&s.pair, now_ms())
+            })
+        {
+            record_entry_decision(ctx, "rejected_kucoin_pro_l2_not_ready");
             continue;
         }
         if !super::risk_manager::verify_trade_health(&s.exchange_a, &s.exchange_b, ctx) {
@@ -783,151 +748,47 @@ async fn enter(
             record_entry_decision(ctx, "rejected_pair_loss_quarantine");
             continue;
         }
-        // Only an eligible signal may consume the private-REST throttle. A pair
-        // rejected by a cheap local guard (notably the loss quarantine) must not
-        // delay a different, executable opportunity arriving on the next tick.
-        // Once claimed, the same bounded batch may still inspect its remaining
-        // signals, preserving the existing at-most-three behavior.
-        if !preflight_slot_claimed {
-            let now = now_ms();
-            if now - LAST_PREFLIGHT.load(Ordering::Acquire) < 2_000 {
-                record_entry_decision(ctx, "preflight_throttled");
-                return Ok(());
-            }
-            LAST_PREFLIGHT.store(now, Ordering::Release);
-            preflight_slot_claimed = true;
+        // The signal-to-order path performs no network preflight. Fees,
+        // leverage and funding are prepared before the entry threshold, while
+        // account snapshots are refreshed independently. Any missing or stale
+        // prerequisite fails closed instead of turning a fleeting edge into a
+        // seconds-long REST transaction.
+        if !candidate_is_prepared(
+            &s.exchange_a,
+            &s.exchange_b,
+            &s.pair,
+            p.leverage as f64,
+            ctx,
+        ) {
+            record_entry_decision(ctx, "rejected_candidate_not_prepared");
+            continue;
         }
-        // These checks are independent and all happen before the first leg. Run
-        // them together so serial exchange requests do not consume a short-lived
-        // edge. Every result is still required and errors fail closed.
-        let preflight_started_ms = now_ms();
-        let (
-            (posa, posa_ms),
-            (posb, posb_ms),
-            (idle_a, idle_a_ms),
-            (idle_b, idle_b_ms),
-            (fee_a, fee_a_ms),
-            (fee_b, fee_b_ms),
-            (ba, ba_ms),
-            (bb, bb_ms),
-            (la, la_ms),
-            (lb, lb_ms),
-            (fa, fa_ms),
-            (fb, fb_ms),
-        ) = tokio::join!(
-            timed_preflight(ca.fetch_positions(http, keys)),
-            timed_preflight(cb.fetch_positions(http, keys)),
-            timed_preflight(ca.symbol_has_no_open_orders(http, keys, &s.pair)),
-            timed_preflight(cb.symbol_has_no_open_orders(http, keys, &s.pair)),
-            timed_preflight(actual_taker_fee(
-                ca.as_ref(),
-                &s.exchange_a,
-                &s.pair,
-                http,
-                keys,
-                ctx,
-            )),
-            timed_preflight(actual_taker_fee(
-                cb.as_ref(),
-                &s.exchange_b,
-                &s.pair,
-                http,
-                keys,
-                ctx,
-            )),
-            timed_preflight(ca.fetch_balances(http, keys)),
-            timed_preflight(cb.fetch_balances(http, keys)),
-            timed_preflight(ensure_leverage_cached(
-                ca.as_ref(),
-                &s.exchange_a,
-                &s.pair,
-                p.leverage as f64,
-                http,
-                keys,
-                ctx,
-            )),
-            timed_preflight(ensure_leverage_cached(
-                cb.as_ref(),
-                &s.exchange_b,
-                &s.pair,
-                p.leverage as f64,
-                http,
-                keys,
-                ctx,
-            )),
-            timed_preflight(super::funding_guard::next(
-                http,
-                &s.exchange_a,
-                &s.pair,
-                ctx,
-            )),
-            timed_preflight(super::funding_guard::next(
-                http,
-                &s.exchange_b,
-                &s.pair,
-                ctx,
-            )),
-        );
-        tracing::info!(
-            "[managed] Preflight timings for {}: positions {}={}ms {}={}ms; open_orders {}={}ms {}={}ms; fees {}={}ms {}={}ms; balances {}={}ms {}={}ms; leverage {}={}ms {}={}ms; funding {}={}ms {}={}ms",
-            s.pair,
-            s.exchange_a,
-            posa_ms,
-            s.exchange_b,
-            posb_ms,
-            s.exchange_a,
-            idle_a_ms,
-            s.exchange_b,
-            idle_b_ms,
-            s.exchange_a,
-            fee_a_ms,
-            s.exchange_b,
-            fee_b_ms,
-            s.exchange_a,
-            ba_ms,
-            s.exchange_b,
-            bb_ms,
-            s.exchange_a,
-            la_ms,
-            s.exchange_b,
-            lb_ms,
-            s.exchange_a,
-            fa_ms,
-            s.exchange_b,
-            fb_ms,
-        );
-        let (posa, posb) = match (posa, posb) {
-            (Ok(a), Ok(b)) => (a, b),
-            _ => {
-                record_entry_decision(ctx, "rejected_positions_fetch");
-                continue;
-            }
-        };
-        if posa
-            .iter()
-            .chain(posb.iter())
-            .any(|x| super::utils::symbols_match(&x.symbol, &s.pair) && x.size.abs() > 1e-12)
+        if !cached_pair_is_flat(ctx, &s.exchange_a, &s.pair)
+            || !cached_pair_is_flat(ctx, &s.exchange_b, &s.pair)
         {
             record_entry_decision(ctx, "rejected_existing_position");
             continue;
         }
-        if !matches!(idle_a, Ok(true)) || !matches!(idle_b, Ok(true)) {
-            record_entry_decision(ctx, "rejected_open_orders_check");
-            continue;
-        }
-        let (fee_a, fee_b) = match (fee_a, fee_b) {
-            (Ok(a), Ok(b)) => (a, b),
-            (a, b) => {
-                tracing::warn!("[managed] fee preflight failed for {} {}-{}: {:?} / {:?}",s.pair,s.exchange_a,s.exchange_b,a.err(),b.err());
-                record_entry_decision(ctx, "rejected_fee_fetch");
+        let fee_key_a = super::utils::exchange_pair_key(&s.exchange_a, &s.pair);
+        let fee_key_b = super::utils::exchange_pair_key(&s.exchange_b, &s.pair);
+        let (fee_a, fee_b) = match (
+            ctx.fee_rates.get(&fee_key_a).map(|value| *value),
+            ctx.fee_rates.get(&fee_key_b).map(|value| *value),
+        ) {
+            (Some(a), Some(b)) => (a, b),
+            _ => {
+                record_entry_decision(ctx, "rejected_fee_cache");
                 continue;
             }
         };
         s.break_even_pct = super::scanner_common::ioc_break_even_pct(fee_a, fee_b);
-        let (available_a, available_b) = match (ba, bb) {
-            (Ok((_, a)), Ok((_, b))) if a.is_finite() && b.is_finite() => (a, b),
+        let (available_a, available_b) = match (
+            ctx.margin_balances.get(&s.exchange_a).map(|value| *value),
+            ctx.margin_balances.get(&s.exchange_b).map(|value| *value),
+        ) {
+            (Some(a), Some(b)) if a.is_finite() && b.is_finite() => (a, b),
             _ => {
-                record_entry_decision(ctx, "rejected_balance_fetch");
+                record_entry_decision(ctx, "rejected_balance_cache");
                 continue;
             }
         };
@@ -941,68 +802,21 @@ async fn enter(
             record_entry_decision(ctx, "rejected_live_margin");
             continue;
         }
-        // A transient setup request must not consume a short-lived edge. Retry only
-        // the failed venue once, while there is still no exposure, then re-price the
-        // complete trade from fresh L2 below. Persistent failures remain fail-closed.
-        let leverage_retry_started_ms = now_ms();
-        let (la, lb) = tokio::join!(
-            confirm_leverage_with_retry(
-                la,
-                ca.as_ref(),
-                &s.exchange_a,
-                &s.pair,
-                p.leverage as f64,
-                http,
-                keys,
-            ),
-            confirm_leverage_with_retry(
-                lb,
-                cb.as_ref(),
-                &s.exchange_b,
-                &s.pair,
-                p.leverage as f64,
-                http,
-                keys,
-            ),
-        );
-        let leverage_retry_ms = now_ms().saturating_sub(leverage_retry_started_ms);
-        // Both venues must be authoritatively configured before taking exposure.
-        if la.is_err() || lb.is_err() {
-            tracing::warn!(
-                "[managed] leverage setup failed for {} on {} / {} on {}: {:?} / {:?}",
-                s.pair,
-                s.exchange_a,
-                s.pair,
-                s.exchange_b,
-                la.as_ref().err(),
-                lb.as_ref().err(),
-            );
-            record_entry_decision(ctx, "rejected_leverage_setup");
-            continue;
-        }
-        let funding_deadline_ms = match (fa, fb) {
-            (Ok(a), Ok(b)) => super::funding_guard::deadline(a, b, now_ms()),
-            _ => None,
-        };
+        let funding_deadline_ms = super::funding_guard::cached_next(ctx, &s.exchange_a, &s.pair)
+            .zip(super::funding_guard::cached_next(ctx, &s.exchange_b, &s.pair))
+            .and_then(|(a, b)| super::funding_guard::deadline(a, b, now_ms()));
         if funding_deadline_ms.is_none() {
-            record_entry_decision(ctx, "rejected_funding_fetch");
+            record_entry_decision(ctx, "rejected_funding_cache");
             continue;
         }
-        tracing::info!(
-            "[managed] Authoritative preflight completed for {} in {}ms (leverage retry phase {}ms)",
-            s.pair,
-            now_ms().saturating_sub(preflight_started_ms),
-            leverage_retry_ms,
-        );
-        // The Binance public WS occasionally queues seconds-old frames on the VPS.
-        // Refresh its top-5 snapshot after all slower private/funding checks, so the
-        // final IOC quote is based on authoritative data inside the 750 ms budget.
-        if s.exchange_a == "binance" || s.exchange_b == "binance" {
-            if let Err(error) = refresh_binance_execution_book(&s.pair, prices, http, ctx).await {
-                tracing::warn!("[managed] Binance L2 refresh failed for {}: {}", s.pair, error);
-                record_entry_decision(ctx, "rejected_binance_l2_refresh");
-                continue;
-            }
+        if !super::scanner::execution_books_are_fresh(
+            ctx,
+            &format!("{}:{}", s.exchange_a, s.pair),
+            &format!("{}:{}", s.exchange_b, s.pair),
+            now_ms(),
+        ) {
+            record_entry_decision(ctx, "rejected_l2_timestamp_skew");
+            continue;
         }
         let (quote_a, quote_b) = match (
             executable_quote(
@@ -1101,14 +915,11 @@ async fn enter(
                 continue;
             }
         };
-        // The private preflight above is independent network work and already
-        // provides a real observation interval. Compare its final authoritative
-        // L2 snapshot with the executable snapshot that emitted the signal;
-        // sleeping another fixed 500 ms only makes the quote older. Trade 2041's
-        // 0.6481% -> 0.7367% momentum move is still rejected here.
+        // Compare the current executable books with the snapshot that emitted
+        // the signal. There is deliberately no fixed sleep or network preflight.
         if entry_spread_is_widening(s.spread, gross) {
             tracing::info!(
-                "[managed] Direction confirmation rejected {} after {}ms preflight: executable L2 widened {:.4}% -> {:.4}%",
+                "[managed] Direction confirmation rejected {} after {}ms: executable L2 widened {:.4}% -> {:.4}%",
                 s.pair,
                 now_ms().saturating_sub(signal_received_ms),
                 s.spread,
@@ -1141,14 +952,12 @@ async fn enter(
                 continue;
             }
         };
-        let required = gross - budget;
         let half = (budget / 2.0).min(p.slippage_percent);
         if half < 0.0 {
             record_entry_decision(ctx, "rejected_slippage_budget");
             continue;
         }
-        // Re-read entry authorization after REST preflight; a disabled profile must not
-        // open using the settings snapshot captured several seconds earlier.
+        // Re-read local authorization immediately before reserving exposure.
         let authorized = if let Some(db) = &ctx.profiles_db {
             let profile_id = s.profile_id.clone();
             db.call(move |c| {
@@ -1189,140 +998,56 @@ async fn enter(
                 settings: p,
             },
         };
-        // Liquidity ranking only selects sequence; both legs have hard price bounds.
-        let first_a = super::utils::liquidity_rank(&s.exchange_a)
-            >= super::utils::liquidity_rank(&s.exchange_b);
-        let (first, second, quote, buy, qty) = if first_a {
-            ("A", "B", quote_a, !s.is_a_higher, s.target_qty_a)
-        } else {
-            ("B", "A", quote_b, s.is_a_higher, s.target_qty_b)
-        };
-        let second_exchange = if first_a {
-            &s.exchange_b
-        } else {
-            &s.exchange_a
-        };
-        // A VWAP is not an executable IOC limit when the quantity spans more
-        // than one level. Reach the last observed level, then reserve only the
-        // remaining movement budget for races after the snapshot.
-        let limit = entry_ioc_limit(quote, buy, half);
-        let o = request(&t, first, qty, limit, false);
+        // Both IOC limits consume at most half of the total movement budget.
+        // Persist both identities first, then poll both dedicated order sockets
+        // in the same Tokio turn. The second leg no longer waits for the first
+        // exchange's acknowledgement or fill report.
+        let order_a = request(
+            &t,
+            "A",
+            s.target_qty_a,
+            entry_ioc_limit(quote_a, !s.is_a_higher, half),
+            false,
+        );
+        let order_b = request(
+            &t,
+            "B",
+            s.target_qty_b,
+            entry_ioc_limit(quote_b, s.is_a_higher, half),
+            false,
+        );
+        j.prepare_batch_for_send(&[order_a.clone(), order_b.clone()])
+            .await?;
+        let dispatch_clock = std::time::Instant::now();
+        let (fill_a, fill_b) = tokio::join!(
+            async {
+                let offset_ns = dispatch_clock.elapsed().as_nanos();
+                (offset_ns, dispatch_prepared(j, &order_a, http, keys).await)
+            },
+            async {
+                let offset_ns = dispatch_clock.elapsed().as_nanos();
+                (offset_ns, dispatch_prepared(j, &order_b, http, keys).await)
+            },
+        );
+        let dispatch_gap_ns = fill_a.0.abs_diff(fill_b.0);
         tracing::info!(
-            "[managed] Dispatching first IOC for {} {}ms after signal acceptance",
+            "[managed] Dual WS IOC tasks started for {} {}ms after signal; local task-start gap={}ns",
             s.pair,
             now_ms().saturating_sub(signal_received_ms),
+            dispatch_gap_ns,
         );
-        // KuCoin may need a short private-order confirmation before its fill is
-        // authoritative. Overlap that wait with independent Binance REST and
-        // WS API depth requests instead of leaving the hedge quote to age for
-        // the whole first leg.
-        let (v, binance_refresh) = if second_exchange == "binance" {
-            let (fill, refreshed) = tokio::join!(submit(j, &o, http, keys), async {
-                let result = refresh_binance_execution_book(&s.pair, prices, http, ctx).await;
-                (result, now_ms())
-            });
-            (fill?, Some(refreshed))
-        } else {
-            (submit(j, &o, http, keys).await?, None)
-        };
-        if !v.state.terminal() {
-            j.state(id, "RECONCILING", "ENTRY_UNKNOWN").await?;
-            return Ok(());
-        }
-        if v.filled_quantity <= 1e-12 {
-            j.state(id, "CLOSING", "ENTRY_UNFILLED").await?;
-            return Ok(());
-        }
-        let second_step = if first_a { s.mult_b } else { s.mult_a };
-        let q = v.filled_quantity;
-        let on_grid = (q / second_step - (q / second_step).round()).abs() < 1e-8;
-        // The first venue's submit/query round trip is commonly longer than
-        // the 750 ms execution-book freshness budget. The overlapping refresh
-        // above should normally be fresh; repeat it only when that refresh has
-        // already aged for 500 ms, preserving time to submit the bounded hedge.
-        let mut binance_refresh_error = None;
-        if on_grid && second_exchange == "binance" {
-            let Some((mut refresh_result, refreshed_ms)) = binance_refresh else {
-                j.state(id, "CLOSING", "HEDGE_MARKET_DATA_UNAVAILABLE")
-                    .await?;
-                return Ok(());
-            };
-            if refresh_result.is_ok() && now_ms() - refreshed_ms > 500 {
-                refresh_result = refresh_binance_execution_book(&s.pair, prices, http, ctx).await;
-            }
-            if let Err(error) = refresh_result {
-                tracing::warn!(
-                    "[managed] Binance hedge L2 refresh failed for {}: {}; requiring a fresh streaming L2 book",
-                    s.pair,
-                    error
-                );
-                binance_refresh_error = Some(error);
-            }
-        }
-        let hedge_quote = executable_quote(
-            prices,
-            ctx,
-            if first_a {
-                &s.exchange_b
-            } else {
-                &s.exchange_a
-            },
-            &s.pair,
-            !buy,
-            q,
-        );
-        if let Some(reason) = hedge_unavailable_reason(
-            on_grid,
-            hedge_quote.is_some(),
-            binance_refresh_error.is_some(),
-        ) {
-            j.state(id, "CLOSING", reason).await?;
-            return Ok(());
-        }
-        if let Some(error) = binance_refresh_error {
-            tracing::info!(
-                "[managed] Using fresh Binance streaming L2 for {} hedge after snapshot refresh error: {}",
-                s.pair,
-                error
-            );
-        }
-        let actual = v.average_price.unwrap();
-        // Solve spread inequality using the actual first fill. This preserves the total budget.
-        let bound = if buy {
-            actual * (1.0 + required / 100.0)
-        } else {
-            actual / (1.0 + required / 100.0)
-        };
-        let hedge_quote = hedge_quote.unwrap();
-        // Both average and last consumed level must fit inside the profit
-        // boundary. Otherwise an IOC at `bound` can partially hedge again.
-        if !hedge_quote_fits_bound(hedge_quote, buy, bound) {
-            j.state(id, "CLOSING", "HEDGE_BUDGET_EXHAUSTED").await?;
-            return Ok(());
-        }
-        let (ex, step, tick) = if first_a {
-            (&s.exchange_b, s.mult_b, s.tick_b)
-        } else {
-            (&s.exchange_a, s.mult_a, s.tick_a)
-        };
-        let bound = super::orders::bounded_price(bound, tick, !buy);
-        if !ctx
-            .specifications
-            .get(&format!("{ex}:{}", s.pair))
-            .map(|spec| spec.permits(now_ms(), q, bound, step, tick))
-            .unwrap_or(false)
-        {
-            j.state(id, "CLOSING", "HEDGE_FILTER_CHANGED").await?;
-            return Ok(());
-        }
-        let second_order = request(&t, second, q, bound, false);
-        let second_fill = submit(j, &second_order, http, keys).await?;
+        let fill_a = fill_a.1?;
+        let fill_b = fill_b.1?;
         let orders = j.orders(id).await?;
-        if !second_fill.state.terminal() {
-            j.state(id, "RECONCILING", "HEDGE_UNKNOWN").await?;
+        if !fill_a.state.terminal() || !fill_b.state.terminal() {
+            j.state(id, "RECONCILING", "DUAL_ENTRY_UNKNOWN").await?;
             return Ok(());
         }
-        if (second_fill.filled_quantity - q).abs() > q * 1e-8 {
+        let qty_a = fill_a.filled_quantity;
+        let qty_b = fill_b.filled_quantity;
+        if qty_a <= 1e-12 && qty_b <= 1e-12 {
+            j.state(id, "CLOSING", "ENTRY_UNFILLED").await?;
+        } else if (qty_a - qty_b).abs() > qty_a.max(qty_b) * 1e-8 {
             j.state(id, "CLOSING", "PARTIAL_HEDGE").await?;
         } else {
             j.project(&t, &orders, false).await?;
@@ -1344,13 +1069,13 @@ pub fn supervise(
     ctx: Arc<EngineContext>,
 ) {
     tokio::spawn(async move {
-        let mut timer = tokio::time::interval(std::time::Duration::from_secs(1));
-        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            timer.tick().await;
+            let cycle_started = std::time::Instant::now();
             ctx.supervisor_tick_ms.store(now_ms(), Ordering::Release);
+            let mut has_active_trades = false;
             match j.active().await {
                 Ok(trades) => {
+                    has_active_trades = !trades.is_empty();
                     *ctx.owned_l2_wanted.write().await = trades
                         .iter()
                         .flat_map(|t| {
@@ -1380,6 +1105,16 @@ pub fn supervise(
                 }
                 Err(e) => kill(&ctx, &j, format!("Cannot load exposure: {}", e)).await,
             }
+            // Idle polling stays cheap, while an owned position is evaluated at
+            // the cadence of KuCoin's validated increment@10ms execution book.
+            // The delay is measured from cycle start so DB/valuation work does
+            // not accumulate on top of the intended reaction interval.
+            let cadence = if has_active_trades {
+                std::time::Duration::from_millis(10)
+            } else {
+                std::time::Duration::from_millis(100)
+            };
+            tokio::time::sleep(cadence.saturating_sub(cycle_started.elapsed())).await;
         }
     });
 }
@@ -1450,7 +1185,17 @@ async fn manage(
             b.remaining(),
         ),
     );
-    let (pxa, pxb) = (quote_a.map(|q| q.vwap), quote_b.map(|q| q.vwap));
+    let synchronized_books = super::scanner::execution_books_are_fresh(
+        ctx,
+        &format!("{}:{}", s.exchange_a, s.pair),
+        &format!("{}:{}", s.exchange_b, s.pair),
+        now_ms(),
+    );
+    let (pxa, pxb) = if synchronized_books {
+        (quote_a.map(|q| q.vwap), quote_b.map(|q| q.vwap))
+    } else {
+        (None, None)
+    };
     let mut profit = false;
     let mut hard_stop = false;
     let mut trailing_stop = false;
@@ -1542,6 +1287,7 @@ async fn manage(
         let exchange = if *leg == "A" { &s.exchange_a } else { &s.exchange_b };
         std::cmp::Reverse(super::utils::liquidity_rank(exchange))
     });
+    let mut close_orders = Vec::with_capacity(2);
     for (leg, qty, px) in legs {
         let a_leg = leg == "A";
         let observed = if now_ms() - t.created_ms >= 10_000 {
@@ -1564,8 +1310,17 @@ async fn manage(
         if !emergency && limit <= 0.0 {
             continue;
         }
-        let o = request(&t, leg, qty, limit, true);
-        let _ = submit(j, &o, http, keys).await?;
+        close_orders.push(request(&t, leg, qty, limit, true));
+    }
+    // Both requests are reduce-only and independently bounded. Dispatch them
+    // concurrently so a profitable exit is not exposed to the first venue's
+    // acknowledgement latency before the second request even leaves the VPS.
+    let close_results = futures_util::future::join_all(
+        close_orders.iter().map(|order| submit(j, order, http, keys)),
+    )
+    .await;
+    for result in close_results {
+        let _ = result?;
     }
     let updated = j.orders(t.id).await?;
     j.project(&t, &updated, true).await?;
@@ -1593,7 +1348,18 @@ async fn manage(
 #[cfg(test)]
 mod transport_tests {
     use super::*;
-    use std::sync::Mutex;
+
+    #[test]
+    fn hot_path_requires_a_fresh_open_order_clear_verdict() {
+        let ctx = EngineContext::default();
+        assert!(!open_orders_are_clear(&ctx, "binance", "BTCUSDT", 10_000));
+
+        ctx.open_orders_clear_ms
+            .insert("binance:BTCUSDT".into(), 5_000);
+        assert!(open_orders_are_clear(&ctx, "binance", "BTCUSDT", 10_000));
+        assert!(!open_orders_are_clear(&ctx, "binance", "BTCUSDT", 10_001));
+        assert!(!open_orders_are_clear(&ctx, "binance", "BTCUSDT", 4_999));
+    }
 
     #[test]
     fn risk_exits_quarantine_the_pair_longer_than_normal_exits() {
@@ -1642,103 +1408,14 @@ mod transport_tests {
         assert!(entry_ioc_limit(sell, false, 0.05) < sell.worst_price);
     }
 
-    #[test]
-    fn hedge_rejects_when_vwap_fits_but_last_level_does_not() {
-        let sell = crate::engine::book::DepthQuote {
-            vwap: 100.0,
-            worst_price: 99.0,
-        };
-        assert!(!hedge_quote_fits_bound(sell, true, 99.5));
-        assert!(hedge_quote_fits_bound(sell, true, 98.5));
-
-        let buy = crate::engine::book::DepthQuote {
-            vwap: 100.0,
-            worst_price: 101.0,
-        };
-        assert!(!hedge_quote_fits_bound(buy, false, 100.5));
-        assert!(hedge_quote_fits_bound(buy, false, 101.5));
-    }
-
-    #[test]
-    fn fresh_ws_hedge_quote_survives_a_rest_refresh_failure() {
-        assert_eq!(hedge_unavailable_reason(true, true, true), None);
-        assert_eq!(
-            hedge_unavailable_reason(true, false, true),
-            Some("HEDGE_MARKET_DATA_UNAVAILABLE")
-        );
-        assert_eq!(
-            hedge_unavailable_reason(false, true, true),
-            Some("HEDGE_UNAVAILABLE")
-        );
-    }
-
-    #[tokio::test]
-    async fn successful_leverage_setup_is_not_repeated() {
-        let calls = std::sync::atomic::AtomicU32::new(0);
-        let result = retry_once(Ok(()), std::time::Duration::from_millis(10), || async {
-            calls.fetch_add(1, Ordering::Relaxed);
-            Err("unexpected retry".into())
-        })
-        .await;
-        assert_eq!(result, Ok(()));
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test]
-    async fn failed_leverage_setup_gets_one_bounded_retry() {
-        let calls = std::sync::atomic::AtomicU32::new(0);
-        let recovered = retry_once(
-            Err("initial transport failure".into()),
-            std::time::Duration::from_millis(10),
-            || async {
-                calls.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            },
-        )
-        .await;
-        assert_eq!(recovered, Ok(()));
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-
-        let rejected = retry_once(
-            Err("initial transport failure".into()),
-            std::time::Duration::from_millis(10),
-            || async { Err("still unavailable".into()) },
-        )
-        .await;
-        assert_eq!(
-            rejected,
-            Err("initial: initial transport failure; retry: still unavailable".into())
-        );
-    }
-
     struct LostAck {
-        queries: Mutex<Vec<String>>,
         submits: std::sync::atomic::AtomicU32,
-        resolved: bool,
     }
     #[async_trait::async_trait]
     impl OrderTransport for LostAck {
         async fn submit(&self, _: &OrderRequest) -> Result<OrderObservation, String> {
             self.submits.fetch_add(1, Ordering::Relaxed);
             Err("Connection lost after exchange accepted order".into())
-        }
-        async fn query(
-            &self,
-            r: &OrderRequest,
-            _: Option<&str>,
-        ) -> Result<OrderObservation, String> {
-            self.queries.lock().unwrap().push(r.client_id.clone());
-            if self.resolved {
-                Ok(OrderObservation {
-                    order_id: Some("exchange-owned-id".into()),
-                    state: OrderState::Cancelled,
-                    filled_quantity: 3.0,
-                    average_price: Some(10.0),
-                    fee: Some(0.01),
-                })
-            } else {
-                Err("Exchange unavailable".into())
-            }
         }
     }
     async fn journal() -> Journal {
@@ -1774,37 +1451,29 @@ mod transport_tests {
         }
     }
     #[tokio::test]
-    async fn lost_ack_recovers_same_order_without_second_submission() {
+    async fn lost_ack_is_deferred_without_replay_or_hot_path_query() {
         let j = journal().await;
         let o = order();
         let fake = LostAck {
-            queries: Mutex::new(vec![]),
             submits: std::sync::atomic::AtomicU32::new(0),
-            resolved: true,
         };
         let observed = submit_using(&j, &o, &fake).await.unwrap();
-        assert_eq!(observed.filled_quantity, 3.0);
-        assert_eq!(observed.state, OrderState::Cancelled);
+        assert_eq!(observed.filled_quantity, 0.0);
+        assert_eq!(observed.state, OrderState::Unknown);
         assert_eq!(fake.submits.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            fake.queries.lock().unwrap().as_slice(),
-            [o.request.client_id.clone()]
-        );
         // Duplicate invocation after a restart fails at the durable identity BEFORE transport.
         assert!(submit_using(&j, &o, &fake).await.is_err());
         assert_eq!(fake.submits.load(Ordering::Relaxed), 1);
         assert_eq!(
             j.orders(42).await.unwrap()[0].observation.filled_quantity,
-            3.0
+            0.0
         );
     }
     #[tokio::test]
     async fn timeout_is_persisted_as_unknown_never_zero_fill_success() {
         let j = journal().await;
         let fake = LostAck {
-            queries: Mutex::new(vec![]),
             submits: std::sync::atomic::AtomicU32::new(0),
-            resolved: false,
         };
         let result = submit_using(&j, &order(), &fake).await.unwrap();
         assert_eq!(result.state, OrderState::Unknown);

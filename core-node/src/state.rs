@@ -17,7 +17,7 @@ pub use shared::TickerData;
 /// exchange_id → symbol → TickerData (e.g. "gate" → "BTCUSDT" → {...})
 pub type PriceMap = Arc<DashMap<String, HashMap<String, TickerData>>>;
 
-/// Live L2 orderbook depth — updated by WS collectors every ~100ms.
+/// Live L2 orderbook depth — updated by the fastest validated venue WS feed.
 /// Key: "exchange:PAIR" (e.g. "binance:BTCUSDT")
 /// Value: (bids, asks) where each is Vec<(price, size_in_base_asset)> sorted by best first.
 pub type L2OrderbookMap = Arc<DashMap<String, L2Snapshot>>;
@@ -60,6 +60,10 @@ pub struct EngineContext {
     pub fee_rates: Arc<DashMap<String, f64>>,
     /// Keyed by exchange:pair; fees without a fresh timestamp are never authoritative.
     pub fee_updated_ms: Arc<DashMap<String, i64>>,
+    /// Latest pre-entry confirmation that a symbol has no resting orders.
+    /// Keyed by exchange:pair and refreshed during candidate prewarm, never in
+    /// the signal-to-order path.
+    pub open_orders_clear_ms: Arc<DashMap<String, i64>>,
     #[allow(dead_code)]
     pub leverage_set: Arc<DashMap<String, bool>>,
     pub exchange_cooldown: Arc<DashMap<String, i64>>,
@@ -135,6 +139,7 @@ impl Default for EngineContext {
             balances_updated_ms: Arc::new(DashMap::new()),
             fee_rates: Arc::new(DashMap::new()),
             fee_updated_ms: Arc::new(DashMap::new()),
+            open_orders_clear_ms: Arc::new(DashMap::new()),
             leverage_set: Arc::new(DashMap::new()),
             exchange_cooldown: Arc::new(DashMap::new()),
             pair_cooldown: Arc::new(DashMap::new()),

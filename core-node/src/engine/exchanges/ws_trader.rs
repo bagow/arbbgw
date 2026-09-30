@@ -1,16 +1,27 @@
 use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    OnceLock,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::{client_async_tls, tungstenite::protocol::Message};
 
 type ResponseSender = oneshot::Sender<Value>;
 
-type RequestSender = mpsc::Sender<(Value, ResponseSender)>;
+struct QueuedRequest {
+    id: String,
+    payload: String,
+    enqueued: std::time::Instant,
+    response: ResponseSender,
+}
+
+type RequestSender = mpsc::Sender<QueuedRequest>;
 
 static WS_QUERY_TX: OnceLock<RequestSender> = OnceLock::new();
 static WS_ORDER_TX: OnceLock<RequestSender> = OnceLock::new();
+static ORDER_READY: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WsLane {
@@ -106,7 +117,11 @@ pub fn prewarm_ws_connections() {
     let _ = get_or_init_lane(WsLane::Order);
 }
 
-async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>, lane: WsLane) {
+pub fn order_lane_ready() -> bool {
+    ORDER_READY.load(Ordering::Acquire)
+}
+
+async fn ws_trader_loop(mut rx: mpsc::Receiver<QueuedRequest>, lane: WsLane) {
     let mut backoff_secs: u64 = 2;
     loop {
         let (ws_stream, _) = match tokio::time::timeout(
@@ -161,6 +176,9 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>, lane: W
             "[binance_ws] lane={} connected to Futures WS Trading API",
             lane.label()
         );
+        if lane == WsLane::Order {
+            ORDER_READY.store(true, Ordering::Release);
+        }
         crate::engine::utils::record_ws_connected("binance");
         let mut ws = ws_stream;
         let mut pending: HashMap<String, ResponseSender> = HashMap::new();
@@ -180,11 +198,16 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>, lane: W
                     }
                 },
                 next=rx.recv()=>{
-                    let(req,sender)=match next{Some(x)=>x,None=>return};
+                    let QueuedRequest{id,payload,enqueued,response:sender}=match next{Some(x)=>x,None=>return};
                     if sender.is_closed(){continue;}
-                    let id=match req["id"].as_str(){Some(id)=>id.to_string(),None=>continue};
                     pending.insert(id,sender);
-                    if !matches!(tokio::time::timeout(tokio::time::Duration::from_secs(1),ws.send(Message::Text(req.to_string()))).await,Ok(Ok(()))){break;}
+                    if !matches!(tokio::time::timeout(tokio::time::Duration::from_secs(1),ws.send(Message::Text(payload))).await,Ok(Ok(()))){break;}
+                    if lane == WsLane::Order {
+                        tracing::info!(
+                            "[binance_ws] order socket queue_delay_us={}",
+                            enqueued.elapsed().as_micros(),
+                        );
+                    }
                 },
                 _=cleanup.tick()=>{
                     let response_waiter_timed_out = pending.values().any(ResponseSender::is_closed);
@@ -202,6 +225,9 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>, lane: W
         }
         // A disconnect drops waiters. No queued or possibly accepted order is replayed.
         drop(pending);
+        if lane == WsLane::Order {
+            ORDER_READY.store(false, Ordering::Release);
+        }
         tracing::warn!(
             "[binance_ws] lane={} connection dropped. Restarting loop...",
             lane.label()
@@ -212,12 +238,23 @@ async fn ws_trader_loop(mut rx: mpsc::Receiver<(Value, ResponseSender)>, lane: W
 
 pub async fn send_ws_request(req: Value) -> Result<Value, String> {
     let lane = request_lane(&req);
+    let id = req["id"]
+        .as_str()
+        .ok_or_else(|| "WS request is missing an id".to_string())?
+        .to_owned();
+    let payload = req.to_string();
     let tx = get_or_init_lane(lane);
     let (resp_tx, resp_rx) = oneshot::channel();
+    let started = std::time::Instant::now();
 
     // try_send: if the WS is disconnected and channel is full, fail immediately
     // instead of blocking the entire trade cycle forever
-    tx.try_send((req, resp_tx)).map_err(|e| {
+    tx.try_send(QueuedRequest {
+        id,
+        payload,
+        enqueued: started,
+        response: resp_tx,
+    }).map_err(|e| {
         format!(
             "WS {} channel full/closed (is Binance WS connected?): {}",
             lane.label(),
@@ -226,7 +263,15 @@ pub async fn send_ws_request(req: Value) -> Result<Value, String> {
     })?;
 
     match tokio::time::timeout(tokio::time::Duration::from_millis(2500), resp_rx).await {
-        Ok(Ok(val)) => Ok(val),
+        Ok(Ok(val)) => {
+            if lane == WsLane::Order {
+                tracing::info!(
+                    "[binance_ws] order response client_rtt_us={}",
+                    started.elapsed().as_micros(),
+                );
+            }
+            Ok(val)
+        }
         Ok(Err(_)) => Err("Response sender dropped".to_string()),
         Err(_) => Err("Timeout waiting for WS response".to_string()),
     }

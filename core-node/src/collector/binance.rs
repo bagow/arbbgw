@@ -363,19 +363,15 @@ fn baseline_health_refresh_due(active: bool, updated_ms: Option<i64>, now_ms: i6
 }
 
 /// Keep the Binance transport-health probe current when this VPS's WebSocket
-/// route delivers old batches. The probe runs only while a profile is active,
-/// obeys the centralized REST weight/ban guard, and accepts the same <=750 ms
-/// exchange timestamp as an executable snapshot.
+/// route delivers old batches. The independent request/response WebSocket probe
+/// runs only while a profile is active and accepts the same <=750 ms exchange
+/// timestamp as an executable snapshot.
 async fn run_l2_health_fallback(
     l2_books: L2OrderbookMap,
     price_map: crate::state::PriceMap,
     signal: UpdateSignal,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
-    let http = Client::builder()
-        .user_agent("cryptoarb-binance-health/1")
-        .build()
-        .expect("Binance health client");
     let key = "binance:BTCUSDT";
     let mut last_warning = std::time::Instant::now();
     loop {
@@ -389,12 +385,7 @@ async fn run_l2_health_fallback(
         if !baseline_health_refresh_due(active, updated_ms, now) {
             continue;
         }
-        match crate::engine::exchanges::binance::fetch_public_depth_snapshot(
-            &http,
-            "BTCUSDT",
-        )
-        .await
-        {
+        match crate::engine::exchanges::binance::fetch_public_depth_snapshot_ws("BTCUSDT").await {
             Ok(book) => {
                 if l2_books
                     .get(key)
@@ -422,7 +413,7 @@ async fn run_l2_health_fallback(
             }
             Err(error) => {
                 if last_warning.elapsed() >= Duration::from_secs(30) {
-                    warn!("[binance_l2_health_rest] Refresh failed: {}", error);
+                    warn!("[binance_l2_health_ws] Refresh failed: {}", error);
                     last_warning = std::time::Instant::now();
                 }
             }
@@ -779,7 +770,7 @@ async fn run_l2_depth_stream(
                     }
                     // A successful handshake alone must not reset retry pacing. Keep
                     // the last snapshot in the map: timestamp freshness expires it,
-                    // while an active profile's REST health fallback may already have
+                    // while an active profile's WS health fallback may already have
                     // replaced it with a newer authoritative snapshot.
                     let stable = backlog_detected || session_start.elapsed() >= Duration::from_secs(60);
                     if stable {
@@ -1172,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn rest_health_fallback_runs_only_for_active_stale_baseline() {
+    fn ws_health_fallback_runs_only_for_active_stale_baseline() {
         assert!(!baseline_health_refresh_due(false, None, 10_000));
         assert!(baseline_health_refresh_due(true, None, 10_000));
         assert!(!baseline_health_refresh_due(true, Some(9_750), 10_000));

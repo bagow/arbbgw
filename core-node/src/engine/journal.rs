@@ -149,6 +149,46 @@ impl Journal {
         self.db.call(move |c| {c.execute("INSERT INTO execution_orders(client_id,trade_id,leg,exchange,request,observation,created_ms,updated_ms) VALUES(?,?,?,?,?,?,?,?)",params![o.request.client_id,o.trade_id,o.leg,o.exchange,r,ob,now,now])?;Ok(())}).await?;
         Ok(())
     }
+    /// Durably reserve every order identity and its send intent in one FULL
+    /// synchronous transaction. Dual-leg entry uses this immediately before
+    /// dispatch so neither leg can exist without the other after a crash, while
+    /// avoiding four separate SQLite round trips on the latency-critical path.
+    pub async fn prepare_batch_for_send(&self, orders: &[JournalOrder]) -> anyhow::Result<()> {
+        if orders.is_empty() {
+            anyhow::bail!("Cannot prepare an empty order batch");
+        }
+        let mut encoded = Vec::with_capacity(orders.len());
+        for order in orders {
+            order.request.validate().map_err(anyhow::Error::msg)?;
+            encoded.push((
+                order.request.client_id.clone(),
+                order.trade_id,
+                order.leg.clone(),
+                order.exchange.clone(),
+                serde_json::to_string(&order.request)?,
+                serde_json::to_string(&order.observation)?,
+            ));
+        }
+        let now = super::utils::now_ms();
+        self.db
+            .call(move |connection| {
+                let transaction = connection.transaction()?;
+                for (client_id, trade_id, leg, exchange, request, observation) in encoded {
+                    transaction.execute(
+                        "INSERT INTO execution_orders(client_id,trade_id,leg,exchange,request,observation,created_ms,updated_ms) VALUES(?,?,?,?,?,?,?,?)",
+                        params![client_id,trade_id,leg,exchange,request,observation,now,now],
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO execution_events(client_id,trade_id,event,at_ms,detail) VALUES(?,?,'SEND_STARTED',?,NULL)",
+                        params![client_id,trade_id,now],
+                    )?;
+                }
+                transaction.commit()?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
     pub async fn observe(&self, o: &JournalOrder, obs: OrderObservation) -> anyhow::Result<()> {
         obs.validate(&o.request).map_err(anyhow::Error::msg)?;
         let id = o.request.client_id.clone();
@@ -611,6 +651,59 @@ mod tests {
         let persisted = j.orders(id).await.unwrap();
         assert_eq!(persisted[0].observation.state, OrderState::Cancelled);
         assert_eq!(aggregate(&persisted, "A").fee, 0.01);
+    }
+    #[tokio::test]
+    async fn dual_send_preparation_is_atomic_and_records_both_intents() {
+        let j = setup().await;
+        let id = j.reserve(plan()).await.unwrap().unwrap();
+        let first = order(id);
+        let mut second = first.clone();
+        second.leg = "B".into();
+        second.exchange = "kucoin".into();
+        second.request.client_id = "stable-client-id-b".into();
+        j.prepare_batch_for_send(&[first.clone(), second.clone()])
+            .await
+            .unwrap();
+        let (orders, intents): (i64, i64) = j
+            .db
+            .call(move |connection| {
+                Ok((
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM execution_orders WHERE trade_id=?",
+                        [id],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM execution_events WHERE trade_id=? AND event='SEND_STARTED'",
+                        [id],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!((orders, intents), (2, 2));
+
+        let mut third = first.clone();
+        third.request.client_id = "must-roll-back".into();
+        assert!(j
+            .prepare_batch_for_send(&[third, first])
+            .await
+            .is_err());
+        let rolled_back: i64 = j
+            .db
+            .call(|connection| {
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM execution_orders WHERE client_id='must-roll-back'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(Into::into)
+            })
+            .await
+            .unwrap();
+        assert_eq!(rolled_back, 0);
     }
     #[tokio::test]
     async fn partial_close_cannot_be_reported_flat() {

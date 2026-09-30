@@ -4,17 +4,35 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::Duration;
-use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+use tokio_tungstenite::{
+    client_async_tls, connect_async_tls_with_config, tungstenite::Message,
+};
 use tracing::{info, warn};
 
 use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
+
+static PRO_DEPTH_UPDATED_MS: OnceLock<dashmap::DashMap<String, i64>> = OnceLock::new();
+
+fn pro_depth_updates() -> &'static dashmap::DashMap<String, i64> {
+    PRO_DEPTH_UPDATED_MS.get_or_init(dashmap::DashMap::new)
+}
+
+/// Entry must never silently fall back to the 100 ms Classic depth stream.
+pub fn pro_depth_is_fresh(pair: &str, now_ms: i64) -> bool {
+    pro_depth_updates()
+        .get(pair)
+        .is_some_and(|updated| (0..=750).contains(&now_ms.saturating_sub(*updated)))
+}
 
 pub async fn run(
     prices: PriceMap,
     signal: UpdateSignal,
     l2_books: L2OrderbookMap,
-    _l2_wanted: std::sync::Arc<dashmap::DashSet<String>>,
+    l2_wanted: std::sync::Arc<dashmap::DashSet<String>>,
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -52,7 +70,7 @@ pub async fn run(
         };
 
         tokio::select! {
-            res = handler(&prices, &signal, &l2_books) => {
+            res = handler(&prices, &signal, &l2_books, &l2_wanted) => {
                 match res {
                     Ok(_)  => { warn!("[kucoin] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
                     Err(e) => warn!("[kucoin] WS disconnected: {}. Reconnecting in {:?}", e, backoff),
@@ -72,6 +90,7 @@ async fn handler(
     price_map: &PriceMap,
     signal: &UpdateSignal,
     l2_books: &L2OrderbookMap,
+    l2_wanted: &std::sync::Arc<dashmap::DashSet<String>>,
 ) -> Result<()> {
     let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
     let contracts: Value = http
@@ -115,6 +134,14 @@ async fn handler(
     // 150 symbols * 2 topics (L1 + L2) = 300 topics per connection
 
     let sym_map = std::sync::Arc::new(sym_map);
+    let normalized_map = std::sync::Arc::new(
+        sym_map
+            .iter()
+            .map(|(raw, (normalized, multiplier))| {
+                (normalized.clone(), (raw.clone(), *multiplier))
+            })
+            .collect::<HashMap<_, _>>(),
+    );
     let mut children = tokio::task::JoinSet::new();
 
     for (idx, chunk) in symbols.chunks(60).enumerate() {
@@ -143,12 +170,367 @@ async fn handler(
         });
     }
 
+    // KuCoin's Classic depth-5 stream above is a 100 ms discovery baseline.
+    // Near-entry and owned pairs additionally use the Pro top-500 incremental
+    // stream (snapshot followed by absolute deltas every 10 ms), with no REST
+    // snapshot in the execution path.
+    let fast_prices = price_map.clone();
+    let fast_signal = signal.clone();
+    let fast_l2 = l2_books.clone();
+    let fast_wanted = l2_wanted.clone();
+    let fast_raw_symbols = sym_map.clone();
+    children.spawn(async move {
+        let mut backoff = Duration::from_millis(250);
+        loop {
+            match run_pro_depth(
+                &fast_prices,
+                &fast_signal,
+                &fast_l2,
+                &fast_wanted,
+                &normalized_map,
+                &fast_raw_symbols,
+            )
+            .await
+            {
+                Ok(()) => backoff = Duration::from_millis(250),
+                Err(error) => {
+                    warn!(
+                        "[kucoin_pro_l2] disconnected: {}; reconnecting in {:?}",
+                        error, backoff
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(5));
+                }
+            }
+        }
+    });
+
     tokio::select! {
         _ = children.join_next() => {},
         _ = tokio::time::sleep(Duration::from_secs(1800)) => {},
     }
     // Dropping JoinSet aborts all children before reloading the instrument universe.
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OrderedPrice(f64);
+
+impl PartialEq for OrderedPrice {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.total_cmp(&other.0) == Ordering::Equal
+    }
+}
+
+impl Eq for OrderedPrice {}
+
+impl PartialOrd for OrderedPrice {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderedPrice {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+#[derive(Default)]
+struct ProBook {
+    sequence: i64,
+    bids: BTreeMap<OrderedPrice, f64>,
+    asks: BTreeMap<OrderedPrice, f64>,
+}
+
+fn apply_pro_side(
+    side: &mut BTreeMap<OrderedPrice, f64>,
+    raw: Option<&Vec<Value>>,
+) -> Result<()> {
+    let raw = raw.ok_or_else(|| anyhow!("KuCoin Pro depth side is missing"))?;
+    for level in raw {
+        let values = level
+            .as_array()
+            .ok_or_else(|| anyhow!("KuCoin Pro depth level is not an array"))?;
+        let price = values
+            .first()
+            .and_then(number)
+            .filter(|value| *value > 0.0)
+            .ok_or_else(|| anyhow!("KuCoin Pro depth price is invalid"))?;
+        let contracts = values
+            .get(1)
+            .and_then(number)
+            .filter(|value| *value >= 0.0)
+            .ok_or_else(|| anyhow!("KuCoin Pro depth size is invalid"))?;
+        let key = OrderedPrice(price);
+        if contracts == 0.0 {
+            side.remove(&key);
+        } else {
+            side.insert(key, contracts);
+        }
+    }
+    Ok(())
+}
+
+fn apply_pro_book_message(book: &mut ProBook, message: &Value) -> Result<bool> {
+    let kind = message["t"]
+        .as_str()
+        .ok_or_else(|| anyhow!("KuCoin Pro depth message has no type"))?;
+    let data = &message["d"];
+    let start = data["O"]
+        .as_i64()
+        .ok_or_else(|| anyhow!("KuCoin Pro depth message has no start sequence"))?;
+    let end = data["C"]
+        .as_i64()
+        .ok_or_else(|| anyhow!("KuCoin Pro depth message has no end sequence"))?;
+    if start <= 0 || end < start {
+        anyhow::bail!("KuCoin Pro depth sequence is invalid");
+    }
+    match kind {
+        "snapshot" => {
+            if start != end {
+                anyhow::bail!("KuCoin Pro snapshot spans multiple sequences");
+            }
+            book.bids.clear();
+            book.asks.clear();
+        }
+        "delta" if end <= book.sequence => return Ok(false),
+        "delta" if book.sequence == 0 => return Ok(false),
+        "delta" if start > book.sequence.saturating_add(1) => {
+            anyhow::bail!(
+                "KuCoin Pro depth sequence gap {}..{} after {}",
+                start,
+                end,
+                book.sequence
+            );
+        }
+        "delta" => {}
+        other => anyhow::bail!("unsupported KuCoin Pro depth message type {other}"),
+    }
+    apply_pro_side(&mut book.bids, data["b"].as_array())?;
+    apply_pro_side(&mut book.asks, data["a"].as_array())?;
+    book.sequence = end;
+    Ok(true)
+}
+
+fn pro_book_snapshot(book: &ProBook, multiplier: f64) -> Option<(Vec<(f64, f64)>, Vec<(f64, f64)>)> {
+    if !multiplier.is_finite() || multiplier <= 0.0 {
+        return None;
+    }
+    let bids: Vec<_> = book
+        .bids
+        .iter()
+        .rev()
+        .take(50)
+        .map(|(price, contracts)| (price.0, contracts * multiplier))
+        .collect();
+    let asks: Vec<_> = book
+        .asks
+        .iter()
+        .take(50)
+        .map(|(price, contracts)| (price.0, contracts * multiplier))
+        .collect();
+    if bids.is_empty()
+        || asks.is_empty()
+        || bids[0].0 >= asks[0].0
+        || bids
+            .iter()
+            .chain(&asks)
+            .any(|(price, quantity)| !price.is_finite() || !quantity.is_finite() || *quantity <= 0.0)
+    {
+        return None;
+    }
+    Some((bids, asks))
+}
+
+fn pro_depth_subscription(raw_symbol: &str, subscribe: bool) -> Value {
+    json!({
+        "id": uuid::Uuid::new_v4().simple().to_string(),
+        "action": if subscribe { "SUBSCRIBE" } else { "UNSUBSCRIBE" },
+        "channel": "obu",
+        "tradeType": "FUTURES",
+        "symbol": raw_symbol,
+        "depth": "increment@10ms",
+        "rpiFilter": 0,
+        "response": true,
+    })
+}
+
+async fn connect_kucoin_pro_public() -> Result<
+    tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+> {
+    const HOST: &str = "x-push-futures.kucoin.com";
+    const URL: &str = "wss://x-push-futures.kucoin.com";
+    let addresses = tokio::net::lookup_host((HOST, 443)).await?;
+    let mut attempts = futures_util::stream::FuturesUnordered::new();
+    for address in addresses {
+        attempts.push(async move {
+            let socket = tokio::time::timeout(
+                Duration::from_secs(4),
+                tokio::net::TcpStream::connect(address),
+            )
+            .await
+            .map_err(|_| anyhow!("KuCoin Pro L2 TCP timeout via {address}"))??;
+            socket.set_nodelay(true)?;
+            tokio::time::timeout(Duration::from_secs(6), client_async_tls(URL, socket))
+                .await
+                .map_err(|_| anyhow!("KuCoin Pro L2 TLS timeout via {address}"))?
+                .map(|(socket, _)| socket)
+                .map_err(anyhow::Error::from)
+        });
+    }
+    let mut failures = Vec::new();
+    while let Some(result) = attempts.next().await {
+        match result {
+            Ok(socket) => return Ok(socket),
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+    anyhow::bail!("all KuCoin Pro L2 addresses failed: {}", failures.join("; "))
+}
+
+async fn run_pro_depth(
+    price_map: &PriceMap,
+    signal: &UpdateSignal,
+    l2_books: &L2OrderbookMap,
+    l2_wanted: &std::sync::Arc<dashmap::DashSet<String>>,
+    normalized_symbols: &HashMap<String, (String, f64)>,
+    raw_symbols: &HashMap<String, (String, f64)>,
+) -> Result<()> {
+    let mut ws = connect_kucoin_pro_public().await?;
+    let welcome_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let welcome: Value = loop {
+        let message = tokio::time::timeout_at(welcome_deadline, ws.next())
+            .await
+            .map_err(|_| anyhow!("KuCoin Pro L2 welcome timeout"))?
+            .ok_or_else(|| anyhow!("KuCoin Pro L2 closed before welcome"))??;
+        match message {
+            Message::Text(text) => break serde_json::from_str(&text)?,
+            Message::Binary(bytes) => break serde_json::from_slice(&bytes)?,
+            Message::Ping(payload) => ws.send(Message::Pong(payload)).await?,
+            Message::Pong(_) => {}
+            Message::Close(frame) => {
+                anyhow::bail!("KuCoin Pro L2 closed before welcome: {frame:?}")
+            }
+            _ => {}
+        }
+    };
+    if welcome["message"].as_str() != Some("welcome") {
+        anyhow::bail!("KuCoin Pro L2 rejected connection: {welcome}");
+    }
+    info!("[kucoin_pro_l2] connected to 10 ms incremental futures depth");
+    // Keep the reader independently polled while subscription maintenance and
+    // pings use the sink. Repeatedly cancelling a combined stream read on every
+    // 20 ms maintenance tick can otherwise delay a fragmented snapshot frame.
+    let (mut writer, mut reader) = ws.split();
+
+    let mut subscribed = HashSet::<String>::new();
+    let mut retained = HashMap::<String, Instant>::new();
+    let mut books = HashMap::<String, ProBook>::new();
+    let mut refresh = tokio::time::interval(Duration::from_millis(20));
+    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ping = tokio::time::interval(Duration::from_secs(15));
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_received = Instant::now();
+    loop {
+        tokio::select! {
+            _ = refresh.tick() => {
+                let now = Instant::now();
+                for key in l2_wanted.iter() {
+                    if let Some(normalized) = key.key().strip_prefix("kucoin:") {
+                        if let Some((raw, _)) = normalized_symbols.get(normalized) {
+                            retained.insert(raw.clone(), now);
+                        }
+                    }
+                }
+                retained.retain(|_, seen| now.duration_since(*seen) < Duration::from_secs(15));
+                let desired: HashSet<String> = retained.keys().cloned().collect();
+                for raw in desired.difference(&subscribed) {
+                    tracing::debug!("[kucoin_pro_l2] subscribing {raw}");
+                    writer.send(Message::Text(
+                        pro_depth_subscription(raw, true).to_string().into(),
+                    )).await?;
+                }
+                for raw in subscribed.difference(&desired) {
+                    writer.send(Message::Text(
+                        pro_depth_subscription(raw, false).to_string().into(),
+                    )).await?;
+                    books.remove(raw);
+                }
+                subscribed = desired;
+            }
+            message = reader.next() => match message {
+                Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => {
+                    last_received = Instant::now();
+                    let value: Value = match message {
+                        Message::Text(text) => serde_json::from_str(&text)?,
+                        Message::Binary(bytes) => serde_json::from_slice(&bytes)?,
+                        _ => unreachable!("match arm only accepts text or binary messages"),
+                    };
+                    if value["code"].as_i64().is_some() || value["result"].as_bool() == Some(false) {
+                        anyhow::bail!("KuCoin Pro L2 server error: {value}");
+                    }
+                    if value["T"].as_str() != Some("obu.FUTURES")
+                        || value["dp"].as_str() != Some("increment@10ms")
+                    {
+                        tracing::debug!("[kucoin_pro_l2] control message: {value}");
+                        continue;
+                    }
+                    let raw = value["d"]["s"]
+                        .as_str()
+                        .ok_or_else(|| anyhow!("KuCoin Pro L2 update has no symbol"))?;
+                    if !subscribed.contains(raw) {
+                        continue;
+                    }
+                    let (normalized, multiplier) = raw_symbols
+                        .get(raw)
+                        .map(|(normalized, multiplier)| (normalized.as_str(), *multiplier))
+                        .ok_or_else(|| anyhow!("unknown KuCoin Pro L2 symbol {raw}"))?;
+                    let source_ms = value["d"]["M"]
+                        .as_i64()
+                        .map(|timestamp_ns| timestamp_ns / 1_000_000)
+                        .ok_or_else(|| anyhow!("KuCoin Pro L2 update has no matching-engine timestamp"))?;
+                    let now_ms = crate::engine::utils::now_ms();
+                    if !(0..=750).contains(&now_ms.saturating_sub(source_ms)) {
+                        continue;
+                    }
+                    let book = books.entry(raw.to_string()).or_default();
+                    if !apply_pro_book_message(book, &value)? {
+                        continue;
+                    }
+                    let Some((bids, asks)) = pro_book_snapshot(book, multiplier) else {
+                        anyhow::bail!("KuCoin Pro L2 produced an invalid/crossed book for {raw}");
+                    };
+                    if let Some(mut venue) = price_map.get_mut("kucoin") {
+                        let _ = apply_depth_ticker(&mut venue, normalized, &bids, &asks, source_ms);
+                    }
+                    l2_books.insert(
+                        format!("kucoin:{normalized}"),
+                        L2Snapshot { bids, asks, updated_ms: source_ms },
+                    );
+                    pro_depth_updates().insert(normalized.to_string(), source_ms);
+                    signal.notify_one();
+                }
+                Some(Ok(Message::Ping(payload))) => writer.send(Message::Pong(payload)).await?,
+                Some(Ok(Message::Close(frame))) => anyhow::bail!("KuCoin Pro L2 closed: {frame:?}"),
+                Some(Err(error)) => return Err(error.into()),
+                None => anyhow::bail!("KuCoin Pro L2 stream ended"),
+                _ => {}
+            },
+            _ = ping.tick() => {
+                if last_received.elapsed() > Duration::from_secs(25) {
+                    anyhow::bail!("KuCoin Pro L2 pong/data timeout");
+                }
+                writer.send(Message::Text(json!({
+                    "id": uuid::Uuid::new_v4().simple().to_string(),
+                    "op": "ping",
+                    "timestamp": crate::engine::utils::now_ms(),
+                }).to_string().into())).await?;
+            }
+        }
+    }
 }
 
 fn number(value: &serde_json::Value) -> Option<f64> {
@@ -554,5 +936,124 @@ mod tests {
         assert!(!price_update_is_newer(Some((100, true)), 100, false));
         assert!(!price_update_is_newer(Some((101, true)), 100, true));
         assert!(price_update_is_newer(Some((100, true)), 101, false));
+    }
+
+    #[test]
+    fn pro_incremental_book_applies_absolute_updates_and_removals() {
+        let mut book = ProBook::default();
+        let snapshot = json!({
+            "t": "snapshot",
+            "d": {
+                "O": 10,
+                "C": 10,
+                "b": [["100", "2"], ["99", "3"]],
+                "a": [["101", "4"], ["102", "5"]]
+            }
+        });
+        assert!(apply_pro_book_message(&mut book, &snapshot).unwrap());
+        let delta = json!({
+            "t": "delta",
+            "d": {
+                "O": 11,
+                "C": 12,
+                "b": [["100", "0"], ["100.5", "7"]],
+                "a": [["101", "6"]]
+            }
+        });
+        assert!(apply_pro_book_message(&mut book, &delta).unwrap());
+        let (bids, asks) = pro_book_snapshot(&book, 0.1).unwrap();
+        assert_eq!(book.sequence, 12);
+        assert_eq!(bids.iter().map(|level| level.0).collect::<Vec<_>>(), vec![100.5, 99.0]);
+        assert_eq!(asks.iter().map(|level| level.0).collect::<Vec<_>>(), vec![101.0, 102.0]);
+        assert!((bids[0].1 - 0.7).abs() < 1e-12);
+        assert!((bids[1].1 - 0.3).abs() < 1e-12);
+        assert!((asks[0].1 - 0.6).abs() < 1e-12);
+        assert!((asks[1].1 - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pro_incremental_book_rejects_sequence_gaps_and_crosses() {
+        let mut book = ProBook::default();
+        apply_pro_book_message(
+            &mut book,
+            &json!({
+                "t": "snapshot",
+                "d": {"O": 20, "C": 20, "b": [["100", "1"]], "a": [["101", "1"]]}
+            }),
+        )
+        .unwrap();
+        assert!(apply_pro_book_message(
+            &mut book,
+            &json!({
+                "t": "delta",
+                "d": {"O": 22, "C": 22, "b": [], "a": [["101", "2"]]}
+            }),
+        )
+        .is_err());
+        apply_pro_book_message(
+            &mut book,
+            &json!({
+                "t": "delta",
+                "d": {"O": 21, "C": 21, "b": [["102", "1"]], "a": []}
+            }),
+        )
+        .unwrap();
+        assert!(pro_book_snapshot(&book, 1.0).is_none());
+    }
+
+    #[test]
+    fn pro_depth_subscription_requests_the_ten_millisecond_orderbook() {
+        let subscribe = pro_depth_subscription("XBTUSDTM", true);
+        assert_eq!(subscribe["action"], "SUBSCRIBE");
+        assert_eq!(subscribe["channel"], "obu");
+        assert_eq!(subscribe["tradeType"], "FUTURES");
+        assert_eq!(subscribe["symbol"], "XBTUSDTM");
+        assert_eq!(subscribe["depth"], "increment@10ms");
+        assert_eq!(subscribe["rpiFilter"], 0);
+        assert_eq!(subscribe["response"], true);
+
+        let unsubscribe = pro_depth_subscription("XBTUSDTM", false);
+        assert_eq!(unsubscribe["action"], "UNSUBSCRIBE");
+        assert_eq!(unsubscribe["channel"], "obu");
+        assert_eq!(unsubscribe["depth"], "increment@10ms");
+    }
+
+    #[tokio::test]
+    #[ignore = "read-only live KuCoin Pro WebSocket probe"]
+    async fn live_pro_incremental_depth_receives_snapshot_without_rest() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+        let prices = std::sync::Arc::new(dashmap::DashMap::new());
+        prices.insert("kucoin".to_string(), HashMap::new());
+        let signal = std::sync::Arc::new(tokio::sync::Notify::new());
+        let books = std::sync::Arc::new(dashmap::DashMap::new());
+        let wanted = std::sync::Arc::new(dashmap::DashSet::new());
+        wanted.insert("kucoin:BTCUSDT".to_string());
+        let normalized = HashMap::from([(
+            "BTCUSDT".to_string(),
+            ("XBTUSDTM".to_string(), 0.001),
+        )]);
+        let raw = HashMap::from([(
+            "XBTUSDTM".to_string(),
+            ("BTCUSDT".to_string(), 0.001),
+        )]);
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            run_pro_depth(&prices, &signal, &books, &wanted, &normalized, &raw),
+        )
+        .await;
+        if let Ok(Err(error)) = result {
+            panic!("KuCoin Pro L2 probe failed before timeout: {error}");
+        }
+        let book = books
+            .get("kucoin:BTCUSDT")
+            .expect("KuCoin Pro L2 did not publish a BTC snapshot");
+        assert!(!book.bids.is_empty());
+        assert!(!book.asks.is_empty());
+        assert!(pro_depth_is_fresh(
+            "BTCUSDT",
+            crate::engine::utils::now_ms()
+        ));
     }
 }

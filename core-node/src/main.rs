@@ -236,16 +236,33 @@ async fn main() -> Result<()> {
     // ── Pre-init KuCoin Private WS so execution reports arrive for the first trade ──
     // Without this, first IOC order's fill is missed because WS connects AFTER the order.
     if exchange_keys.supports("kucoin") {
-        info!("[startup] Pre-initializing KuCoin Private WS...");
+        info!("[startup] Pre-initializing KuCoin execution and order-report WS channels...");
+        engine::exchanges::ws_kucoin_order::prewarm(
+            &exchange_keys.kucoin_key,
+            &exchange_keys.kucoin_secret,
+            &exchange_keys.kucoin_passphrase,
+        );
         engine::exchanges::ws_kucoin_private::ensure_private_ws(
             &exchange_keys.kucoin_key,
             &exchange_keys.kucoin_secret,
             &exchange_keys.kucoin_passphrase,
         )
         .await;
-        // Give WS time to connect and subscribe before first trade
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        info!("[startup] KuCoin Private WS ready.");
+        match engine::exchanges::ws_kucoin_order::wait_ready(
+            &exchange_keys.kucoin_key,
+            &exchange_keys.kucoin_secret,
+            &exchange_keys.kucoin_passphrase,
+            std::time::Duration::from_secs(12),
+        )
+        .await
+        {
+            Ok(()) => info!("[startup] KuCoin Pro order WS authenticated."),
+            Err(error) => tracing::error!("[startup] {error}; order entry remains fail-closed"),
+        }
+        // The Classic report stream has no readiness acknowledgement exposed
+        // yet; give its subscription a short head start without delaying the
+        // already-authenticated Pro order lane.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
     // ── Pre-init Binance Trading WebSocket ───────────────────────────────────
@@ -679,8 +696,13 @@ async fn handle_health(
         })
         .count();
     let private_ready = private_ready_venues >= 2;
+    let order_ws_ready = engine::exchanges::ws_trader::order_lane_ready()
+        && engine::exchanges::ws_kucoin_order::is_ready();
     let healthy = process_healthy && market_ready;
-    let trading_ready = healthy && private_ready && !ctx.is_killed.load(std::sync::atomic::Ordering::Acquire);
+    let trading_ready = healthy
+        && private_ready
+        && order_ws_ready
+        && !ctx.is_killed.load(std::sync::atomic::Ordering::Acquire);
     let entry_decisions: std::collections::BTreeMap<String, u64> = ctx
         .entry_decisions
         .iter()
@@ -698,7 +720,7 @@ async fn handle_health(
             axum::http::StatusCode::SERVICE_UNAVAILABLE
         },
         Json(
-            serde_json::json!({"venues":venues,"healthy":healthy,"process_healthy":process_healthy,"market_ready":market_ready,"private_ready":private_ready,"trading_ready":trading_ready,"build_sha":option_env!("BUILD_SHA").unwrap_or("unknown"),"entries_halted":ctx.is_killed.load(std::sync::atomic::Ordering::Acquire),"supervisor_age_ms":age,"active_trades":active.ok().map(|v|v.len()),"scanner_status":scanner_status,"entry_decisions":entry_decisions}),
+            serde_json::json!({"venues":venues,"healthy":healthy,"process_healthy":process_healthy,"market_ready":market_ready,"private_ready":private_ready,"order_ws_ready":order_ws_ready,"trading_ready":trading_ready,"build_sha":option_env!("BUILD_SHA").unwrap_or("unknown"),"entries_halted":ctx.is_killed.load(std::sync::atomic::Ordering::Acquire),"supervisor_age_ms":age,"active_trades":active.ok().map(|v|v.len()),"scanner_status":scanner_status,"entry_decisions":entry_decisions}),
         ),
     )
 }

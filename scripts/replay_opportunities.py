@@ -15,6 +15,7 @@ import sqlite3
 SCALE = 100_000_000
 EXPECTED_IOC_SLIPPAGE_PER_LEG_PCT = 0.02
 FEE_TTL_MS = 3_600_000
+MAX_EXECUTION_BOOK_SKEW_MS = 250
 
 
 def finite_positive(value):
@@ -168,6 +169,8 @@ def evaluate(sample, profile):
     book_a, book_b = sample.get("book_a"), sample.get("book_b")
     if not valid_book(book_a, now_ms) or not valid_book(book_b, now_ms):
         return None, "book_freshness"
+    if abs(book_a["updated_ms"] - book_b["updated_ms"]) > profile["max_book_skew_ms"]:
+        return None, "book_skew"
     if not directional_structural_regime_is_stable(spread):
         return None, "structural_regime"
     gross_l1 = spread.get("spread")
@@ -318,13 +321,15 @@ def books_for_route(sample, route):
     return None
 
 
-def exit_valuation(entry, sample):
+def exit_valuation(entry, sample, max_book_skew_ms=MAX_EXECUTION_BOOK_SKEW_MS):
     books = books_for_route(sample, entry["route"])
     now_ms = sample.get("recorded_ms")
     if books is None or not isinstance(now_ms, int):
         return None
     book_a, book_b = books
     if not valid_book(book_a, now_ms) or not valid_book(book_b, now_ms):
+        return None
+    if abs(book_a["updated_ms"] - book_b["updated_ms"]) > max_book_skew_ms:
         return None
     quantity = entry["quantity"]
     is_a_higher = entry["is_a_higher"]
@@ -376,7 +381,7 @@ def simulate_exit(samples, entry, profile):
             continue
         if stamp > deadline_ms:
             break
-        valuation = exit_valuation(entry, sample)
+        valuation = exit_valuation(entry, sample, profile["max_book_skew_ms"])
         if valuation is None:
             continue
         last = valuation
@@ -512,6 +517,7 @@ def profile_from_args(args, deviation):
         "take_profit_percent": args.take_profit,
         "hard_stop_percent": args.hard_stop,
         "max_holding_time_ms": args.max_holding_ms,
+        "max_book_skew_ms": args.max_book_skew_ms,
     }
 
 
@@ -532,6 +538,7 @@ def main():
     parser.add_argument("--take-profit", type=float, default=0.1)
     parser.add_argument("--hard-stop", type=float, default=1.0)
     parser.add_argument("--max-holding-ms", type=int, default=1_800_000)
+    parser.add_argument("--max-book-skew-ms", type=int, default=MAX_EXECUTION_BOOK_SKEW_MS)
     args = parser.parse_args()
     samples = load_samples(args.database, args.build)
     report = {

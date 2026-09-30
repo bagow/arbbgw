@@ -89,6 +89,9 @@ class ReplayOpportunityTests(unittest.TestCase):
         value = replay.exit_valuation(entry, sample)
         self.assertAlmostEqual(value["average"]["net_usdt"], 0.598, places=9)
 
+        sample["book_b"]["updated_ms"] = 1_700
+        self.assertIsNone(replay.exit_valuation(entry, sample))
+
     def test_full_book_validation_rejects_bad_deeper_level(self):
         book = {
             "updated_ms": 1_000,
@@ -96,6 +99,17 @@ class ReplayOpportunityTests(unittest.TestCase):
             "asks": [[11.0, 1.0], [12.0, 1.0]],
         }
         self.assertFalse(replay.valid_book(book, 1_000))
+
+    def test_entry_rejects_books_from_different_market_moments(self):
+        sample = {
+            "recorded_ms": 2_000,
+            "spread": {"exchangeA": "binance", "exchangeB": "kucoin"},
+            "book_a": {"updated_ms": 2_000, "bids": [[10.0, 1.0]], "asks": [[11.0, 1.0]]},
+            "book_b": {"updated_ms": 1_700, "bids": [[10.0, 1.0]], "asks": [[11.0, 1.0]]},
+        }
+        event, reason = replay.evaluate(sample, {"max_book_skew_ms": 250})
+        self.assertIsNone(event)
+        self.assertEqual(reason, "book_skew")
 
     def test_sequential_cycles_do_not_double_count_one_live_pair(self):
         cycles = [

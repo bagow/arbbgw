@@ -580,24 +580,17 @@ impl ExchangeConnector for BinanceConnector {
                 let Some(order_id) = order_id else {
                     return Err(parse_error);
                 };
-                // Binance can acknowledge a filled IOC with executedQty and an
-                // orderId while omitting both avgPrice and cumQuote. The order is
-                // already live exchange state, so recover it immediately by its
-                // authoritative identity instead of discarding that identity and
-                // waiting for generic unknown-submit reconciliation.
+                // Do not inject a REST lookup into the dual-dispatch hot path.
+                // Preserve the exchange identity and let the independent
+                // reconciliation loop resolve the rare incomplete response.
                 tracing::warn!(
-                    "[binance] Filled order.place response omitted average price for {}; querying orderId={} immediately",
+                    "[binance] Filled order.place response omitted average price for {}; deferring orderId={} reconciliation",
                     r.client_id,
                     order_id,
                 );
-                self.query_managed(http, keys, r, Some(&order_id))
-                    .await
-                    .map_err(|query_error| {
-                        format!(
-                            "{}; immediate orderId={} recovery failed: {}",
-                            parse_error, order_id, query_error
-                        )
-                    })
+                Ok(crate::engine::orders::OrderObservation::pending(Some(
+                    order_id,
+                )))
             }
         }
     }
@@ -1745,7 +1738,7 @@ mod fee_tests {
     }
 
     #[test]
-    fn filled_ioc_without_average_keeps_identity_for_immediate_query() {
+    fn filled_ioc_without_average_keeps_identity_for_deferred_reconciliation() {
         let response = serde_json::json!({
             "status": "FILLED",
             "executedQty": "2620",

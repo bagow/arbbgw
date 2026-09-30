@@ -17,14 +17,20 @@ fn signal_throttle() -> &'static DashMap<String, i64> {
 
 static LAST_DIAG_LOG: AtomicI64 = AtomicI64::new(0);
 
-fn execution_books_are_fresh(
+/// A pair of individually fresh books can still describe different market
+/// moments. With 100 ms venue feeds, 250 ms leaves room for normal phase
+/// offset and network jitter while rejecting a quote assembled from a moving
+/// market and a lagging peer.
+pub(crate) const MAX_EXECUTION_BOOK_SKEW_MS: i64 = 250;
+
+pub(crate) fn execution_books_are_fresh(
     e_ctx: &EngineContext,
     key_a: &str,
     key_b: &str,
     now_ms: i64,
 ) -> bool {
-    [key_a, key_b].iter().all(|key| {
-        e_ctx.l2_books.get(*key).is_some_and(|book| {
+    let valid = |key: &str| {
+        e_ctx.l2_books.get(key).is_some_and(|book| {
             let top = book.bids.first().zip(book.asks.first());
             local_timestamp_is_fresh(now_ms, book.updated_ms, 750)
                 && top.is_some_and(|(bid, ask)| {
@@ -34,7 +40,17 @@ fn execution_books_are_fresh(
                         && bid.0 < ask.0
                 })
         })
-    })
+    };
+    if !valid(key_a) || !valid(key_b) {
+        return false;
+    }
+    let Some(updated_a) = e_ctx.l2_books.get(key_a).map(|book| book.updated_ms) else {
+        return false;
+    };
+    let Some(updated_b) = e_ctx.l2_books.get(key_b).map(|book| book.updated_ms) else {
+        return false;
+    };
+    updated_a.abs_diff(updated_b) <= MAX_EXECUTION_BOOK_SKEW_MS as u64
 }
 
 /// Price the complete physical quantity against both executable books.
@@ -652,7 +668,27 @@ mod l2_gate_tests {
             .insert("binance:TESTUSDT".into(), book(now - 750));
         ctx.l2_books
             .insert("kucoin:TESTUSDT".into(), book(now + 1));
+        assert!(!execution_books_are_fresh(
+            &ctx,
+            "binance:TESTUSDT",
+            "kucoin:TESTUSDT",
+            now,
+        ));
+
+        ctx.l2_books
+            .insert("binance:TESTUSDT".into(), book(now - 249));
+        ctx.l2_books
+            .insert("kucoin:TESTUSDT".into(), book(now));
         assert!(execution_books_are_fresh(
+            &ctx,
+            "binance:TESTUSDT",
+            "kucoin:TESTUSDT",
+            now,
+        ));
+
+        ctx.l2_books
+            .insert("binance:TESTUSDT".into(), book(now - 251));
+        assert!(!execution_books_are_fresh(
             &ctx,
             "binance:TESTUSDT",
             "kucoin:TESTUSDT",
@@ -668,6 +704,8 @@ mod l2_gate_tests {
             now,
         ));
 
+        ctx.l2_books
+            .insert("binance:TESTUSDT".into(), book(now));
         ctx.l2_books
             .insert("kucoin:TESTUSDT".into(), book(now));
         assert!(execution_books_are_fresh(

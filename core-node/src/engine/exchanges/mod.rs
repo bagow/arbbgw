@@ -11,6 +11,7 @@ pub mod traits;
 pub mod ws_bybit;
 pub mod ws_gate;
 pub mod ws_kucoin;
+pub mod ws_kucoin_order;
 pub mod ws_trader;
 pub mod xt;
 
