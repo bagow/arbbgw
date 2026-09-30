@@ -64,6 +64,39 @@ def episode_counts(snapshots, predicate):
     return dict(episodes)
 
 
+def readiness_outages(snapshots):
+    episodes = []
+    current = None
+    for record in snapshots:
+        health = record.get("health") or {}
+        unavailable = bool(health.get("error")) or health.get("healthy") is False
+        if unavailable and current is None:
+            current = {
+                "start_ms": record["ts"],
+                "last_unavailable_ms": record["ts"],
+                "samples": 1,
+                "errors": [health.get("error") or "unhealthy"],
+            }
+        elif unavailable:
+            current["last_unavailable_ms"] = record["ts"]
+            current["samples"] += 1
+            error = health.get("error") or "unhealthy"
+            if error not in current["errors"]:
+                current["errors"].append(error)
+        elif current is not None:
+            current["recovered_ms"] = record["ts"]
+            current["observed_duration_ms"] = record["ts"] - current["start_ms"]
+            episodes.append(current)
+            current = None
+    if current is not None:
+        current["recovered_ms"] = None
+        current["observed_duration_ms"] = (
+            current["last_unavailable_ms"] - current["start_ms"]
+        )
+        episodes.append(current)
+    return episodes
+
+
 def summarize(lines):
     starts = 0
     read_errors = []
@@ -170,6 +203,7 @@ def summarize(lines):
         "malformed_lines": malformed,
         "read_errors": len(read_errors),
         "health_errors": health_errors,
+        "readiness_outages": readiness_outages(snapshots),
         "observer_summaries": len(observer_summaries),
         "first_snapshot_ms": first_ts,
         "last_snapshot_ms": last_ts,

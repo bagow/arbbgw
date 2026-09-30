@@ -78,6 +78,41 @@ class CandidateTelemetrySummaryTests(unittest.TestCase):
         )
         self.assertEqual(result["candidate_episodes"], {"ONE": 2})
 
+    def test_groups_consecutive_health_failures_into_one_outage(self):
+        result = summarize(
+            [
+                line({"kind": "snapshot", "ts": 1_000, "rows": [], "health": {}}),
+                line(
+                    {
+                        "kind": "snapshot",
+                        "ts": 2_000,
+                        "rows": [],
+                        "health": {"error": "HTTPError"},
+                    }
+                ),
+                line(
+                    {
+                        "kind": "snapshot",
+                        "ts": 3_000,
+                        "rows": [],
+                        "health": {"error": "HTTPError"},
+                    }
+                ),
+                line(
+                    {
+                        "kind": "snapshot",
+                        "ts": 4_500,
+                        "rows": [],
+                        "health": {"healthy": True},
+                    }
+                ),
+            ]
+        )
+        self.assertEqual(result["health_errors"], 2)
+        self.assertEqual(len(result["readiness_outages"]), 1)
+        self.assertEqual(result["readiness_outages"][0]["samples"], 2)
+        self.assertEqual(result["readiness_outages"][0]["observed_duration_ms"], 2_500)
+
 
 if __name__ == "__main__":
     unittest.main()
