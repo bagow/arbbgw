@@ -33,7 +33,6 @@ const CANDIDATE_PREWARM_RETRY_MS: i64 = 5_000;
 const BINANCE_DEPTH_PREWARM_INTERVAL_MS: i64 = 500;
 const NORMAL_EXIT_PAIR_COOLDOWN_MS: i64 = 60_000;
 const RISK_EXIT_PAIR_COOLDOWN_MS: i64 = 30 * 60_000;
-const ENTRY_DIRECTION_CONFIRMATION_MS: u64 = 500;
 const ENTRY_WIDENING_EPSILON_PCT: f64 = 0.000001;
 
 async fn timed_preflight<F: Future>(future: F) -> (F::Output, i64) {
@@ -705,6 +704,7 @@ async fn enter(
     // Existing unowned positions must be reconciled, not silently absorbed by a new trade.
     let mut preflight_slot_claimed = false;
     for mut s in signals.into_iter().take(3) {
+        let signal_received_ms = now_ms();
         record_entry_decision(ctx, "signal_received");
         if ctx.is_killed.load(Ordering::Acquire) {
             record_entry_decision(ctx, "rejected_kill_switch");
@@ -773,7 +773,7 @@ async fn enter(
             // The durable seven-day quarantine remains authoritative in SQLite.
             // This short in-process marker prevents the same persistent spread
             // from re-querying that verdict and retaining scarce L2 capacity on
-            // every 100 ms engine tick; it is rechecked after pair_cooldown_ms.
+            // on every engine tick; it is rechecked after pair_cooldown_ms.
             ctx.pair_cooldown.insert(s.pair.clone(), now_ms());
             tracing::info!(
                 "[managed] Pair loss quarantine rejected {}: {} VERIFIED losses in the last 7d",
@@ -1101,62 +1101,17 @@ async fn enter(
                 continue;
             }
         };
-        // A large cross-venue deviation that is still expanding is momentum,
-        // not confirmed mean reversion. Trade 2041 entered while executable L2
-        // widened from 0.6481% to 0.7367% and then 0.8469%, immediately reaching
-        // the hard stop. Re-sample after several Binance depth cycles and require
-        // the edge to be stable or narrowing while still clearing the full budget.
-        let initial_gross = gross;
-        tokio::time::sleep(std::time::Duration::from_millis(
-            ENTRY_DIRECTION_CONFIRMATION_MS,
-        ))
-        .await;
-        if s.exchange_a == "binance" || s.exchange_b == "binance" {
-            if let Err(error) = refresh_binance_execution_book(&s.pair, prices, http, ctx).await {
-                tracing::warn!(
-                    "[managed] Binance L2 confirmation refresh failed for {}: {}",
-                    s.pair,
-                    error,
-                );
-                record_entry_decision(ctx, "rejected_direction_confirmation_refresh");
-                continue;
-            }
-        }
-        let (quote_a, quote_b) = match (
-            executable_quote(
-                prices,
-                ctx,
-                &s.exchange_a,
-                &s.pair,
-                !s.is_a_higher,
-                s.target_qty_a,
-            ),
-            executable_quote(
-                prices,
-                ctx,
-                &s.exchange_b,
-                &s.pair,
-                s.is_a_higher,
-                s.target_qty_b,
-            ),
-        ) {
-            (Some(a), Some(b)) => (a, b),
-            _ => {
-                record_entry_decision(ctx, "rejected_direction_confirmation_l2");
-                continue;
-            }
-        };
-        let (pa, pb) = (quote_a.vwap, quote_b.vwap);
-        let gross = if s.is_a_higher {
-            (pa - pb) / pb * 100.0
-        } else {
-            (pb - pa) / pa * 100.0
-        };
-        if entry_spread_is_widening(initial_gross, gross) {
+        // The private preflight above is independent network work and already
+        // provides a real observation interval. Compare its final authoritative
+        // L2 snapshot with the executable snapshot that emitted the signal;
+        // sleeping another fixed 500 ms only makes the quote older. Trade 2041's
+        // 0.6481% -> 0.7367% momentum move is still rejected here.
+        if entry_spread_is_widening(s.spread, gross) {
             tracing::info!(
-                "[managed] Direction confirmation rejected {}: executable L2 widened {:.4}% -> {:.4}%",
+                "[managed] Direction confirmation rejected {} after {}ms preflight: executable L2 widened {:.4}% -> {:.4}%",
                 s.pair,
-                initial_gross,
+                now_ms().saturating_sub(signal_received_ms),
+                s.spread,
                 gross,
             );
             record_entry_decision(ctx, "rejected_widening_l2");
@@ -1176,9 +1131,9 @@ async fn enter(
                     .min_entry_spread
                     .max(s.structural_spread + s.break_even_pct + p.min_structural_deviation);
                 tracing::info!(
-                    "[managed] Direction confirmation budget rejected {}: initial_l2={:.4}% confirmed_l2={:.4}% required={:.4}%",
+                    "[managed] Direction confirmation budget rejected {}: signal_l2={:.4}% final_l2={:.4}% required={:.4}%",
                     s.pair,
-                    initial_gross,
+                    s.spread,
                     gross,
                     required_floor,
                 );
@@ -1252,6 +1207,11 @@ async fn enter(
         // remaining movement budget for races after the snapshot.
         let limit = entry_ioc_limit(quote, buy, half);
         let o = request(&t, first, qty, limit, false);
+        tracing::info!(
+            "[managed] Dispatching first IOC for {} {}ms after signal acceptance",
+            s.pair,
+            now_ms().saturating_sub(signal_received_ms),
+        );
         // KuCoin may need a short private-order confirmation before its fill is
         // authoritative. Overlap that wait with independent Binance REST and
         // WS API depth requests instead of leaving the hedge quote to age for

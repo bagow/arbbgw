@@ -215,11 +215,9 @@ async fn main() -> Result<()> {
     // ── Exchange keys — loaded once at startup ───────────────────────────────
     let exchange_keys = Arc::new(engine::real::ExchangeKeys::from_env());
     info!(
-        "Exchange keys loaded: gate={} kucoin={} binance={} bybit={}",
-        exchange_keys.supports("gate"),
+        "Active-route exchange keys loaded: kucoin={} binance={}",
         exchange_keys.supports("kucoin"),
         exchange_keys.supports("binance"),
-        exchange_keys.supports("bybit")
     );
 
     // ── Pre-warm and fetch loops ──────────────────────────────────────────────
@@ -250,17 +248,10 @@ async fn main() -> Result<()> {
         info!("[startup] KuCoin Private WS ready.");
     }
 
-    // ── Pre-init Trading WebSockets (Binance + Gate) ─────────────────────────
+    // ── Pre-init Binance Trading WebSocket ───────────────────────────────────
     if exchange_keys.supports("binance") {
         info!("[startup] Pre-initializing Binance query and order WS APIs...");
         engine::exchanges::ws_trader::prewarm_ws_connections();
-    }
-    if exchange_keys.supports("gate") {
-        info!("[startup] Pre-initializing Gate WS trading API...");
-        let _ = engine::exchanges::ws_gate::get_or_init_gate_ws(
-            exchange_keys.gate_key.clone(),
-            exchange_keys.gate_secret.clone(),
-        );
     }
 
     // ── Spawn collectors ─────────────────────────────────────────────────────
@@ -299,12 +290,16 @@ async fn main() -> Result<()> {
         let profiles_db_engine = profiles_db.clone();
 
         tokio::spawn(async move {
+            // Coalesce bursts without adding a human-scale polling delay. The
+            // collectors are already event driven; 20 ms bounds CPU usage while
+            // allowing up to 50 complete cross-venue scans per second.
+            const MIN_ENGINE_CYCLE: Duration = Duration::from_millis(20);
             let mut last_run = std::time::Instant::now();
             loop {
                 signal.notified().await;
                 let elapsed = last_run.elapsed();
-                if elapsed < Duration::from_millis(100) {
-                    tokio::time::sleep(Duration::from_millis(100) - elapsed).await;
+                if elapsed < MIN_ENGINE_CYCLE {
+                    tokio::time::sleep(MIN_ENGINE_CYCLE - elapsed).await;
                 }
                 last_run = std::time::Instant::now();
 
@@ -322,6 +317,7 @@ async fn main() -> Result<()> {
                 let t_shadow_tx = shadow_tx.clone();
 
                 let tick_result = tokio::task::spawn(async move {
+                    let cycle_started = std::time::Instant::now();
                     // Read cached settings (no SQL, just RwLock read)
                     let real_profiles = t_real_cache.read().await.clone();
                     let ts = t_ts_cache.read().await.clone();
@@ -504,7 +500,11 @@ async fn main() -> Result<()> {
                         &ts,
                     );
 
-                    engine::managed::propose(signals, real_profiles, t_prices, t_http, t_keys, t_journal, t_e_ctx, ts);
+                    engine::managed::propose(signals, real_profiles, t_prices, t_http, t_keys, t_journal, t_e_ctx.clone(), ts);
+                    t_e_ctx.scanner_status.insert(
+                        "engine_cycle_us".to_string(),
+                        cycle_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                    );
                 }).await;
 
                 if let Err(e) = tick_result {
@@ -608,7 +608,7 @@ async fn handle_health(
     let process_healthy = active.is_ok()
         && engine::utils::local_timestamp_is_fresh(now, supervisor_tick_ms, 4_999);
     let mut market_ready_venues = 0usize;
-    let venues: Vec<_> = ["binance", "gate", "kucoin"]
+    let venues: Vec<_> = ["binance", "kucoin"]
         .iter()
         .map(|ex| {
             let prefix = format!("{ex}:");
@@ -650,7 +650,7 @@ async fn handle_health(
         })
         .collect();
     let market_ready = market_ready_venues >= 2;
-    let private_ready_venues = ["binance", "gate", "kucoin"]
+    let private_ready_venues = ["binance", "kucoin"]
         .iter()
         .filter(|ex| {
             let balance_fresh = ctx

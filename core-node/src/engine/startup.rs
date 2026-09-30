@@ -32,16 +32,11 @@ pub fn spawn_collectors(
     e_ctx: &Arc<EngineContext>,
     settings_cache: &Arc<RwLock<Vec<TradingSettings>>>,
 ) {
-    spawn_collector!(crate::collector::gate::run, prices, signal, e_ctx, settings_cache);
+    // This deployment trades only the Binance/KuCoin route. Keeping unused
+    // collectors alive created irrelevant wakeups and stole CPU from the hot
+    // scanner path without producing an executable signal.
     spawn_collector!(crate::collector::kucoin::run, prices, signal, e_ctx, settings_cache);
     spawn_collector!(crate::collector::binance::run, prices, signal, e_ctx, settings_cache);
-    spawn_collector!(crate::collector::bybit::run, prices, signal, e_ctx, settings_cache);
-    spawn_collector!(crate::collector::bitget::run, prices, signal, e_ctx, settings_cache);
-    spawn_collector!(crate::collector::bingx::run, prices, signal, e_ctx, settings_cache);
-    spawn_collector!(crate::collector::bitmex::run, prices, signal, e_ctx, settings_cache);
-    spawn_collector!(crate::collector::ascendex::run, prices, signal, e_ctx, settings_cache);
-    spawn_collector!(crate::collector::xt::run, prices, signal, e_ctx, settings_cache);
-    spawn_collector!(crate::collector::toobit::run, prices, signal, e_ctx, settings_cache);
 }
 
 /// Pre-warm HTTP connections to exchange APIs.
@@ -51,8 +46,6 @@ pub fn prewarm_http(http: reqwest::Client) {
     tokio::spawn(async move {
         let endpoints = [
             "https://fapi.binance.com/fapi/v1/time",
-            "https://api.bybit.com/v5/market/time",
-            "https://api.gateio.ws/api/v4/futures/usdt/contracts",
             "https://api-futures.kucoin.com/api/v1/timestamp",
         ];
         for url in endpoints {

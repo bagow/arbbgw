@@ -16,13 +16,16 @@ use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSigna
 // the 750 ms execution freshness budget while cutting message volume by roughly 4x.
 const DEPTH_STREAMS_PER_CONNECTION: usize = 5;
 const DEPTH_UPDATE_INTERVAL_MS: u64 = 500;
+// Once a route enters the executable candidate set, promote it to Binance's
+// fastest documented partial-depth cadence. The broad health probe remains at
+// 500 ms so the VPS does not rebuild the old all-market receive backlog.
+const DYNAMIC_DEPTH_UPDATE_INTERVAL_MS: u64 = 100;
 const DEPTH_SUBSCRIPTION_REFRESH_SECS: u64 = 1_800;
-// The engine recomputes the candidate set every 100 ms. Polling it once per
-// second can miss an entire short-lived edge between two refresh ticks, so the
-// local hand-off must be faster than the producer cadence. This does not send
-// extra exchange traffic: SUBSCRIBE/UNSUBSCRIBE messages are emitted only when
+// The engine can produce a new candidate every 20 ms. Poll the in-memory set
+// faster than that so subscription hand-off does not add another scan cycle.
+// This does not send extra exchange traffic: messages are emitted only when
 // the deduplicated symbol set actually changes.
-const DYNAMIC_DEPTH_REFRESH_MS: u64 = 50;
+const DYNAMIC_DEPTH_REFRESH_MS: u64 = 5;
 const DYNAMIC_DEPTH_RETENTION_SECS: u64 = 30;
 const MAX_BASELINE_DEPTH_BACKLOG_MS: i64 = 5_000;
 const MAX_BASELINE_CONSECUTIVE_STALE_DEPTH: u32 = 10;
@@ -811,8 +814,6 @@ async fn run_dynamic_l2_depth_stream(
     l2_wanted: std::sync::Arc<dashmap::DashSet<String>>,
     signal: UpdateSignal,
 ) {
-    let fallback: std::collections::HashSet<&str> =
-        FALLBACK_DEPTH_SYMBOLS.iter().copied().collect();
     let mut backoff = Duration::from_secs(1);
 
     loop {
@@ -860,7 +861,7 @@ async fn run_dynamic_l2_depth_stream(
                     let mut wanted: Vec<String> = l2_wanted
                         .iter()
                         .filter_map(|key| key.strip_prefix("binance:").map(str::to_owned))
-                        .filter(|symbol| symbol.ends_with("USDT") && !fallback.contains(symbol.as_str()))
+                        .filter(|symbol| symbol.ends_with("USDT"))
                         .collect();
                     wanted.sort_unstable();
                     wanted.dedup();
@@ -888,7 +889,7 @@ async fn run_dynamic_l2_depth_stream(
                     if !added.is_empty() {
                         let params: Vec<String> = added
                             .iter()
-                            .map(|symbol| format!("{}@depth5@{}ms", symbol.to_lowercase(), DEPTH_UPDATE_INTERVAL_MS))
+                            .map(|symbol| format!("{}@depth5@{}ms", symbol.to_lowercase(), DYNAMIC_DEPTH_UPDATE_INTERVAL_MS))
                             .collect();
                         let request = serde_json::json!({"method":"SUBSCRIBE","params":params,"id":request_id});
                         request_id += 1;
@@ -907,7 +908,7 @@ async fn run_dynamic_l2_depth_stream(
                     if !expired.is_empty() {
                         let params: Vec<String> = expired
                             .iter()
-                            .map(|symbol| format!("{}@depth5@{}ms", symbol.to_lowercase(), DEPTH_UPDATE_INTERVAL_MS))
+                            .map(|symbol| format!("{}@depth5@{}ms", symbol.to_lowercase(), DYNAMIC_DEPTH_UPDATE_INTERVAL_MS))
                             .collect();
                         let request = serde_json::json!({"method":"UNSUBSCRIBE","params":params,"id":request_id});
                         request_id += 1;
@@ -1159,9 +1160,15 @@ mod tests {
 
     #[test]
     fn dynamic_candidate_handoff_is_faster_than_engine_ticks() {
-        // The producer cadence in main.rs is 100 ms. Sampling at the same or a
+        // The producer cadence in main.rs is 20 ms. Sampling at the same or a
         // slower cadence can miss a candidate that exists for exactly one tick.
-        assert!(DYNAMIC_DEPTH_REFRESH_MS < 100);
+        assert!(DYNAMIC_DEPTH_REFRESH_MS < 20);
+    }
+
+    #[test]
+    fn executable_candidates_use_fast_partial_depth() {
+        assert_eq!(DYNAMIC_DEPTH_UPDATE_INTERVAL_MS, 100);
+        assert!(DYNAMIC_DEPTH_UPDATE_INTERVAL_MS < DEPTH_UPDATE_INTERVAL_MS);
     }
 
     #[test]
@@ -1289,7 +1296,7 @@ mod tests {
         ws.send(Message::Text(
             serde_json::json!({
                 "method": "SUBSCRIBE",
-                "params": ["btcusdt@depth5@500ms"],
+                "params": [format!("btcusdt@depth5@{}ms", DYNAMIC_DEPTH_UPDATE_INTERVAL_MS)],
                 "id": 1
             })
             .to_string(),

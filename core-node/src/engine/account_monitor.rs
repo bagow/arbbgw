@@ -48,7 +48,7 @@ pub fn start(j: Journal, http: Client, keys: Arc<ExchangeKeys>, ctx: Arc<EngineC
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             timer.tick().await;
-            for ex in ["binance", "gate", "kucoin"] {
+            for ex in ["binance", "kucoin"] {
                 if !keys.supports(ex) {
                     continue;
                 }
