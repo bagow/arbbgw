@@ -498,15 +498,16 @@ pub fn compute_spreads(
 /// Pre-seed the STRUCTURAL_EMA from historical canonical premiums.
 /// Tuple: (timestamp_secs, premium_12, premium_21, pair, ex1_canonical, ex2_canonical)
 /// All keys seeded here are marked as VERIFIED — they have real 24h history.
+/// Returns the number of keys that passed validation and were newly seeded.
 pub fn warmup_ema_from_premiums(
     history: &[(f64, f64, f64, String, String, String)],
     ts: &TechnicalSettings,
-) {
+) -> usize {
     let ema_map = STRUCTURAL_EMA.get_or_init(DashMap::new);
     let verified = VERIFIED_KEYS.get_or_init(DashSet::new);
     let historically_verified = HISTORICALLY_VERIFIED_KEYS.get_or_init(DashSet::new);
     if !ts.ema_tau_secs.is_finite() || ts.ema_tau_secs <= 0.0 {
-        return;
+        return 0;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -521,6 +522,7 @@ pub fn warmup_ema_from_premiums(
                 .push((*stamp, *a, *b));
         }
     }
+    let mut verified_count = 0usize;
     for (key, mut rows) in grouped {
         if historically_verified.contains(&key) {
             continue;
@@ -571,7 +573,9 @@ pub fn warmup_ema_from_premiums(
         ema_map.insert(key.clone(), e);
         verified.insert(key.clone());
         historically_verified.insert(key);
+        verified_count += 1;
     }
+    verified_count
 }
 
 /// Returns all EMA keys that are being tracked but not yet verified.

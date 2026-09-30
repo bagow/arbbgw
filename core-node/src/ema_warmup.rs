@@ -482,8 +482,7 @@ pub async fn run(http: Client, prices: PriceMap, books: L2OrderbookMap, ts: shar
                         ));
                     }
 
-                    warmup_ema_from_premiums(&history, &ts);
-                    1usize
+                    warmup_ema_from_premiums(&history, &ts)
                 }));
             }
         }
@@ -574,8 +573,7 @@ async fn run_retry_unverified(
                 let p21 = (c2 - c1) / c1 * 100.0;
                 history.push((*ts_val, p12, p21, pair.to_string(), name1.clone(), name2.clone()));
             }
-            warmup_ema_from_premiums(&history, &ts);
-            1usize
+            warmup_ema_from_premiums(&history, &ts)
         }));
     }
 
