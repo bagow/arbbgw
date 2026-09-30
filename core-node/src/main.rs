@@ -350,22 +350,37 @@ async fn main() -> Result<()> {
                     let spreads = compute_spreads(&t_prices, 0.0, &discovery_ts);
 
                     // Writes to profiles_db since vps-api reads from it
+                    // Replay must resolve the scanner's 500 ms confirmation rule.
+                    // Keep the public API snapshot at one hertz, but retain candidate
+                    // books at 100 ms while they exist. `try_send` and the one-slot
+                    // writer queue keep this passive recorder out of the trading path.
+                    static LAST_SHADOW: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
                     static LAST_SNAP: std::sync::atomic::AtomicU64 =
                         std::sync::atomic::AtomicU64::new(0);
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64;
-                    if now_ms.saturating_sub(LAST_SNAP.load(std::sync::atomic::Ordering::Relaxed))
-                        > 1000
+                    if now_ms.saturating_sub(
+                        LAST_SHADOW.load(std::sync::atomic::Ordering::Relaxed),
+                    ) > 100
                     {
-                        LAST_SNAP.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                        let _ = t_shadow_tx.try_send(engine::shadow::capture(
+                        LAST_SHADOW.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                        let shadow_rows = engine::shadow::capture(
                             &spreads,
                             &t_e_ctx,
                             now_ms as i64,
                             ts.default_fee_rate,
-                        ));
+                        );
+                        if !shadow_rows.is_empty() {
+                            let _ = t_shadow_tx.try_send(shadow_rows);
+                        }
+                    }
+                    if now_ms.saturating_sub(LAST_SNAP.load(std::sync::atomic::Ordering::Relaxed))
+                        > 1000
+                    {
+                        LAST_SNAP.store(now_ms, std::sync::atomic::Ordering::Relaxed);
                         let snapshot_spreads: Vec<_> = spreads.iter().take(500).cloned().collect();
                         let snapshot_val =
                             serde_json::json!({ "ts": now_ms as i64, "data": snapshot_spreads })
