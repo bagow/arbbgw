@@ -11,14 +11,14 @@ use tracing::{error, info, warn};
 
 use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
 
-// At 100 ms the deployment host accumulated a multi-second receive queue even with
-// bounded transports. The 500 ms partial-depth stream keeps exchange timestamps inside
-// the 750 ms execution freshness budget while cutting message volume by roughly 4x.
+// The stable health probe now follows only BTCUSDT. At that bounded one-symbol
+// volume, use Binance's fastest documented partial-depth cadence so the observed
+// 250-350 ms route latency still leaves headroom inside the 750 ms freshness gate.
 const DEPTH_STREAMS_PER_CONNECTION: usize = 5;
-const DEPTH_UPDATE_INTERVAL_MS: u64 = 500;
+const DEPTH_UPDATE_INTERVAL_MS: u64 = 100;
 // Once a route enters the executable candidate set, promote it to Binance's
-// fastest documented partial-depth cadence. The broad health probe remains at
-// 500 ms so the VPS does not rebuild the old all-market receive backlog.
+// fastest documented partial-depth cadence. The bounded health probe uses the
+// same cadence; unlike the old all-market stream it carries only one symbol.
 const DYNAMIC_DEPTH_UPDATE_INTERVAL_MS: u64 = 100;
 const DEPTH_SUBSCRIPTION_REFRESH_SECS: u64 = 1_800;
 // The engine can produce a new candidate every 20 ms. Poll the in-memory set
@@ -1131,7 +1131,7 @@ mod tests {
     fn depth_stream_uses_routed_combined_url() {
         assert_eq!(
             depth_stream_url(&["BTCUSDT".into(), "ETHUSDT".into()]),
-            "wss://fstream.binance.com/stream?streams=btcusdt@depth5@500ms/ethusdt@depth5@500ms"
+            "wss://fstream.binance.com/stream?streams=btcusdt@depth5@100ms/ethusdt@depth5@100ms"
         );
     }
 
@@ -1139,7 +1139,7 @@ mod tests {
     fn single_baseline_depth_uses_raw_stream() {
         assert_eq!(
             depth_stream_url(&["BTCUSDT".into()]),
-            "wss://fstream.binance.com/ws/btcusdt@depth5@500ms"
+            "wss://fstream.binance.com/ws/btcusdt@depth5@100ms"
         );
     }
 
@@ -1157,9 +1157,9 @@ mod tests {
     }
 
     #[test]
-    fn executable_candidates_use_fast_partial_depth() {
+    fn bounded_baseline_and_candidates_use_fast_partial_depth() {
+        assert_eq!(DEPTH_UPDATE_INTERVAL_MS, 100);
         assert_eq!(DYNAMIC_DEPTH_UPDATE_INTERVAL_MS, 100);
-        assert!(DYNAMIC_DEPTH_UPDATE_INTERVAL_MS < DEPTH_UPDATE_INTERVAL_MS);
     }
 
     #[test]
