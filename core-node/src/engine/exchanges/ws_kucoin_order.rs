@@ -46,6 +46,14 @@ fn hmac_b64(secret: &str, payload: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
 }
 
+fn json_frame_bytes(message: Message, phase: &str) -> Result<Vec<u8>, String> {
+    match message {
+        Message::Text(text) => Ok(text.as_bytes().to_vec()),
+        Message::Binary(bytes) => Ok(bytes.to_vec()),
+        _ => Err(format!("KuCoin Pro WS sent a non-JSON {phase} frame")),
+    }
+}
+
 fn authenticated_url(credentials: &Credentials, timestamp: i64) -> String {
     let timestamp = timestamp.to_string();
     let signature = hmac_b64(
@@ -170,20 +178,21 @@ async fn authenticate(
     // KuCoin requires the signature of the exact JSON bytes it sends here,
     // not a parsed-and-reserialized equivalent.
     let challenge = match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
-        Ok(Some(Ok(Message::Text(text)))) => text,
-        Ok(Some(Ok(_))) => return Err("KuCoin Pro WS sent a non-text auth challenge".into()),
+        Ok(Some(Ok(message))) => json_frame_bytes(message, "auth challenge")?,
         Ok(Some(Err(error))) => return Err(format!("KuCoin Pro WS auth read failed: {error}")),
         Ok(None) => return Err("KuCoin Pro WS closed before authentication".into()),
         Err(_) => return Err("KuCoin Pro WS auth challenge timeout".into()),
     };
-    let challenge_json: Value = serde_json::from_str(&challenge)
+    let challenge_json: Value = serde_json::from_slice(&challenge)
         .map_err(|error| format!("invalid KuCoin Pro WS auth challenge: {error}"))?;
     if challenge_json["sessionId"].as_str().is_none()
         || challenge_json["timestamp"].as_i64().is_none()
     {
         return Err("KuCoin Pro WS auth challenge is missing sessionId/timestamp".into());
     }
-    let auth_signature = hmac_b64(&credentials.api_secret, &challenge);
+    let challenge_text = std::str::from_utf8(&challenge)
+        .map_err(|error| format!("KuCoin Pro WS auth challenge is not UTF-8: {error}"))?;
+    let auth_signature = hmac_b64(&credentials.api_secret, challenge_text);
     tokio::time::timeout(
         Duration::from_secs(1),
         ws.send(Message::Text(auth_signature)),
@@ -193,9 +202,11 @@ async fn authenticate(
     .map_err(|error| format!("KuCoin Pro WS auth send failed: {error}"))?;
 
     let welcome = match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
-        Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str::<Value>(&text)
-            .map_err(|error| format!("invalid KuCoin Pro WS welcome: {error}"))?,
-        Ok(Some(Ok(_))) => return Err("KuCoin Pro WS sent a non-text welcome".into()),
+        Ok(Some(Ok(message))) => {
+            let bytes = json_frame_bytes(message, "welcome")?;
+            serde_json::from_slice::<Value>(&bytes)
+                .map_err(|error| format!("invalid KuCoin Pro WS welcome: {error}"))?
+        }
         Ok(Some(Err(error))) => return Err(format!("KuCoin Pro WS welcome read failed: {error}")),
         Ok(None) => return Err("KuCoin Pro WS closed during authentication".into()),
         Err(_) => return Err("KuCoin Pro WS welcome timeout".into()),
@@ -237,8 +248,15 @@ async fn order_loop(
             tokio::select! {
                 incoming = ws.next() => {
                     match incoming {
-                        Some(Ok(Message::Text(text))) => {
-                            match serde_json::from_str::<Value>(&text) {
+                        Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => {
+                            let bytes = match json_frame_bytes(message, "response") {
+                                Ok(bytes) => bytes,
+                                Err(error) => {
+                                    tracing::warn!("[kucoin_order_ws] {error}");
+                                    continue;
+                                }
+                            };
+                            match serde_json::from_slice::<Value>(&bytes) {
                                 Ok(response) => {
                                     if let Some(id) = response["id"].as_str() {
                                         if let Some(sender) = pending.remove(id) {
@@ -369,6 +387,23 @@ pub async fn send_order(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pro_json_frames_accept_text_and_binary_without_changing_bytes() {
+        let payload = br#"{"sessionId":"s","timestamp":123}"#;
+        assert_eq!(
+            json_frame_bytes(
+                Message::Text(String::from_utf8(payload.to_vec()).unwrap().into()),
+                "test",
+            )
+            .unwrap(),
+            payload,
+        );
+        assert_eq!(
+            json_frame_bytes(Message::Binary(payload.to_vec().into()), "test").unwrap(),
+            payload,
+        );
+    }
 
     #[test]
     fn url_credentials_are_encoded_and_signature_uses_key_plus_timestamp() {
