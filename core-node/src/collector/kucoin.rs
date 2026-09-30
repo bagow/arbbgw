@@ -78,8 +78,18 @@ pub async fn run(
         tokio::select! {
             res = handler(&prices, &signal, &l2_books, &l2_wanted) => {
                 match res {
-                    Ok(_)  => { warn!("[kucoin] WS closed, reconnecting..."); backoff = Duration::from_secs(1); }
-                    Err(e) => warn!("[kucoin] WS disconnected: {}. Reconnecting in {:?}", e, backoff),
+                    Ok(_) => {
+                        // `handler` normally returns after its planned instrument-universe
+                        // refresh.  Do not add the failure backoff to that deterministic
+                        // rotation: all Classic and Pro streams are already down while the
+                        // next generation is being created.
+                        info!("[kucoin] Refreshing instrument universe immediately...");
+                        backoff = Duration::from_secs(1);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("[kucoin] WS disconnected: {}. Reconnecting in {:?}", e, backoff);
+                    }
                 }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -213,7 +223,13 @@ async fn handler(
     });
 
     tokio::select! {
-        _ = children.join_next() => {},
+        child = children.join_next() => {
+            match child {
+                Some(Ok(())) => anyhow::bail!("KuCoin collector child exited unexpectedly"),
+                Some(Err(error)) => anyhow::bail!("KuCoin collector child failed: {error}"),
+                None => anyhow::bail!("KuCoin collector has no live children"),
+            }
+        },
         _ = tokio::time::sleep(Duration::from_secs(1800)) => {},
     }
     // Dropping JoinSet aborts all children before reloading the instrument universe.
