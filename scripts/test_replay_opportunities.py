@@ -51,11 +51,30 @@ class ReplayOpportunityTests(unittest.TestCase):
 
     def test_confirmation_requires_a_non_widening_future_sample(self):
         rows = [
-            {"recorded_ms": 1_000, "gross_pct": 1.0},
-            {"recorded_ms": 1_600, "gross_pct": 1.1},
-            {"recorded_ms": 2_200, "gross_pct": 0.9},
+            {"recorded_ms": 1_000, "gross_pct": 1.0, "book_a_updated_ms": 990, "book_b_updated_ms": 995},
+            {"recorded_ms": 1_200, "gross_pct": 1.0, "book_a_updated_ms": 1_190, "book_b_updated_ms": 1_195},
+            {"recorded_ms": 1_400, "gross_pct": 1.1, "book_a_updated_ms": 1_390, "book_b_updated_ms": 1_395},
+            {"recorded_ms": 1_500, "gross_pct": 1.1, "book_a_updated_ms": 1_490, "book_b_updated_ms": 1_495},
+            {"recorded_ms": 1_700, "gross_pct": 1.0, "book_a_updated_ms": 1_690, "book_b_updated_ms": 1_695},
+            {"recorded_ms": 1_900, "gross_pct": 0.9, "book_a_updated_ms": 1_890, "book_b_updated_ms": 1_895},
+            {"recorded_ms": 2_000, "gross_pct": 0.9, "book_a_updated_ms": 1_990, "book_b_updated_ms": 1_995},
         ]
-        self.assertEqual(replay.confirmed_entry(rows, 500), rows[2])
+        self.assertEqual(replay.confirmed_entry(rows, 500), rows[6])
+
+    def test_confirmation_rejects_sparse_or_one_sided_book_updates(self):
+        sparse = [
+            {"recorded_ms": 1_000, "gross_pct": 1.0, "book_a_updated_ms": 990, "book_b_updated_ms": 995},
+            {"recorded_ms": 1_600, "gross_pct": 0.9, "book_a_updated_ms": 1_590, "book_b_updated_ms": 1_595},
+        ]
+        self.assertIsNone(replay.confirmed_entry(sparse, 500))
+
+        one_sided = [
+            {"recorded_ms": 1_000, "gross_pct": 1.0, "book_a_updated_ms": 990, "book_b_updated_ms": 995},
+            {"recorded_ms": 1_200, "gross_pct": 0.9, "book_a_updated_ms": 1_190, "book_b_updated_ms": 995},
+            {"recorded_ms": 1_400, "gross_pct": 0.9, "book_a_updated_ms": 1_390, "book_b_updated_ms": 995},
+            {"recorded_ms": 1_600, "gross_pct": 0.9, "book_a_updated_ms": 1_590, "book_b_updated_ms": 995},
+        ]
+        self.assertIsNone(replay.confirmed_entry(one_sided, 500))
 
     def test_exit_valuation_includes_all_four_fees(self):
         entry = {

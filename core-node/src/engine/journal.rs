@@ -9,7 +9,7 @@ pub const PAIR_LOSS_QUARANTINE_THRESHOLD: i64 = 2;
 /// Increment only when entry/exit risk semantics materially change. Historical
 /// losses remain auditable, but cannot permanently quarantine a corrected
 /// strategy before it has produced any outcome under the new rules.
-pub const RISK_STRATEGY_REVISION: i64 = 3;
+pub const RISK_STRATEGY_REVISION: i64 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Plan {

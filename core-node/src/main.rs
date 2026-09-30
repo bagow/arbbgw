@@ -350,7 +350,7 @@ async fn main() -> Result<()> {
                     let spreads = compute_spreads(&t_prices, 0.0, &discovery_ts);
 
                     // Writes to profiles_db since vps-api reads from it
-                    // Replay must resolve the scanner's 500 ms confirmation rule.
+                    // Replay must resolve the scanner's non-blocking 500 ms confirmation rule.
                     // Keep the public API snapshot at one hertz, but retain candidate
                     // books at 100 ms while they exist. `try_send` and the one-slot
                     // writer queue keep this passive recorder out of the trading path.

@@ -17,6 +17,75 @@ fn signal_throttle() -> &'static DashMap<String, i64> {
 
 static LAST_DIAG_LOG: AtomicI64 = AtomicI64::new(0);
 
+/// An entry must remain executable while both venue books advance.  Keeping
+/// this state in the event-driven scanner avoids sleeping on the hot path: the
+/// confirming market event carries a fresh quote and can be dispatched
+/// immediately.
+const ENTRY_CONFIRMATION_MS: i64 = 500;
+const ENTRY_WIDENING_EPSILON_PCT: f64 = 0.000001;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct EntryConfirmation {
+    first_seen_ms: i64,
+    initial_spread: f64,
+    initial_sell_book_ms: i64,
+    initial_buy_book_ms: i64,
+}
+
+static ENTRY_CONFIRMATIONS: OnceLock<DashMap<String, EntryConfirmation>> = OnceLock::new();
+
+fn advance_entry_confirmation(
+    previous: Option<EntryConfirmation>,
+    now_ms: i64,
+    spread: f64,
+    sell_book_ms: i64,
+    buy_book_ms: i64,
+) -> (EntryConfirmation, bool) {
+    let reset = || EntryConfirmation {
+        first_seen_ms: now_ms,
+        initial_spread: spread,
+        initial_sell_book_ms: sell_book_ms,
+        initial_buy_book_ms: buy_book_ms,
+    };
+    let Some(state) = previous else {
+        return (reset(), false);
+    };
+    if now_ms < state.first_seen_ms
+        || sell_book_ms < state.initial_sell_book_ms
+        || buy_book_ms < state.initial_buy_book_ms
+    {
+        return (reset(), false);
+    }
+    let elapsed = now_ms - state.first_seen_ms;
+    if elapsed >= ENTRY_CONFIRMATION_MS
+        && spread > state.initial_spread + ENTRY_WIDENING_EPSILON_PCT
+    {
+        return (reset(), false);
+    }
+    let both_books_advanced = sell_book_ms > state.initial_sell_book_ms
+        && buy_book_ms > state.initial_buy_book_ms;
+    (
+        state,
+        elapsed >= ENTRY_CONFIRMATION_MS && both_books_advanced,
+    )
+}
+
+fn confirmation_route(signal: &TradeSignal) -> (String, String, String) {
+    let (sell_exchange, buy_exchange) = if signal.is_a_higher {
+        (&signal.exchange_a, &signal.exchange_b)
+    } else {
+        (&signal.exchange_b, &signal.exchange_a)
+    };
+    (
+        format!(
+            "{}:{}:{}>{}",
+            signal.profile_id, signal.pair, sell_exchange, buy_exchange
+        ),
+        format!("{}:{}", sell_exchange, signal.pair),
+        format!("{}:{}", buy_exchange, signal.pair),
+    )
+}
+
 /// A pair of individually fresh books can still describe different market
 /// moments. With 100 ms venue feeds, 250 ms leaves room for normal phase
 /// offset and network jitter while rejecting a quote assembled from a moving
@@ -577,19 +646,6 @@ pub fn generate_signals(
                 mult_a,
                 mult_b,
             });
-            {
-                let sig_key = format!("{}:{}:{}", row.pair, row.exchange_a, row.exchange_b);
-                let throttle = signal_throttle();
-                let last = throttle.get(&sig_key).map(|v| *v).unwrap_or(0);
-                if now - last > 5_000 {
-                    throttle.insert(sig_key, now);
-                    tracing::info!(
-                        "[scanner] SIGNAL {}: {} vs {} L2_VWAP={:.4}% L1={:.4}% BE={:.4}% (fee_a={:.6} fee_b={:.6})",
-                        row.pair, row.exchange_a, row.exchange_b, executable_spread, row.spread, break_even_pct,
-                        fee_a, fee_b
-                    );
-                }
-            }
         }
     }
     // Rank by executable net edge before retaining one route per profile/pair.
@@ -600,6 +656,52 @@ pub fn generate_signals(
         edge_b.total_cmp(&edge_a)
     });
     signals.retain(|signal| emitted_pairs.insert(format!("{}:{}", signal.profile_id, signal.pair)));
+    let confirmations = ENTRY_CONFIRMATIONS.get_or_init(DashMap::new);
+    let mut observed_confirmation_keys = HashSet::new();
+    let mut signals_awaiting_confirmation = 0u64;
+    signals.retain(|signal| {
+        let (route_key, sell_book_key, buy_book_key) = confirmation_route(signal);
+        observed_confirmation_keys.insert(route_key.clone());
+        let Some((sell_book_ms, buy_book_ms)) = e_ctx
+            .l2_books
+            .get(&sell_book_key)
+            .map(|book| book.updated_ms)
+            .zip(e_ctx.l2_books.get(&buy_book_key).map(|book| book.updated_ms))
+        else {
+            confirmations.remove(&route_key);
+            return false;
+        };
+        let previous = confirmations.get(&route_key).map(|state| *state);
+        let (next, ready) = advance_entry_confirmation(
+            previous,
+            now,
+            signal.spread,
+            sell_book_ms,
+            buy_book_ms,
+        );
+        if ready {
+            confirmations.remove(&route_key);
+            let throttle = signal_throttle();
+            let last = throttle.get(&route_key).map(|value| *value).unwrap_or(0);
+            if now - last > 5_000 {
+                throttle.insert(route_key, now);
+                tracing::info!(
+                    "[scanner] CONFIRMED SIGNAL {}: {} vs {} L2_VWAP={:.4}% BE={:.4}% after {}ms",
+                    signal.pair,
+                    signal.exchange_a,
+                    signal.exchange_b,
+                    signal.spread,
+                    signal.break_even_pct,
+                    ENTRY_CONFIRMATION_MS,
+                );
+            }
+        } else {
+            confirmations.insert(route_key, next);
+            signals_awaiting_confirmation += 1;
+        }
+        ready
+    });
+    confirmations.retain(|key, _| observed_confirmation_keys.contains(key));
     let considered = spreads.len().min(ts.max_spreads_per_cycle.max(0) as usize);
     let profile_window_rows = spreads
         .iter()
@@ -628,6 +730,7 @@ pub fn generate_signals(
         ("profile_window_rows", profile_window_rows as u64),
         ("signals_emitted", signals.len() as u64),
         ("signals_before_pair_dedupe", signals_before_pair_dedupe),
+        ("signals_awaiting_confirmation", signals_awaiting_confirmation),
         ("l2_pending_rows", l2_pending_rows),
         ("structural_rejections", structural_rejections),
         ("lot_grid_rejections", lot_grid_rejections),
@@ -651,6 +754,43 @@ mod l2_gate_tests {
             asks: vec![(101.0, 1.0)],
             updated_ms,
         }
+    }
+
+    #[test]
+    fn entry_confirmation_is_non_blocking_and_requires_both_books_to_advance() {
+        let (initial, ready) = advance_entry_confirmation(None, 1_000, 1.0, 990, 995);
+        assert!(!ready);
+
+        let (_, ready) = advance_entry_confirmation(Some(initial), 1_600, 0.9, 1_100, 995);
+        assert!(!ready, "one unchanged venue book cannot confirm entry");
+
+        let (_, ready) = advance_entry_confirmation(Some(initial), 1_499, 0.9, 1_100, 1_105);
+        assert!(!ready, "fresh books cannot bypass the duration guard");
+
+        let (confirmed, ready) =
+            advance_entry_confirmation(Some(initial), 1_500, 0.9, 1_100, 1_105);
+        assert!(ready);
+        assert_eq!(confirmed, initial);
+    }
+
+    #[test]
+    fn widening_at_the_confirmation_boundary_resets_the_window() {
+        let (initial, _) = advance_entry_confirmation(None, 1_000, 1.0, 990, 995);
+        let (before_boundary, ready) =
+            advance_entry_confirmation(Some(initial), 1_400, 1.1, 1_100, 1_105);
+        assert!(!ready);
+        assert_eq!(before_boundary, initial);
+
+        let (reset, ready) =
+            advance_entry_confirmation(Some(before_boundary), 1_500, 1.1, 1_200, 1_205);
+        assert!(!ready);
+        assert_eq!(reset.first_seen_ms, 1_500);
+        assert_eq!(reset.initial_spread, 1.1);
+
+        let (_, ready) = advance_entry_confirmation(Some(reset), 1_999, 1.0, 1_300, 1_305);
+        assert!(!ready);
+        let (_, ready) = advance_entry_confirmation(Some(reset), 2_000, 1.0, 1_300, 1_305);
+        assert!(ready);
     }
 
     #[test]

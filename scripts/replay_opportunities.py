@@ -275,6 +275,8 @@ def evaluate(sample, profile):
         "fixed_cost_pct": fixed_costs,
         "crossing_cost_pct": crossing_cost,
         "is_a_higher": is_a_higher,
+        "book_a_updated_ms": book_a["updated_ms"],
+        "book_b_updated_ms": book_b["updated_ms"],
         "sample_index": sample.get("_replay_index"),
     }, "eligible"
 
@@ -297,15 +299,53 @@ def group_windows(events, gap_ms):
     return sorted(windows, key=lambda window: window[1][0]["recorded_ms"])
 
 
-def confirmed_entry(rows, confirmation_ms):
-    """Model the production rule: wait, then accept only stable/narrowing L2."""
-    for initial in rows:
-        for confirmed in rows:
-            if confirmed["recorded_ms"] < initial["recorded_ms"] + confirmation_ms:
-                continue
-            if confirmed["gross_pct"] <= initial["gross_pct"] + 0.000001:
-                return confirmed
-            break
+def confirmed_entry(rows, confirmation_ms, max_observation_gap_ms=250):
+    """Model the non-blocking production confirmation state machine.
+
+    Eligibility must be observed continuously at the recorder cadence, both
+    venue books must advance, and widening at the confirmation boundary
+    restarts the clock.
+    """
+    initial = None
+    previous = None
+    for observed in rows:
+        timestamps = (
+            observed.get("recorded_ms"),
+            observed.get("book_a_updated_ms"),
+            observed.get("book_b_updated_ms"),
+        )
+        if not all(isinstance(value, (int, float)) for value in timestamps):
+            initial = previous = None
+            continue
+        discontinuous = (
+            previous is not None
+            and observed["recorded_ms"] - previous["recorded_ms"] > max_observation_gap_ms
+        )
+        regressed = (
+            initial is not None
+            and (
+                observed["recorded_ms"] < initial["recorded_ms"]
+                or observed["book_a_updated_ms"] < initial["book_a_updated_ms"]
+                or observed["book_b_updated_ms"] < initial["book_b_updated_ms"]
+            )
+        )
+        confirmation_due = (
+            initial is not None
+            and observed["recorded_ms"] >= initial["recorded_ms"] + confirmation_ms
+        )
+        widened_at_confirmation = (
+            confirmation_due
+            and observed["gross_pct"] > initial["gross_pct"] + 0.000001
+        )
+        if initial is None or discontinuous or regressed or widened_at_confirmation:
+            initial = observed
+        elif (
+            confirmation_due
+            and observed["book_a_updated_ms"] > initial["book_a_updated_ms"]
+            and observed["book_b_updated_ms"] > initial["book_b_updated_ms"]
+        ):
+            return observed
+        previous = observed
     return None
 
 
@@ -486,6 +526,7 @@ def summarize(samples, profile, gap_ms=5_000, confirmation_ms=500):
             "A durable opportunity is necessary, not sufficient, evidence of a profitable trade.",
             "Each window is replayed independently; overlapping windows are not simultaneous trades.",
             "Only candidate snapshots were retained, so UNRESOLVED is not proof of a loss.",
+            "Entry confirmation resets when eligible observations are more than 250 ms apart; legacy one-hertz samples cannot prove continuous eligibility.",
         ],
     }
 
