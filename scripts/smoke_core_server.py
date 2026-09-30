@@ -55,8 +55,14 @@ def main():
             with sqlite3.connect(root/"profiles.db") as copy:
                 live.backup(copy)
                 disabled = json.dumps(["gate","bybit","bitget","bingx","bitmex","ascendex","xt","toobit"])
-                copy.execute("UPDATE trading_profiles SET is_active=0,pending_commands=NULL,disabled_exchanges=?",(disabled,))
+                # Exercise the active-profile market path, including dynamic depth
+                # subscriptions and health fallbacks, while a persisted kill switch
+                # makes any entry attempt a test failure rather than an exchange risk.
+                copy.execute("UPDATE trading_profiles SET is_active=1,pending_commands=NULL,disabled_exchanges=?",(disabled,))
                 copy.execute("DELETE FROM server_cache")
+                copy.execute(
+                    "INSERT INTO server_cache(key,value,expires_at) VALUES('kill_switch_active','1',NULL)"
+                )
         with socket.socket() as probe:
             probe.bind(("127.0.0.1",0))
             port = probe.getsockname()[1]
@@ -84,7 +90,10 @@ def main():
                     except (OSError,ValueError):
                         pass
                     time.sleep(0.25)
-                if not health or not health.get("process_healthy") or health.get("build_sha") != expected_sha:
+                if (not health or not health.get("process_healthy")
+                        or health.get("build_sha") != expected_sha
+                        or not health.get("entries_halted")
+                        or health.get("trading_ready")):
                     raise RuntimeError("Candidate process health/build identity not confirmed")
                 samples = []
                 observation_start = time.monotonic()
@@ -92,7 +101,10 @@ def main():
                     if process.poll() is not None:
                         raise RuntimeError("Candidate exited during public market observation")
                     health = read_health(f"http://127.0.0.1:{port}/health")
-                    if not health.get("process_healthy") or health.get("build_sha") != expected_sha:
+                    if (not health.get("process_healthy")
+                            or health.get("build_sha") != expected_sha
+                            or not health.get("entries_halted")
+                            or health.get("trading_ready")):
                         raise RuntimeError("Candidate lost process health/build identity during observation")
                     fresh = {venue["exchange"]: venue["fresh_books"] for venue in health["venues"]}
                     samples.append({"elapsed_seconds": round(time.monotonic()-observation_start, 1),
@@ -113,7 +125,7 @@ def main():
                     "public_collector_log":(root/"process.log").read_text(errors="replace")[-12000:],
                     "market_samples":samples,"simultaneous_fresh_samples":simultaneous,
                     "steady_fresh_samples":steady_fresh,"steady_samples":len(steady_samples),
-                    "scope":"Public Binance/KuCoin data for 60 seconds; inactive profile; no profitability claim"}))
+                    "scope":"Public Binance/KuCoin data for 60 seconds; disposable active profile with persisted kill switch; no profitability claim"}))
             finally:
                 if process.poll() is None:
                     process.terminate()
