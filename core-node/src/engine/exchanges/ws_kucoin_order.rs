@@ -11,7 +11,8 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::net::SocketAddr;
+use std::sync::{atomic::{AtomicUsize, Ordering}, OnceLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::{client_async_tls, tungstenite::protocol::Message};
@@ -39,6 +40,9 @@ struct OrderLane {
 }
 
 static ORDER_LANE: OnceLock<OrderLane> = OnceLock::new();
+static ROUTE_OFFSET: AtomicUsize = AtomicUsize::new(0);
+const MAX_ROUTE_ATTEMPTS: usize = 4;
+type KucoinOrderWs = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn hmac_b64(secret: &str, payload: &str) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key");
@@ -125,55 +129,19 @@ pub async fn wait_ready(
     .map_err(|_| "KuCoin Pro order WS did not become ready before timeout".to_string())?
 }
 
-async fn authenticate(
+async fn authenticate_route(
+    url: String,
     credentials: &Credentials,
-) -> Result<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    String,
-> {
-    let url = authenticated_url(credentials, crate::engine::real::now_ms());
-    // Race all resolved addresses and disable Nagle. This is paid only on
-    // startup/reconnect; the authenticated socket stays hot for order traffic.
-    let addresses = tokio::net::lookup_host(("wsapi.kucoin.com", 443))
-        .await
-        .map_err(|error| format!("KuCoin Pro WS DNS lookup failed: {error}"))?;
-    let mut attempts = FuturesUnordered::new();
-    for address in addresses {
-        let url = url.clone();
-        attempts.push(async move {
-            let socket = tokio::time::timeout(
-                Duration::from_secs(4),
-                tokio::net::TcpStream::connect(address),
-            )
-            .await
-            .map_err(|_| format!("TCP timeout via {address}"))?
-            .map_err(|error| format!("TCP failure via {address}: {error}"))?;
-            socket
-                .set_nodelay(true)
-                .map_err(|error| format!("TCP_NODELAY failed via {address}: {error}"))?;
-            tokio::time::timeout(Duration::from_secs(6), client_async_tls(&url, socket))
-                .await
-                .map_err(|_| format!("TLS/WebSocket timeout via {address}"))?
-                .map_err(|error| format!("TLS/WebSocket failure via {address}: {error}"))
-        });
-    }
-    let mut failures = Vec::new();
-    let mut connected = None;
-    while let Some(attempt) = attempts.next().await {
-        match attempt {
-            Ok(connection) => {
-                connected = Some(connection);
-                break;
-            }
-            Err(error) => failures.push(error),
-        }
-    }
-    let (mut ws, _) = connected.ok_or_else(|| {
-        format!(
-            "all KuCoin Pro WS addresses failed: {}",
-            failures.join("; ")
-        )
-    })?;
+    address: SocketAddr,
+) -> Result<(KucoinOrderWs, u128), String> {
+    let started=std::time::Instant::now();
+    let socket=tokio::time::timeout(Duration::from_secs(4),tokio::net::TcpStream::connect(address))
+        .await.map_err(|_|format!("TCP timeout via {address}"))?
+        .map_err(|e|format!("TCP failure via {address}: {e}"))?;
+    socket.set_nodelay(true).map_err(|e|format!("TCP_NODELAY failed via {address}: {e}"))?;
+    let (mut ws,_)=tokio::time::timeout(Duration::from_secs(6),client_async_tls(&url,socket))
+        .await.map_err(|_|format!("TLS/WebSocket timeout via {address}"))?
+        .map_err(|e|format!("TLS/WebSocket failure via {address}: {e}"))?;
 
     // KuCoin requires the signature of the exact JSON bytes it sends here,
     // not a parsed-and-reserialized equivalent.
@@ -216,7 +184,34 @@ async fn authenticate(
     {
         return Err(format!("KuCoin Pro WS authentication rejected: {welcome}"));
     }
-    Ok(ws)
+    Ok((ws,started.elapsed().as_micros()))
+}
+
+async fn authenticate(credentials: &Credentials) -> Result<KucoinOrderWs, String> {
+    let url=authenticated_url(credentials,crate::engine::real::now_ms());
+    let addresses=tokio::net::lookup_host(("wsapi.kucoin.com",443)).await
+        .map_err(|e|format!("KuCoin Pro WS DNS lookup failed: {e}"))?;
+    let mut addresses:Vec<_>=addresses.collect(); addresses.sort_unstable(); addresses.dedup();
+    if addresses.is_empty(){return Err("KuCoin Pro WS DNS returned no addresses".into());}
+    let count=addresses.len(); let attempts_count=count.min(MAX_ROUTE_ATTEMPTS);
+    let offset=ROUTE_OFFSET.fetch_add(attempts_count,Ordering::Relaxed)%count;
+    let mut attempts=FuturesUnordered::new();
+    for index in 0..attempts_count {
+        let address=addresses[(offset+index)%count];
+        let url=url.clone(); let credentials=credentials.clone();
+        attempts.push(async move {authenticate_route(url,&credentials,address).await.map(|result|(result,address))});
+    }
+    let mut failures=Vec::new();
+    while let Some(attempt)=attempts.next().await {
+        match attempt {
+            Ok(((ws,auth_us),address))=>{
+                tracing::info!("[kucoin_order_ws] selected route={} full_auth_us={}",address,auth_us);
+                return Ok(ws);
+            }
+            Err(error)=>failures.push(error),
+        }
+    }
+    Err(format!("all KuCoin Pro WS routes failed authentication: {}",failures.join("; ")))
 }
 
 async fn order_loop(

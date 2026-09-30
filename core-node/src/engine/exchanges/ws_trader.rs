@@ -1,8 +1,9 @@
 use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     OnceLock,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -22,6 +23,9 @@ type RequestSender = mpsc::Sender<QueuedRequest>;
 static WS_QUERY_TX: OnceLock<RequestSender> = OnceLock::new();
 static WS_ORDER_TX: OnceLock<RequestSender> = OnceLock::new();
 static ORDER_READY: AtomicBool = AtomicBool::new(false);
+static ROUTE_OFFSET: AtomicUsize = AtomicUsize::new(0);
+const MAX_ROUTE_ATTEMPTS: usize = 4;
+type BinanceWs = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WsLane {
@@ -59,48 +63,55 @@ fn get_or_init_lane(lane: WsLane) -> RequestSender {
     .clone()
 }
 
-async fn connect_binance_ws() -> Result<
-    (
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        tokio_tungstenite::tungstenite::handshake::client::Response,
-    ),
-    String,
-> {
-    const HOST: &str = "ws-fapi.binance.com";
+async fn connect_and_probe_route(address: SocketAddr) -> Result<(BinanceWs, u128), String> {
     const URL: &str = "wss://ws-fapi.binance.com/ws-fapi/v1";
+    let socket = tokio::time::timeout(tokio::time::Duration::from_secs(4),tokio::net::TcpStream::connect(address))
+        .await.map_err(|_|format!("TCP timeout via {address}"))?
+        .map_err(|e|format!("TCP failure via {address}: {e}"))?;
+    socket.set_nodelay(true).map_err(|e|format!("TCP_NODELAY failed via {address}: {e}"))?;
+    let (mut ws, _)=tokio::time::timeout(tokio::time::Duration::from_secs(6),client_async_tls(URL,socket))
+        .await.map_err(|_|format!("TLS/WebSocket timeout via {address}"))?
+        .map_err(|e|format!("TLS/WebSocket failure via {address}: {e}"))?;
+    // Measure the application path without consuming an API request or credentials.
+    let payload=format!("arb-route-{address}").into_bytes();
+    let started=std::time::Instant::now();
+    ws.send(Message::Ping(payload.clone().into())).await.map_err(|e|format!("probe send failed via {address}: {e}"))?;
+    tokio::time::timeout(tokio::time::Duration::from_secs(2),async {
+        loop { match ws.next().await {
+            Some(Ok(Message::Pong(received))) if received==payload => return Ok(()),
+            Some(Ok(Message::Ping(p))) => ws.send(Message::Pong(p)).await.map_err(|e|format!("probe pong failed via {address}: {e}"))?,
+            Some(Ok(Message::Close(frame))) => return Err(format!("closed during probe via {address}: {frame:?}")),
+            Some(Ok(_)) => {},
+            Some(Err(e)) => return Err(format!("probe receive failed via {address}: {e}")),
+            None => return Err(format!("ended during probe via {address}")),
+        }}
+    }).await.map_err(|_|format!("probe timeout via {address}"))??;
+    Ok((ws,started.elapsed().as_micros()))
+}
+
+async fn connect_binance_ws() -> Result<BinanceWs, String> {
+    const HOST: &str = "ws-fapi.binance.com";
 
     let addresses = tokio::net::lookup_host((HOST, 443))
         .await
         .map_err(|error| format!("Binance WS DNS lookup failed: {error}"))?;
+    let mut addresses:Vec<_>=addresses.collect(); addresses.sort_unstable(); addresses.dedup();
+    if addresses.is_empty(){return Err("Binance WS DNS returned no addresses".into());}
+    let count=addresses.len(); let attempts_count=count.min(MAX_ROUTE_ATTEMPTS);
+    let offset=ROUTE_OFFSET.fetch_add(attempts_count,Ordering::Relaxed)%count;
     let mut attempts = FuturesUnordered::new();
-    for address in addresses {
-        attempts.push(async move {
-            let socket = tokio::time::timeout(
-                tokio::time::Duration::from_secs(4),
-                tokio::net::TcpStream::connect(address),
-            )
-            .await
-            .map_err(|_| format!("TCP timeout via {address}"))?
-            .map_err(|error| format!("TCP failure via {address}: {error}"))?;
-            socket
-                .set_nodelay(true)
-                .map_err(|error| format!("TCP_NODELAY failed via {address}: {error}"))?;
-            tokio::time::timeout(
-                tokio::time::Duration::from_secs(6),
-                client_async_tls(URL, socket),
-            )
-            .await
-            .map_err(|_| format!("TLS/WebSocket timeout via {address}"))?
-            .map_err(|error| format!("TLS/WebSocket failure via {address}: {error}"))
-        });
+    for index in 0..attempts_count {
+        let address=addresses[(offset+index)%count];
+        attempts.push(async move {connect_and_probe_route(address).await.map(|result|(result,address))});
     }
 
     let mut failures = Vec::new();
     while let Some(attempt) = attempts.next().await {
         match attempt {
-            Ok(connection) => return Ok(connection),
+            Ok(((ws,rtt_us),address)) => {
+                tracing::info!("[binance_ws] selected route={} probe_rtt_us={}",address,rtt_us);
+                return Ok(ws);
+            },
             Err(error) => failures.push(error),
         }
     }
@@ -124,7 +135,7 @@ pub fn order_lane_ready() -> bool {
 async fn ws_trader_loop(mut rx: mpsc::Receiver<QueuedRequest>, lane: WsLane) {
     let mut backoff_secs: u64 = 2;
     loop {
-        let (ws_stream, _) = match tokio::time::timeout(
+        let ws_stream = match tokio::time::timeout(
             tokio::time::Duration::from_secs(12),
             connect_binance_ws(),
         )

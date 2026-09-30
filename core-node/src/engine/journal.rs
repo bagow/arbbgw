@@ -1,5 +1,5 @@
 //! SQLite is the authority for order ownership and progress, including across restarts.
-use super::orders::{OrderObservation, OrderRequest};
+use super::orders::{OrderObservation, OrderRequest, OrderState};
 use serde::{Deserialize, Serialize};
 use shared::{TradeSignal, TradingSettings};
 use tokio_rusqlite::{params, Connection};
@@ -33,6 +33,13 @@ pub struct JournalOrder {
     pub exchange: String,
     pub request: OrderRequest,
     pub observation: OrderObservation,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EntryReservation {
+    Reserved(i64),
+    DailyLossLimit(f64),
+    PairLossQuarantine(i64),
+    Rejected,
 }
 #[derive(Clone)]
 pub struct Journal {
@@ -89,6 +96,68 @@ impl Journal {
             tx.execute("INSERT INTO trades(pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,status,profile_id,structural_spread,accounting_status,commission_cost,funding_cost,highest_spread_reached,strategy_revision) VALUES(?,?,?,?,?,0,0,?,?,'ENTRY',?,?,'PENDING',0,0,0,?)",params![s.pair,s.exchange_a,s.exchange_b,s.direction,s.actual_vol_a_usd,s.spread,now,s.profile_id,s.structural_spread,RISK_STRATEGY_REVISION])?;
             let id=tx.last_insert_rowid();tx.execute("INSERT INTO execution_plans(trade_id,plan) VALUES(?,?)",params![id,json])?;
             tx.commit()?;Ok(Some(id))
+        }).await?)
+    }
+    /// Final local durability boundary before both websocket writes. Risk
+    /// checks, trade reservation, order identities and send intents commit in
+    /// one FULL-sync transaction.
+    pub async fn reserve_and_prepare_entry(&self, plan: Plan, orders: &[JournalOrder]) -> anyhow::Result<EntryReservation> {
+        if orders.len() != 2 { anyhow::bail!("Entry reservation requires exactly two orders"); }
+        let signal = &plan.signal;
+        let mut seen_a = false;
+        let mut seen_b = false;
+        let mut client_ids = std::collections::HashSet::new();
+        let mut encoded = Vec::with_capacity(2);
+        for order in orders {
+            order.request.validate().map_err(anyhow::Error::msg)?;
+            let expected_exchange = match order.leg.as_str() {
+                "A" if !seen_a => { seen_a = true; &signal.exchange_a }
+                "B" if !seen_b => { seen_b = true; &signal.exchange_b }
+                _ => anyhow::bail!("Entry reservation requires distinct A and B legs"),
+            };
+            if order.trade_id != 0 || order.exchange != *expected_exchange
+                || order.request.pair != signal.pair || order.request.reduce_only
+                || order.observation.state != OrderState::Unknown
+                || order.observation.order_id.is_some() || order.observation.filled_quantity != 0.0
+                || order.observation.average_price.is_some() || order.observation.fee.is_some()
+                || !client_ids.insert(order.request.client_id.clone()) {
+                anyhow::bail!("Entry order does not match its execution plan");
+            }
+            encoded.push((order.request.client_id.clone(), order.leg.clone(), order.exchange.clone(),
+                serde_json::to_string(&order.request)?, serde_json::to_string(&order.observation)?));
+        }
+        if !seen_a || !seen_b { anyhow::bail!("Entry reservation requires A and B legs"); }
+
+        let plan_json = serde_json::to_string(&plan)?;
+        let s = plan.signal;
+        let now = super::utils::now_ms();
+        let max = plan.settings.max_active_trades;
+        let daily_limit = plan.settings.daily_loss_limit_usdt;
+        let exposure_limit = plan.settings.max_total_exposure_usdt;
+        let day_start = now - now.rem_euclid(86_400_000);
+        let pair_loss_start = now - PAIR_LOSS_QUARANTINE_MS;
+        Ok(self.db.call(move |connection| {
+            let tx=connection.transaction()?;
+            let blocked:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED') AND (pair=? OR profile_id=?)",params![s.pair,s.profile_id],|r|r.get(0))?;
+            let same:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED') AND pair=?",[&s.pair],|r|r.get(0))?;
+            let unresolved:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status IN ('ENTRY','RECONCILING')",[],|r|r.get(0))?;
+            let active_exposure:f64=tx.query_row("SELECT COALESCE(SUM(volume),0) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED') AND profile_id=?",[&s.profile_id],|r|r.get(0))?;
+            let daily_pnl:f64=tx.query_row("SELECT COALESCE(SUM(pnl),0) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND profile_id=? AND exit_time>=?",params![s.profile_id,day_start],|r|r.get(0))?;
+            let recent_pair_losses:i64=tx.query_row("SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND accounting_status='VERIFIED' AND pair=? AND pnl<0 AND exit_time>=? AND strategy_revision=?",params![s.pair,pair_loss_start,RISK_STRATEGY_REVISION],|r|r.get(0))?;
+            let unsettled:i64=tx.query_row("SELECT COUNT(*) FROM trades t JOIN execution_plans p ON p.trade_id=t.id WHERE t.status='CLOSED' AND t.accounting_status!='VERIFIED' AND t.profile_id=?",[&s.profile_id],|r|r.get(0))?;
+            if daily_limit>0.0 && daily_pnl<=-daily_limit { return Ok(EntryReservation::DailyLossLimit(daily_pnl)); }
+            if recent_pair_losses>=PAIR_LOSS_QUARANTINE_THRESHOLD { return Ok(EntryReservation::PairLossQuarantine(recent_pair_losses)); }
+            let exposure_blocked=exposure_limit>0.0 && active_exposure+s.actual_vol_a_usd>exposure_limit+1e-9;
+            if same>0 || blocked>=max || unresolved>0 || unsettled>0 || exposure_blocked { return Ok(EntryReservation::Rejected); }
+            tx.execute("INSERT INTO trades(pair,exchange_a,exchange_b,direction,volume,entry_price_a,entry_price_b,entry_spread,entry_time,status,profile_id,structural_spread,accounting_status,commission_cost,funding_cost,highest_spread_reached,strategy_revision) VALUES(?,?,?,?,?,0,0,?,?,'ENTRY',?,?,'PENDING',0,0,0,?)",params![s.pair,s.exchange_a,s.exchange_b,s.direction,s.actual_vol_a_usd,s.spread,now,s.profile_id,s.structural_spread,RISK_STRATEGY_REVISION])?;
+            let id=tx.last_insert_rowid();
+            tx.execute("INSERT INTO execution_plans(trade_id,plan) VALUES(?,?)",params![id,plan_json])?;
+            for (client_id,leg,exchange,request,observation) in encoded {
+                tx.execute("INSERT INTO execution_orders(client_id,trade_id,leg,exchange,request,observation,created_ms,updated_ms) VALUES(?,?,?,?,?,?,?,?)",params![client_id,id,leg,exchange,request,observation,now,now])?;
+                tx.execute("INSERT INTO execution_events(client_id,trade_id,event,at_ms,detail) VALUES(?,?,'SEND_STARTED',?,NULL)",params![client_id,id,now])?;
+            }
+            tx.commit()?;
+            Ok(EntryReservation::Reserved(id))
         }).await?)
     }
     pub async fn daily_verified_pnl(&self, profile_id: &str) -> anyhow::Result<f64> {
@@ -704,6 +773,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rolled_back, 0);
+    }
+    #[tokio::test]
+    async fn entry_reservation_and_both_send_intents_commit_together() {
+        let j = setup().await;
+        let first = order(0);
+        let mut second = first.clone();
+        second.leg = "B".into(); second.exchange = "binance".into();
+        second.request.client_id = "atomic-client-id-b".into();
+        let id = match j.reserve_and_prepare_entry(plan(), &[first, second]).await.unwrap() {
+            EntryReservation::Reserved(id) => id,
+            result => panic!("unexpected reservation result: {result:?}"),
+        };
+        assert_eq!(j.orders(id).await.unwrap().len(), 2);
+        let intents: i64 = j.db.call(move |c| {
+            c.query_row("SELECT COUNT(*) FROM execution_events WHERE trade_id=? AND event='SEND_STARTED'",[id],|r|r.get(0)).map_err(Into::into)
+        }).await.unwrap();
+        assert_eq!(intents, 2);
+    }
+    #[tokio::test]
+    async fn entry_reservation_rolls_back_trade_when_an_order_identity_conflicts() {
+        let j = setup().await;
+        let occupied_id = j.reserve(plan()).await.unwrap().unwrap();
+        j.prepare(&order(occupied_id)).await.unwrap();
+        j.state(occupied_id, "CANCELLED", "test setup").await.unwrap();
+        let first = order(0);
+        let mut second = first.clone();
+        second.leg = "B".into(); second.exchange = "binance".into();
+        second.request.client_id = "rollback-client-id-b".into();
+        assert!(j.reserve_and_prepare_entry(plan(), &[first, second]).await.is_err());
+        assert!(j.active().await.unwrap().is_empty());
+        let count: i64 = j.db.call(|c| c.query_row("SELECT COUNT(*) FROM trades",[],|r|r.get(0)).map_err(Into::into)).await.unwrap();
+        assert_eq!(count, 1);
     }
     #[tokio::test]
     async fn partial_close_cannot_be_reported_flat() {

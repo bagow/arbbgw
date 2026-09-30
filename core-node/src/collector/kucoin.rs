@@ -16,6 +16,12 @@ use tracing::{info, warn};
 use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
 
 static PRO_DEPTH_UPDATED_MS: OnceLock<dashmap::DashMap<String, i64>> = OnceLock::new();
+const CLASSIC_SYMBOLS_PER_SHARD: usize = 150;
+const CLASSIC_DEPTH_BASELINE_SYMBOL: &str = "XBTUSDTM";
+
+fn is_classic_depth_baseline(symbol: &str) -> bool {
+    symbol == CLASSIC_DEPTH_BASELINE_SYMBOL
+}
 
 fn pro_depth_updates() -> &'static dashmap::DashMap<String, i64> {
     PRO_DEPTH_UPDATED_MS.get_or_init(dashmap::DashMap::new)
@@ -130,8 +136,9 @@ async fn handler(
         symbols.len()
     );
 
-    // Split symbols into chunks of 150 to stay under Kucoin's 400 topics per WS limit
-    // 150 symbols * 2 topics (L1 + L2) = 300 topics per connection
+    // Discovery needs only top-of-book ticker data. Keep the full universe on a
+    // small number of sockets and reserve depth bandwidth for one health
+    // baseline plus demand-driven Pro subscriptions below.
 
     let sym_map = std::sync::Arc::new(sym_map);
     let normalized_map = std::sync::Arc::new(
@@ -144,7 +151,7 @@ async fn handler(
     );
     let mut children = tokio::task::JoinSet::new();
 
-    for (idx, chunk) in symbols.chunks(60).enumerate() {
+    for (idx, chunk) in symbols.chunks(CLASSIC_SYMBOLS_PER_SHARD).enumerate() {
         let chunk_symbols = chunk.to_vec();
         let p_map = price_map.clone();
         let sig = signal.clone();
@@ -656,8 +663,14 @@ async fn run_ws(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // Futures depth5 uses one symbol per topic. Every shard owns both streams.
-    for symbol in symbols {
+    // A permanent BTC depth stream supplies venue health and warmup headroom.
+    // Executable candidate/position books use the demand-driven Pro 10 ms feed;
+    // subscribing all ~680 contracts here floods small VPS receive queues and
+    // starves the independent Binance feed.
+    for symbol in symbols
+        .iter()
+        .filter(|symbol| is_classic_depth_baseline(symbol))
+    {
         let topic = format!("/contractMarket/level2Depth5:{symbol}");
         ws.send(Message::Text(json!({"id":uuid::Uuid::new_v4().to_string(),"type":"subscribe","topic":topic,"privateChannel":false,"response":true}).to_string().into())).await?;
         tokio::time::sleep(Duration::from_millis(110)).await;
@@ -883,6 +896,13 @@ mod tests {
 
     fn levels(value: serde_json::Value) -> Vec<Vec<serde_json::Value>> {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn classic_discovery_keeps_one_depth_baseline_and_five_universe_sockets() {
+        assert!(is_classic_depth_baseline("XBTUSDTM"));
+        assert!(!is_classic_depth_baseline("ETHUSDTM"));
+        assert_eq!(681usize.div_ceil(CLASSIC_SYMBOLS_PER_SHARD), 5);
     }
 
     #[test]

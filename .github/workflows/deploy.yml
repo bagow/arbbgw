@@ -310,6 +310,7 @@ jobs:
             EnvironmentFile=/etc/core-node.env
             OOMScoreAdjust=-600
             LimitNOFILE=65536
+            Nice=-5
             TimeoutStopSec=5
             KillMode=process
             StandardOutput=journal

@@ -1,7 +1,7 @@
 //! Order ownership, bounded entries and independent position supervision.
 use super::{
     exchanges::{get_connector, traits::ExchangeConnector},
-    journal::{aggregate, Journal, JournalOrder, ManagedTrade, Plan},
+    journal::{aggregate, EntryReservation, Journal, JournalOrder, ManagedTrade, Plan},
     orders::{OrderObservation, OrderRequest, OrderState},
     real::ExchangeKeys,
     utils::now_ms,
@@ -672,13 +672,6 @@ async fn enter(
             }
         };
         p.validate().map_err(anyhow::Error::msg)?;
-        if p.daily_loss_limit_usdt > 0.0 {
-            let daily = j.daily_verified_pnl(&p.id).await?;
-            if daily <= -p.daily_loss_limit_usdt {
-                kill(ctx,j,format!("Daily VERIFIED loss limit reached for {}: {:.4} <= -{:.4} USDT",p.id,daily,p.daily_loss_limit_usdt)).await;
-                return Ok(());
-            }
-        }
         if ts.entry_order_type != "ioc" || p.strategy_type != "ema" {
             record_entry_decision(ctx, "rejected_execution_mode");
             continue;
@@ -731,21 +724,6 @@ async fn enter(
         let cooldown = ctx.pair_cooldown.get(&s.pair).map(|v| *v).unwrap_or(0);
         if super::utils::cooldown_active(cooldown, now_ms(), ts.pair_cooldown_ms) {
             record_entry_decision(ctx, "rejected_pair_cooldown");
-            continue;
-        }
-        let recent_pair_losses = j.recent_verified_pair_losses(&s.pair).await?;
-        if recent_pair_losses >= super::journal::PAIR_LOSS_QUARANTINE_THRESHOLD {
-            // The durable seven-day quarantine remains authoritative in SQLite.
-            // This short in-process marker prevents the same persistent spread
-            // from re-querying that verdict and retaining scarce L2 capacity on
-            // on every engine tick; it is rechecked after pair_cooldown_ms.
-            ctx.pair_cooldown.insert(s.pair.clone(), now_ms());
-            tracing::info!(
-                "[managed] Pair loss quarantine rejected {}: {} VERIFIED losses in the last 7d",
-                s.pair,
-                recent_pair_losses,
-            );
-            record_entry_decision(ctx, "rejected_pair_loss_quarantine");
             continue;
         }
         // The signal-to-order path performs no network preflight. Fees,
@@ -970,54 +948,52 @@ async fn enter(
             record_entry_decision(ctx, "rejected_authorization");
             continue;
         }
-        let id = match j
-            .reserve(Plan {
-                funding_deadline_ms,
-                signal: s.clone(),
-                settings: p.clone(),
-            })
-            .await?
-        {
-            Some(id) => id,
-            None => {
-                record_entry_decision(ctx, "rejected_reservation");
-                continue;
-            }
-        };
-        record_entry_decision(ctx, "trade_reserved");
-        let _guard =
-            claim(ctx, id).ok_or_else(|| anyhow::anyhow!("Trade already being supervised"))?;
-        let t = ManagedTrade {
-            id,
+        let plan = Plan { funding_deadline_ms, signal: s.clone(), settings: p.clone() };
+        let mut t = ManagedTrade {
+            id: 0,
             state: "ENTRY".into(),
             reason: None,
             created_ms: now_ms(),
-            plan: Plan {
-                funding_deadline_ms,
-                signal: s.clone(),
-                settings: p,
-            },
+            plan: plan.clone(),
         };
         // Both IOC limits consume at most half of the total movement budget.
         // Persist both identities first, then poll both dedicated order sockets
         // in the same Tokio turn. The second leg no longer waits for the first
         // exchange's acknowledgement or fill report.
-        let order_a = request(
+        let mut order_a = request(
             &t,
             "A",
             s.target_qty_a,
             entry_ioc_limit(quote_a, !s.is_a_higher, half),
             false,
         );
-        let order_b = request(
+        let mut order_b = request(
             &t,
             "B",
             s.target_qty_b,
             entry_ioc_limit(quote_b, s.is_a_higher, half),
             false,
         );
-        j.prepare_batch_for_send(&[order_a.clone(), order_b.clone()])
-            .await?;
+        let id = match j.reserve_and_prepare_entry(plan, &[order_a.clone(), order_b.clone()]).await? {
+            EntryReservation::Reserved(id) => id,
+            EntryReservation::DailyLossLimit(daily) => {
+                kill(ctx,j,format!("Daily VERIFIED loss limit reached for {}: {:.4} <= -{:.4} USDT",p.id,daily,p.daily_loss_limit_usdt)).await;
+                return Ok(());
+            }
+            EntryReservation::PairLossQuarantine(losses) => {
+                ctx.pair_cooldown.insert(s.pair.clone(), now_ms());
+                tracing::info!("[managed] Pair loss quarantine rejected {}: {} VERIFIED losses in the last 7d",s.pair,losses);
+                record_entry_decision(ctx, "rejected_pair_loss_quarantine");
+                continue;
+            }
+            EntryReservation::Rejected => {
+                record_entry_decision(ctx, "rejected_reservation");
+                continue;
+            }
+        };
+        t.id=id; order_a.trade_id=id; order_b.trade_id=id;
+        record_entry_decision(ctx, "trade_reserved_and_prepared");
+        let _guard = claim(ctx, id).ok_or_else(|| anyhow::anyhow!("Trade already being supervised"))?;
         let dispatch_clock = std::time::Instant::now();
         let (fill_a, fill_b) = tokio::join!(
             async {

@@ -3,7 +3,7 @@
 //! and pre-initialises the STRUCTURAL_EMA cache so the engine can trade immediately
 //! without waiting for a cold-start accumulation period.
 //!
-//! Uses parallel fetching (~20 concurrent requests) to complete warmup quickly.
+//! Uses bounded parallel fetching so history cannot starve live sockets.
 
 use reqwest::Client;
 use serde_json::Value;
@@ -12,10 +12,22 @@ use tokio::sync::Semaphore;
 use tracing::info;
 
 use crate::spreads::{warmup_ema_from_premiums, unverified_ema_keys};
-use crate::state::PriceMap;
+use crate::state::{L2OrderbookMap, PriceMap};
 
 const LOOKBACK_SECS: u64 = 86_400; // 24 hours
-const MAX_CONCURRENT: usize = 10; // Max parallel REST requests (avoid rate limits)
+const MAX_CONCURRENT: usize = 2;
+
+async fn wait_for_market_headroom(books: &L2OrderbookMap) {
+    loop {
+        let now = crate::engine::utils::now_ms();
+        let binance_fresh = books.get("binance:BTCUSDT")
+            .is_some_and(|book| (0..=750).contains(&(now - book.updated_ms)));
+        let kucoin_fresh = books.iter().any(|book| book.key().starts_with("kucoin:")
+            && (0..=750).contains(&(now - book.updated_ms)));
+        if binance_fresh && kucoin_fresh { return; }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
 
 // ─── Gate.io: fetch 15-min candles for a USDT perp ────────────────────────────
 
@@ -335,20 +347,27 @@ async fn fetch_bybit_candles(http: &Client, pair: &str) -> Option<Vec<(f64, f64)
 
 // ─── Main warmup function — called from main.rs after WS collectors start ────
 
-pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) {
-    // Wait for collectors to populate the price map (full 15s to ensure all exchanges connect)
+pub async fn run(http: Client, prices: PriceMap, books: L2OrderbookMap, ts: shared::TechnicalSettings) {
+    // Give the websocket routes a full stabilization window before background REST.
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        // Don't break early, otherwise slower exchanges like Gate/Kucoin miss historical warmup!
     }
 
-    // First, collect all unique (exchange, pair) combinations to fetch
-    let mut unique_ex_pairs = std::collections::HashSet::new();
+    // Histories are useful only for symbols shared by at least two venues.
     let exchanges: Vec<String> = prices.iter().map(|e| e.key().clone()).collect();
+    let mut venue_counts = std::collections::HashMap::<String, usize>::new();
+    for ex in &exchanges {
+        if let Some(map) = prices.get(ex.as_str()) {
+            for pair in map.keys() { *venue_counts.entry(pair.clone()).or_default() += 1; }
+        }
+    }
+    let mut unique_ex_pairs = std::collections::HashSet::new();
     for ex in &exchanges {
         if let Some(map) = prices.get(ex.as_str()) {
             for pair in map.keys() {
-                unique_ex_pairs.insert((ex.clone(), pair.clone()));
+                if venue_counts.get(pair).copied().unwrap_or(0) >= 2 {
+                    unique_ex_pairs.insert((ex.clone(), pair.clone()));
+                }
             }
         }
     }
@@ -368,12 +387,15 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
         let http = http.clone();
         let sem = semaphore.clone();
         let cache = candle_cache.clone();
+        let books = books.clone();
         fetch_handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
+            wait_for_market_headroom(&books).await;
             let candles = fetch_candles_for_with_retry(&http, &ex, &pair).await;
             if !candles.is_empty() {
                 cache.insert(format!("{}:{}", ex, pair), candles);
             }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }));
     }
 
@@ -485,11 +507,12 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
     // will be verified as soon as they accumulate 2+ candles on both exchanges.
     let http2 = http.clone();
     let prices2 = prices.clone();
+    let books2 = books.clone();
     let ts2 = ts.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(600)).await; // 10 min
-            let verified = run_retry_unverified(&http2, &prices2, &ts2).await;
+            let verified = run_retry_unverified(&http2, &prices2, &books2, &ts2).await;
             if verified > 0 {
                 info!("[ema_warmup] 🔄 Background re-warmup verified {} new pair(s)", verified);
             }
@@ -502,6 +525,7 @@ pub async fn run(http: Client, prices: PriceMap, ts: shared::TechnicalSettings) 
 async fn run_retry_unverified(
     http: &Client,
     prices: &PriceMap,
+    books: &L2OrderbookMap,
     ts: &shared::TechnicalSettings,
 ) -> usize {
     let unverified = unverified_ema_keys();
@@ -509,7 +533,7 @@ async fn run_retry_unverified(
         return 0;
     }
 
-    let semaphore = Arc::new(Semaphore::new(10));
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
     let mut handles = Vec::new();
 
     for key in unverified {
@@ -531,8 +555,10 @@ async fn run_retry_unverified(
         let http = http.clone();
         let ts = ts.clone();
         let sem = semaphore.clone();
+        let books = books.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
+            wait_for_market_headroom(&books).await;
             let candles_a = fetch_candles_for_with_retry(&http, &ex_a, &pair).await;
             let candles_b = fetch_candles_for_with_retry(&http, &ex_b, &pair).await;
             if candles_a.is_empty() || candles_b.is_empty() { return 0usize; }

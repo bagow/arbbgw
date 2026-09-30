@@ -20,6 +20,9 @@ EnvironmentFile=/etc/core-node.env
 # Protect from OOM: core-node holds all WS connections + price map
 OOMScoreAdjust=-600
 LimitNOFILE=65536
+# Keep market/order socket handling ahead of dashboard and maintenance work on
+# the two-vCPU production host. systemd applies this before dropping to User=opc.
+Nice=-5
 
 StandardOutput=journal
 StandardError=journal

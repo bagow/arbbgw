@@ -5,6 +5,8 @@ use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio_tungstenite::{client_async_tls, tungstenite::Message};
 use tracing::{error, info, warn};
@@ -21,11 +23,18 @@ const DEPTH_UPDATE_INTERVAL_MS: u64 = 100;
 // same cadence; unlike the old all-market stream it carries only one symbol.
 const DYNAMIC_DEPTH_UPDATE_INTERVAL_MS: u64 = 100;
 const DEPTH_SUBSCRIPTION_REFRESH_SECS: u64 = 1_800;
-// The engine can produce a new candidate every 20 ms. Poll the in-memory set
-// faster than that so subscription hand-off does not add another scan cycle.
+// Zurich-to-Binance routes can begin near 300 ms and drift past the 750 ms
+// execution gate after roughly 35-45 seconds. Rotate independent lanes before
+// that point; the stagger keeps at least one admitted socket publishing while
+// another performs DNS/TCP/TLS/event-quality selection.
+const BASELINE_DEPTH_SESSION_SECS: u64 = 33;
+const DYNAMIC_DEPTH_SESSION_SECS: u64 = 25;
+const SECOND_DYNAMIC_START_DELAY_SECS: u64 = 12;
+// Poll faster than the engine's five-millisecond floor so subscription hand-off
+// adds no extra scan cycle.
 // This does not send extra exchange traffic: messages are emitted only when
 // the deduplicated symbol set actually changes.
-const DYNAMIC_DEPTH_REFRESH_MS: u64 = 5;
+const DYNAMIC_DEPTH_REFRESH_MS: u64 = 2;
 const DYNAMIC_DEPTH_RETENTION_SECS: u64 = 30;
 const MAX_BASELINE_DEPTH_BACKLOG_MS: i64 = 5_000;
 const MAX_BASELINE_CONSECUTIVE_STALE_DEPTH: u32 = 10;
@@ -52,13 +61,94 @@ const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
 // accepts connections but has been observed delivering ever older events.
 const BINANCE_RAW_WS_URL: &str = "wss://fstream.binance.com/ws";
 const BINANCE_COMBINED_WS_URL: &str = "wss://fstream.binance.com/stream";
+const MAX_MARKET_ROUTE_ATTEMPTS: usize = 4;
+const MAX_INITIAL_EVENT_LAG_MS: i64 = 750;
+const DEPTH_ROUTE_PROBE_EVENTS: usize = 20;
+const MAX_DEPTH_ROUTE_LAG_DRIFT_MS: i64 = 250;
+static MARKET_ROUTE_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
-async fn connect_market_ws(
-    url: &str,
-) -> Result<(
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    tokio_tungstenite::tungstenite::handshake::client::Response,
-)> {
+type MarketWs = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+fn event_timestamp_ms(value: &Value) -> Option<i64> {
+    value.get("E").and_then(Value::as_i64)
+        .or_else(|| value.get("data").and_then(event_timestamp_ms))
+        .or_else(|| value.as_array().and_then(|items| items.iter().find_map(event_timestamp_ms)))
+}
+
+fn event_lag_ms(text: &str, received_ms: i64) -> Option<i64> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    event_timestamp_ms(&value).map(|event_ms| received_ms - event_ms)
+}
+
+async fn connect_market_route(url: String, address: SocketAddr) -> Result<(MarketWs, String, i64)> {
+    let probe_depth_stability = url.contains("@depth");
+    let socket = tokio::time::timeout(Duration::from_secs(4), tokio::net::TcpStream::connect(address))
+        .await.map_err(|_| anyhow!("TCP timeout via {address}"))?
+        .with_context(|| format!("TCP failure via {address}"))?;
+    socket.set_nodelay(true).with_context(|| format!("TCP_NODELAY failed via {address}"))?;
+    let (mut ws, _) = tokio::time::timeout(Duration::from_secs(6), client_async_tls(url, socket))
+        .await.map_err(|_| anyhow!("TLS/WebSocket timeout via {address}"))?
+        .with_context(|| format!("TLS/WebSocket failure via {address}"))?;
+
+    // From Zurich, a fast TLS handshake can still lead to a seconds-old event
+    // queue. Select on the first exchange-stamped event that is actually usable.
+    let first = tokio::time::timeout(Duration::from_secs(7), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let text = text.to_string();
+                    if let Some(lag_ms) = event_lag_ms(&text, crate::engine::utils::now_ms()) {
+                        return Ok((text, lag_ms));
+                    }
+                }
+                Some(Ok(Message::Ping(payload))) => ws.send(Message::Pong(payload)).await
+                    .with_context(|| format!("Pong failed via {address}"))?,
+                Some(Ok(Message::Close(frame))) => anyhow::bail!("closed before first event via {address}: {frame:?}"),
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Err(anyhow!("receive failure via {address}: {error}")),
+                None => anyhow::bail!("ended before first event via {address}"),
+            }
+        }
+    }).await.map_err(|_| anyhow!("first event timeout via {address}"))??;
+    if !(0..=MAX_INITIAL_EVENT_LAG_MS).contains(&first.1) {
+        anyhow::bail!("stale first event via {address}: lag_ms={}", first.1);
+    }
+    if !probe_depth_stability { return Ok((ws, first.0, first.1)); }
+
+    // The problematic Zurich routes often look fresh once and then accumulate
+    // a queue immediately. Require a short stable series before admitting a
+    // critical depth socket into the candidate path.
+    let stable = tokio::time::timeout(Duration::from_secs(4), async {
+        let mut latest = first;
+        let mut min_lag = latest.1;
+        let mut accepted = 1usize;
+        while accepted < DEPTH_ROUTE_PROBE_EVENTS {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let text = text.to_string();
+                    let Some(lag_ms) = event_lag_ms(&text, crate::engine::utils::now_ms()) else { continue; };
+                    min_lag = min_lag.min(lag_ms);
+                    if !(0..=MAX_INITIAL_EVENT_LAG_MS).contains(&lag_ms)
+                        || lag_ms > min_lag + MAX_DEPTH_ROUTE_LAG_DRIFT_MS {
+                        anyhow::bail!("unstable depth route via {address}: lag_ms={lag_ms} min_lag_ms={min_lag}");
+                    }
+                    latest = (text, lag_ms);
+                    accepted += 1;
+                }
+                Some(Ok(Message::Ping(payload))) => ws.send(Message::Pong(payload)).await
+                    .with_context(|| format!("probe Pong failed via {address}"))?,
+                Some(Ok(Message::Close(frame))) => anyhow::bail!("closed during depth probe via {address}: {frame:?}"),
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Err(anyhow!("depth probe failed via {address}: {error}")),
+                None => anyhow::bail!("ended during depth probe via {address}"),
+            }
+        }
+        Ok(latest)
+    }).await.map_err(|_| anyhow!("depth stability probe timed out via {address}"))??;
+    Ok((ws, stable.0, stable.1))
+}
+
+async fn connect_market_ws(url: &str) -> Result<(MarketWs, String)> {
     const HOST: &str = "fstream.binance.com";
     let addresses =
         tokio::time::timeout(Duration::from_secs(3), tokio::net::lookup_host((HOST, 443)))
@@ -71,37 +161,28 @@ async fn connect_market_ws(
     // TLS/WebSocket handshakes so one bad address cannot consume the caller's
     // entire reconnect budget. The original hostname stays in `url`, preserving
     // the correct TLS SNI and HTTP Host header.
+    let mut addresses: Vec<_> = addresses.collect();
+    addresses.sort_unstable();
+    addresses.dedup();
+    if addresses.is_empty() { anyhow::bail!("Binance market WS DNS returned no addresses"); }
+    let address_count = addresses.len();
+    let attempt_count = address_count.min(MAX_MARKET_ROUTE_ATTEMPTS);
+    let offset = MARKET_ROUTE_OFFSET.fetch_add(attempt_count, Ordering::Relaxed) % address_count;
     let mut attempts = FuturesUnordered::new();
-    for address in addresses {
+    for index in 0..attempt_count {
+        let address = addresses[(offset + index) % address_count];
         let request_url = url.to_string();
         attempts.push(async move {
-            let socket = tokio::time::timeout(
-                Duration::from_secs(4),
-                tokio::net::TcpStream::connect(address),
-            )
-            .await
-            .map_err(|_| anyhow!("TCP timeout via {address}"))?
-            .with_context(|| format!("TCP failure via {address}"))?;
-            socket
-                .set_nodelay(true)
-                .with_context(|| format!("TCP_NODELAY failed via {address}"))?;
-            tokio::time::timeout(
-                Duration::from_secs(6),
-                client_async_tls(request_url, socket),
-            )
-            .await
-            .map_err(|_| anyhow!("TLS/WebSocket timeout via {address}"))?
-            .with_context(|| format!("TLS/WebSocket failure via {address}"))
-            .map(|connection| (connection, address))
+            connect_market_route(request_url, address).await.map(|result| (result, address))
         });
     }
 
     let mut failures = Vec::new();
     while let Some(attempt) = attempts.next().await {
         match attempt {
-            Ok((connection, address)) => {
-                info!("[binance_market_ws] connected via {}", address);
-                return Ok(connection);
+            Ok(((ws, first_text, lag_ms), address)) => {
+                info!("[binance_market_ws] selected route via {} first_event_lag_ms={}", address, lag_ms);
+                return Ok((ws, first_text));
             }
             Err(error) => failures.push(error.to_string()),
         }
@@ -222,9 +303,18 @@ pub async fn run(
                     run_dynamic_l2_depth_stream(
                         l2_books_for_depth.clone(),
                         prices_for_depth.clone(),
-                        l2_wanted_for_dynamic,
-                        signal_for_dynamic,
+                        l2_wanted_for_dynamic.clone(),
+                        signal_for_dynamic.clone(),
                     ),
+                    async {
+                        tokio::time::sleep(Duration::from_secs(SECOND_DYNAMIC_START_DELAY_SECS)).await;
+                        run_dynamic_l2_depth_stream(
+                            l2_books_for_depth.clone(),
+                            prices_for_depth.clone(),
+                            l2_wanted_for_dynamic,
+                            signal_for_dynamic,
+                        ).await;
+                    },
                     run_l2_health_fallback(
                         l2_books_for_depth.clone(),
                         prices_for_depth.clone(),
@@ -232,8 +322,8 @@ pub async fn run(
                         settings_for_health,
                     ),
                     run_l1_discovery_fallback(
-                        l2_books_for_depth,
-                        prices_for_depth,
+                        l2_books_for_depth.clone(),
+                        prices_for_depth.clone(),
                         signal_for_discovery,
                         settings_for_discovery,
                     )
@@ -497,19 +587,28 @@ async fn handler(
     // this aggregate stream with a five-second update speed, and execution needs full
     // quantity depth rather than a top quote. Fresh candidate depth is handled by the
     // bounded streams below and remains mandatory before an order can be sent.
-    let (mut ws, _) = connect_market_ws(&format!("{BINANCE_RAW_WS_URL}/!bookTicker"))
+    let (mut ws, first_text) = connect_market_ws(&format!("{BINANCE_RAW_WS_URL}/!bookTicker"))
         .await
         .context("Binance all-book-ticker connect failed")?;
     info!("[binance] Connected (all bookTicker discovery)");
     price_map.entry("binance".to_string()).or_default();
     let connected_at = std::time::Instant::now();
 
-    while let Ok(Some(message)) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+    let mut buffered = Some(Message::Text(first_text.into()));
+    loop {
+        let message = if let Some(message) = buffered.take() {
+            message
+        } else {
+            match tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+                Ok(Some(message)) => message?,
+                _ => break,
+            }
+        };
         if connected_at.elapsed() > Duration::from_secs(300) {
             break;
         }
         match message {
-            Ok(Message::Text(text)) => {
+            Message::Text(text) => {
                 let now_ms = crate::engine::utils::now_ms();
                 if let Ok(payload) = serde_json::from_str::<BookTickerPayload>(&text) {
                     let tickers = match payload {
@@ -529,12 +628,11 @@ async fn handler(
                     }
                 }
             }
-            Ok(Message::Close(frame)) => {
+            Message::Close(frame) => {
                 warn!("[binance] All-book-ticker closed: {:?}", frame);
                 break;
             }
-            Ok(_) => {}
-            Err(error) => anyhow::bail!("Binance all-book-ticker receive failed: {error}"),
+            _ => {}
         }
     }
     Ok(())
@@ -678,13 +776,15 @@ async fn run_l2_depth_stream(
 
                     let session_start = std::time::Instant::now();
                     let mut backlog_detected = false;
+                    let mut planned_rotation = false;
                     match tokio::time::timeout(
                         Duration::from_secs(10),
                         connect_market_ws(&stream_url),
                     )
                     .await
                     {
-                        Ok(Ok((mut ws, _))) => {
+                        Ok(Ok((mut ws, first_text))) => {
+                            let connected_at = std::time::Instant::now();
                             let mut received = 0u64;
                             let mut accepted = 0u64;
                             let mut stale = 0u64;
@@ -692,9 +792,23 @@ async fn run_l2_depth_stream(
                             let mut invalid = 0u64;
                             let mut last_lag_ms = 0i64;
                             let mut report_at = std::time::Instant::now();
-                            while let Ok(Some(msg)) =
-                                tokio::time::timeout(Duration::from_secs(30), ws.next()).await
-                            {
+                            let mut buffered = Some(Message::Text(first_text.into()));
+                            loop {
+                                if connected_at.elapsed()
+                                    >= Duration::from_secs(BASELINE_DEPTH_SESSION_SECS)
+                                {
+                                    planned_rotation = true;
+                                    info!("[binance_l2_chunk] Proactive route rotation");
+                                    break;
+                                }
+                                let msg = if let Some(msg) = buffered.take() {
+                                    Ok(msg)
+                                } else {
+                                    match tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+                                        Ok(Some(msg)) => msg,
+                                        _ => break,
+                                    }
+                                };
                                 received += 1;
                                 if report_at.elapsed() >= Duration::from_secs(10) {
                                     info!("[binance_l2_quality] symbols={} received={} accepted={} stale={} invalid={} last_lag_ms={}",
@@ -772,7 +886,11 @@ async fn run_l2_depth_stream(
                     // the last snapshot in the map: timestamp freshness expires it,
                     // while an active profile's WS health fallback may already have
                     // replaced it with a newer authoritative snapshot.
-                    let stable = backlog_detected || session_start.elapsed() >= Duration::from_secs(60);
+                    if planned_rotation {
+                        backoff = Duration::from_secs(1);
+                        continue;
+                    }
+                    let stable = !backlog_detected && session_start.elapsed() >= Duration::from_secs(60);
                     if stable {
                         backoff = Duration::from_secs(1);
                     }
@@ -810,10 +928,10 @@ async fn run_dynamic_l2_depth_stream(
     loop {
         let connection = tokio::time::timeout(
             Duration::from_secs(10),
-            connect_market_ws(BINANCE_RAW_WS_URL),
+            connect_market_ws(&format!("{BINANCE_RAW_WS_URL}/btcusdt@depth5@{DYNAMIC_DEPTH_UPDATE_INTERVAL_MS}ms")),
         )
         .await;
-        let (mut ws, _) = match connection {
+        let (mut ws, first_text) = match connection {
             Ok(Ok(connection)) => connection,
             Ok(Err(error)) => {
                 warn!("[binance_l2_dynamic] Connect failed: {}", error);
@@ -836,18 +954,34 @@ async fn run_dynamic_l2_depth_stream(
         let mut active: std::collections::HashMap<String, std::time::Instant> =
             std::collections::HashMap::new();
         let mut request_id = 1u64;
-        let mut received = 0u64;
+        let mut received = 1u64;
         let mut accepted = 0u64;
         let mut stale = 0u64;
         let mut invalid = 0u64;
         let mut last_lag_ms = 0i64;
         let mut stale_streak = 0u32;
         let mut backlog_detected = false;
+        let mut planned_rotation = false;
         let mut report_at = std::time::Instant::now();
+        if let Ok(data) = serde_json::from_str::<Value>(&first_text) {
+            match apply_depth_update(&data, &l2_books, &price_map, &signal) {
+                DepthUpdate::Accepted(lag_ms) => { accepted = 1; last_lag_ms = lag_ms; }
+                DepthUpdate::Stale(lag_ms) => { stale = 1; stale_streak = 1; last_lag_ms = lag_ms; }
+                DepthUpdate::Invalid => invalid = 1,
+                DepthUpdate::Ignored => {}
+            }
+        } else {
+            invalid = 1;
+        }
 
         loop {
             tokio::select! {
                 _ = refresh.tick() => {
+                    if session_start.elapsed() >= Duration::from_secs(DYNAMIC_DEPTH_SESSION_SECS) {
+                        planned_rotation = true;
+                        info!("[binance_l2_dynamic] Proactive route rotation");
+                        break;
+                    }
                     let now = std::time::Instant::now();
                     let mut wanted: Vec<String> = l2_wanted
                         .iter()
@@ -979,10 +1113,14 @@ async fn run_dynamic_l2_depth_stream(
             }
         }
 
-        for symbol in active.keys() {
-            l2_books.remove(&format!("binance:{}", symbol));
+        // A redundant dynamic route may still be publishing the same symbols.
+        // Leave the last snapshot in place; its exchange timestamp expires it
+        // fail-closed after 750 ms if no healthy route replaces it.
+        if planned_rotation {
+            backoff = Duration::from_secs(1);
+            continue;
         }
-        let stable = backlog_detected || session_start.elapsed() >= Duration::from_secs(60);
+        let stable = !backlog_detected && session_start.elapsed() >= Duration::from_secs(60);
         if stable {
             backoff = Duration::from_secs(1);
         }
@@ -1151,15 +1289,41 @@ mod tests {
 
     #[test]
     fn dynamic_candidate_handoff_is_faster_than_engine_ticks() {
-        // The producer cadence in main.rs is 20 ms. Sampling at the same or a
-        // slower cadence can miss a candidate that exists for exactly one tick.
-        assert!(DYNAMIC_DEPTH_REFRESH_MS < 20);
+        // Retention makes equal producer/consumer cadence safe without a busy poll.
+        assert!(DYNAMIC_DEPTH_REFRESH_MS < 5);
     }
 
     #[test]
     fn bounded_baseline_and_candidates_use_fast_partial_depth() {
         assert_eq!(DEPTH_UPDATE_INTERVAL_MS, 100);
         assert_eq!(DYNAMIC_DEPTH_UPDATE_INTERVAL_MS, 100);
+    }
+
+    #[test]
+    fn proactive_route_rotation_is_staggered_and_within_connection_budget() {
+        assert!(SECOND_DYNAMIC_START_DELAY_SECS < DYNAMIC_DEPTH_SESSION_SECS);
+        assert!(DYNAMIC_DEPTH_SESSION_SECS < BASELINE_DEPTH_SESSION_SECS);
+        let five_minutes = 300u64;
+        let baseline_races = five_minutes.div_ceil(BASELINE_DEPTH_SESSION_SECS);
+        let dynamic_races = five_minutes.div_ceil(DYNAMIC_DEPTH_SESSION_SECS) * 2;
+        let steady_attempts =
+            (baseline_races + dynamic_races) * MAX_MARKET_ROUTE_ATTEMPTS as u64;
+        // Preserve ample room below Binance's 300-attempt/5-minute IP limit for
+        // discovery, execution sockets, transient failures, and operator probes.
+        assert!(steady_attempts < 150);
+    }
+
+    #[test]
+    fn route_quality_uses_exchange_event_time_through_all_payload_shapes() {
+        let now = 1_900_000_000_000i64;
+        for (value, expected_lag) in [
+            (serde_json::json!({"E": now - 12}), 12),
+            (serde_json::json!({"stream":"btcusdt@depth5@100ms","data":{"E":now - 13}}), 13),
+            (serde_json::json!([{"E":now - 14}]), 14),
+        ] {
+            assert_eq!(event_lag_ms(&value.to_string(), now), Some(expected_lag));
+        }
+        assert_eq!(event_lag_ms(r#"{"result":null,"id":1}"#, now), None);
     }
 
     #[test]
@@ -1283,25 +1447,19 @@ mod tests {
     #[tokio::test]
     #[ignore = "live Binance connectivity check"]
     async fn live_dynamic_subscription_receives_partial_depth() {
-        let (mut ws, _) = connect_market_ws(BINANCE_RAW_WS_URL).await.unwrap();
-        ws.send(Message::Text(
-            serde_json::json!({
-                "method": "SUBSCRIBE",
-                "params": [format!("btcusdt@depth5@{}ms", DYNAMIC_DEPTH_UPDATE_INTERVAL_MS)],
-                "id": 1
-            })
-            .to_string(),
-        ))
-        .await
-        .unwrap();
+        let (mut ws, first_text) = connect_market_ws(&format!(
+            "{BINANCE_RAW_WS_URL}/btcusdt@depth5@{DYNAMIC_DEPTH_UPDATE_INTERVAL_MS}ms"
+        )).await.unwrap();
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut buffered = Some(Message::Text(first_text.into()));
         loop {
-            let message = tokio::time::timeout_at(deadline, ws.next())
-                .await
-                .expect("depth event timeout")
-                .expect("stream closed")
-                .expect("websocket error");
+            let message = if let Some(message) = buffered.take() {
+                message
+            } else {
+                tokio::time::timeout_at(deadline, ws.next()).await
+                    .expect("depth event timeout").expect("stream closed").expect("websocket error")
+            };
             if let Message::Text(text) = message {
                 let data: Value = serde_json::from_str(&text).unwrap();
                 if data["s"] == "BTCUSDT" && data["b"].is_array() && data["a"].is_array() {

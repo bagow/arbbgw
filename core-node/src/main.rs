@@ -9,6 +9,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
 use anyhow::{Context, Result};
+use futures_util::FutureExt;
 use axum::{
     extract::State,
     routing::{get, post},
@@ -208,8 +209,9 @@ async fn main() -> Result<()> {
     {
         let http_w = http.clone();
         let prices_w = prices.clone();
+        let books_w = engine_ctx.l2_books.clone();
         let ts_warmup = tech_settings_cache.read().await.clone();
-        tokio::spawn(async move { ema_warmup::run(http_w, prices_w, ts_warmup).await });
+        tokio::spawn(async move { ema_warmup::run(http_w, prices_w, books_w, ts_warmup).await });
     }
 
     // ── Exchange keys — loaded once at startup ───────────────────────────────
@@ -307,10 +309,9 @@ async fn main() -> Result<()> {
         let profiles_db_engine = profiles_db.clone();
 
         tokio::spawn(async move {
-            // Coalesce bursts without adding a human-scale polling delay. The
-            // collectors are already event driven; 20 ms bounds CPU usage while
-            // allowing up to 50 complete cross-venue scans per second.
-            const MIN_ENGINE_CYCLE: Duration = Duration::from_millis(20);
+            // KuCoin publishes every 10 ms; the old 20 ms floor discarded that
+            // edge. This remains event-driven, so an idle market does no scans.
+            const MIN_ENGINE_CYCLE: Duration = Duration::from_millis(5);
             let mut last_run = std::time::Instant::now();
             loop {
                 signal.notified().await;
@@ -320,8 +321,8 @@ async fn main() -> Result<()> {
                 }
                 last_run = std::time::Instant::now();
 
-                // Wrap entire loop body in a spawned task so a panic
-                // in compute_spreads / run_cycle / etc. does NOT kill the engine loop.
+                // Preserve panic isolation without scheduling a fresh Tokio task
+                // for every market event.
                 let t_prices = prices.clone();
                 let t_real_cache = real_cache.clone();
                 let t_ts_cache = ts_cache.clone();
@@ -333,7 +334,7 @@ async fn main() -> Result<()> {
                 let t_profiles_db = profiles_db_engine.clone();
                 let t_shadow_tx = shadow_tx.clone();
 
-                let tick_result = tokio::task::spawn(async move {
+                let tick_result = std::panic::AssertUnwindSafe(async move {
                     let cycle_started = std::time::Instant::now();
                     // Read cached settings (no SQL, just RwLock read)
                     let real_profiles = t_real_cache.read().await.clone();
@@ -522,19 +523,15 @@ async fn main() -> Result<()> {
                         "engine_cycle_us".to_string(),
                         cycle_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
                     );
-                }).await;
+                }).catch_unwind().await;
 
-                if let Err(e) = tick_result {
-                    let msg = if e.is_panic() {
-                        match e.into_panic().downcast::<String>() {
-                            Ok(s) => *s,
-                            Err(p) => match p.downcast::<&str>() {
-                                Ok(s) => s.to_string(),
-                                Err(_) => "unknown panic".to_string(),
-                            },
-                        }
-                    } else {
-                        format!("task cancelled: {}", e)
+                if let Err(panic) = tick_result {
+                    let msg = match panic.downcast::<String>() {
+                        Ok(s) => *s,
+                        Err(panic) => match panic.downcast::<&str>() {
+                            Ok(s) => s.to_string(),
+                            Err(_) => "unknown panic".to_string(),
+                        },
                     };
                     tracing::error!("🔥 ENGINE LOOP PANIC (recovered, continuing): {}", msg);
                     // Small delay to avoid tight panic-loop
