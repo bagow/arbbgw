@@ -9,6 +9,120 @@ use crate::engine::real::{now_ms, ExchangeKeys};
 
 pub struct KucoinConnector;
 
+fn public_depth_number(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse().ok()))
+        .filter(|number| number.is_finite())
+}
+
+fn parse_public_depth_side(
+    value: &Value,
+    multiplier: f64,
+) -> Result<Vec<(f64, f64)>, String> {
+    if !multiplier.is_finite() || multiplier <= 0.0 {
+        return Err("Invalid KuCoin contract multiplier".into());
+    }
+    let levels = value
+        .as_array()
+        .ok_or("KuCoin public depth side is not an array")?;
+    if levels.is_empty() || levels.len() > 20 {
+        return Err("KuCoin public depth side has invalid length".into());
+    }
+    levels
+        .iter()
+        .map(|level| {
+            let level = level
+                .as_array()
+                .filter(|level| level.len() >= 2)
+                .ok_or("Invalid KuCoin public depth level")?;
+            let price = public_depth_number(&level[0])
+                .filter(|price| *price > 0.0)
+                .ok_or("Invalid KuCoin public depth price")?;
+            let contracts = public_depth_number(&level[1])
+                .filter(|quantity| *quantity > 0.0)
+                .ok_or("Invalid KuCoin public depth quantity")?;
+            let quantity = contracts * multiplier;
+            if !quantity.is_finite() || quantity <= 0.0 {
+                return Err("Invalid KuCoin public depth physical quantity".into());
+            }
+            Ok((price, quantity))
+        })
+        .collect()
+}
+
+fn parse_public_depth_snapshot(
+    body: &Value,
+    pair: &str,
+    multiplier: f64,
+    received_ms: i64,
+) -> Result<crate::state::L2Snapshot, String> {
+    if body["code"].as_str() != Some("200000") {
+        return Err(format!("KuCoin public depth rejected: {}", body["code"]));
+    }
+    let data = body
+        .get("data")
+        .filter(|value| value.is_object())
+        .ok_or("KuCoin public depth response has no data")?;
+    let symbol = managed_kucoin_symbol(pair);
+    if data["symbol"].as_str() != Some(symbol.as_str()) {
+        return Err("KuCoin public depth symbol mismatch".into());
+    }
+    let timestamp_ns = data["ts"]
+        .as_i64()
+        .or_else(|| data["ts"].as_str().and_then(|raw| raw.parse().ok()))
+        .ok_or("KuCoin public depth response has no timestamp")?;
+    let updated_ms = timestamp_ns / 1_000_000;
+    if !crate::engine::utils::local_timestamp_is_fresh(received_ms, updated_ms, 750) {
+        return Err(format!(
+            "Stale KuCoin public depth snapshot: {}ms",
+            received_ms.saturating_sub(updated_ms),
+        ));
+    }
+    let bids = parse_public_depth_side(&data["bids"], multiplier)?;
+    let asks = parse_public_depth_side(&data["asks"], multiplier)?;
+    if bids[0].0 >= asks[0].0
+        || bids.windows(2).any(|levels| levels[1].0 > levels[0].0)
+        || asks.windows(2).any(|levels| levels[1].0 < levels[0].0)
+    {
+        return Err("KuCoin public depth snapshot is crossed or unsorted".into());
+    }
+    Ok(crate::state::L2Snapshot {
+        bids,
+        asks,
+        updated_ms,
+    })
+}
+
+/// Fetch a bounded public futures book while the 10 ms Pro stream is warming.
+/// The exchange timestamp, symbol and contract multiplier remain mandatory;
+/// receipt time is never substituted for stale market data.
+pub async fn fetch_public_depth_snapshot(
+    http: &Client,
+    pair: &str,
+    multiplier: f64,
+) -> Result<crate::state::L2Snapshot, String> {
+    let response = http
+        .get("https://api-futures.kucoin.com/api/v1/level2/depth20")
+        .query(&[("symbol", managed_kucoin_symbol(pair))])
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|error| format!("KuCoin public depth request failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("Invalid KuCoin public depth response: {error}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "KuCoin public depth returned HTTP {}",
+            status.as_u16(),
+        ));
+    }
+    parse_public_depth_snapshot(&body, pair, multiplier, now_ms())
+}
+
 #[async_trait]
 impl ExchangeConnector for KucoinConnector {
     async fn symbol_has_no_open_orders(
@@ -1236,6 +1350,107 @@ fn managed_kucoin_symbol(pair: &str) -> String {
         "XBTUSDTM".into()
     } else {
         format!("{}M", pair)
+    }
+}
+
+#[cfg(test)]
+mod public_depth_tests {
+    use super::*;
+
+    fn response(timestamp_ns: i64) -> Value {
+        json!({
+            "code": "200000",
+            "data": {
+                "symbol": "NILUSDTM",
+                "sequence": 42,
+                "ts": timestamp_ns,
+                "bids": [["0.1273", "2"], [0.1272, 3]],
+                "asks": [["0.1274", "4"], [0.1275, 5]]
+            }
+        })
+    }
+
+    #[test]
+    fn public_depth_parser_requires_fresh_identity_and_converts_contracts() {
+        let book = parse_public_depth_snapshot(
+            &response(9_800_000_000),
+            "NILUSDT",
+            10.0,
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(book.updated_ms, 9_800);
+        assert_eq!(book.bids[0], (0.1273, 20.0));
+        assert_eq!(book.asks[1], (0.1275, 50.0));
+
+        let mut wrong = response(9_800_000_000);
+        wrong["data"]["symbol"] = json!("OTHERUSDTM");
+        assert!(parse_public_depth_snapshot(&wrong, "NILUSDT", 10.0, 10_000).is_err());
+        assert!(parse_public_depth_snapshot(
+            &response(9_000_000_000),
+            "NILUSDT",
+            10.0,
+            10_000,
+        )
+        .is_err());
+        assert!(parse_public_depth_snapshot(
+            &response(9_800_000_000),
+            "NILUSDT",
+            0.0,
+            10_000,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn public_depth_parser_rejects_crossed_unsorted_or_malformed_books() {
+        let mut crossed = response(9_800_000_000);
+        crossed["data"]["asks"][0][0] = json!(0.1272);
+        assert!(parse_public_depth_snapshot(&crossed, "NILUSDT", 1.0, 10_000).is_err());
+
+        let mut unsorted = response(9_800_000_000);
+        unsorted["data"]["bids"][1][0] = json!(0.1274);
+        assert!(parse_public_depth_snapshot(&unsorted, "NILUSDT", 1.0, 10_000).is_err());
+
+        let mut malformed = response(9_800_000_000);
+        malformed["data"]["asks"][0][1] = json!("nan");
+        assert!(parse_public_depth_snapshot(&malformed, "NILUSDT", 1.0, 10_000).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "live KuCoin public depth check"]
+    async fn live_public_depth_is_fresh_and_valid() {
+        let client = Client::new();
+        let mut last_error = None;
+        let mut fresh_book = None;
+        // KuCoin can occasionally serve a depth20 snapshot just outside the
+        // production freshness bound. Production retries on its bounded lane,
+        // so the ignored network test should exercise that same behavior
+        // instead of failing on one correctly rejected stale response.
+        for _ in 0..5 {
+            match fetch_public_depth_snapshot(&client, "BTCUSDT", 0.001).await {
+                Ok(book) => {
+                    fresh_book = Some(book);
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        let book = fresh_book.unwrap_or_else(|| {
+            panic!(
+                "KuCoin did not return a fresh BTC depth snapshot after retries: {}",
+                last_error.unwrap_or_else(|| "no response".to_string()),
+            )
+        });
+        assert!(!book.bids.is_empty());
+        assert!(!book.asks.is_empty());
+        assert!(book.bids[0].0 < book.asks[0].0);
+        assert!(crate::engine::utils::local_timestamp_is_fresh(
+            now_ms(),
+            book.updated_ms,
+            750,
+        ));
     }
 }
 

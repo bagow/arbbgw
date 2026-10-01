@@ -23,6 +23,9 @@ static CANDIDATE_PREWARM_LAST_ATTEMPT: OnceLock<DashMap<String, i64>> = OnceLock
 static BINANCE_DEPTH_PREWARM_INFLIGHT: OnceLock<DashSet<String>> = OnceLock::new();
 static LAST_BINANCE_DEPTH_PREWARM: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
+static KUCOIN_DEPTH_PREWARM_INFLIGHT: OnceLock<DashSet<String>> = OnceLock::new();
+static LAST_KUCOIN_DEPTH_PREWARM: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
 const FEE_TTL_MS: i64 = 3_600_000;
 const OPEN_ORDERS_CLEAR_TTL_MS: i64 = 5_000;
 const CANDIDATE_PREWARM_INTERVAL_MS: i64 = 1_000;
@@ -30,6 +33,7 @@ const CANDIDATE_PREWARM_INTERVAL_MS: i64 = 1_000;
 // untradeable for half a minute. Calls still share the one-per-second lane.
 const CANDIDATE_PREWARM_RETRY_MS: i64 = 5_000;
 const BINANCE_DEPTH_PREWARM_INTERVAL_MS: i64 = 500;
+const KUCOIN_DEPTH_PREWARM_INTERVAL_MS: i64 = 1_000;
 const NORMAL_EXIT_PAIR_COOLDOWN_MS: i64 = 60_000;
 const RISK_EXIT_PAIR_COOLDOWN_MS: i64 = 30 * 60_000;
 const ENTRY_WIDENING_EPSILON_PCT: f64 = 0.000001;
@@ -264,7 +268,7 @@ fn order_ws_ready(exchange: &str) -> bool {
     }
 }
 
-fn binance_depth_needs_prewarm(updated_ms: Option<i64>, now: i64) -> bool {
+fn execution_depth_needs_prewarm(updated_ms: Option<i64>, now: i64) -> bool {
     !updated_ms.is_some_and(|updated| {
         super::utils::local_timestamp_is_fresh(now, updated, 500)
     })
@@ -283,7 +287,7 @@ pub fn prewarm_binance_execution_book(
     let key = format!("binance:{pair}");
     let now = now_ms();
     let updated_ms = ctx.l2_books.get(&key).map(|book| book.updated_ms);
-    if !binance_depth_needs_prewarm(updated_ms, now) {
+    if !execution_depth_needs_prewarm(updated_ms, now) {
         return false;
     }
     let inflight = BINANCE_DEPTH_PREWARM_INFLIGHT.get_or_init(DashSet::new);
@@ -335,6 +339,101 @@ pub fn prewarm_binance_execution_book(
             ),
         }
         BINANCE_DEPTH_PREWARM_INFLIGHT
+            .get_or_init(DashSet::new)
+            .remove(&pair);
+    });
+    true
+}
+
+/// Fill a stale KuCoin candidate book through the bounded public depth20
+/// endpoint while the demand-driven 10 ms stream is receiving its first
+/// snapshot. This never bypasses the scanner's 750 ms freshness gate.
+pub fn prewarm_kucoin_execution_book(
+    pair: &str,
+    multiplier: f64,
+    prices: PriceMap,
+    signal: crate::state::UpdateSignal,
+    http: Client,
+    ctx: Arc<EngineContext>,
+) -> bool {
+    let key = format!("kucoin:{pair}");
+    let now = now_ms();
+    let updated_ms = ctx.l2_books.get(&key).map(|book| book.updated_ms);
+    if !execution_depth_needs_prewarm(updated_ms, now)
+        || !multiplier.is_finite()
+        || multiplier <= 0.0
+    {
+        return false;
+    }
+    let inflight = KUCOIN_DEPTH_PREWARM_INFLIGHT.get_or_init(DashSet::new);
+    if inflight.contains(pair) || inflight.len() >= 2 {
+        return false;
+    }
+    let previous = LAST_KUCOIN_DEPTH_PREWARM.load(Ordering::Acquire);
+    if now - previous < KUCOIN_DEPTH_PREWARM_INTERVAL_MS
+        || LAST_KUCOIN_DEPTH_PREWARM
+            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        || !inflight.insert(pair.to_string())
+    {
+        return false;
+    }
+    *ctx.scanner_status
+        .entry("kucoin_depth_prewarm_scheduled".to_string())
+        .or_insert(0) += 1;
+    let pair = pair.to_string();
+    tokio::spawn(async move {
+        let started_ms = now_ms();
+        match super::exchanges::kucoin::fetch_public_depth_snapshot(&http, &pair, multiplier).await {
+            Ok(book) => {
+                *ctx.scanner_status
+                    .entry("kucoin_depth_prewarm_success".to_string())
+                    .or_insert(0) += 1;
+                ctx.scanner_status.insert(
+                    "kucoin_depth_prewarm_last_latency_ms".to_string(),
+                    now_ms().saturating_sub(started_ms).max(0) as u64,
+                );
+                ctx.scanner_status.insert(
+                    "kucoin_depth_prewarm_last_book_age_ms".to_string(),
+                    now_ms().saturating_sub(book.updated_ms).max(0) as u64,
+                );
+                let key = format!("kucoin:{pair}");
+                let newer = ctx
+                    .l2_books
+                    .get(&key)
+                    .map(|existing| book.updated_ms > existing.updated_ms)
+                    .unwrap_or(true);
+                if newer {
+                    if let (Some(bid), Some(ask), Some(mut venue)) = (
+                        book.bids.first(),
+                        book.asks.first(),
+                        prices.get_mut("kucoin"),
+                    ) {
+                        if let Some(ticker) = venue.get_mut(&pair) {
+                            ticker.bid = bid.0;
+                            ticker.ask = ask.0;
+                            ticker.price = (bid.0 + ask.0) / 2.0;
+                            ticker.bid_size = bid.0 * bid.1;
+                            ticker.ask_size = ask.0 * ask.1;
+                            ticker.last_updated = (book.updated_ms / 1_000) as u64;
+                        }
+                    }
+                    ctx.l2_books.insert(key, book);
+                    signal.notify_one();
+                }
+            }
+            Err(error) => {
+                *ctx.scanner_status
+                    .entry("kucoin_depth_prewarm_failure".to_string())
+                    .or_insert(0) += 1;
+                tracing::debug!(
+                    "[managed] KuCoin candidate depth prewarm failed for {}: {}",
+                    pair,
+                    error,
+                );
+            }
+        }
+        KUCOIN_DEPTH_PREWARM_INFLIGHT
             .get_or_init(DashSet::new)
             .remove(&pair);
     });
@@ -1362,10 +1461,10 @@ mod transport_tests {
 
     #[test]
     fn candidate_depth_prewarm_starts_before_execution_freshness_expires() {
-        assert!(!binance_depth_needs_prewarm(Some(9_500), 10_000));
-        assert!(binance_depth_needs_prewarm(Some(9_499), 10_000));
-        assert!(binance_depth_needs_prewarm(None, 10_000));
-        assert!(binance_depth_needs_prewarm(Some(11_001), 10_000));
+        assert!(!execution_depth_needs_prewarm(Some(9_500), 10_000));
+        assert!(execution_depth_needs_prewarm(Some(9_499), 10_000));
+        assert!(execution_depth_needs_prewarm(None, 10_000));
+        assert!(execution_depth_needs_prewarm(Some(11_001), 10_000));
     }
 
     #[test]

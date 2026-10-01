@@ -485,7 +485,8 @@ async fn main() -> Result<()> {
                         // briefly, so a single L1 wobble cannot churn subscriptions.
                         let mut candidate_rows = 0usize;
                         let mut candidate_preflight_scheduled = false;
-                        let mut candidate_depth_prewarm_scheduled = false;
+                        let mut binance_depth_prewarm_scheduled = false;
+                        let mut kucoin_depth_prewarm_scheduled = false;
                         for row in &spreads {
                             let key_a = format!("{}:{}", row.exchange_a, row.pair);
                             let key_b = format!("{}:{}", row.exchange_b, row.pair);
@@ -567,10 +568,10 @@ async fn main() -> Result<()> {
                             };
                             t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_a, row.pair));
                             t_e_ctx.l2_wanted.insert(format!("{}:{}", row.exchange_b, row.pair));
-                            if !candidate_depth_prewarm_scheduled
+                            if !binance_depth_prewarm_scheduled
                                 && (row.exchange_a == "binance" || row.exchange_b == "binance")
                             {
-                                candidate_depth_prewarm_scheduled =
+                                binance_depth_prewarm_scheduled =
                                     engine::managed::prewarm_binance_execution_book(
                                         &row.pair,
                                         t_prices.clone(),
@@ -578,6 +579,24 @@ async fn main() -> Result<()> {
                                         t_http.clone(),
                                         t_e_ctx.clone(),
                                     );
+                            }
+                            if !kucoin_depth_prewarm_scheduled
+                                && (row.exchange_a == "kucoin" || row.exchange_b == "kucoin")
+                            {
+                                let kucoin_key = format!("kucoin:{}", row.pair);
+                                if let Some(multiplier) =
+                                    t_e_ctx.multipliers.get(&kucoin_key).map(|value| *value)
+                                {
+                                    kucoin_depth_prewarm_scheduled =
+                                        engine::managed::prewarm_kucoin_execution_book(
+                                            &row.pair,
+                                            multiplier,
+                                            t_prices.clone(),
+                                            t_signal.clone(),
+                                            t_http.clone(),
+                                            t_e_ctx.clone(),
+                                        );
+                                }
                             }
                             if !candidate_preflight_scheduled {
                                 candidate_preflight_scheduled = engine::managed::prewarm_candidate(
@@ -674,10 +693,10 @@ async fn main() -> Result<()> {
                                     std::sync::atomic::Ordering::Relaxed,
                                 );
                             }
-                            if !candidate_depth_prewarm_scheduled
+                            if !binance_depth_prewarm_scheduled
                                 && (row.exchange_a == "binance" || row.exchange_b == "binance")
                             {
-                                candidate_depth_prewarm_scheduled =
+                                binance_depth_prewarm_scheduled =
                                     engine::managed::prewarm_binance_execution_book(
                                         &row.pair,
                                         t_prices.clone(),
@@ -685,6 +704,24 @@ async fn main() -> Result<()> {
                                         t_http.clone(),
                                         t_e_ctx.clone(),
                                     );
+                            }
+                            if !kucoin_depth_prewarm_scheduled
+                                && (row.exchange_a == "kucoin" || row.exchange_b == "kucoin")
+                            {
+                                let kucoin_key = format!("kucoin:{}", row.pair);
+                                if let Some(multiplier) =
+                                    t_e_ctx.multipliers.get(&kucoin_key).map(|value| *value)
+                                {
+                                    kucoin_depth_prewarm_scheduled =
+                                        engine::managed::prewarm_kucoin_execution_book(
+                                            &row.pair,
+                                            multiplier,
+                                            t_prices.clone(),
+                                            t_signal.clone(),
+                                            t_http.clone(),
+                                            t_e_ctx.clone(),
+                                        );
+                                }
                             }
                             diagnostic_l2_pairs += 1;
                         }
