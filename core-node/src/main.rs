@@ -824,6 +824,8 @@ async fn main() -> Result<()> {
                         pro_idle_snapshots,
                         pro_last_snapshot_latency_ms,
                         pro_max_snapshot_latency_ms,
+                        pro_warm_reuses,
+                        pro_subscribed,
                     ) = crate::collector::kucoin::pro_depth_snapshot_metrics();
                     for (key, value) in [
                         ("kucoin_pro_l2_snapshots", pro_snapshots),
@@ -836,6 +838,8 @@ async fn main() -> Result<()> {
                             "kucoin_pro_l2_max_snapshot_latency_ms",
                             pro_max_snapshot_latency_ms,
                         ),
+                        ("kucoin_pro_l2_warm_reuses", pro_warm_reuses),
+                        ("kucoin_pro_l2_subscribed", pro_subscribed),
                     ] {
                         t_e_ctx.scanner_status.insert(key.to_string(), value);
                     }

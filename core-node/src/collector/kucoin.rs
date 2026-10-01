@@ -23,8 +23,16 @@ static PRO_DEPTH_SNAPSHOTS_ACCEPTED: AtomicU64 = AtomicU64::new(0);
 static PRO_DEPTH_SNAPSHOTS_WITH_OLD_MATCHING_TIME: AtomicU64 = AtomicU64::new(0);
 static PRO_DEPTH_LAST_SNAPSHOT_LATENCY_MS: AtomicU64 = AtomicU64::new(0);
 static PRO_DEPTH_MAX_SNAPSHOT_LATENCY_MS: AtomicU64 = AtomicU64::new(0);
+static PRO_DEPTH_WARM_REUSES: AtomicU64 = AtomicU64::new(0);
+static PRO_DEPTH_SUBSCRIBED: AtomicU64 = AtomicU64::new(0);
 const CLASSIC_SYMBOLS_PER_SHARD: usize = 150;
 const CLASSIC_DEPTH_BASELINE_SYMBOL: &str = "XBTUSDTM";
+// Candidate bursts frequently recur within a few minutes. Keeping a small,
+// bounded set of recent Pro books avoids paying the 0.8-1.4 second initial
+// snapshot latency again without allowing 10 ms depth traffic to grow without
+// bound on the small VPS.
+const PRO_DEPTH_WARM_RETENTION: Duration = Duration::from_secs(300);
+const MAX_PRO_DEPTH_RETAINED_SYMBOLS: usize = 8;
 
 fn is_classic_depth_baseline(symbol: &str) -> bool {
     symbol == CLASSIC_DEPTH_BASELINE_SYMBOL
@@ -41,12 +49,14 @@ pub fn pro_depth_is_fresh(pair: &str, now_ms: i64) -> bool {
         .is_some_and(|updated| (0..=750).contains(&now_ms.saturating_sub(*updated)))
 }
 
-pub fn pro_depth_snapshot_metrics() -> (u64, u64, u64, u64) {
+pub fn pro_depth_snapshot_metrics() -> (u64, u64, u64, u64, u64, u64) {
     (
         PRO_DEPTH_SNAPSHOTS_ACCEPTED.load(AtomicOrdering::Relaxed),
         PRO_DEPTH_SNAPSHOTS_WITH_OLD_MATCHING_TIME.load(AtomicOrdering::Relaxed),
         PRO_DEPTH_LAST_SNAPSHOT_LATENCY_MS.load(AtomicOrdering::Relaxed),
         PRO_DEPTH_MAX_SNAPSHOT_LATENCY_MS.load(AtomicOrdering::Relaxed),
+        PRO_DEPTH_WARM_REUSES.load(AtomicOrdering::Relaxed),
+        PRO_DEPTH_SUBSCRIBED.load(AtomicOrdering::Relaxed),
     )
 }
 
@@ -215,7 +225,7 @@ async fn handler(
     children.spawn(async move {
         let mut backoff = Duration::from_millis(250);
         loop {
-            match run_pro_depth(
+            let result = run_pro_depth(
                 &fast_prices,
                 &fast_signal,
                 &fast_l2,
@@ -223,8 +233,11 @@ async fn handler(
                 &normalized_map,
                 &fast_raw_symbols,
             )
-            .await
-            {
+            .await;
+            // A disconnected actor no longer owns any server subscriptions;
+            // do not leave a stale positive health gauge during its backoff.
+            PRO_DEPTH_SUBSCRIBED.store(0, AtomicOrdering::Relaxed);
+            match result {
                 Ok(()) => backoff = Duration::from_millis(250),
                 Err(error) => {
                     warn!(
@@ -395,6 +408,39 @@ fn pro_depth_subscription(raw_symbol: &str, subscribe: bool) -> Value {
     })
 }
 
+fn refresh_pro_depth_retention(
+    retained: &mut HashMap<String, Instant>,
+    currently_wanted: &HashSet<String>,
+    now: Instant,
+) {
+    for raw in currently_wanted {
+        retained.insert(raw.clone(), now);
+    }
+    retained.retain(|raw, seen| {
+        currently_wanted.contains(raw)
+            || now.saturating_duration_since(*seen) < PRO_DEPTH_WARM_RETENTION
+    });
+
+    // Never evict a symbol that is currently required by a candidate or an
+    // owned position. Only the inactive warm tail is bounded.
+    let target = MAX_PRO_DEPTH_RETAINED_SYMBOLS.max(currently_wanted.len());
+    if retained.len() <= target {
+        return;
+    }
+    let mut inactive: Vec<_> = retained
+        .iter()
+        .filter(|(raw, _)| !currently_wanted.contains(*raw))
+        .map(|(raw, seen)| (raw.clone(), *seen))
+        .collect();
+    inactive.sort_by_key(|(_, seen)| *seen);
+    for (raw, _) in inactive
+        .into_iter()
+        .take(retained.len().saturating_sub(target))
+    {
+        retained.remove(&raw);
+    }
+}
+
 fn pro_nanosecond_timestamp_ms(value: &Value) -> Option<i64> {
     let nanos = value
         .as_i64()
@@ -499,6 +545,7 @@ async fn run_pro_depth(
     let (mut writer, mut reader) = ws.split();
 
     let mut subscribed = HashSet::<String>::new();
+    let mut actively_wanted = HashSet::<String>::new();
     let mut subscription_started = HashMap::<String, Instant>::new();
     let mut retained = HashMap::<String, Instant>::new();
     let mut books = HashMap::<String, ProBook>::new();
@@ -511,14 +558,23 @@ async fn run_pro_depth(
         tokio::select! {
             _ = refresh.tick() => {
                 let now = Instant::now();
+                let mut currently_wanted = HashSet::new();
                 for key in l2_wanted.iter() {
                     if let Some(normalized) = key.key().strip_prefix("kucoin:") {
                         if let Some((raw, _)) = normalized_symbols.get(normalized) {
-                            retained.insert(raw.clone(), now);
+                            currently_wanted.insert(raw.clone());
                         }
                     }
                 }
-                retained.retain(|_, seen| now.duration_since(*seen) < Duration::from_secs(15));
+                let warm_reuses = currently_wanted
+                    .iter()
+                    .filter(|raw| !actively_wanted.contains(*raw) && subscribed.contains(*raw))
+                    .count() as u64;
+                if warm_reuses > 0 {
+                    PRO_DEPTH_WARM_REUSES.fetch_add(warm_reuses, AtomicOrdering::Relaxed);
+                }
+                actively_wanted = currently_wanted.clone();
+                refresh_pro_depth_retention(&mut retained, &currently_wanted, now);
                 let desired: HashSet<String> = retained.keys().cloned().collect();
                 for raw in desired.difference(&subscribed) {
                     tracing::debug!("[kucoin_pro_l2] subscribing {raw}");
@@ -535,6 +591,7 @@ async fn run_pro_depth(
                     subscription_started.remove(raw);
                 }
                 subscribed = desired;
+                PRO_DEPTH_SUBSCRIBED.store(subscribed.len() as u64, AtomicOrdering::Relaxed);
             }
             message = reader.next() => match message {
                 Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => {
@@ -1118,6 +1175,30 @@ mod tests {
         assert_eq!(unsubscribe["action"], "UNSUBSCRIBE");
         assert_eq!(unsubscribe["channel"], "obu");
         assert_eq!(unsubscribe["depth"], "increment@10ms");
+    }
+
+    #[test]
+    fn pro_depth_retention_keeps_current_and_newest_warm_symbols() {
+        let now = Instant::now();
+        let wanted = HashSet::from(["ACTIVE".to_string()]);
+        let mut retained = HashMap::from([
+            ("ACTIVE".to_string(), now - Duration::from_secs(600)),
+            ("EXPIRED".to_string(), now - Duration::from_secs(301)),
+        ]);
+        for index in 0..10 {
+            retained.insert(
+                format!("WARM{index}"),
+                now - Duration::from_secs(10 + index),
+            );
+        }
+
+        refresh_pro_depth_retention(&mut retained, &wanted, now);
+
+        assert!(retained.contains_key("ACTIVE"));
+        assert!(!retained.contains_key("EXPIRED"));
+        assert_eq!(retained.len(), MAX_PRO_DEPTH_RETAINED_SYMBOLS);
+        assert!(retained.contains_key("WARM0"));
+        assert!(!retained.contains_key("WARM9"));
     }
 
     #[test]
