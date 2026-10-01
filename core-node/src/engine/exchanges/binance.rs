@@ -318,6 +318,33 @@ pub async fn fetch_public_depth_snapshot_ws(
     parse_public_depth_ws_response(&response, now_ms() as i64)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicDepthTransport {
+    WebSocket,
+    RestFallback,
+}
+
+/// Prefer the weight-free request/response WS lane, but recover through the
+/// independently routed REST depth endpoint when this VPS receives a stale WS
+/// snapshot. Both paths use the same strict parser and <=750 ms exchange-time
+/// budget; the REST call also passes through the shared IP rate-limit guard.
+pub async fn fetch_public_depth_snapshot_resilient(
+    http: &Client,
+    pair: &str,
+) -> Result<(crate::state::L2Snapshot, PublicDepthTransport), String> {
+    match fetch_public_depth_snapshot_ws(pair).await {
+        Ok(book) => Ok((book, PublicDepthTransport::WebSocket)),
+        Err(ws_error) => fetch_public_depth_snapshot(http, pair)
+            .await
+            .map(|book| (book, PublicDepthTransport::RestFallback))
+            .map_err(|rest_error| {
+                format!(
+                    "Binance depth WS failed ({ws_error}); REST fallback failed ({rest_error})"
+                )
+            }),
+    }
+}
+
 // ── Private helpers (used internally by connector methods) ───────────────────
 
 fn check_ip_ban() -> Result<(), String> {

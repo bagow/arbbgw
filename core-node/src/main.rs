@@ -843,6 +843,18 @@ async fn main() -> Result<()> {
                     ] {
                         t_e_ctx.scanner_status.insert(key.to_string(), value);
                     }
+                    let (health_rest_success, health_rest_failure) =
+                        crate::collector::binance::health_rest_fallback_metrics();
+                    let (prewarm_rest_success, prewarm_rest_failure) =
+                        engine::managed::binance_depth_rest_fallback_metrics();
+                    for (key, value) in [
+                        ("binance_health_rest_fallback_success", health_rest_success),
+                        ("binance_health_rest_fallback_failure", health_rest_failure),
+                        ("binance_prewarm_rest_fallback_success", prewarm_rest_success),
+                        ("binance_prewarm_rest_fallback_failure", prewarm_rest_failure),
+                    ] {
+                        t_e_ctx.scanner_status.insert(key.to_string(), value);
+                    }
 
                     engine::managed::propose(signals, real_profiles, t_prices, t_http, t_keys, t_journal, t_e_ctx.clone(), ts);
                     t_e_ctx.scanner_status.insert(

@@ -11,7 +11,7 @@ use dashmap::{DashMap, DashSet};
 use reqwest::Client;
 use shared::{TechnicalSettings, TradeSignal, TradingSettings};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, OnceLock,
 };
 
@@ -23,6 +23,8 @@ static CANDIDATE_PREWARM_LAST_ATTEMPT: OnceLock<DashMap<String, i64>> = OnceLock
 static BINANCE_DEPTH_PREWARM_INFLIGHT: OnceLock<DashSet<String>> = OnceLock::new();
 static LAST_BINANCE_DEPTH_PREWARM: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
+static BINANCE_DEPTH_REST_FALLBACK_SUCCESS: AtomicU64 = AtomicU64::new(0);
+static BINANCE_DEPTH_REST_FALLBACK_FAILURE: AtomicU64 = AtomicU64::new(0);
 static KUCOIN_DEPTH_PREWARM_INFLIGHT: OnceLock<DashSet<String>> = OnceLock::new();
 static LAST_KUCOIN_DEPTH_PREWARM: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
@@ -37,6 +39,13 @@ const KUCOIN_DEPTH_PREWARM_INTERVAL_MS: i64 = 1_000;
 const NORMAL_EXIT_PAIR_COOLDOWN_MS: i64 = 60_000;
 const RISK_EXIT_PAIR_COOLDOWN_MS: i64 = 30 * 60_000;
 const ENTRY_WIDENING_EPSILON_PCT: f64 = 0.000001;
+
+pub fn binance_depth_rest_fallback_metrics() -> (u64, u64) {
+    (
+        BINANCE_DEPTH_REST_FALLBACK_SUCCESS.load(Ordering::Relaxed),
+        BINANCE_DEPTH_REST_FALLBACK_FAILURE.load(Ordering::Relaxed),
+    )
+}
 
 fn pair_cooldown_after_close(reason: &str) -> i64 {
     if matches!(reason, "TP" | "MANUAL_CLOSE") {
@@ -289,7 +298,7 @@ pub fn prewarm_binance_execution_book(
     pair: &str,
     prices: PriceMap,
     signal: crate::state::UpdateSignal,
-    _http: Client,
+    http: Client,
     ctx: Arc<EngineContext>,
 ) -> bool {
     let key = format!("binance:{pair}");
@@ -313,8 +322,13 @@ pub fn prewarm_binance_execution_book(
     }
     let pair = pair.to_string();
     tokio::spawn(async move {
-        match super::exchanges::binance::fetch_public_depth_snapshot_ws(&pair).await {
-            Ok(book) => {
+        match super::exchanges::binance::fetch_public_depth_snapshot_resilient(&http, &pair).await {
+            Ok((book, transport)) => {
+                if transport
+                    == super::exchanges::binance::PublicDepthTransport::RestFallback
+                {
+                    BINANCE_DEPTH_REST_FALLBACK_SUCCESS.fetch_add(1, Ordering::Relaxed);
+                }
                 let key = format!("binance:{pair}");
                 let newer = ctx
                     .l2_books
@@ -340,11 +354,14 @@ pub fn prewarm_binance_execution_book(
                     signal.notify_one();
                 }
             }
-            Err(error) => tracing::debug!(
-                "[managed] Binance candidate depth prewarm failed for {}: {}",
-                pair,
-                error,
-            ),
+            Err(error) => {
+                BINANCE_DEPTH_REST_FALLBACK_FAILURE.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    "[managed] Binance candidate depth prewarm failed for {}: {}",
+                    pair,
+                    error,
+                );
+            }
         }
         BINANCE_DEPTH_PREWARM_INFLIGHT
             .get_or_init(DashSet::new)

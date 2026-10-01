@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio_tungstenite::{client_async_tls, tungstenite::Message};
 use tracing::{error, info, warn};
@@ -66,6 +66,15 @@ const MAX_INITIAL_EVENT_LAG_MS: i64 = 750;
 const DEPTH_ROUTE_PROBE_EVENTS: usize = 20;
 const MAX_DEPTH_ROUTE_LAG_DRIFT_MS: i64 = 250;
 static MARKET_ROUTE_OFFSET: AtomicUsize = AtomicUsize::new(0);
+static HEALTH_REST_FALLBACK_SUCCESS: AtomicU64 = AtomicU64::new(0);
+static HEALTH_REST_FALLBACK_FAILURE: AtomicU64 = AtomicU64::new(0);
+
+pub fn health_rest_fallback_metrics() -> (u64, u64) {
+    (
+        HEALTH_REST_FALLBACK_SUCCESS.load(Ordering::Relaxed),
+        HEALTH_REST_FALLBACK_FAILURE.load(Ordering::Relaxed),
+    )
+}
 
 type MarketWs = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -463,6 +472,10 @@ async fn run_l2_health_fallback(
     settings: std::sync::Arc<tokio::sync::RwLock<Vec<crate::settings::TradingSettings>>>,
 ) {
     let key = "binance:BTCUSDT";
+    let http = Client::builder()
+        .user_agent("cryptoarb-binance-depth-fallback/1")
+        .build()
+        .expect("Binance depth fallback client");
     let mut last_warning = std::time::Instant::now();
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -475,8 +488,18 @@ async fn run_l2_health_fallback(
         if !baseline_health_refresh_due(active, updated_ms, now) {
             continue;
         }
-        match crate::engine::exchanges::binance::fetch_public_depth_snapshot_ws("BTCUSDT").await {
-            Ok(book) => {
+        match crate::engine::exchanges::binance::fetch_public_depth_snapshot_resilient(
+            &http,
+            "BTCUSDT",
+        )
+        .await
+        {
+            Ok((book, transport)) => {
+                if transport
+                    == crate::engine::exchanges::binance::PublicDepthTransport::RestFallback
+                {
+                    HEALTH_REST_FALLBACK_SUCCESS.fetch_add(1, Ordering::Relaxed);
+                }
                 if l2_books
                     .get(key)
                     .map(|existing| existing.updated_ms >= book.updated_ms)
@@ -502,8 +525,9 @@ async fn run_l2_health_fallback(
                 signal.notify_one();
             }
             Err(error) => {
+                HEALTH_REST_FALLBACK_FAILURE.fetch_add(1, Ordering::Relaxed);
                 if last_warning.elapsed() >= Duration::from_secs(30) {
-                    warn!("[binance_l2_health_ws] Refresh failed: {}", error);
+                    warn!("[binance_l2_health] WS and REST refresh failed: {}", error);
                     last_warning = std::time::Instant::now();
                 }
             }
