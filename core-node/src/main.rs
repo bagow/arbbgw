@@ -27,6 +27,7 @@ use spreads::{compute_spreads, discovery_spread_threshold, DISCOVERY_PREWARM_RAT
 use state::{PriceMap, UpdateSignal};
 
 const DIAGNOSTIC_L2_PAIR_LIMIT: usize = 2;
+const DIAGNOSTIC_L2_RETENTION_MS: i64 = 15_000;
 
 /// Select an unstable route only for passive public-book recording.
 ///
@@ -413,12 +414,39 @@ async fn main() -> Result<()> {
                     ) > 100
                     {
                         LAST_SHADOW.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                        let shadow_rows = engine::shadow::capture(
+                        let expired_diagnostics: Vec<_> = t_e_ctx
+                            .diagnostic_l2_rows
+                            .iter()
+                            .filter(|entry| entry.expires_ms <= now_ms as i64)
+                            .map(|entry| entry.key().clone())
+                            .collect();
+                        for key in expired_diagnostics {
+                            t_e_ctx.diagnostic_l2_rows.remove(&key);
+                        }
+                        let mut shadow_rows = engine::shadow::capture(
                             &spreads,
                             &t_e_ctx,
                             now_ms as i64,
                             ts.default_fee_rate,
                         );
+                        let diagnostic_only: Vec<_> = t_e_ctx
+                            .diagnostic_l2_rows
+                            .iter()
+                            .filter(|nomination| {
+                                !spreads.iter().any(|row| {
+                                    row.pair == nomination.row.pair
+                                        && row.exchange_a == nomination.row.exchange_a
+                                        && row.exchange_b == nomination.row.exchange_b
+                                })
+                            })
+                            .map(|entry| entry.value().clone())
+                            .collect();
+                        shadow_rows.extend(engine::shadow::capture_diagnostics(
+                            &diagnostic_only,
+                            &t_e_ctx,
+                            now_ms as i64,
+                            ts.default_fee_rate,
+                        ));
                         if !shadow_rows.is_empty() {
                             let _ = t_shadow_tx.try_send(shadow_rows);
                         }
@@ -624,6 +652,28 @@ async fn main() -> Result<()> {
                             }
                             t_e_ctx.l2_wanted.insert(key_a);
                             t_e_ctx.l2_wanted.insert(key_b);
+                            let diagnostic_key = format!(
+                                "{}:{}:{}",
+                                row.exchange_a, row.exchange_b, row.pair,
+                            );
+                            let prior_nomination_ms = t_e_ctx
+                                .diagnostic_l2_rows
+                                .get(&diagnostic_key)
+                                .map(|nomination| nomination.nominated_ms);
+                            t_e_ctx.diagnostic_l2_rows.insert(
+                                diagnostic_key,
+                                crate::state::DiagnosticL2Nomination {
+                                    row: row.clone(),
+                                    nominated_ms: prior_nomination_ms.unwrap_or(now_ms as i64),
+                                    expires_ms: now_ms as i64 + DIAGNOSTIC_L2_RETENTION_MS,
+                                },
+                            );
+                            if prior_nomination_ms.is_none() {
+                                t_e_ctx.diagnostic_l2_nominations.fetch_add(
+                                    1,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
                             if !candidate_depth_prewarm_scheduled
                                 && (row.exchange_a == "binance" || row.exchange_b == "binance")
                             {
@@ -653,6 +703,16 @@ async fn main() -> Result<()> {
                     t_e_ctx.scanner_status.insert(
                         "diagnostic_l2_pairs".to_string(),
                         diagnostic_l2_pairs as u64,
+                    );
+                    t_e_ctx.scanner_status.insert(
+                        "diagnostic_l2_retained_rows".to_string(),
+                        t_e_ctx.diagnostic_l2_rows.len() as u64,
+                    );
+                    t_e_ctx.scanner_status.insert(
+                        "diagnostic_l2_nominations".to_string(),
+                        t_e_ctx
+                            .diagnostic_l2_nominations
+                            .load(std::sync::atomic::Ordering::Relaxed),
                     );
 
                     engine::managed::propose(signals, real_profiles, t_prices, t_http, t_keys, t_journal, t_e_ctx.clone(), ts);

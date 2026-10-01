@@ -50,6 +50,13 @@ pub struct PositionSnapshot {
 }
 
 #[derive(Clone)]
+pub struct DiagnosticL2Nomination {
+    pub row: shared::SpreadRow,
+    pub nominated_ms: i64,
+    pub expires_ms: i64,
+}
+
+#[derive(Clone)]
 pub struct EngineContext {
     pub specifications: Arc<DashMap<String, crate::engine::specification::Specification>>,
     pub multipliers: Arc<DashMap<String, f64>>,
@@ -99,6 +106,11 @@ pub struct EngineContext {
     /// Populated by scanner (spread rows) + cycle (open trades).
     /// Collectors subscribe only to pairs present here.
     pub l2_wanted: Arc<DashSet<String>>,
+    /// Unstable but economically interesting public-L1 routes retained briefly
+    /// so the passive recorder can persist the L2 result even when executable
+    /// depth immediately removes the route from discovery.
+    pub diagnostic_l2_rows: Arc<DashMap<String, DiagnosticL2Nomination>>,
+    pub diagnostic_l2_nominations: Arc<std::sync::atomic::AtomicU64>,
     /// Last scanner-cycle funnel snapshot (overwritten each cycle).
     pub scanner_status: Arc<DashMap<String, u64>>,
     /// Cumulative managed-entry funnel since process start. Exposed by /health so
@@ -160,6 +172,8 @@ impl Default for EngineContext {
             price_history: Arc::new(DashMap::new()),
             l2_books: Arc::new(DashMap::new()),
             l2_wanted: Arc::new(DashSet::new()),
+            diagnostic_l2_rows: Arc::new(DashMap::new()),
+            diagnostic_l2_nominations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scanner_status: Arc::new(DashMap::new()),
             entry_decisions: Arc::new(DashMap::new()),
             mirage_cooldown: Arc::new(DashMap::new()),
