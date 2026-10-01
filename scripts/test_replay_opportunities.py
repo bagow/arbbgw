@@ -234,6 +234,16 @@ class ReplayOpportunityTests(unittest.TestCase):
         self.assertAlmostEqual(report[0]["gross_pct_max"], 1.0)
         self.assertAlmostEqual(report[0]["required_pct_max"], 0.83)
 
+        sample["capture_reason"] = "low_volume_l1_nomination"
+        sample["spread"]["has_structural_spread"] = True
+        sample["spread"]["volA"] = 430_000.0
+        report = replay.summarize_nomination_diagnostics([sample], profile, 1_000)
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report[0]["capture_reason"], "low_volume_l1_nomination")
+        self.assertEqual(report[0]["volume_a"], 430_000.0)
+        self.assertEqual(report[0]["reasons"], {"priced": 1})
+        self.assertEqual(report[0]["priced_samples"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

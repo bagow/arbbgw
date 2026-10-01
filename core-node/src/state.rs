@@ -52,6 +52,9 @@ pub struct PositionSnapshot {
 #[derive(Clone)]
 pub struct DiagnosticL2Nomination {
     pub row: shared::SpreadRow,
+    /// Why this route is being observed. Diagnostic nominations never
+    /// authorize private preflight or order placement.
+    pub capture_reason: &'static str,
     pub nominated_ms: i64,
     pub expires_ms: i64,
 }
@@ -106,9 +109,8 @@ pub struct EngineContext {
     /// Populated by scanner (spread rows) + cycle (open trades).
     /// Collectors subscribe only to pairs present here.
     pub l2_wanted: Arc<DashSet<String>>,
-    /// Unstable but economically interesting public-L1 routes retained briefly
-    /// so the passive recorder can persist the L2 result even when executable
-    /// depth immediately removes the route from discovery.
+    /// Economically interesting public-L1 routes retained briefly for passive
+    /// L2 diagnosis even though a safety gate prevents them from trading.
     pub diagnostic_l2_rows: Arc<DashMap<String, DiagnosticL2Nomination>>,
     pub diagnostic_l2_nominations: Arc<std::sync::atomic::AtomicU64>,
     /// Last scanner-cycle funnel snapshot (overwritten each cycle).

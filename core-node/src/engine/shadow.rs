@@ -57,7 +57,7 @@ pub fn capture_diagnostics(
                 ctx,
                 now,
                 default_fee_rate,
-                "unstable_l1_nomination",
+                nomination.capture_reason,
                 Some(nomination.nominated_ms),
             )
         })
@@ -151,6 +151,7 @@ mod tests {
         let records = capture_diagnostics(
             &[DiagnosticL2Nomination {
                 row: row(),
+                capture_reason: "unstable_l1_nomination",
                 nominated_ms: 1_000,
                 expires_ms: 16_000,
             }],

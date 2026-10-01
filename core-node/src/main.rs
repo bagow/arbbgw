@@ -28,6 +28,7 @@ use state::{PriceMap, UpdateSignal};
 
 const DIAGNOSTIC_L2_PAIR_LIMIT: usize = 2;
 const DIAGNOSTIC_L2_RETENTION_MS: i64 = 15_000;
+const DIAGNOSTIC_MIN_VOLUME_RATIO: f64 = 0.75;
 
 /// Select an unstable route only for passive public-book recording.
 ///
@@ -47,6 +48,55 @@ fn diagnostic_l2_profile_matches(
         || row.vol_a < profile.min_volume_millions * 1_000_000.0
         || row.vol_b < profile.min_volume_millions * 1_000_000.0
         || engine::scanner_common::directional_structural_regime_is_stable(
+            row.structural_verified,
+            row.has_structural_spread,
+            row.structural_min,
+            row.structural_max,
+        )
+    {
+        return false;
+    }
+    let Some(structural_reserve) = engine::scanner_common::configured_structural_reserve(
+        profile.min_structural_deviation,
+        row.structural_verified,
+        row.structural_spread,
+    ) else {
+        return false;
+    };
+    engine::scanner_common::entry_execution_budget(
+        row.spread,
+        profile.min_entry_spread,
+        profile.max_entry_spread,
+        structural_reserve,
+        profile.min_structural_deviation,
+        break_even_pct,
+    )
+    .is_some()
+}
+
+/// Select a stable route which passes the full L1 economic budget but misses
+/// only the configured 24h-volume gate by a bounded amount. This is passive
+/// evidence collection: the normal scanner still enforces the complete volume
+/// threshold and this lane never performs private preflight or places orders.
+fn low_volume_diagnostic_l2_profile_matches(
+    row: &shared::SpreadRow,
+    profile: &settings::TradingSettings,
+    break_even_pct: f64,
+) -> bool {
+    let configured_volume = profile.min_volume_millions * 1_000_000.0;
+    let observed_volume = row.vol_a.min(row.vol_b);
+    if !profile.is_active
+        || profile.strategy_type != "ema"
+        || profile.disabled_exchanges.contains(&row.exchange_a)
+        || profile.disabled_exchanges.contains(&row.exchange_b)
+        || !configured_volume.is_finite()
+        || configured_volume <= 0.0
+        || !row.vol_a.is_finite()
+        || !row.vol_b.is_finite()
+        || !observed_volume.is_finite()
+        || observed_volume < configured_volume * DIAGNOSTIC_MIN_VOLUME_RATIO
+        || observed_volume >= configured_volume
+        || !engine::scanner_common::directional_structural_regime_is_stable(
             row.structural_verified,
             row.has_structural_spread,
             row.structural_min,
@@ -615,11 +665,12 @@ async fn main() -> Result<()> {
                             }
                         }
 
-                        // A route can have attractive headline economics while its
-                        // 24h directional regime is not stable. Never trade it, but
-                        // retain at most two such public L2 routes so replay can tell
-                        // whether the apparent edge survived executable depth. This
-                        // lane intentionally does not call `prewarm_candidate`.
+                        // A route can have attractive headline economics while a
+                        // safety gate still forbids trading it. Retain at most two
+                        // such public L2 routes so replay can test executable depth:
+                        // either the 24h direction is unstable or volume is narrowly
+                        // below the configured minimum. This lane intentionally does
+                        // not call `prewarm_candidate`.
                         let mut diagnostic_l2_pairs = 0usize;
                         for row in &spreads {
                             if diagnostic_l2_pairs >= DIAGNOSTIC_L2_PAIR_LIMIT {
@@ -664,16 +715,27 @@ async fn main() -> Result<()> {
                             let break_even_pct = engine::scanner_common::ioc_break_even_pct(
                                 fee_a, fee_b,
                             );
-                            if !real_profiles.iter().any(|profile| {
-                                diagnostic_l2_profile_matches(row, profile, break_even_pct)
-                            }) {
+                            let capture_reason = real_profiles.iter().find_map(|profile| {
+                                if diagnostic_l2_profile_matches(row, profile, break_even_pct) {
+                                    Some("unstable_l1_nomination")
+                                } else if low_volume_diagnostic_l2_profile_matches(
+                                    row,
+                                    profile,
+                                    break_even_pct,
+                                ) {
+                                    Some("low_volume_l1_nomination")
+                                } else {
+                                    None
+                                }
+                            });
+                            let Some(capture_reason) = capture_reason else {
                                 continue;
-                            }
+                            };
                             t_e_ctx.l2_wanted.insert(key_a);
                             t_e_ctx.l2_wanted.insert(key_b);
                             let diagnostic_key = format!(
-                                "{}:{}:{}",
-                                row.exchange_a, row.exchange_b, row.pair,
+                                "{}:{}:{}:{}",
+                                capture_reason, row.exchange_a, row.exchange_b, row.pair,
                             );
                             let prior_nomination_ms = t_e_ctx
                                 .diagnostic_l2_rows
@@ -683,6 +745,7 @@ async fn main() -> Result<()> {
                                 diagnostic_key,
                                 crate::state::DiagnosticL2Nomination {
                                     row: row.clone(),
+                                    capture_reason,
                                     nominated_ms: prior_nomination_ms.unwrap_or(now_ms as i64),
                                     expires_ms: now_ms as i64 + DIAGNOSTIC_L2_RETENTION_MS,
                                 },
@@ -1130,5 +1193,39 @@ mod diagnostic_l2_tests {
         let mut disabled = profile.clone();
         disabled.disabled_exchanges.push("binance".to_string());
         assert!(!diagnostic_l2_profile_matches(&row, &disabled, 0.28));
+    }
+
+    #[test]
+    fn low_volume_diagnostic_lane_is_bounded_and_never_matches_live_volume() {
+        let profile = profile();
+        let mut row = unstable_row();
+        row.has_structural_spread = true;
+        row.vol_a = 430_000.0;
+        row.vol_b = 3_000_000.0;
+        assert!(low_volume_diagnostic_l2_profile_matches(
+            &row, &profile, 0.28,
+        ));
+
+        row.vol_a = 500_000.0;
+        assert!(!low_volume_diagnostic_l2_profile_matches(
+            &row, &profile, 0.28,
+        ));
+
+        row.vol_a = 374_999.0;
+        assert!(!low_volume_diagnostic_l2_profile_matches(
+            &row, &profile, 0.28,
+        ));
+
+        row.vol_a = 430_000.0;
+        row.has_structural_spread = false;
+        assert!(!low_volume_diagnostic_l2_profile_matches(
+            &row, &profile, 0.28,
+        ));
+
+        row.has_structural_spread = true;
+        row.vol_b = f64::NAN;
+        assert!(!low_volume_diagnostic_l2_profile_matches(
+            &row, &profile, 0.28,
+        ));
     }
 }

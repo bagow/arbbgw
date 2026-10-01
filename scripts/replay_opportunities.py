@@ -346,13 +346,14 @@ def evaluate(sample, profile):
     }, "eligible"
 
 
-def diagnose_nomination_sample(sample, profile):
-    """Price a captured nomination without trusting its structural-regime flag.
+def diagnose_nomination_sample(sample, profile, bypass_volume=False):
+    """Price a captured nomination without trusting its nominated safety gate.
 
-    Production entry still requires a stable structural regime. This diagnostic
-    path deliberately bypasses only that gate and fee-timestamp freshness so an
-    unstable L1 headline can be compared with executable L2 economics. All
-    book freshness, skew, lot-grid, depth, volume, and contract checks remain.
+    Production entry still requires every configured gate. This diagnostic path
+    deliberately bypasses structural stability, fee-timestamp freshness, and,
+    only for a low-volume nomination, the volume gate so the rejected L1 route
+    can be compared with executable L2 economics. All book freshness, skew,
+    lot-grid, depth, and contract checks remain.
     """
     spread = sample.get("spread") or {}
     if {spread.get("exchangeA"), spread.get("exchangeB")} != {"binance", "kucoin"}:
@@ -373,7 +374,11 @@ def diagnose_nomination_sample(sample, profile):
         return None, "spread_values"
     if not profile["min_entry_spread"] <= gross_l1 <= profile["max_entry_spread"]:
         return None, "entry_window"
-    if min(float(spread.get("volA", 0)), float(spread.get("volB", 0))) < profile["min_volume_usd"]:
+    if (
+        not bypass_volume
+        and min(float(spread.get("volA", 0)), float(spread.get("volB", 0)))
+        < profile["min_volume_usd"]
+    ):
         return None, "volume"
 
     top_bid_a, top_ask_a = book_a["bids"][0][0], book_a["asks"][0][0]
@@ -472,25 +477,30 @@ def diagnose_nomination_sample(sample, profile):
 
 
 def summarize_nomination_diagnostics(samples, profile, since_ms=0):
-    """Aggregate executable counterfactuals for unstable L1 nominations."""
+    """Aggregate executable counterfactuals for rejected L1 nominations."""
     groups = {}
     for sample in samples:
         nomination_ms = sample.get("nomination_ms")
+        capture_reason = sample.get("capture_reason")
         spread = sample.get("spread") or {}
         if (
-            sample.get("capture_reason") != "unstable_l1_nomination"
+            capture_reason
+            not in {"unstable_l1_nomination", "low_volume_l1_nomination"}
             or not isinstance(nomination_ms, int)
             or nomination_ms < since_ms
         ):
             continue
-        key = (nomination_ms, spread.get("pair"), spread.get("direction"))
+        key = (nomination_ms, capture_reason, spread.get("pair"), spread.get("direction"))
         group = groups.setdefault(key, {
             "nomination_ms": nomination_ms,
+            "capture_reason": capture_reason,
             "pair": spread.get("pair"),
             "direction": spread.get("direction"),
             "l1_spread_pct": spread.get("spread"),
             "structural_spread_pct": spread.get("structural_spread"),
             "has_structural_spread": spread.get("has_structural_spread"),
+            "volume_a": spread.get("volA"),
+            "volume_b": spread.get("volB"),
             "rows": 0,
             "first_recorded_ms": None,
             "last_recorded_ms": None,
@@ -504,7 +514,11 @@ def summarize_nomination_diagnostics(samples, profile, since_ms=0):
             last = group["last_recorded_ms"]
             group["first_recorded_ms"] = recorded_ms if first is None else min(first, recorded_ms)
             group["last_recorded_ms"] = recorded_ms if last is None else max(last, recorded_ms)
-        event, reason = diagnose_nomination_sample(sample, profile)
+        event, reason = diagnose_nomination_sample(
+            sample,
+            profile,
+            bypass_volume=capture_reason == "low_volume_l1_nomination",
+        )
         group["reasons"][reason] += 1
         if event is not None:
             group["events"].append(event)
@@ -840,7 +854,7 @@ def main():
     parser.add_argument(
         "--diagnose-nominations-since-ms",
         type=int,
-        help="report executable L2 economics for unstable nominations at or after this timestamp",
+        help="report executable L2 economics for diagnostic nominations at or after this timestamp",
     )
     args = parser.parse_args()
     samples = load_samples(args.database, args.build)
@@ -863,7 +877,7 @@ def main():
                     args.diagnose_nominations_since_ms,
                 ),
                 "limitations": [
-                    "Structural-regime and fee-timestamp gates are intentionally bypassed for diagnosis.",
+                    "The nominated structural/volume gate and fee-timestamp gate are intentionally bypassed for diagnosis.",
                     "Budget and hard-stop pass counts are counterfactuals, not evidence of fills.",
                 ],
             }
