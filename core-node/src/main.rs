@@ -819,6 +819,26 @@ async fn main() -> Result<()> {
                             .diagnostic_l2_nominations
                             .load(std::sync::atomic::Ordering::Relaxed),
                     );
+                    let (
+                        pro_snapshots,
+                        pro_idle_snapshots,
+                        pro_last_snapshot_latency_ms,
+                        pro_max_snapshot_latency_ms,
+                    ) = crate::collector::kucoin::pro_depth_snapshot_metrics();
+                    for (key, value) in [
+                        ("kucoin_pro_l2_snapshots", pro_snapshots),
+                        ("kucoin_pro_l2_idle_snapshots", pro_idle_snapshots),
+                        (
+                            "kucoin_pro_l2_last_snapshot_latency_ms",
+                            pro_last_snapshot_latency_ms,
+                        ),
+                        (
+                            "kucoin_pro_l2_max_snapshot_latency_ms",
+                            pro_max_snapshot_latency_ms,
+                        ),
+                    ] {
+                        t_e_ctx.scanner_status.insert(key.to_string(), value);
+                    }
 
                     engine::managed::propose(signals, real_profiles, t_prices, t_http, t_keys, t_journal, t_e_ctx.clone(), ts);
                     t_e_ctx.scanner_status.insert(

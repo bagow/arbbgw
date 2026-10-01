@@ -6,7 +6,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicU64, Ordering as AtomicOrdering},
+    OnceLock,
+};
 use std::time::{Duration, Instant};
 use tokio_tungstenite::{
     client_async_tls, connect_async_tls_with_config, tungstenite::Message,
@@ -16,6 +19,10 @@ use tracing::{info, warn};
 use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
 
 static PRO_DEPTH_UPDATED_MS: OnceLock<dashmap::DashMap<String, i64>> = OnceLock::new();
+static PRO_DEPTH_SNAPSHOTS_ACCEPTED: AtomicU64 = AtomicU64::new(0);
+static PRO_DEPTH_SNAPSHOTS_WITH_OLD_MATCHING_TIME: AtomicU64 = AtomicU64::new(0);
+static PRO_DEPTH_LAST_SNAPSHOT_LATENCY_MS: AtomicU64 = AtomicU64::new(0);
+static PRO_DEPTH_MAX_SNAPSHOT_LATENCY_MS: AtomicU64 = AtomicU64::new(0);
 const CLASSIC_SYMBOLS_PER_SHARD: usize = 150;
 const CLASSIC_DEPTH_BASELINE_SYMBOL: &str = "XBTUSDTM";
 
@@ -32,6 +39,15 @@ pub fn pro_depth_is_fresh(pair: &str, now_ms: i64) -> bool {
     pro_depth_updates()
         .get(pair)
         .is_some_and(|updated| (0..=750).contains(&now_ms.saturating_sub(*updated)))
+}
+
+pub fn pro_depth_snapshot_metrics() -> (u64, u64, u64, u64) {
+    (
+        PRO_DEPTH_SNAPSHOTS_ACCEPTED.load(AtomicOrdering::Relaxed),
+        PRO_DEPTH_SNAPSHOTS_WITH_OLD_MATCHING_TIME.load(AtomicOrdering::Relaxed),
+        PRO_DEPTH_LAST_SNAPSHOT_LATENCY_MS.load(AtomicOrdering::Relaxed),
+        PRO_DEPTH_MAX_SNAPSHOT_LATENCY_MS.load(AtomicOrdering::Relaxed),
+    )
 }
 
 pub async fn run(
@@ -379,6 +395,39 @@ fn pro_depth_subscription(raw_symbol: &str, subscribe: bool) -> Value {
     })
 }
 
+fn pro_nanosecond_timestamp_ms(value: &Value) -> Option<i64> {
+    let nanos = value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse().ok()))?;
+    (nanos > 0).then_some(nanos / 1_000_000)
+}
+
+/// A Pro order-book snapshot is the complete book at one sequence point. `P`
+/// is when KuCoin pushed that snapshot, while `d.M` is the matching-engine time
+/// of the last book mutation and can legitimately be old on an idle contract.
+/// Deltas represent a mutation, so both their push and matching times must be
+/// fresh. This distinction avoids waiting for an unrelated future mutation
+/// without ever treating a delayed delta as current market data.
+fn pro_book_update_ms(message: &Value, received_ms: i64) -> Option<(i64, bool)> {
+    let push_ms = pro_nanosecond_timestamp_ms(&message["P"])?;
+    if !crate::engine::utils::local_timestamp_is_fresh(received_ms, push_ms, 750) {
+        return None;
+    }
+    let matching_ms = pro_nanosecond_timestamp_ms(&message["d"]["M"])?;
+    match message["t"].as_str()? {
+        "snapshot" => Some((
+            push_ms,
+            !crate::engine::utils::local_timestamp_is_fresh(received_ms, matching_ms, 750),
+        )),
+        "delta"
+            if crate::engine::utils::local_timestamp_is_fresh(received_ms, matching_ms, 750) =>
+        {
+            Some((push_ms, false))
+        }
+        _ => None,
+    }
+}
+
 async fn connect_kucoin_pro_public() -> Result<
     tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -450,6 +499,7 @@ async fn run_pro_depth(
     let (mut writer, mut reader) = ws.split();
 
     let mut subscribed = HashSet::<String>::new();
+    let mut subscription_started = HashMap::<String, Instant>::new();
     let mut retained = HashMap::<String, Instant>::new();
     let mut books = HashMap::<String, ProBook>::new();
     let mut refresh = tokio::time::interval(Duration::from_millis(20));
@@ -475,12 +525,14 @@ async fn run_pro_depth(
                     writer.send(Message::Text(
                         pro_depth_subscription(raw, true).to_string().into(),
                     )).await?;
+                    subscription_started.insert(raw.clone(), Instant::now());
                 }
                 for raw in subscribed.difference(&desired) {
                     writer.send(Message::Text(
                         pro_depth_subscription(raw, false).to_string().into(),
                     )).await?;
                     books.remove(raw);
+                    subscription_started.remove(raw);
                 }
                 subscribed = desired;
             }
@@ -511,14 +563,13 @@ async fn run_pro_depth(
                         .get(raw)
                         .map(|(normalized, multiplier)| (normalized.as_str(), *multiplier))
                         .ok_or_else(|| anyhow!("unknown KuCoin Pro L2 symbol {raw}"))?;
-                    let source_ms = value["d"]["M"]
-                        .as_i64()
-                        .map(|timestamp_ns| timestamp_ns / 1_000_000)
-                        .ok_or_else(|| anyhow!("KuCoin Pro L2 update has no matching-engine timestamp"))?;
                     let now_ms = crate::engine::utils::now_ms();
-                    if !(0..=750).contains(&now_ms.saturating_sub(source_ms)) {
+                    let Some((source_ms, snapshot_had_old_matching_time)) =
+                        pro_book_update_ms(&value, now_ms)
+                    else {
                         continue;
-                    }
+                    };
+                    let is_snapshot = value["t"].as_str() == Some("snapshot");
                     let book = books.entry(raw.to_string()).or_default();
                     if !apply_pro_book_message(book, &value)? {
                         continue;
@@ -534,6 +585,21 @@ async fn run_pro_depth(
                         L2Snapshot { bids, asks, updated_ms: source_ms },
                     );
                     pro_depth_updates().insert(normalized.to_string(), source_ms);
+                    if is_snapshot {
+                        PRO_DEPTH_SNAPSHOTS_ACCEPTED.fetch_add(1, AtomicOrdering::Relaxed);
+                        if snapshot_had_old_matching_time {
+                            PRO_DEPTH_SNAPSHOTS_WITH_OLD_MATCHING_TIME
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                        }
+                        if let Some(started) = subscription_started.remove(raw) {
+                            let latency_ms =
+                                started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                            PRO_DEPTH_LAST_SNAPSHOT_LATENCY_MS
+                                .store(latency_ms, AtomicOrdering::Relaxed);
+                            PRO_DEPTH_MAX_SNAPSHOT_LATENCY_MS
+                                .fetch_max(latency_ms, AtomicOrdering::Relaxed);
+                        }
+                    }
                     signal.notify_one();
                 }
                 Some(Ok(Message::Ping(payload))) => writer.send(Message::Pong(payload)).await?,
@@ -1052,6 +1118,40 @@ mod tests {
         assert_eq!(unsubscribe["action"], "UNSUBSCRIBE");
         assert_eq!(unsubscribe["channel"], "obu");
         assert_eq!(unsubscribe["depth"], "increment@10ms");
+    }
+
+    #[test]
+    fn pro_snapshot_uses_fresh_push_time_when_idle_matching_time_is_old() {
+        let snapshot = json!({
+            "t": "snapshot",
+            "P": 10_000_000_000i64,
+            "d": {"M": 7_000_000_000i64}
+        });
+        assert_eq!(pro_book_update_ms(&snapshot, 10_100), Some((10_000, true)));
+
+        let stale_push = json!({
+            "t": "snapshot",
+            "P": 9_000_000_000i64,
+            "d": {"M": 9_000_000_000i64}
+        });
+        assert_eq!(pro_book_update_ms(&stale_push, 10_100), None);
+    }
+
+    #[test]
+    fn pro_delta_still_requires_fresh_matching_engine_time() {
+        let fresh = json!({
+            "t": "delta",
+            "P": "10000000000",
+            "d": {"M": "9950000000"}
+        });
+        assert_eq!(pro_book_update_ms(&fresh, 10_100), Some((10_000, false)));
+
+        let stale_matching_time = json!({
+            "t": "delta",
+            "P": 10_000_000_000i64,
+            "d": {"M": 7_000_000_000i64}
+        });
+        assert_eq!(pro_book_update_ms(&stale_matching_time, 10_100), None);
     }
 
     #[tokio::test]
