@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sqlite3
 import time
+import urllib.error
 import urllib.request
 
 
@@ -112,20 +113,49 @@ def health():
         with urllib.request.urlopen(
             "http://127.0.0.1:3003/health", timeout=3
         ) as response:
+            status = getattr(response, "status", 200)
             value = json.load(response)
+    except urllib.error.HTTPError as error:
+        # The core returns its most useful readiness diagnosis in the JSON body
+        # of a fail-closed 503. Preserve that body instead of reducing a market
+        # or private-feed outage to the uninformative string "HTTPError".
+        status = error.code
+        try:
+            value = json.load(error)
+        except Exception as body_error:
+            return {
+                "error": type(error).__name__,
+                "detail": str(error)[:300],
+                "http_status": status,
+                "body_error": type(body_error).__name__,
+            }
     except Exception as error:
         return {"error": type(error).__name__, "detail": str(error)[:300]}
-    return {
+    if not isinstance(value, dict):
+        return {
+            "error": "InvalidHealthBody",
+            "detail": f"expected object, received {type(value).__name__}",
+            "http_status": status,
+        }
+    result = {
         key: value.get(key)
         for key in (
             "healthy",
+            "process_healthy",
+            "market_ready",
+            "private_ready",
+            "order_ws_ready",
             "trading_ready",
             "entries_halted",
+            "supervisor_age_ms",
             "active_trades",
             "entry_decisions",
             "scanner_status",
+            "venues",
         )
     }
+    result["http_status"] = status
+    return result
 
 
 def emit(value):

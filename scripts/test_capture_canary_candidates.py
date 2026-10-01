@@ -1,6 +1,10 @@
+import io
+import json
 import unittest
+import urllib.error
+from unittest.mock import patch
 
-from capture_canary_candidates import classify
+from capture_canary_candidates import classify, health
 
 
 CONFIG = {
@@ -63,6 +67,46 @@ class CandidateClassificationTests(unittest.TestCase):
         result = classify(row(askB=100.3), {}, CONFIG)
         self.assertFalse(result["intra_gate"])
         self.assertFalse(result["l1_candidate"])
+
+
+class HealthCaptureTests(unittest.TestCase):
+    def test_preserves_fail_closed_503_body(self):
+        body = {
+            "healthy": False,
+            "process_healthy": True,
+            "market_ready": False,
+            "private_ready": True,
+            "order_ws_ready": True,
+            "trading_ready": False,
+            "venues": [{"exchange": "binance", "fresh_books": 0}],
+        }
+        error = urllib.error.HTTPError(
+            "http://127.0.0.1:3003/health",
+            503,
+            "Service Unavailable",
+            None,
+            io.BytesIO(json.dumps(body).encode()),
+        )
+        with patch("urllib.request.urlopen", side_effect=error):
+            result = health()
+        self.assertEqual(result["http_status"], 503)
+        self.assertFalse(result["healthy"])
+        self.assertFalse(result["market_ready"])
+        self.assertEqual(result["venues"], body["venues"])
+
+    def test_reports_malformed_503_body_without_hiding_status(self):
+        error = urllib.error.HTTPError(
+            "http://127.0.0.1:3003/health",
+            503,
+            "Service Unavailable",
+            None,
+            io.BytesIO(b"not-json"),
+        )
+        with patch("urllib.request.urlopen", side_effect=error):
+            result = health()
+        self.assertEqual(result["error"], "HTTPError")
+        self.assertEqual(result["http_status"], 503)
+        self.assertEqual(result["body_error"], "JSONDecodeError")
 
 
 if __name__ == "__main__":
