@@ -17,6 +17,60 @@ pub fn ioc_break_even_pct(fee_a: f64, fee_b: f64) -> f64 {
     2.0 * (fee_a + fee_b) * 100.0 + 4.0 * EXPECTED_IOC_SLIPPAGE_PER_LEG_PCT
 }
 
+/// Net PnL percent if both newly opened legs were immediately liquidated at
+/// the current executable quotes. This uses the same leg-A entry-value
+/// denominator as managed-trade mark-to-market accounting.
+pub fn initial_liquidation_net_pct(
+    is_a_higher: bool,
+    entry_a: f64,
+    entry_b: f64,
+    exit_a: f64,
+    exit_b: f64,
+    quantity: f64,
+    fee_a: f64,
+    fee_b: f64,
+) -> Option<f64> {
+    if ![
+        entry_a, entry_b, exit_a, exit_b, quantity, fee_a, fee_b,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+        || [entry_a, entry_b, exit_a, exit_b, quantity]
+            .iter()
+            .any(|value| *value <= 0.0)
+        || fee_a < 0.0
+        || fee_b < 0.0
+    {
+        return None;
+    }
+    let gross = if is_a_higher {
+        entry_a - exit_a + exit_b - entry_b
+    } else {
+        exit_a - entry_a + entry_b - exit_b
+    } * quantity;
+    let fees = quantity
+        * (entry_a * fee_a + entry_b * fee_b + exit_a * fee_a + exit_b * fee_b);
+    let percent = (gross - fees) / (entry_a * quantity) * 100.0;
+    percent.is_finite().then_some(percent)
+}
+
+/// A trade must not start on, or within the configured maximum movement of its
+/// two opening IOC legs from, its own hard-stop boundary. A disabled hard stop
+/// remains compatible by definition.
+pub fn hard_stop_entry_is_compatible(
+    initial_net_pct: f64,
+    hard_stop_percent: f64,
+    entry_slippage_limit_per_leg_pct: f64,
+) -> bool {
+    initial_net_pct.is_finite()
+        && hard_stop_percent.is_finite()
+        && entry_slippage_limit_per_leg_pct.is_finite()
+        && entry_slippage_limit_per_leg_pct >= 0.0
+        && (hard_stop_percent <= 0.0
+            || initial_net_pct
+                > -hard_stop_percent + 2.0 * entry_slippage_limit_per_leg_pct)
+}
+
 /// Return the verified structural reserve used by every EMA entry.
 ///
 /// `min_structural_deviation` controls the additional deviation required by
@@ -317,6 +371,20 @@ mod tests {
     fn ioc_break_even_uses_expected_cost_not_price_limit_ceiling() {
         // Four 0.05% taker fees + four expected 0.02% slips = 0.28%.
         assert!((ioc_break_even_pct(0.0005, 0.0005) - 0.28).abs() < 1e-12);
+    }
+
+    #[test]
+    fn entry_cannot_begin_inside_its_own_hard_stop() {
+        let immediate = initial_liquidation_net_pct(
+            true, 101.0, 100.0, 101.2, 99.8, 1.0, 0.0005, 0.0005,
+        )
+        .unwrap();
+        assert!(immediate < -0.4);
+        assert!(!hard_stop_entry_is_compatible(immediate, 0.4, 0.05));
+        assert!(hard_stop_entry_is_compatible(immediate, 0.7, 0.05));
+        assert!(hard_stop_entry_is_compatible(immediate, 0.0, 0.05));
+        assert!(!hard_stop_entry_is_compatible(f64::NAN, 0.7, 0.05));
+        assert!(!hard_stop_entry_is_compatible(immediate, 0.7, -0.01));
     }
 
     #[test]

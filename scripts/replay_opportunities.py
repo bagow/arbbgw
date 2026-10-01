@@ -127,6 +127,51 @@ def crossing_cost_pct(is_a_higher, entry_a, entry_b, exit_a, exit_b):
     return max(0.0, cost) if math.isfinite(cost) else None
 
 
+def initial_liquidation_net_pct(
+    is_a_higher, entry_a, entry_b, exit_a, exit_b, quantity, fee_a, fee_b
+):
+    values = (entry_a, entry_b, exit_a, exit_b, quantity)
+    if not all(finite_positive(value) for value in values):
+        return None
+    if not all(
+        isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+        for value in (fee_a, fee_b)
+    ):
+        return None
+    gross = (
+        entry_a - exit_a + exit_b - entry_b
+        if is_a_higher
+        else exit_a - entry_a + entry_b - exit_b
+    ) * quantity
+    fees = quantity * (
+        entry_a * fee_a
+        + entry_b * fee_b
+        + exit_a * fee_a
+        + exit_b * fee_b
+    )
+    percent = (gross - fees) / (entry_a * quantity) * 100
+    return percent if math.isfinite(percent) else None
+
+
+def hard_stop_entry_is_compatible(
+    initial_net_pct, hard_stop_percent, entry_slippage_limit_per_leg_pct
+):
+    values = (
+        initial_net_pct,
+        hard_stop_percent,
+        entry_slippage_limit_per_leg_pct,
+    )
+    return (
+        all(isinstance(value, (int, float)) and math.isfinite(value) for value in values)
+        and entry_slippage_limit_per_leg_pct >= 0
+        and (
+            hard_stop_percent <= 0
+            or initial_net_pct
+            > -hard_stop_percent + 2 * entry_slippage_limit_per_leg_pct
+        )
+    )
+
+
 def valid_book(book, now_ms, freshness_ms=750):
     if not isinstance(book, dict):
         return False
@@ -239,6 +284,20 @@ def evaluate(sample, profile):
     )
     if fixed_costs is None:
         return None, "fees"
+    initial_net_pct = (
+        initial_liquidation_net_pct(
+            is_a_higher,
+            entry_a["vwap"],
+            entry_b["vwap"],
+            unwind_a["vwap"],
+            unwind_b["vwap"],
+            quantity,
+            fee_a,
+            fee_b,
+        )
+        if unwind_a is not None and unwind_b is not None
+        else None
+    )
     # The recorded structural_spread is already mid-price EMA plus the
     # entry-to-exit half-spreads. Adding crossing_cost again would double count.
     costs = fixed_costs
@@ -249,6 +308,11 @@ def evaluate(sample, profile):
     )
     if gross <= required:
         return None, "entry_budget"
+    hard_stop = profile["hard_stop_percent"]
+    if hard_stop > 0 and not hard_stop_entry_is_compatible(
+        initial_net_pct, hard_stop, profile["slippage_percent"]
+    ):
+        return None, "hard_stop_compatibility"
     actual_a, actual_b = quantity * entry_a["vwap"], quantity * entry_b["vwap"]
     lower = profile["notional_usdt"] * (1 - profile["volume_tolerance_pct"] / 100)
     upper = profile["notional_usdt"] * (1 + profile["volume_tolerance_pct"] / 100)
@@ -274,6 +338,7 @@ def evaluate(sample, profile):
         "fee_b": fee_b,
         "fixed_cost_pct": fixed_costs,
         "crossing_cost_pct": crossing_cost,
+        "initial_liquidation_net_pct": initial_net_pct,
         "is_a_higher": is_a_higher,
         "book_a_updated_ms": book_a["updated_ms"],
         "book_b_updated_ms": book_b["updated_ms"],
@@ -557,6 +622,7 @@ def profile_from_args(args, deviation):
         "volume_tolerance_pct": args.volume_tolerance,
         "take_profit_percent": args.take_profit,
         "hard_stop_percent": args.hard_stop,
+        "slippage_percent": args.slippage_percent,
         "max_holding_time_ms": args.max_holding_ms,
         "max_book_skew_ms": args.max_book_skew_ms,
     }
@@ -578,6 +644,7 @@ def main():
     parser.add_argument("--confirmation-ms", type=int, default=500)
     parser.add_argument("--take-profit", type=float, default=0.1)
     parser.add_argument("--hard-stop", type=float, default=1.0)
+    parser.add_argument("--slippage-percent", type=float, default=0.05)
     parser.add_argument("--max-holding-ms", type=int, default=1_800_000)
     parser.add_argument("--max-book-skew-ms", type=int, default=MAX_EXECUTION_BOOK_SKEW_MS)
     args = parser.parse_args()

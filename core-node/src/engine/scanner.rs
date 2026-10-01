@@ -160,6 +160,60 @@ fn executable_l2_spread(
         .then_some((quote_a.vwap, quote_b.vwap, spread))
 }
 
+/// Price the immediate reduce-only unwind that managed risk evaluates after
+/// entry. The scanner rejects a signal if ordinary crossing costs would put a
+/// new position on its own hard-stop boundary before any adverse move.
+fn initial_l2_liquidation_net_pct(
+    e_ctx: &EngineContext,
+    key_a: &str,
+    key_b: &str,
+    is_a_higher: bool,
+    quantity: f64,
+    fee_a: f64,
+    fee_b: f64,
+    now_ms: i64,
+) -> Option<f64> {
+    if !execution_books_are_fresh(e_ctx, key_a, key_b, now_ms) {
+        return None;
+    }
+    let book_a = e_ctx.l2_books.get(key_a)?;
+    let book_b = e_ctx.l2_books.get(key_b)?;
+    let entry_a = crate::engine::book::quote(
+        &book_a.bids,
+        &book_a.asks,
+        !is_a_higher,
+        quantity,
+    )?;
+    let entry_b = crate::engine::book::quote(
+        &book_b.bids,
+        &book_b.asks,
+        is_a_higher,
+        quantity,
+    )?;
+    let exit_a = crate::engine::book::quote(
+        &book_a.bids,
+        &book_a.asks,
+        is_a_higher,
+        quantity,
+    )?;
+    let exit_b = crate::engine::book::quote(
+        &book_b.bids,
+        &book_b.asks,
+        !is_a_higher,
+        quantity,
+    )?;
+    crate::engine::scanner_common::initial_liquidation_net_pct(
+        is_a_higher,
+        entry_a.vwap,
+        entry_b.vwap,
+        exit_a.vwap,
+        exit_b.vwap,
+        quantity,
+        fee_a,
+        fee_b,
+    )
+}
+
 /// Core logic of token analysis: translates bare `SpreadRow` into ready-to-execute `TradeSignal`.
 pub fn generate_signals(
     spreads: &[SpreadRow],
@@ -176,6 +230,7 @@ pub fn generate_signals(
     let mut lot_grid_rejections = 0u64;
     let mut depth_rejections = 0u64;
     let mut l2_budget_rejections = 0u64;
+    let mut hard_stop_compatibility_rejections = 0u64;
     let mut volume_rejections = 0u64;
     let now = now_ms();
     let now_s = now_secs();
@@ -560,6 +615,37 @@ pub fn generate_signals(
                 continue;
             }
 
+            if profile.hard_stop_percent > 0.0 {
+                let initial_net_pct = initial_l2_liquidation_net_pct(
+                    e_ctx,
+                    &key_a,
+                    &key_b,
+                    is_a_higher,
+                    phys_qty,
+                    fee_a,
+                    fee_b,
+                    now,
+                );
+                if !initial_net_pct.is_some_and(|value| {
+                    crate::engine::scanner_common::hard_stop_entry_is_compatible(
+                        value,
+                        profile.hard_stop_percent,
+                        profile.slippage_percent,
+                    )
+                }) {
+                    hard_stop_compatibility_rejections += 1;
+                    if let Some(p) = &diag_prefix {
+                        tracing::info!(
+                            "{} -> initial liquidation net {:?}% conflicts with {:.4}% hard stop",
+                            p,
+                            initial_net_pct.map(|value| (value * 10_000.0).round() / 10_000.0),
+                            profile.hard_stop_percent,
+                        );
+                    }
+                    continue;
+                }
+            }
+
             let actual_vol_a = phys_qty * entry_a;
             let actual_vol_b = phys_qty * entry_b;
             if !crate::engine::scanner_common::volumes_within_tolerance(
@@ -736,6 +822,10 @@ pub fn generate_signals(
         ("lot_grid_rejections", lot_grid_rejections),
         ("depth_rejections", depth_rejections),
         ("l2_budget_rejections", l2_budget_rejections),
+        (
+            "hard_stop_compatibility_rejections",
+            hard_stop_compatibility_rejections,
+        ),
         ("volume_rejections", volume_rejections),
     ] {
         e_ctx.scanner_status.insert(key.to_string(), value);
@@ -906,5 +996,73 @@ mod l2_gate_tests {
             now,
         )
         .is_none());
+    }
+
+    #[test]
+    fn round_trip_l2_quote_exposes_immediate_hard_stop_conflict() {
+        let ctx = EngineContext::default();
+        let now = 10_000;
+        ctx.l2_books.insert(
+            "binance:TESTUSDT".into(),
+            L2Snapshot {
+                bids: vec![(101.0, 2.0)],
+                asks: vec![(101.2, 2.0)],
+                updated_ms: now,
+            },
+        );
+        ctx.l2_books.insert(
+            "kucoin:TESTUSDT".into(),
+            L2Snapshot {
+                bids: vec![(99.8, 2.0)],
+                asks: vec![(100.0, 2.0)],
+                updated_ms: now,
+            },
+        );
+        let immediate = initial_l2_liquidation_net_pct(
+            &ctx,
+            "binance:TESTUSDT",
+            "kucoin:TESTUSDT",
+            true,
+            1.0,
+            0.0005,
+            0.0005,
+            now,
+        )
+        .unwrap();
+        assert!(immediate < -0.4);
+        assert!(!crate::engine::scanner_common::hard_stop_entry_is_compatible(
+            immediate, 0.4, 0.05
+        ));
+
+        ctx.l2_books.insert(
+            "binance:TESTUSDT".into(),
+            L2Snapshot {
+                bids: vec![(101.0, 2.0)],
+                asks: vec![(101.02, 2.0)],
+                updated_ms: now,
+            },
+        );
+        ctx.l2_books.insert(
+            "kucoin:TESTUSDT".into(),
+            L2Snapshot {
+                bids: vec![(99.98, 2.0)],
+                asks: vec![(100.0, 2.0)],
+                updated_ms: now,
+            },
+        );
+        let tight = initial_l2_liquidation_net_pct(
+            &ctx,
+            "binance:TESTUSDT",
+            "kucoin:TESTUSDT",
+            true,
+            1.0,
+            0.0005,
+            0.0005,
+            now,
+        )
+        .unwrap();
+        assert!(crate::engine::scanner_common::hard_stop_entry_is_compatible(
+            tight, 0.4, 0.05
+        ));
     }
 }

@@ -49,6 +49,22 @@ class ReplayOpportunityTests(unittest.TestCase):
         cost = replay.crossing_cost_pct(True, 101.0, 100.0, 101.2, 99.8)
         self.assertAlmostEqual(cost, 0.4 / 101.0 * 100)
 
+    def test_initial_liquidation_cannot_begin_inside_hard_stop(self):
+        immediate = replay.initial_liquidation_net_pct(
+            True, 101.0, 100.0, 101.2, 99.8, 1.0, 0.0005, 0.0005
+        )
+        self.assertLess(immediate, -0.4)
+        self.assertLessEqual(
+            immediate,
+            -0.4 + 2 * 0.05,
+        )
+        self.assertFalse(
+            replay.hard_stop_entry_is_compatible(immediate, 0.4, 0.05)
+        )
+        self.assertTrue(
+            replay.hard_stop_entry_is_compatible(immediate, 0.7, 0.05)
+        )
+
     def test_confirmation_requires_a_non_widening_future_sample(self):
         rows = [
             {"recorded_ms": 1_000, "gross_pct": 1.0, "book_a_updated_ms": 990, "book_b_updated_ms": 995},
