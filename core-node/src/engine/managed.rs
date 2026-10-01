@@ -274,6 +274,14 @@ fn execution_depth_needs_prewarm(updated_ms: Option<i64>, now: i64) -> bool {
     })
 }
 
+fn kucoin_stale_depth_age_ms(error: &str) -> Option<u64> {
+    error
+        .strip_prefix("Stale KuCoin public depth snapshot: ")?
+        .strip_suffix("ms")?
+        .parse()
+        .ok()
+}
+
 /// Fill a stale candidate book through Binance REST while the streaming route
 /// is catching up. This is bounded globally and never authorizes an entry: the
 /// scanner and final preflight still require a <=750 ms full-quantity quote.
@@ -426,6 +434,29 @@ pub fn prewarm_kucoin_execution_book(
                 *ctx.scanner_status
                     .entry("kucoin_depth_prewarm_failure".to_string())
                     .or_insert(0) += 1;
+                ctx.scanner_status.insert(
+                    "kucoin_depth_prewarm_last_latency_ms".to_string(),
+                    now_ms().saturating_sub(started_ms).max(0) as u64,
+                );
+                if let Some(age_ms) = kucoin_stale_depth_age_ms(&error) {
+                    *ctx.scanner_status
+                        .entry("kucoin_depth_prewarm_failure_stale".to_string())
+                        .or_insert(0) += 1;
+                    ctx.scanner_status.insert(
+                        "kucoin_depth_prewarm_last_rejected_book_age_ms".to_string(),
+                        age_ms,
+                    );
+                } else if error.contains("request failed")
+                    || error.contains("returned HTTP")
+                {
+                    *ctx.scanner_status
+                        .entry("kucoin_depth_prewarm_failure_transport".to_string())
+                        .or_insert(0) += 1;
+                } else {
+                    *ctx.scanner_status
+                        .entry("kucoin_depth_prewarm_failure_invalid".to_string())
+                        .or_insert(0) += 1;
+                }
                 tracing::debug!(
                     "[managed] KuCoin candidate depth prewarm failed for {}: {}",
                     pair,
@@ -1465,6 +1496,15 @@ mod transport_tests {
         assert!(execution_depth_needs_prewarm(Some(9_499), 10_000));
         assert!(execution_depth_needs_prewarm(None, 10_000));
         assert!(execution_depth_needs_prewarm(Some(11_001), 10_000));
+    }
+
+    #[test]
+    fn kucoin_stale_depth_error_preserves_rejected_book_age() {
+        assert_eq!(
+            kucoin_stale_depth_age_ms("Stale KuCoin public depth snapshot: 2431ms"),
+            Some(2_431),
+        );
+        assert_eq!(kucoin_stale_depth_age_ms("request failed"), None);
     }
 
     #[test]

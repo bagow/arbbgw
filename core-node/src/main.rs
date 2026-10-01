@@ -725,6 +725,74 @@ async fn main() -> Result<()> {
                             }
                             diagnostic_l2_pairs += 1;
                         }
+
+                        // A one-tick L1 spike can disappear before KuCoin's
+                        // first snapshot arrives. Keep the newest bounded
+                        // nominations subscribed for their existing retention
+                        // window and let the globally rate-limited public-depth
+                        // lane retry stale responses. This remains diagnostic
+                        // only: no private preflight or signal is created here.
+                        if diagnostic_l2_pairs < DIAGNOSTIC_L2_PAIR_LIMIT {
+                            let mut retained_diagnostics: Vec<_> = t_e_ctx
+                                .diagnostic_l2_rows
+                                .iter()
+                                .filter(|nomination| nomination.expires_ms > now_ms as i64)
+                                .map(|nomination| nomination.value().clone())
+                                .collect();
+                            retained_diagnostics.sort_by(|left, right| {
+                                right.nominated_ms.cmp(&left.nominated_ms)
+                            });
+                            for nomination in retained_diagnostics {
+                                if diagnostic_l2_pairs >= DIAGNOSTIC_L2_PAIR_LIMIT {
+                                    break;
+                                }
+                                let row = nomination.row;
+                                let key_a = format!("{}:{}", row.exchange_a, row.pair);
+                                let key_b = format!("{}:{}", row.exchange_b, row.pair);
+                                if t_e_ctx.l2_wanted.contains(&key_a)
+                                    || t_e_ctx.l2_wanted.contains(&key_b)
+                                {
+                                    continue;
+                                }
+                                t_e_ctx.l2_wanted.insert(key_a);
+                                t_e_ctx.l2_wanted.insert(key_b);
+                                if !binance_depth_prewarm_scheduled
+                                    && (row.exchange_a == "binance"
+                                        || row.exchange_b == "binance")
+                                {
+                                    binance_depth_prewarm_scheduled =
+                                        engine::managed::prewarm_binance_execution_book(
+                                            &row.pair,
+                                            t_prices.clone(),
+                                            t_signal.clone(),
+                                            t_http.clone(),
+                                            t_e_ctx.clone(),
+                                        );
+                                }
+                                if !kucoin_depth_prewarm_scheduled
+                                    && (row.exchange_a == "kucoin"
+                                        || row.exchange_b == "kucoin")
+                                {
+                                    let kucoin_key = format!("kucoin:{}", row.pair);
+                                    if let Some(multiplier) = t_e_ctx
+                                        .multipliers
+                                        .get(&kucoin_key)
+                                        .map(|value| *value)
+                                    {
+                                        kucoin_depth_prewarm_scheduled =
+                                            engine::managed::prewarm_kucoin_execution_book(
+                                                &row.pair,
+                                                multiplier,
+                                                t_prices.clone(),
+                                                t_signal.clone(),
+                                                t_http.clone(),
+                                                t_e_ctx.clone(),
+                                            );
+                                    }
+                                }
+                                diagnostic_l2_pairs += 1;
+                            }
+                        }
                         diagnostic_l2_pairs
                     };
 
