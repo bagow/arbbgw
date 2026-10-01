@@ -324,22 +324,23 @@ pub enum PublicDepthTransport {
     RestFallback,
 }
 
-/// Prefer the weight-free request/response WS lane, but recover through the
-/// independently routed REST depth endpoint when this VPS receives a stale WS
-/// snapshot. Both paths use the same strict parser and <=750 ms exchange-time
-/// budget; the REST call also passes through the shared IP rate-limit guard.
+/// Recover a stale streaming book through the independently routed REST depth
+/// endpoint first. On this VPS REST remains fresh while both market WS and the
+/// request/response WS lane queue old snapshots. The WS request is retained as
+/// a fallback for REST failures. Both paths use the same strict parser and
+/// <=750 ms exchange-time budget; REST passes through the shared IP rate guard.
 pub async fn fetch_public_depth_snapshot_resilient(
     http: &Client,
     pair: &str,
 ) -> Result<(crate::state::L2Snapshot, PublicDepthTransport), String> {
-    match fetch_public_depth_snapshot_ws(pair).await {
-        Ok(book) => Ok((book, PublicDepthTransport::WebSocket)),
-        Err(ws_error) => fetch_public_depth_snapshot(http, pair)
+    match fetch_public_depth_snapshot(http, pair).await {
+        Ok(book) => Ok((book, PublicDepthTransport::RestFallback)),
+        Err(rest_error) => fetch_public_depth_snapshot_ws(pair)
             .await
-            .map(|book| (book, PublicDepthTransport::RestFallback))
-            .map_err(|rest_error| {
+            .map(|book| (book, PublicDepthTransport::WebSocket))
+            .map_err(|ws_error| {
                 format!(
-                    "Binance depth WS failed ({ws_error}); REST fallback failed ({rest_error})"
+                    "Binance depth REST recovery failed ({rest_error}); WS fallback failed ({ws_error})"
                 )
             }),
     }
