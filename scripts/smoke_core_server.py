@@ -71,7 +71,12 @@ def main():
             port = probe.getsockname()[1]
         # Explicit allowlist: inherit no process environment or service secrets.
         environment = {
-            "PATH":"/usr/local/bin:/usr/bin:/bin", "RUST_LOG":"error,core_node::collector::binance=info",
+            "PATH":"/usr/local/bin:/usr/bin:/bin",
+            # Keep the log compact enough that the 30-minute KuCoin refresh
+            # evidence survives in the structured smoke result. Binance route
+            # failures remain visible at warn/error without its high-rate INFO
+            # quality reports drowning out the refresh marker.
+            "RUST_LOG":"error,core_node::collector::binance=warn,core_node::collector::kucoin=info",
             "PROFILES_DB_PATH":str(root/"profiles.db"),"REAL_DB_PATH":str(root/"trades.db"),
             "PORT":str(port),"CORE_DIAGNOSTIC_PATH":str(root/"profiles.txt"),
         }
@@ -123,9 +128,15 @@ def main():
                     trades = db.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
                 if orders or trades:
                     raise RuntimeError("Unexpected order/trade intent in credential-free smoke test")
+                process_log = (root/"process.log").read_text(errors="replace")
+                kucoin_refresh_events = [
+                    line for line in process_log.splitlines()
+                    if "[kucoin] Instrument universe " in line
+                ]
                 print(json.dumps({"ok":simultaneous >= 5 and len(steady_samples) == 10 and steady_fresh >= 8,"health":health,"order_intents":orders,"trades":trades,
                     "exchange_credentials_provided":False,"production_replaced":False,
-                    "public_collector_log":(root/"process.log").read_text(errors="replace")[-12000:],
+                    "public_collector_log":process_log[-12000:],
+                    "kucoin_refresh_events":kucoin_refresh_events,
                     "market_samples":samples,"simultaneous_fresh_samples":simultaneous,
                     "steady_fresh_samples":steady_fresh,"steady_samples":len(steady_samples),
                     "scope":f"Public Binance/KuCoin data for {observation_seconds} seconds; disposable active profile with persisted kill switch; no profitability claim"}))
