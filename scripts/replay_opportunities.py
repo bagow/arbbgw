@@ -346,6 +346,196 @@ def evaluate(sample, profile):
     }, "eligible"
 
 
+def diagnose_nomination_sample(sample, profile):
+    """Price a captured nomination without trusting its structural-regime flag.
+
+    Production entry still requires a stable structural regime. This diagnostic
+    path deliberately bypasses only that gate and fee-timestamp freshness so an
+    unstable L1 headline can be compared with executable L2 economics. All
+    book freshness, skew, lot-grid, depth, volume, and contract checks remain.
+    """
+    spread = sample.get("spread") or {}
+    if {spread.get("exchangeA"), spread.get("exchangeB")} != {"binance", "kucoin"}:
+        return None, "venues"
+    now_ms = sample.get("recorded_ms")
+    if not isinstance(now_ms, int):
+        return None, "timestamp"
+    book_a, book_b = sample.get("book_a"), sample.get("book_b")
+    if not valid_book(book_a, now_ms) or not valid_book(book_b, now_ms):
+        return None, "book_freshness"
+    if abs(book_a["updated_ms"] - book_b["updated_ms"]) > profile["max_book_skew_ms"]:
+        return None, "book_skew"
+
+    gross_l1 = spread.get("spread")
+    baseline = spread.get("structural_spread")
+    if not all(isinstance(value, (int, float)) and math.isfinite(value)
+               for value in (gross_l1, baseline)):
+        return None, "spread_values"
+    if not profile["min_entry_spread"] <= gross_l1 <= profile["max_entry_spread"]:
+        return None, "entry_window"
+    if min(float(spread.get("volA", 0)), float(spread.get("volB", 0))) < profile["min_volume_usd"]:
+        return None, "volume"
+
+    top_bid_a, top_ask_a = book_a["bids"][0][0], book_a["asks"][0][0]
+    top_bid_b, top_ask_b = book_b["bids"][0][0], book_b["asks"][0][0]
+    intra_a = (top_ask_a - top_bid_a) / top_bid_a * 100
+    intra_b = (top_ask_b - top_bid_b) / top_bid_b * 100
+    if intra_a > profile["max_intra_spread_pct"] or intra_b > profile["max_intra_spread_pct"]:
+        return None, "intra_spread"
+
+    spec_a, spec_b = sample.get("spec_a"), sample.get("spec_b")
+    if not isinstance(spec_a, dict) or not isinstance(spec_b, dict):
+        return None, "specification"
+    is_a_higher = str(spread.get("direction", "")).startswith(str(spread.get("exchangeA", "")))
+    discovery_entry_a = float(spread.get("bidA") if is_a_higher else spread.get("askA"))
+    quantity = lot_size(
+        profile["notional_usdt"],
+        discovery_entry_a,
+        float(spec_a.get("quantity_step", 0)),
+        float(spec_b.get("quantity_step", 0)),
+        profile["volume_tolerance_pct"],
+    )
+    if quantity is None:
+        return None, "lot_grid"
+
+    reserve_qty = profile["notional_usdt"] * profile["min_depth_percent"] / 100 / discovery_entry_a
+    reserve_a = quote(book_a["asks" if not is_a_higher else "bids"], reserve_qty, not is_a_higher)
+    reserve_b = quote(book_b["asks" if is_a_higher else "bids"], reserve_qty, is_a_higher)
+    if reserve_a is None or reserve_b is None:
+        return None, "reserve_depth"
+    entry_a = quote(book_a["asks" if not is_a_higher else "bids"], quantity, not is_a_higher)
+    entry_b = quote(book_b["asks" if is_a_higher else "bids"], quantity, is_a_higher)
+    if entry_a is None or entry_b is None:
+        return None, "entry_depth"
+    unwind_a = quote(book_a["asks" if is_a_higher else "bids"], quantity, is_a_higher)
+    unwind_b = quote(book_b["bids" if is_a_higher else "asks"], quantity, not is_a_higher)
+    if unwind_a is None or unwind_b is None:
+        return None, "unwind_depth"
+
+    actual_a, actual_b = quantity * entry_a["vwap"], quantity * entry_b["vwap"]
+    lower = profile["notional_usdt"] * (1 - profile["volume_tolerance_pct"] / 100)
+    upper = profile["notional_usdt"] * (1 + profile["volume_tolerance_pct"] / 100)
+    if not lower <= actual_a <= upper or not lower <= actual_b <= upper:
+        return None, "actual_volume"
+    if not specification_permits(spec_a, now_ms, quantity, entry_a["vwap"], spec_a["quantity_step"]):
+        return None, "specification_a"
+    if not specification_permits(spec_b, now_ms, quantity, entry_b["vwap"], spec_b["quantity_step"]):
+        return None, "specification_b"
+
+    fee_a, fee_b = sample.get("fee_a"), sample.get("fee_b")
+    fixed_costs = break_even_pct(fee_a, fee_b)
+    if fixed_costs is None:
+        return None, "fees"
+    gross = (
+        (entry_a["vwap"] - entry_b["vwap"]) / entry_b["vwap"] * 100
+        if is_a_higher else
+        (entry_b["vwap"] - entry_a["vwap"]) / entry_a["vwap"] * 100
+    )
+    crossing_cost = crossing_cost_pct(
+        is_a_higher,
+        entry_a["vwap"],
+        entry_b["vwap"],
+        unwind_a["vwap"],
+        unwind_b["vwap"],
+    )
+    initial_net_pct = initial_liquidation_net_pct(
+        is_a_higher,
+        entry_a["vwap"],
+        entry_b["vwap"],
+        unwind_a["vwap"],
+        unwind_b["vwap"],
+        quantity,
+        fee_a,
+        fee_b,
+    )
+    required = max(
+        profile["min_entry_spread"],
+        max(0.0, baseline) + fixed_costs + profile["min_structural_deviation"],
+    )
+    budget_pass = gross > required
+    hard_stop_pass = hard_stop_entry_is_compatible(
+        initial_net_pct,
+        profile["hard_stop_percent"],
+        profile["slippage_percent"],
+    )
+    return {
+        "recorded_ms": now_ms,
+        "gross_pct": gross,
+        "required_pct": required,
+        "initial_liquidation_net_pct": initial_net_pct,
+        "crossing_cost_pct": crossing_cost,
+        "quantity": quantity,
+        "budget_pass": budget_pass,
+        "hard_stop_pass": hard_stop_pass,
+        "both_pass": budget_pass and hard_stop_pass,
+    }, "priced"
+
+
+def summarize_nomination_diagnostics(samples, profile, since_ms=0):
+    """Aggregate executable counterfactuals for unstable L1 nominations."""
+    groups = {}
+    for sample in samples:
+        nomination_ms = sample.get("nomination_ms")
+        spread = sample.get("spread") or {}
+        if (
+            sample.get("capture_reason") != "unstable_l1_nomination"
+            or not isinstance(nomination_ms, int)
+            or nomination_ms < since_ms
+        ):
+            continue
+        key = (nomination_ms, spread.get("pair"), spread.get("direction"))
+        group = groups.setdefault(key, {
+            "nomination_ms": nomination_ms,
+            "pair": spread.get("pair"),
+            "direction": spread.get("direction"),
+            "l1_spread_pct": spread.get("spread"),
+            "structural_spread_pct": spread.get("structural_spread"),
+            "has_structural_spread": spread.get("has_structural_spread"),
+            "rows": 0,
+            "first_recorded_ms": None,
+            "last_recorded_ms": None,
+            "reasons": Counter(),
+            "events": [],
+        })
+        group["rows"] += 1
+        recorded_ms = sample.get("recorded_ms")
+        if isinstance(recorded_ms, int):
+            first = group["first_recorded_ms"]
+            last = group["last_recorded_ms"]
+            group["first_recorded_ms"] = recorded_ms if first is None else min(first, recorded_ms)
+            group["last_recorded_ms"] = recorded_ms if last is None else max(last, recorded_ms)
+        event, reason = diagnose_nomination_sample(sample, profile)
+        group["reasons"][reason] += 1
+        if event is not None:
+            group["events"].append(event)
+
+    def bounds(events, field):
+        values = [event[field] for event in events if event.get(field) is not None]
+        return (min(values), max(values)) if values else (None, None)
+
+    report = []
+    for key in sorted(groups):
+        group = groups[key]
+        events = group.pop("events")
+        group["reasons"] = dict(group["reasons"])
+        group["priced_samples"] = len(events)
+        for field in (
+            "gross_pct",
+            "required_pct",
+            "initial_liquidation_net_pct",
+            "crossing_cost_pct",
+            "quantity",
+        ):
+            minimum, maximum = bounds(events, field)
+            group[f"{field}_min"] = minimum
+            group[f"{field}_max"] = maximum
+        group["budget_pass_samples"] = sum(event["budget_pass"] for event in events)
+        group["hard_stop_pass_samples"] = sum(event["hard_stop_pass"] for event in events)
+        group["both_pass_samples"] = sum(event["both_pass"] for event in events)
+        report.append(group)
+    return report
+
+
 def group_windows(events, gap_ms):
     windows = []
     by_route = defaultdict(list)
@@ -647,17 +837,38 @@ def main():
     parser.add_argument("--slippage-percent", type=float, default=0.05)
     parser.add_argument("--max-holding-ms", type=int, default=1_800_000)
     parser.add_argument("--max-book-skew-ms", type=int, default=MAX_EXECUTION_BOOK_SKEW_MS)
+    parser.add_argument(
+        "--diagnose-nominations-since-ms",
+        type=int,
+        help="report executable L2 economics for unstable nominations at or after this timestamp",
+    )
     args = parser.parse_args()
     samples = load_samples(args.database, args.build)
-    report = {
-        str(deviation): summarize(
-            samples,
-            profile_from_args(args, deviation),
-            args.window_gap_ms,
-            args.confirmation_ms,
-        )
-        for deviation in args.deviations
-    }
+    if args.diagnose_nominations_since_ms is None:
+        report = {
+            str(deviation): summarize(
+                samples,
+                profile_from_args(args, deviation),
+                args.window_gap_ms,
+                args.confirmation_ms,
+            )
+            for deviation in args.deviations
+        }
+    else:
+        report = {
+            str(deviation): {
+                "nomination_diagnostics": summarize_nomination_diagnostics(
+                    samples,
+                    profile_from_args(args, deviation),
+                    args.diagnose_nominations_since_ms,
+                ),
+                "limitations": [
+                    "Structural-regime and fee-timestamp gates are intentionally bypassed for diagnosis.",
+                    "Budget and hard-stop pass counts are counterfactuals, not evidence of fills.",
+                ],
+            }
+            for deviation in args.deviations
+        }
     print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
 
 
