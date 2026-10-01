@@ -804,7 +804,14 @@ pub fn generate_signals(
             })
         })
         .count();
-    e_ctx.scanner_status.clear();
+    // Candidate-depth fetches finish asynchronously and publish their own
+    // cumulative diagnostics into this map. Keep only those external metrics
+    // while replacing every scanner-owned value below; a wholesale clear can
+    // otherwise erase a completed prewarm between its cache update and the
+    // next `/health` sample.
+    e_ctx
+        .scanner_status
+        .retain(|key, _| key.starts_with("kucoin_depth_prewarm_"));
     for (key, value) in [
         ("updated_ms", now.max(0) as u64),
         ("spreads_available", spreads.len() as u64),
