@@ -31,6 +31,25 @@ def read_health(url):
         return json.load(response)
 
 
+def market_sample_ready(sample):
+    return all(
+        sample["fresh_books"].get(exchange, 0) > 0
+        for exchange in ("binance", "kucoin")
+    )
+
+
+def longest_unready_run(samples):
+    longest = 0
+    current = 0
+    for sample in samples:
+        if market_sample_ready(sample):
+            current = 0
+        else:
+            current += 1
+            longest = max(longest, current)
+    return longest
+
+
 def main():
     def expire(*_):
         raise TimeoutError("Isolated smoke exceeded its remote deadline")
@@ -93,12 +112,13 @@ def main():
                             +"; isolated log: "+(root/"process.log").read_text(errors="replace")[-2000:])
                     try:
                         health = read_health(f"http://127.0.0.1:{port}/health")
-                        if health.get("process_healthy"):
+                        if health.get("process_healthy") and health.get("market_ready"):
                             break
                     except (OSError,ValueError):
                         pass
                     time.sleep(0.25)
                 if (not health or not health.get("process_healthy")
+                        or not health.get("market_ready")
                         or health.get("build_sha") != expected_sha
                         or not health.get("entries_halted")
                         or health.get("trading_ready")):
@@ -118,11 +138,11 @@ def main():
                     samples.append({"elapsed_seconds": round(time.monotonic()-observation_start, 1),
                                     "fresh_books": fresh})
                     time.sleep(2)
-                simultaneous = sum(all(sample["fresh_books"].get(ex, 0) > 0
-                                       for ex in ("binance", "kucoin")) for sample in samples)
+                simultaneous = sum(map(market_sample_ready, samples))
+                required_simultaneous = max(5, (len(samples) * 95 + 99) // 100)
+                max_unready_run = longest_unready_run(samples)
                 steady_samples = samples[-10:]
-                steady_fresh = sum(all(sample["fresh_books"].get(ex, 0) > 0
-                                       for ex in ("binance", "kucoin")) for sample in steady_samples)
+                steady_fresh = sum(map(market_sample_ready, steady_samples))
                 with sqlite3.connect((root/"trades.db").as_uri()+"?mode=ro",uri=True) as db:
                     orders = db.execute("SELECT COUNT(*) FROM execution_orders").fetchone()[0]
                     trades = db.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
@@ -133,11 +153,14 @@ def main():
                     line for line in process_log.splitlines()
                     if "[kucoin] Instrument universe " in line
                 ]
-                print(json.dumps({"ok":simultaneous >= 5 and len(steady_samples) == 10 and steady_fresh >= 8,"health":health,"order_intents":orders,"trades":trades,
+                print(json.dumps({"ok":simultaneous >= required_simultaneous and max_unready_run <= 2 and len(steady_samples) == 10 and steady_fresh >= 8,"health":health,"order_intents":orders,"trades":trades,
                     "exchange_credentials_provided":False,"production_replaced":False,
                     "public_collector_log":process_log[-12000:],
                     "kucoin_refresh_events":kucoin_refresh_events,
                     "market_samples":samples,"simultaneous_fresh_samples":simultaneous,
+                    "required_simultaneous_fresh_samples":required_simultaneous,
+                    "unready_samples":len(samples)-simultaneous,
+                    "longest_unready_run_samples":max_unready_run,
                     "steady_fresh_samples":steady_fresh,"steady_samples":len(steady_samples),
                     "scope":f"Public Binance/KuCoin data for {observation_seconds} seconds; disposable active profile with persisted kill switch; no profitability claim"}))
             finally:
