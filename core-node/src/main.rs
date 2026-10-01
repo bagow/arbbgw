@@ -26,6 +26,52 @@ use settings::load_all_settings;
 use spreads::{compute_spreads, discovery_spread_threshold, DISCOVERY_PREWARM_RATIO};
 use state::{PriceMap, UpdateSignal};
 
+const DIAGNOSTIC_L2_PAIR_LIMIT: usize = 2;
+
+/// Select an unstable route only for passive public-book recording.
+///
+/// This deliberately requires the full configured entry/deviation economics,
+/// rather than the discounted discovery budget. A matching route is never a
+/// trade candidate: the ordinary scanner still rejects its unstable structural
+/// regime, and this lane does not run the private candidate preflight.
+fn diagnostic_l2_profile_matches(
+    row: &shared::SpreadRow,
+    profile: &settings::TradingSettings,
+    break_even_pct: f64,
+) -> bool {
+    if !profile.is_active
+        || profile.strategy_type != "ema"
+        || profile.disabled_exchanges.contains(&row.exchange_a)
+        || profile.disabled_exchanges.contains(&row.exchange_b)
+        || row.vol_a < profile.min_volume_millions * 1_000_000.0
+        || row.vol_b < profile.min_volume_millions * 1_000_000.0
+        || engine::scanner_common::directional_structural_regime_is_stable(
+            row.structural_verified,
+            row.has_structural_spread,
+            row.structural_min,
+            row.structural_max,
+        )
+    {
+        return false;
+    }
+    let Some(structural_reserve) = engine::scanner_common::configured_structural_reserve(
+        profile.min_structural_deviation,
+        row.structural_verified,
+        row.structural_spread,
+    ) else {
+        return false;
+    };
+    engine::scanner_common::entry_execution_budget(
+        row.spread,
+        profile.min_entry_spread,
+        profile.max_entry_spread,
+        structural_reserve,
+        profile.min_structural_deviation,
+        break_even_pct,
+    )
+    .is_some()
+}
+
 mod collector {
     pub mod ascendex;
     pub mod binance;
@@ -402,7 +448,7 @@ async fn main() -> Result<()> {
 
 
                     // ── UPDATE L2 WANTED SET (demand-driven subscriptions) ──
-                    {
+                    let diagnostic_l2_pairs = {
                         t_e_ctx.l2_wanted.clear();
                         for key in t_e_ctx.owned_l2_wanted.read().await.iter() {t_e_ctx.l2_wanted.insert(key.clone());}
                         // L2 is expensive on Binance. Follow only routes which are close
@@ -521,7 +567,79 @@ async fn main() -> Result<()> {
                                 break;
                             }
                         }
-                    }
+
+                        // A route can have attractive headline economics while its
+                        // 24h directional regime is not stable. Never trade it, but
+                        // retain at most two such public L2 routes so replay can tell
+                        // whether the apparent edge survived executable depth. This
+                        // lane intentionally does not call `prewarm_candidate`.
+                        let mut diagnostic_l2_pairs = 0usize;
+                        for row in &spreads {
+                            if diagnostic_l2_pairs >= DIAGNOSTIC_L2_PAIR_LIMIT {
+                                break;
+                            }
+                            let key_a = format!("{}:{}", row.exchange_a, row.pair);
+                            let key_b = format!("{}:{}", row.exchange_b, row.pair);
+                            if t_e_ctx.l2_wanted.contains(&key_a)
+                                || t_e_ctx.l2_wanted.contains(&key_b)
+                                || [&key_a, &key_b].iter().any(|key| {
+                                    !t_e_ctx.specifications.contains_key(*key)
+                                        || !t_e_ctx.multipliers.contains_key(*key)
+                                        || !t_e_ctx.tick_sizes.contains_key(*key)
+                                })
+                            {
+                                continue;
+                            }
+                            let pair_cooldown = t_e_ctx
+                                .pair_cooldown
+                                .get(&row.pair)
+                                .map(|value| *value)
+                                .unwrap_or(0);
+                            if engine::utils::cooldown_active(
+                                pair_cooldown,
+                                now_ms as i64,
+                                ts.pair_cooldown_ms,
+                            ) {
+                                continue;
+                            }
+                            let fee_a = engine::utils::get_exchange_fee(
+                                &row.exchange_a,
+                                &row.pair,
+                                ts.default_fee_rate,
+                                &t_e_ctx,
+                            );
+                            let fee_b = engine::utils::get_exchange_fee(
+                                &row.exchange_b,
+                                &row.pair,
+                                ts.default_fee_rate,
+                                &t_e_ctx,
+                            );
+                            let break_even_pct = engine::scanner_common::ioc_break_even_pct(
+                                fee_a, fee_b,
+                            );
+                            if !real_profiles.iter().any(|profile| {
+                                diagnostic_l2_profile_matches(row, profile, break_even_pct)
+                            }) {
+                                continue;
+                            }
+                            t_e_ctx.l2_wanted.insert(key_a);
+                            t_e_ctx.l2_wanted.insert(key_b);
+                            if !candidate_depth_prewarm_scheduled
+                                && (row.exchange_a == "binance" || row.exchange_b == "binance")
+                            {
+                                candidate_depth_prewarm_scheduled =
+                                    engine::managed::prewarm_binance_execution_book(
+                                        &row.pair,
+                                        t_prices.clone(),
+                                        t_signal.clone(),
+                                        t_http.clone(),
+                                        t_e_ctx.clone(),
+                                    );
+                            }
+                            diagnostic_l2_pairs += 1;
+                        }
+                        diagnostic_l2_pairs
+                    };
 
                     // ── EVALUATE SMART SIGNALS & RUN ENGINE ──
                     let signals = crate::engine::scanner::generate_signals(
@@ -531,6 +649,10 @@ async fn main() -> Result<()> {
                         &t_keys,
                         &t_e_ctx,
                         &ts,
+                    );
+                    t_e_ctx.scanner_status.insert(
+                        "diagnostic_l2_pairs".to_string(),
+                        diagnostic_l2_pairs as u64,
                     );
 
                     engine::managed::propose(signals, real_profiles, t_prices, t_http, t_keys, t_journal, t_e_ctx.clone(), ts);
@@ -735,4 +857,77 @@ async fn handle_health(
             serde_json::json!({"venues":venues,"healthy":healthy,"process_healthy":process_healthy,"market_ready":market_ready,"private_ready":private_ready,"order_ws_ready":order_ws_ready,"trading_ready":trading_ready,"build_sha":option_env!("BUILD_SHA").unwrap_or("unknown"),"entries_halted":ctx.is_killed.load(std::sync::atomic::Ordering::Acquire),"supervisor_age_ms":age,"active_trades":active.ok().map(|v|v.len()),"scanner_status":scanner_status,"entry_decisions":entry_decisions}),
         ),
     )
+}
+
+#[cfg(test)]
+mod diagnostic_l2_tests {
+    use super::*;
+
+    fn profile() -> settings::TradingSettings {
+        settings::TradingSettings {
+            is_active: true,
+            min_entry_spread: 0.5,
+            max_entry_spread: 5.0,
+            min_volume_millions: 0.5,
+            min_structural_deviation: 0.45,
+            ..Default::default()
+        }
+    }
+
+    fn unstable_row() -> shared::SpreadRow {
+        shared::SpreadRow {
+            pair: "MOVRUSDT".to_string(),
+            exchange_a: "kucoin".to_string(),
+            exchange_b: "binance".to_string(),
+            price_a: 10.0,
+            price_b: 9.9,
+            bid_a: 10.0,
+            ask_a: 10.01,
+            bid_b: 9.89,
+            ask_b: 9.9,
+            vol_a: 2_000_000.0,
+            vol_b: 3_000_000.0,
+            funding_a: 0.0,
+            funding_b: 0.0,
+            structural_spread: 0.05,
+            structural_max: 0.3,
+            structural_min: -0.1,
+            spread: 0.79,
+            direction: "kucoin>binance".to_string(),
+            has_structural_spread: false,
+            structural_verified: true,
+        }
+    }
+
+    #[test]
+    fn diagnostic_lane_accepts_only_full_economic_unstable_routes() {
+        let profile = profile();
+        let row = unstable_row();
+        assert!(diagnostic_l2_profile_matches(&row, &profile, 0.28));
+
+        let mut below_full_budget = row.clone();
+        below_full_budget.spread = 0.779;
+        assert!(!diagnostic_l2_profile_matches(
+            &below_full_budget,
+            &profile,
+            0.28,
+        ));
+    }
+
+    #[test]
+    fn diagnostic_lane_never_duplicates_stable_or_ineligible_routes() {
+        let profile = profile();
+        let mut row = unstable_row();
+        row.has_structural_spread = true;
+        assert!(!diagnostic_l2_profile_matches(&row, &profile, 0.28));
+
+        row.has_structural_spread = false;
+        row.structural_verified = false;
+        assert!(!diagnostic_l2_profile_matches(&row, &profile, 0.28));
+
+        row.structural_verified = true;
+        let mut disabled = profile.clone();
+        disabled.disabled_exchanges.push("binance".to_string());
+        assert!(!diagnostic_l2_profile_matches(&row, &disabled, 0.28));
+    }
 }
