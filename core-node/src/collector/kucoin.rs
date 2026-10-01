@@ -33,6 +33,11 @@ const CLASSIC_DEPTH_BASELINE_SYMBOL: &str = "XBTUSDTM";
 // bound on the small VPS.
 const PRO_DEPTH_WARM_RETENTION: Duration = Duration::from_secs(300);
 const MAX_PRO_DEPTH_RETAINED_SYMBOLS: usize = 8;
+// `l2_wanted` is rebuilt in place by the scanner. A collector refresh can
+// briefly observe the set between clear and repopulation, which is not a real
+// inactive interval. Only count a reuse after the symbol was continuously
+// unwanted long enough to rule out that hand-off window.
+const PRO_DEPTH_WARM_REUSE_MIN_IDLE: Duration = Duration::from_secs(1);
 
 fn is_classic_depth_baseline(symbol: &str) -> bool {
     symbol == CLASSIC_DEPTH_BASELINE_SYMBOL
@@ -441,6 +446,25 @@ fn refresh_pro_depth_retention(
     }
 }
 
+fn pro_depth_warm_reuse_count(
+    currently_wanted: &HashSet<String>,
+    actively_wanted: &HashSet<String>,
+    subscribed: &HashSet<String>,
+    retained: &HashMap<String, Instant>,
+    now: Instant,
+) -> u64 {
+    currently_wanted
+        .iter()
+        .filter(|raw| {
+            !actively_wanted.contains(*raw)
+                && subscribed.contains(*raw)
+                && retained.get(*raw).is_some_and(|last_wanted| {
+                    now.saturating_duration_since(*last_wanted) >= PRO_DEPTH_WARM_REUSE_MIN_IDLE
+                })
+        })
+        .count() as u64
+}
+
 fn pro_nanosecond_timestamp_ms(value: &Value) -> Option<i64> {
     let nanos = value
         .as_i64()
@@ -566,10 +590,13 @@ async fn run_pro_depth(
                         }
                     }
                 }
-                let warm_reuses = currently_wanted
-                    .iter()
-                    .filter(|raw| !actively_wanted.contains(*raw) && subscribed.contains(*raw))
-                    .count() as u64;
+                let warm_reuses = pro_depth_warm_reuse_count(
+                    &currently_wanted,
+                    &actively_wanted,
+                    &subscribed,
+                    &retained,
+                    now,
+                );
                 if warm_reuses > 0 {
                     PRO_DEPTH_WARM_REUSES.fetch_add(warm_reuses, AtomicOrdering::Relaxed);
                 }
@@ -1199,6 +1226,29 @@ mod tests {
         assert_eq!(retained.len(), MAX_PRO_DEPTH_RETAINED_SYMBOLS);
         assert!(retained.contains_key("WARM0"));
         assert!(!retained.contains_key("WARM9"));
+    }
+
+    #[test]
+    fn pro_depth_warm_reuse_ignores_transient_wanted_set_rebuild() {
+        let now = Instant::now();
+        let pair = "MOVUSDTM".to_string();
+        let wanted = HashSet::from([pair.clone()]);
+        let active = HashSet::new();
+        let subscribed = HashSet::from([pair.clone()]);
+        let transient = HashMap::from([(pair.clone(), now - Duration::from_millis(20))]);
+        let genuinely_idle = HashMap::from([(
+            pair,
+            now - PRO_DEPTH_WARM_REUSE_MIN_IDLE - Duration::from_millis(1),
+        )]);
+
+        assert_eq!(
+            pro_depth_warm_reuse_count(&wanted, &active, &subscribed, &transient, now),
+            0
+        );
+        assert_eq!(
+            pro_depth_warm_reuse_count(&wanted, &active, &subscribed, &genuinely_idle, now),
+            1
+        );
     }
 
     #[test]
