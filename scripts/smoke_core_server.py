@@ -34,10 +34,13 @@ def read_health(url):
 def main():
     def expire(*_):
         raise TimeoutError("Isolated smoke exceeded its remote deadline")
-    signal.signal(signal.SIGALRM, expire)
-    signal.alarm(105)
     binary = Path(sys.argv[1]).resolve()
     expected_sha = sys.argv[2]
+    observation_seconds = int(sys.argv[3]) if len(sys.argv) > 3 else 60
+    if not 10 <= observation_seconds <= 3600:
+        raise RuntimeError("Observation duration outside 10..3600 seconds")
+    signal.signal(signal.SIGALRM, expire)
+    signal.alarm(observation_seconds + 45)
     if binary.name != "core-node" or not binary.is_file():
         raise RuntimeError("Missing candidate binary")
     if len(expected_sha) != 40 or any(c not in "0123456789abcdef" for c in expected_sha):
@@ -97,7 +100,7 @@ def main():
                     raise RuntimeError("Candidate process health/build identity not confirmed")
                 samples = []
                 observation_start = time.monotonic()
-                while time.monotonic() - observation_start < 60:
+                while time.monotonic() - observation_start < observation_seconds:
                     if process.poll() is not None:
                         raise RuntimeError("Candidate exited during public market observation")
                     health = read_health(f"http://127.0.0.1:{port}/health")
@@ -125,7 +128,7 @@ def main():
                     "public_collector_log":(root/"process.log").read_text(errors="replace")[-12000:],
                     "market_samples":samples,"simultaneous_fresh_samples":simultaneous,
                     "steady_fresh_samples":steady_fresh,"steady_samples":len(steady_samples),
-                    "scope":"Public Binance/KuCoin data for 60 seconds; disposable active profile with persisted kill switch; no profitability claim"}))
+                    "scope":f"Public Binance/KuCoin data for {observation_seconds} seconds; disposable active profile with persisted kill switch; no profitability claim"}))
             finally:
                 if process.poll() is None:
                     process.terminate()

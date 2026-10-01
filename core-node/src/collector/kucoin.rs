@@ -38,6 +38,13 @@ const MAX_PRO_DEPTH_RETAINED_SYMBOLS: usize = 8;
 // inactive interval. Only count a reuse after the symbol was continuously
 // unwanted long enough to rule out that hand-off window.
 const PRO_DEPTH_WARM_REUSE_MIN_IDLE: Duration = Duration::from_secs(1);
+const INSTRUMENT_UNIVERSE_REFRESH: Duration = Duration::from_secs(1800);
+
+#[derive(Clone, Debug, PartialEq)]
+struct ContractUniverse {
+    symbols: Vec<String>,
+    symbol_map: HashMap<String, (String, f64)>,
+}
 
 fn is_classic_depth_baseline(symbol: &str) -> bool {
     symbol == CLASSIC_DEPTH_BASELINE_SYMBOL
@@ -110,11 +117,9 @@ pub async fn run(
             res = handler(&prices, &signal, &l2_books, &l2_wanted) => {
                 match res {
                     Ok(_) => {
-                        // `handler` normally returns after its planned instrument-universe
-                        // refresh.  Do not add the failure backoff to that deterministic
-                        // rotation: all Classic and Pro streams are already down while the
-                        // next generation is being created.
-                        info!("[kucoin] Refreshing instrument universe immediately...");
+                        // A clean return means the contract identity or multiplier map
+                        // actually changed. Rebuild immediately without failure backoff.
+                        info!("[kucoin] Instrument universe changed; reconnecting immediately...");
                         backoff = Duration::from_secs(1);
                         continue;
                     }
@@ -133,13 +138,10 @@ pub async fn run(
     }
 }
 
-async fn handler(
+async fn fetch_contract_universe(
+    http: &Client,
     price_map: &PriceMap,
-    signal: &UpdateSignal,
-    l2_books: &L2OrderbookMap,
-    l2_wanted: &std::sync::Arc<dashmap::DashSet<String>>,
-) -> Result<()> {
-    let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
+) -> Result<ContractUniverse> {
     let contracts: Value = http
         .get("https://api-futures.kucoin.com/api/v1/contracts/active")
         .timeout(Duration::from_secs(10))
@@ -147,31 +149,62 @@ async fn handler(
         .await?
         .json()
         .await?;
-    let mut symbols: Vec<String> = Vec::new();
-    let mut sym_map = std::collections::HashMap::new();
+    parse_contract_universe(&contracts, price_map)
+}
 
-    for c in contracts["data"].as_array().unwrap_or(&vec![]) {
-        if let Some(s) = c["symbol"].as_str() {
-            if s.ends_with("USDTM") {
-                symbols.push(s.to_string());
-                let normalized = s.replace("XBTUSDTM", "BTCUSDT").replace("USDTM", "USDT");
-                let mult = c["multiplier"].as_f64().unwrap_or(1.0);
-                sym_map.insert(s.to_string(), (normalized.clone(), mult));
+fn parse_contract_universe(
+    contracts: &Value,
+    price_map: &PriceMap,
+) -> Result<ContractUniverse> {
+    let contracts = contracts["data"]
+        .as_array()
+        .ok_or_else(|| anyhow!("KuCoin contract response has no data array"))?;
+    let mut symbols = Vec::new();
+    let mut symbol_map = HashMap::new();
 
-                let vol_usd = c["turnoverOf24h"].as_f64().unwrap_or(0.0);
-                if vol_usd > 0.0 {
-                    let mut entry = price_map.entry("kucoin".to_string()).or_default();
-                    entry
-                        .entry(normalized)
-                        .or_insert_with(|| TickerData {
-                            vol: vol_usd,
-                            ..Default::default()
-                        })
-                        .vol = vol_usd;
-                }
-            }
+    for contract in contracts {
+        let Some(symbol) = contract["symbol"].as_str() else {
+            continue;
+        };
+        if !symbol.ends_with("USDTM") {
+            continue;
+        }
+        symbols.push(symbol.to_string());
+        let normalized = symbol
+            .replace("XBTUSDTM", "BTCUSDT")
+            .replace("USDTM", "USDT");
+        let multiplier = contract["multiplier"].as_f64().unwrap_or(1.0);
+        symbol_map.insert(symbol.to_string(), (normalized.clone(), multiplier));
+
+        let volume_usd = contract["turnoverOf24h"].as_f64().unwrap_or(0.0);
+        if volume_usd > 0.0 {
+            let mut entry = price_map.entry("kucoin".to_string()).or_default();
+            entry
+                .entry(normalized)
+                .or_insert_with(|| TickerData {
+                    vol: volume_usd,
+                    ..Default::default()
+                })
+                .vol = volume_usd;
         }
     }
+    symbols.sort_unstable();
+    Ok(ContractUniverse {
+        symbols,
+        symbol_map,
+    })
+}
+
+async fn handler(
+    price_map: &PriceMap,
+    signal: &UpdateSignal,
+    l2_books: &L2OrderbookMap,
+    l2_wanted: &std::sync::Arc<dashmap::DashSet<String>>,
+) -> Result<()> {
+    let http = Client::builder().user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36").build().unwrap();
+    let universe = fetch_contract_universe(&http, price_map).await?;
+    let symbols = universe.symbols.clone();
+    let sym_map = universe.symbol_map.clone();
     info!(
         "[kucoin] Found {} USDT-M contracts (volumes seeded)",
         symbols.len()
@@ -256,18 +289,40 @@ async fn handler(
         }
     });
 
-    tokio::select! {
-        child = children.join_next() => {
-            match child {
-                Some(Ok(())) => anyhow::bail!("KuCoin collector child exited unexpectedly"),
-                Some(Err(error)) => anyhow::bail!("KuCoin collector child failed: {error}"),
-                None => anyhow::bail!("KuCoin collector has no live children"),
+    loop {
+        tokio::select! {
+            child = children.join_next() => {
+                match child {
+                    Some(Ok(())) => anyhow::bail!("KuCoin collector child exited unexpectedly"),
+                    Some(Err(error)) => anyhow::bail!("KuCoin collector child failed: {error}"),
+                    None => anyhow::bail!("KuCoin collector has no live children"),
+                }
+            },
+            _ = tokio::time::sleep(INSTRUMENT_UNIVERSE_REFRESH) => {
+                match fetch_contract_universe(&http, price_map).await {
+                    Ok(refreshed) if refreshed == universe => {
+                        info!(
+                            "[kucoin] Instrument universe unchanged at {} contracts; keeping live streams",
+                            universe.symbols.len(),
+                        );
+                    }
+                    Ok(refreshed) => {
+                        info!(
+                            "[kucoin] Instrument universe changed from {} to {} contracts",
+                            universe.symbols.len(),
+                            refreshed.symbols.len(),
+                        );
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        warn!(
+                            "[kucoin] Instrument refresh failed while streams remain live: {error}"
+                        );
+                    }
+                }
             }
-        },
-        _ = tokio::time::sleep(Duration::from_secs(1800)) => {},
+        }
     }
-    // Dropping JoinSet aborts all children before reloading the instrument universe.
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -842,10 +897,6 @@ async fn run_ws(
         tokio::time::sleep(Duration::from_millis(110)).await;
     }
 
-    // Reconnect after 30 min to refresh L2 subscription list (new cross-exchange pairs may appear)
-    let conn_start = std::time::Instant::now();
-    let max_conn_age = Duration::from_secs(1800);
-
     #[derive(Deserialize)]
     struct KucoinMsg<'a> {
         topic: Option<String>,
@@ -918,11 +969,6 @@ async fn run_ws(
     let mut latest_prices: std::collections::HashMap<String, (i64, bool)> =
         std::collections::HashMap::new();
     loop {
-        // Reconnect periodically to refresh L2 subscriptions (new pairs may appear)
-        if conn_start.elapsed() > max_conn_age {
-            info!("[kucoin] Refreshing L2 subscriptions after 30min...");
-            break;
-        }
         tokio::select! {
             msg = ws.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
@@ -1069,6 +1115,56 @@ mod tests {
         assert!(is_classic_depth_baseline("XBTUSDTM"));
         assert!(!is_classic_depth_baseline("ETHUSDTM"));
         assert_eq!(681usize.div_ceil(CLASSIC_SYMBOLS_PER_SHARD), 5);
+    }
+
+    #[test]
+    fn turnover_refresh_keeps_streams_but_identity_changes_require_rebuild() {
+        let prices = PriceMap::default();
+        let payload = serde_json::json!({"data":[
+            {"symbol":"XBTUSDTM","multiplier":0.001,"turnoverOf24h":400000.0},
+            {"symbol":"ETHUSDTM","multiplier":0.01,"turnoverOf24h":900000.0},
+            {"symbol":"ETHUSDM","multiplier":0.01,"turnoverOf24h":1.0}
+        ]});
+        let initial = parse_contract_universe(&payload, &prices).unwrap();
+        assert_eq!(initial.symbols, vec!["ETHUSDTM", "XBTUSDTM"]);
+        assert_eq!(
+            initial.symbol_map["XBTUSDTM"],
+            ("BTCUSDT".to_string(), 0.001),
+        );
+        assert_eq!(
+            prices.get("kucoin").unwrap().get("BTCUSDT").unwrap().vol,
+            400_000.0,
+        );
+
+        let volume_only = serde_json::json!({"data":[
+            {"symbol":"ETHUSDTM","multiplier":0.01,"turnoverOf24h":950000.0},
+            {"symbol":"XBTUSDTM","multiplier":0.001,"turnoverOf24h":430000.0}
+        ]});
+        let refreshed = parse_contract_universe(&volume_only, &prices).unwrap();
+        assert_eq!(initial, refreshed);
+        assert_eq!(
+            prices.get("kucoin").unwrap().get("BTCUSDT").unwrap().vol,
+            430_000.0,
+        );
+
+        let multiplier_change = serde_json::json!({"data":[
+            {"symbol":"ETHUSDTM","multiplier":0.02,"turnoverOf24h":950000.0},
+            {"symbol":"XBTUSDTM","multiplier":0.001,"turnoverOf24h":430000.0}
+        ]});
+        assert_ne!(
+            initial,
+            parse_contract_universe(&multiplier_change, &prices).unwrap(),
+        );
+
+        let new_symbol = serde_json::json!({"data":[
+            {"symbol":"ETHUSDTM","multiplier":0.01,"turnoverOf24h":950000.0},
+            {"symbol":"XBTUSDTM","multiplier":0.001,"turnoverOf24h":430000.0},
+            {"symbol":"NEWUSDTM","multiplier":1.0,"turnoverOf24h":100000.0}
+        ]});
+        assert_ne!(
+            initial,
+            parse_contract_universe(&new_symbol, &prices).unwrap(),
+        );
     }
 
     #[test]
