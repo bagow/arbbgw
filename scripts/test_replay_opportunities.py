@@ -313,6 +313,7 @@ class ReplayOpportunityTests(unittest.TestCase):
         self.assertEqual(len(report), 1)
         self.assertEqual(report[0]["reasons"], {"priced": 1})
         self.assertEqual(report[0]["priced_samples"], 1)
+
         self.assertAlmostEqual(report[0]["diagnostic_actual_volume_a_usdt_min"], 6.0)
         self.assertEqual(report[0]["budget_pass_samples"], 1)
         self.assertEqual(report[0]["hard_stop_pass_samples"], 0)
@@ -367,6 +368,79 @@ class ReplayOpportunityTests(unittest.TestCase):
         self.assertEqual(report[0]["volume_a"], 430_000.0)
         self.assertEqual(report[0]["reasons"], {"priced": 1})
         self.assertEqual(report[0]["priced_samples"], 1)
+
+    def test_explicit_fee_overrides_enable_labelled_counterfactual_replay(self):
+        sample = {
+            "recorded_ms": 2_000,
+            "spread": {
+                "pair": "TESTUSDT",
+                "exchangeA": "kucoin",
+                "exchangeB": "binance",
+                "direction": "binance>kucoin",
+                "spread": 1.0,
+                "structural_spread": 0.1,
+                "structural_verified": True,
+                "has_structural_spread": True,
+                "structural_min": 0.1,
+                "structural_max": 1.1,
+                "volA": 2_000_000.0,
+                "volB": 3_000_000.0,
+                "askA": 100.0,
+                "bidA": 99.8,
+                "askB": 101.2,
+                "bidB": 101.0,
+            },
+            "book_a": {
+                "updated_ms": 1_990,
+                "bids": [[99.8, 2.0]],
+                "asks": [[100.0, 2.0]],
+            },
+            "book_b": {
+                "updated_ms": 1_980,
+                "bids": [[101.0, 2.0]],
+                "asks": [[101.2, 2.0]],
+            },
+            "spec_a": {
+                "fetched_ms": 1_500,
+                "min_quantity": 0.01,
+                "max_quantity": 100.0,
+                "min_notional": 5.0,
+                "quantity_step": 0.01,
+            },
+            "spec_b": {
+                "fetched_ms": 1_500,
+                "min_quantity": 0.01,
+                "max_quantity": 100.0,
+                "min_notional": 5.0,
+                "quantity_step": 0.01,
+            },
+            "fee_a": 0.0005,
+            "fee_b": 0.0005,
+            "fee_a_updated_ms": None,
+            "fee_b_updated_ms": None,
+        }
+        profile = {
+            "notional_usdt": 6.0,
+            "min_entry_spread": 0.5,
+            "max_entry_spread": 5.0,
+            "min_structural_deviation": 0.45,
+            "min_depth_percent": 500.0,
+            "min_volume_usd": 500_000.0,
+            "max_intra_spread_pct": 1.0,
+            "volume_tolerance_pct": 15.0,
+            "hard_stop_percent": 0.0,
+            "slippage_percent": 0.05,
+            "max_book_skew_ms": 250,
+        }
+        event, reason = replay.evaluate(sample, profile)
+        self.assertIsNone(event)
+        self.assertEqual(reason, "fee_freshness")
+
+        profile["fee_overrides"] = {"binance": 0.0005, "kucoin": 0.0006}
+        event, reason = replay.evaluate(sample, profile)
+        self.assertEqual(reason, "eligible")
+        self.assertAlmostEqual(event["fee_a"], 0.0006)
+        self.assertAlmostEqual(event["fee_b"], 0.0005)
 
 
 if __name__ == "__main__":

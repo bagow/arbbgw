@@ -263,11 +263,17 @@ def evaluate(sample, profile):
              (entry_b["vwap"] - entry_a["vwap"]) / entry_a["vwap"] * 100)
     if not profile["min_entry_spread"] <= gross <= profile["max_entry_spread"]:
         return None, "l2_entry_window"
-    fee_a, fee_b = sample.get("fee_a"), sample.get("fee_b")
+    fee_overrides = profile.get("fee_overrides") or {}
+    exchange_a = str(spread.get("exchangeA", ""))
+    exchange_b = str(spread.get("exchangeB", ""))
+    fee_a = fee_overrides.get(exchange_a, sample.get("fee_a"))
+    fee_b = fee_overrides.get(exchange_b, sample.get("fee_b"))
     fee_stamps = (sample.get("fee_a_updated_ms"), sample.get("fee_b_updated_ms"))
+    fee_exchanges = (exchange_a, exchange_b)
     if any(
-        not isinstance(stamp, int) or not 0 <= now_ms - stamp <= FEE_TTL_MS
-        for stamp in fee_stamps
+        exchange not in fee_overrides
+        and (not isinstance(stamp, int) or not 0 <= now_ms - stamp <= FEE_TTL_MS)
+        for exchange, stamp in zip(fee_exchanges, fee_stamps)
     ):
         return None, "fee_freshness"
     fixed_costs = break_even_pct(fee_a, fee_b)
@@ -842,6 +848,7 @@ def summarize_evaluated(
         "confirmed_cycles": cycles,
         "sequential_cycle_outcomes": dict(sequential_counts),
         "sequential_cycles": sequential,
+        "fee_overrides": profile.get("fee_overrides") or {},
         "limitations": [
             "Recorded snapshots cannot prove fills, queue position, or prices between samples.",
             "Listing-age and private-account preflight are not present in shadow snapshots.",
@@ -929,6 +936,14 @@ def summarize_database_profiles(
 
 
 def profile_from_args(args, deviation):
+    fee_overrides = {
+        exchange: fee
+        for exchange, fee in (
+            ("binance", args.binance_fee),
+            ("kucoin", args.kucoin_fee),
+        )
+        if fee is not None
+    }
     return {
         "notional_usdt": args.notional,
         "min_entry_spread": args.min_entry,
@@ -943,6 +958,7 @@ def profile_from_args(args, deviation):
         "slippage_percent": args.slippage_percent,
         "max_holding_time_ms": args.max_holding_ms,
         "max_book_skew_ms": args.max_book_skew_ms,
+        "fee_overrides": fee_overrides,
     }
 
 
@@ -966,11 +982,26 @@ def main():
     parser.add_argument("--max-holding-ms", type=int, default=1_800_000)
     parser.add_argument("--max-book-skew-ms", type=int, default=MAX_EXECUTION_BOOK_SKEW_MS)
     parser.add_argument(
+        "--binance-fee",
+        type=float,
+        help="counterfactual Binance taker fee rate used instead of captured fee freshness",
+    )
+    parser.add_argument(
+        "--kucoin-fee",
+        type=float,
+        help="counterfactual KuCoin taker fee rate used instead of captured fee freshness",
+    )
+    parser.add_argument(
         "--diagnose-nominations-since-ms",
         type=int,
         help="report executable L2 economics for diagnostic nominations at or after this timestamp",
     )
     args = parser.parse_args()
+    if any(
+        fee is not None and (not math.isfinite(fee) or fee < 0)
+        for fee in (args.binance_fee, args.kucoin_fee)
+    ):
+        parser.error("fee overrides must be finite and non-negative")
     if args.diagnose_nominations_since_ms is None:
         profiles = {
             str(deviation): profile_from_args(args, deviation)
