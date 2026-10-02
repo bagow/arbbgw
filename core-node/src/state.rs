@@ -109,6 +109,9 @@ pub struct EngineContext {
     /// Populated by scanner (spread rows) + cycle (open trades).
     /// Collectors subscribe only to pairs present here.
     pub l2_wanted: Arc<DashSet<String>>,
+    /// Leased public-only warm routes. A changing L1 rank must not continually
+    /// restart multi-second initial snapshots. Never used for trade admission.
+    pub public_l2_warm_rows: Arc<DashMap<String, DiagnosticL2Nomination>>,
     /// Economically interesting public-L1 routes retained through their holding horizon for passive
     /// L2 diagnosis even though a safety gate prevents them from trading.
     pub diagnostic_l2_rows: Arc<DashMap<String, DiagnosticL2Nomination>>,
@@ -174,6 +177,7 @@ impl Default for EngineContext {
             price_history: Arc::new(DashMap::new()),
             l2_books: Arc::new(DashMap::new()),
             l2_wanted: Arc::new(DashSet::new()),
+            public_l2_warm_rows: Arc::new(DashMap::new()),
             diagnostic_l2_rows: Arc::new(DashMap::new()),
             diagnostic_l2_nominations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scanner_status: Arc::new(DashMap::new()),

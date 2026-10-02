@@ -34,6 +34,29 @@ const DIAGNOSTIC_MIN_VOLUME_RATIO: f64 = 0.75;
 // lifetime waiting for the initial snapshot. This lane never starts private
 // preflight and the scanner still enforces every entry/risk rule.
 const PUBLIC_L2_WARM_PAIR_LIMIT: usize = 4;
+const PUBLIC_L2_WARM_RETENTION_MS: i64 = 60_000;
+
+fn retain_public_warm_route(ctx: &state::EngineContext, row: &shared::SpreadRow, now: i64) -> bool {
+    let key = format!("{}:{}:{}", row.exchange_a, row.exchange_b, row.pair);
+    if ctx.public_l2_warm_rows.contains_key(&key) {
+        return true;
+    }
+    let slot = ctx.public_l2_warm_rows.len();
+    if slot >= PUBLIC_L2_WARM_PAIR_LIMIT {
+        return false;
+    }
+    ctx.public_l2_warm_rows.insert(
+        key,
+        state::DiagnosticL2Nomination {
+            row: row.clone(),
+            capture_reason: "public_warm",
+            nominated_ms: now,
+            // Stagger cohort replacement rather than cooling all four slots at once.
+            expires_ms: now + PUBLIC_L2_WARM_RETENTION_MS + slot as i64 * 5_000,
+        },
+    );
+    true
+}
 
 fn diagnostic_retention_ms(profile: &settings::TradingSettings) -> i64 {
     profile.max_holding_time_ms.clamp(15_000, 1_800_000) + 10_000
@@ -787,6 +810,17 @@ async fn main() -> Result<()> {
                         // prewarm or private-account preflight is performed in
                         // this lane, and generate_signals below remains the sole
                         // authority for admission.
+                        t_e_ctx.public_l2_warm_rows.retain(|_, route| {
+                            route.expires_ms > now_ms as i64 && real_profiles.iter().any(|p| {
+                                p.is_active && p.strategy_type == "ema"
+                                    && !p.disabled_exchanges.contains(&route.row.exchange_a)
+                                    && !p.disabled_exchanges.contains(&route.row.exchange_b)
+                            })
+                        });
+                        for route in t_e_ctx.public_l2_warm_rows.iter() {
+                            t_e_ctx.l2_wanted.insert(format!("{}:{}", route.row.exchange_a, route.row.pair));
+                            t_e_ctx.l2_wanted.insert(format!("{}:{}", route.row.exchange_b, route.row.pair));
+                        }
                         let mut public_warm_rows: Vec<(&shared::SpreadRow, f64)> = observation_spreads
                             .iter()
                             .filter(|row| {
@@ -837,8 +871,10 @@ async fn main() -> Result<()> {
                                 .then_with(|| left_row.pair.cmp(&right_row.pair))
                         });
                         prioritize_one_stable_warm_route(&mut public_warm_rows);
-                        let mut public_l2_warm_pairs = 0usize;
                         for (row, _) in public_warm_rows {
+                            if t_e_ctx.public_l2_warm_rows.len() >= PUBLIC_L2_WARM_PAIR_LIMIT {
+                                break;
+                            }
                             let key_a = format!("{}:{}", row.exchange_a, row.pair);
                             let key_b = format!("{}:{}", row.exchange_b, row.pair);
                             if t_e_ctx.l2_wanted.contains(&key_a)
@@ -846,13 +882,13 @@ async fn main() -> Result<()> {
                             {
                                 continue;
                             }
+                            if !retain_public_warm_route(&t_e_ctx, row, now_ms as i64) {
+                                continue;
+                            }
                             t_e_ctx.l2_wanted.insert(key_a);
                             t_e_ctx.l2_wanted.insert(key_b);
-                            public_l2_warm_pairs += 1;
-                            if public_l2_warm_pairs >= PUBLIC_L2_WARM_PAIR_LIMIT {
-                                break;
-                            }
                         }
+                        let public_l2_warm_pairs = t_e_ctx.public_l2_warm_rows.len();
 
                         // A route can have attractive headline economics while a
                         // safety gate still forbids trading it. Retain at most two
@@ -1527,5 +1563,32 @@ mod diagnostic_l2_tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             2
         );
+    }
+
+    #[test]
+    fn public_warm_leases_bound_churn_and_do_not_slide_with_each_tick() {
+        let ctx = state::EngineContext::default();
+        let mut row = unstable_row();
+        for index in 0..PUBLIC_L2_WARM_PAIR_LIMIT {
+            row.pair = format!("WARM{index}USDT");
+            assert!(retain_public_warm_route(&ctx, &row, 1_000));
+        }
+        row.pair = "SPIKEUSDT".into();
+        assert!(!retain_public_warm_route(&ctx, &row, 2_000));
+        row.pair = "WARM0USDT".into();
+        assert!(retain_public_warm_route(&ctx, &row, 2_000));
+        assert_eq!(
+            ctx.public_l2_warm_rows
+                .get("kucoin:binance:WARM0USDT")
+                .unwrap()
+                .expires_ms,
+            61_000
+        );
+        ctx.public_l2_warm_rows
+            .retain(|_, route| route.expires_ms > 61_000);
+        assert_eq!(ctx.public_l2_warm_rows.len(), 3);
+        row.pair = "SPIKEUSDT".into();
+        assert!(retain_public_warm_route(&ctx, &row, 61_000));
+        assert_eq!(ctx.public_l2_warm_rows.len(), 4);
     }
 }
