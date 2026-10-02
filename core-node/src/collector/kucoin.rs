@@ -19,7 +19,9 @@ use tracing::{info, warn};
 use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
 
 static PRO_DEPTH_UPDATED_MS: OnceLock<dashmap::DashMap<String, i64>> = OnceLock::new();
-static TICKER_SOURCE_MS: OnceLock<dashmap::DashMap<String, i64>> = OnceLock::new();
+// Shared by Classic L1/depth, Pro depth and REST prewarm. A per-connection
+// timestamp cannot order updates from the other publishers or survive reconnects.
+static TICKER_SOURCES: OnceLock<dashmap::DashMap<String, (i64, bool)>> = OnceLock::new();
 static PRO_DEPTH_SNAPSHOTS_ACCEPTED: AtomicU64 = AtomicU64::new(0);
 static PRO_DEPTH_SNAPSHOTS_WITH_OLD_MATCHING_TIME: AtomicU64 = AtomicU64::new(0);
 static PRO_DEPTH_LAST_SNAPSHOT_LATENCY_MS: AtomicU64 = AtomicU64::new(0);
@@ -55,22 +57,12 @@ fn pro_depth_updates() -> &'static dashmap::DashMap<String, i64> {
     PRO_DEPTH_UPDATED_MS.get_or_init(dashmap::DashMap::new)
 }
 
-fn ticker_source_map() -> &'static dashmap::DashMap<String, i64> {
-    TICKER_SOURCE_MS.get_or_init(dashmap::DashMap::new)
+fn ticker_source_map() -> &'static dashmap::DashMap<String, (i64, bool)> {
+    TICKER_SOURCES.get_or_init(dashmap::DashMap::new)
 }
 
 pub(crate) fn ticker_source_ms(pair: &str) -> Option<i64> {
-    ticker_source_map().get(pair).map(|stamp| *stamp)
-}
-
-pub(crate) fn record_ticker_source_ms(pair: &str, source_ms: i64) {
-    if source_ms <= 0 {
-        return;
-    }
-    ticker_source_map()
-        .entry(pair.to_string())
-        .and_modify(|current| *current = (*current).max(source_ms))
-        .or_insert(source_ms);
+    ticker_source_map().get(pair).map(|stamp| stamp.0)
 }
 
 /// Entry must never silently fall back to the 100 ms Classic depth stream.
@@ -832,7 +824,46 @@ fn price_update_is_newer(last: Option<(i64, bool)>, source_ms: i64, is_depth: bo
     }
 }
 
-fn apply_depth_ticker(
+/// All publishers call this while holding the KuCoin venue price lock. Check
+/// the shared source and update prices + source together; never attach a newer
+/// timestamp to prices from an older message. Preserve volume/funding metadata.
+fn apply_price_update(
+    venue: &mut std::collections::HashMap<String, TickerData>,
+    symbol: &str,
+    update: TickerData,
+    source_ms: i64,
+    is_depth: bool,
+) -> bool {
+    if source_ms <= 0
+        || ![update.bid, update.ask, update.price, update.bid_size, update.ask_size]
+            .iter()
+            .all(|value| value.is_finite())
+        || update.bid <= 0.0
+        || update.ask <= update.bid
+        || update.price <= 0.0
+        || update.bid_size < 0.0
+        || update.ask_size < 0.0
+        || (is_depth && (update.bid_size == 0.0 || update.ask_size == 0.0))
+        || !price_update_is_newer(
+            ticker_source_map().get(symbol).map(|source| *source),
+            source_ms,
+            is_depth,
+        )
+    {
+        return false;
+    }
+    let entry = venue.entry(symbol.to_string()).or_default();
+    entry.bid = update.bid;
+    entry.ask = update.ask;
+    entry.price = update.price;
+    entry.bid_size = update.bid_size;
+    entry.ask_size = update.ask_size;
+    entry.last_updated = (source_ms / 1000) as u64;
+    ticker_source_map().insert(symbol.to_string(), (source_ms, is_depth));
+    true
+}
+
+pub(crate) fn apply_depth_ticker(
     venue: &mut std::collections::HashMap<String, TickerData>,
     symbol: &str,
     bids: &[(f64, f64)],
@@ -854,15 +885,20 @@ fn apply_depth_ticker(
     {
         return false;
     }
-    let entry = venue.entry(symbol.to_string()).or_default();
-    entry.bid = bid;
-    entry.ask = ask;
-    entry.price = (bid + ask) / 2.0;
-    entry.bid_size = bid * bid_quantity;
-    entry.ask_size = ask * ask_quantity;
-    entry.last_updated = (source_ms / 1000) as u64;
-    record_ticker_source_ms(symbol, source_ms);
-    true
+    apply_price_update(
+        venue,
+        symbol,
+        TickerData {
+            bid,
+            ask,
+            price: (bid + ask) / 2.0,
+            bid_size: bid * bid_quantity,
+            ask_size: ask * ask_quantity,
+            ..Default::default()
+        },
+        source_ms,
+        true,
+    )
 }
 
 async fn run_ws(
@@ -984,10 +1020,6 @@ async fn run_ws(
 
     let mut ping = tokio::time::interval(Duration::from_secs(12));
     let mut sequences: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    // L1 ticker and depth5 are independent topics. Retain millisecond ordering
-    // across both and prefer executable depth when timestamps are equal.
-    let mut latest_prices: std::collections::HashMap<String, (i64, bool)> =
-        std::collections::HashMap::new();
     loop {
         tokio::select! {
             msg = ws.next() => match msg {
@@ -1028,22 +1060,10 @@ async fn run_ws(
                                         {
                                             continue;
                                         }
-                                        if price_update_is_newer(
-                                            latest_prices.get(sym).copied(),
-                                            source_ms,
-                                            true,
-                                        ) {
-                                            if let Some(mut venue) = price_map.get_mut("kucoin") {
-                                                if apply_depth_ticker(
-                                                    &mut venue,
-                                                    sym,
-                                                    &bids,
-                                                    &asks,
-                                                    source_ms,
-                                                ) {
-                                                    latest_prices.insert(sym.to_string(), (source_ms, true));
-                                                }
-                                            }
+                                        if let Some(mut venue) = price_map.get_mut("kucoin") {
+                                            apply_depth_ticker(
+                                                &mut venue, sym, &bids, &asks, source_ms,
+                                            );
                                         }
                                         l2_books.insert(
                                             book_key,
@@ -1075,33 +1095,24 @@ async fn run_ws(
                                         || ask_qty < 0.0
                                         || !price.is_finite()
                                         || price <= 0.0
-                                        || !price_update_is_newer(
-                                            latest_prices.get(sym).copied(),
-                                            source_ms,
-                                            false,
-                                        )
                                     {
                                         continue;
                                     }
 
                                     if let Some(mut ex_map) = price_map.get_mut("kucoin") {
-                                        let ts = (source_ms / 1000) as u64;
-                                        if let Some(entry) = ex_map.get_mut(sym) {
-                                            entry.bid = bid;
-                                            entry.ask = ask;
-                                            entry.price = price;
-                                            entry.bid_size = bid_qty * mult * price;
-                                            entry.ask_size = ask_qty * mult * price;
-                                            entry.last_updated = ts;
-                                        } else {
-                                            ex_map.insert(sym.to_string(), TickerData {
+                                        if !apply_price_update(
+                                            &mut ex_map,
+                                            sym,
+                                            TickerData {
                                                 bid, ask, price, vol: 0.0, funding_rate: 0.0,
                                                 bid_size: bid_qty * mult * price, ask_size: ask_qty * mult * price,
-                                                last_updated: ts
-                                            });
+                                                ..Default::default()
+                                            },
+                                            source_ms,
+                                            false,
+                                        ) {
+                                            continue;
                                         }
-                                        latest_prices.insert(sym.to_string(), (source_ms, false));
-                                        record_ticker_source_ms(sym, source_ms);
                                     }
                                     signal.notify_one();
                                 }
@@ -1239,6 +1250,88 @@ mod tests {
         assert!(!price_update_is_newer(Some((100, true)), 100, false));
         assert!(!price_update_is_newer(Some((101, true)), 100, true));
         assert!(price_update_is_newer(Some((100, true)), 101, false));
+    }
+
+    fn test_price(bid: f64) -> TickerData {
+        TickerData {
+            bid,
+            ask: bid + 1.0,
+            price: bid + 0.5,
+            bid_size: 200.0,
+            ask_size: 400.0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn delayed_depth_cannot_rewind_a_newer_l1_price_or_its_source() {
+        let symbol = "KUCOIN_DEPTH_HANDOFF_TEST";
+        let mut venue = HashMap::new();
+        assert!(apply_price_update(&mut venue, symbol, test_price(110.0), 1_000_900, false));
+        assert!(!apply_depth_ticker(
+            &mut venue, symbol, &[(100.0, 2.0)], &[(101.0, 4.0)], 1_000_800,
+        ));
+        assert_eq!(venue[symbol].bid, 110.0);
+        assert_eq!(venue[symbol].ask, 111.0);
+        assert_eq!(venue[symbol].price, 110.5);
+        assert_eq!(venue[symbol].last_updated, 1_000);
+        assert_eq!(ticker_source_ms(symbol), Some(1_000_900));
+
+        assert!(apply_depth_ticker(
+            &mut venue, symbol, &[(112.0, 2.0)], &[(113.0, 4.0)], 1_000_950,
+        ));
+        assert_eq!(venue[symbol].bid, 112.0);
+        assert_eq!(ticker_source_ms(symbol), Some(1_000_950));
+    }
+
+    #[test]
+    fn shared_price_order_survives_publishers_and_connection_local_state() {
+        let symbol = "KUCOIN_L1_HANDOFF_TEST";
+        let mut venue = HashMap::new();
+        assert!(apply_depth_ticker(
+            &mut venue, symbol, &[(110.0, 2.0)], &[(111.0, 4.0)], 2_000_900,
+        ));
+        // A fresh Classic connection has no local watermark. The shared price
+        // source still rejects its delayed/equal-time L1 after a Pro/REST top.
+        for source_ms in [2_000_800, 2_000_900] {
+            assert!(!apply_price_update(&mut venue, symbol, test_price(100.0), source_ms, false));
+            assert_eq!(venue[symbol].bid, 110.0);
+            assert_eq!(ticker_source_ms(symbol), Some(2_000_900));
+        }
+        assert!(apply_price_update(&mut venue, symbol, test_price(112.0), 2_000_950, false));
+        assert_eq!(venue[symbol].bid, 112.0);
+        assert_eq!(ticker_source_ms(symbol), Some(2_000_950));
+    }
+
+    #[test]
+    fn depth_wins_equal_time_in_either_publisher_order() {
+        for (index, depth_first) in [true, false].into_iter().enumerate() {
+            let symbol = format!("KUCOIN_EQUAL_TIME_TEST_{index}");
+            let mut venue = HashMap::new();
+            if !depth_first {
+                assert!(apply_price_update(&mut venue, &symbol, test_price(100.0), 3_000_100, false));
+            }
+            assert!(apply_depth_ticker(
+                &mut venue, &symbol, &[(110.0, 2.0)], &[(111.0, 4.0)], 3_000_100,
+            ));
+            assert!(!apply_price_update(&mut venue, &symbol, test_price(100.0), 3_000_100, false));
+            assert_eq!(venue[&symbol].bid, 110.0);
+            assert_eq!(ticker_source_ms(&symbol), Some(3_000_100));
+        }
+    }
+
+    #[test]
+    fn rejected_price_does_not_poison_the_shared_source() {
+        let symbol = "KUCOIN_INVALID_HANDOFF_TEST";
+        let mut venue = HashMap::new();
+        assert!(!apply_price_update(&mut venue, symbol, test_price(f64::NAN), 4_000_900, false));
+        assert!(!apply_depth_ticker(
+            &mut venue, symbol, &[(100.0, f64::MAX)], &[(101.0, 4.0)], 4_000_900,
+        ));
+        assert!(ticker_source_ms(symbol).is_none());
+        assert!(!venue.contains_key(symbol));
+        assert!(apply_price_update(&mut venue, symbol, test_price(100.0), 4_000_800, false));
+        assert_eq!(ticker_source_ms(symbol), Some(4_000_800));
     }
 
     #[test]

@@ -862,6 +862,7 @@ def summarize_evaluated(
         "effective_profile": profile,
         "fee_overrides": profile.get("fee_overrides") or {},
         "limitations": [
+            "Rejection counts include unrequested cached books; they are not active-feed latency or missed-trade rates. Use the demand-aware shadow audit for feed-quality grouping.",
             "Recorded snapshots cannot prove fills, queue position, or prices between samples.",
             "Listing-age and private-account preflight are not present in shadow snapshots.",
             "A durable opportunity is necessary, not sufficient, evidence of a profitable trade.",

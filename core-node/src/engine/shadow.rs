@@ -39,8 +39,16 @@ pub fn capture(
     now: i64,
     default_fee_rate: f64,
 ) -> Vec<String> {
+    // A cached book can outlive its subscription. Record those rows as evidence,
+    // but never let them consume all slots ahead of currently requested routes.
+    let requested = |row: &&SpreadRow| {
+        ctx.l2_wanted.contains(&format!("{}:{}", row.exchange_a, row.pair))
+            || ctx.l2_wanted.contains(&format!("{}:{}", row.exchange_b, row.pair))
+    };
     spreads
         .iter()
+        .filter(requested)
+        .chain(spreads.iter().filter(|row| !requested(row)))
         .filter_map(|row| capture_row(row, ctx, now, default_fee_rate, "discovery", None))
         .take(20)
         .collect()
@@ -93,6 +101,8 @@ fn capture_row(
         "min_quantity":value.min_quantity,"max_quantity":value.max_quantity,"min_notional":value.min_notional
     }))
     };
+    // Demand is the scanner's requested set, not a subscription acknowledgement.
+    // A non-requested book can still be streamed by the bounded warm-retention lane.
     // Include age explicitly: stale observations are evidence, never executable quotes.
     Some(serde_json::json!({
         "recorded_ms":now,
@@ -100,8 +110,10 @@ fn capture_row(
         "capture_reason":capture_reason,
         "nomination_ms":nomination_ms,
         "spread":row,
-        "book_a":{"updated_ms":a.updated_ms,"age_ms":now-a.updated_ms,"bids":a.bids,"asks":a.asks},
-        "book_b":{"updated_ms":b.updated_ms,"age_ms":now-b.updated_ms,"bids":b.bids,"asks":b.asks},
+        "book_a":{"updated_ms":a.updated_ms,"age_ms":now-a.updated_ms,"bids":a.bids,"asks":a.asks,
+            "requested":ctx.l2_wanted.contains(&key_a)},
+        "book_b":{"updated_ms":b.updated_ms,"age_ms":now-b.updated_ms,"bids":b.bids,"asks":b.asks,
+            "requested":ctx.l2_wanted.contains(&key_b)},
         "spec_a":spec_json(&key_a),"spec_b":spec_json(&key_b),
         "fee_a":super::utils::get_exchange_fee(&row.exchange_a,&row.pair,default_fee_rate,ctx),
         "fee_b":super::utils::get_exchange_fee(&row.exchange_b,&row.pair,default_fee_rate,ctx),
@@ -176,5 +188,38 @@ mod tests {
         assert_eq!(record["nomination_ms"], 1_000);
         assert_eq!(record["book_a"]["age_ms"], 5);
         assert_eq!(record["book_b"]["age_ms"], 5);
+        assert_eq!(record["book_a"]["requested"], false);
+        assert_eq!(record["book_b"]["requested"], false);
+    }
+
+    #[test]
+    fn requested_route_is_not_crowded_out_by_twenty_cached_routes() {
+        let ctx = EngineContext::default();
+        let rows: Vec<_> = (0..21).map(|index| {
+            let mut row = row();
+            row.pair = format!("SHADOW{index}USDT");
+            for exchange in ["kucoin", "binance"] {
+                ctx.l2_books.insert(format!("{exchange}:{}", row.pair), L2Snapshot {
+                    bids: vec![(1.0, 10.0)],
+                    asks: vec![(1.001, 10.0)],
+                    updated_ms: 1_005,
+                });
+            }
+            row
+        }).collect();
+        // Even a partially requested route is important diagnostic evidence.
+        ctx.l2_wanted.insert("kucoin:SHADOW20USDT".to_string());
+        let records = capture(&rows, &ctx, 1_010, 0.0005);
+        assert_eq!(records.len(), 20);
+        let record: serde_json::Value = serde_json::from_str(&records[0]).unwrap();
+        assert_eq!(record["spread"]["pair"], "SHADOW20USDT");
+        assert_eq!(record["book_a"]["requested"], true);
+        assert_eq!(record["book_b"]["requested"], false);
+
+        ctx.l2_wanted.insert("binance:SHADOW20USDT".to_string());
+        let records = capture(&rows, &ctx, 1_010, 0.0005);
+        let record: serde_json::Value = serde_json::from_str(&records[0]).unwrap();
+        assert_eq!(record["book_a"]["requested"], true);
+        assert_eq!(record["book_b"]["requested"], true);
     }
 }
