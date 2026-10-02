@@ -162,6 +162,18 @@ def emit(value):
     print(json.dumps(value, separators=(",", ":"), allow_nan=False), flush=True)
 
 
+def supervisor_running(run_dir: Path, proc_root: Path = Path("/proc")):
+    """Return None before the supervisor publishes its PID, else liveness."""
+    pid_path = run_dir / "runner.pid"
+    if not pid_path.exists():
+        return None
+    try:
+        pid = int(pid_path.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    return pid > 0 and (proc_root / str(pid)).exists()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("."))
@@ -229,12 +241,9 @@ def main():
         if (run_dir / "result.json").exists():
             stop_reason = "canary_result"
             break
-        pid_path = run_dir / "pid"
-        if pid_path.exists():
-            pid = int(pid_path.read_text().strip())
-            if not Path(f"/proc/{pid}").exists():
-                stop_reason = "canary_supervisor_missing"
-                break
+        if supervisor_running(run_dir) is False:
+            stop_reason = "canary_supervisor_missing"
+            break
         time.sleep(max(0.1, args.interval))
     else:
         stop_reason = "max_seconds"

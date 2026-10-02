@@ -1,10 +1,12 @@
 import io
 import json
+from pathlib import Path
+import tempfile
 import unittest
 import urllib.error
 from unittest.mock import patch
 
-from capture_canary_candidates import classify, health
+from capture_canary_candidates import classify, health, supervisor_running
 
 
 CONFIG = {
@@ -107,6 +109,31 @@ class HealthCaptureTests(unittest.TestCase):
         self.assertEqual(result["error"], "HTTPError")
         self.assertEqual(result["http_status"], 503)
         self.assertEqual(result["body_error"], "JSONDecodeError")
+
+
+class SupervisorLivenessTests(unittest.TestCase):
+    def test_uses_supervisor_runner_pid_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run"
+            proc_root = root / "proc"
+            run_dir.mkdir()
+            proc_root.mkdir()
+            (run_dir / "pid").write_text("999")
+            self.assertIsNone(supervisor_running(run_dir, proc_root))
+
+            (run_dir / "runner.pid").write_text("123")
+            self.assertFalse(supervisor_running(run_dir, proc_root))
+            (proc_root / "123").mkdir()
+            self.assertTrue(supervisor_running(run_dir, proc_root))
+
+    def test_malformed_runner_pid_is_not_treated_as_alive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "runner.pid").write_text("not-a-pid")
+            self.assertFalse(supervisor_running(run_dir, root / "proc"))
 
 
 if __name__ == "__main__":
