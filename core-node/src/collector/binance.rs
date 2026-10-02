@@ -96,12 +96,19 @@ pub fn health_rest_fallback_metrics() -> (u64, u64) {
     )
 }
 
-type MarketWs = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type MarketWs =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn event_timestamp_ms(value: &Value) -> Option<i64> {
-    value.get("E").and_then(Value::as_i64)
+    value
+        .get("E")
+        .and_then(Value::as_i64)
         .or_else(|| value.get("data").and_then(event_timestamp_ms))
-        .or_else(|| value.as_array().and_then(|items| items.iter().find_map(event_timestamp_ms)))
+        .or_else(|| {
+            value
+                .as_array()
+                .and_then(|items| items.iter().find_map(event_timestamp_ms))
+        })
 }
 
 fn event_lag_ms(text: &str, received_ms: i64) -> Option<i64> {
@@ -111,12 +118,19 @@ fn event_lag_ms(text: &str, received_ms: i64) -> Option<i64> {
 
 async fn connect_market_route(url: String, address: SocketAddr) -> Result<(MarketWs, String, i64)> {
     let probe_depth_stability = url.contains("@depth");
-    let socket = tokio::time::timeout(Duration::from_secs(4), tokio::net::TcpStream::connect(address))
-        .await.map_err(|_| anyhow!("TCP timeout via {address}"))?
-        .with_context(|| format!("TCP failure via {address}"))?;
-    socket.set_nodelay(true).with_context(|| format!("TCP_NODELAY failed via {address}"))?;
+    let socket = tokio::time::timeout(
+        Duration::from_secs(4),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    .map_err(|_| anyhow!("TCP timeout via {address}"))?
+    .with_context(|| format!("TCP failure via {address}"))?;
+    socket
+        .set_nodelay(true)
+        .with_context(|| format!("TCP_NODELAY failed via {address}"))?;
     let (mut ws, _) = tokio::time::timeout(Duration::from_secs(6), client_async_tls(url, socket))
-        .await.map_err(|_| anyhow!("TLS/WebSocket timeout via {address}"))?
+        .await
+        .map_err(|_| anyhow!("TLS/WebSocket timeout via {address}"))?
         .with_context(|| format!("TLS/WebSocket failure via {address}"))?;
 
     // From Zurich, a fast TLS handshake can still lead to a seconds-old event
@@ -130,19 +144,27 @@ async fn connect_market_route(url: String, address: SocketAddr) -> Result<(Marke
                         return Ok((text, lag_ms));
                     }
                 }
-                Some(Ok(Message::Ping(payload))) => ws.send(Message::Pong(payload)).await
+                Some(Ok(Message::Ping(payload))) => ws
+                    .send(Message::Pong(payload))
+                    .await
                     .with_context(|| format!("Pong failed via {address}"))?,
-                Some(Ok(Message::Close(frame))) => anyhow::bail!("closed before first event via {address}: {frame:?}"),
+                Some(Ok(Message::Close(frame))) => {
+                    anyhow::bail!("closed before first event via {address}: {frame:?}")
+                }
                 Some(Ok(_)) => {}
                 Some(Err(error)) => return Err(anyhow!("receive failure via {address}: {error}")),
                 None => anyhow::bail!("ended before first event via {address}"),
             }
         }
-    }).await.map_err(|_| anyhow!("first event timeout via {address}"))??;
+    })
+    .await
+    .map_err(|_| anyhow!("first event timeout via {address}"))??;
     if !(0..=MAX_INITIAL_EVENT_LAG_MS).contains(&first.1) {
         anyhow::bail!("stale first event via {address}: lag_ms={}", first.1);
     }
-    if !probe_depth_stability { return Ok((ws, first.0, first.1)); }
+    if !probe_depth_stability {
+        return Ok((ws, first.0, first.1));
+    }
 
     // The problematic Zurich routes often look fresh once and then accumulate
     // a queue immediately. Require a short stable series before admitting a
@@ -193,7 +215,9 @@ async fn connect_market_ws(url: &str) -> Result<(MarketWs, String)> {
     let mut addresses: Vec<_> = addresses.collect();
     addresses.sort_unstable();
     addresses.dedup();
-    if addresses.is_empty() { anyhow::bail!("Binance market WS DNS returned no addresses"); }
+    if addresses.is_empty() {
+        anyhow::bail!("Binance market WS DNS returned no addresses");
+    }
     let address_count = addresses.len();
     let attempt_count = address_count.min(MAX_MARKET_ROUTE_ATTEMPTS);
     let offset = MARKET_ROUTE_OFFSET.fetch_add(attempt_count, Ordering::Relaxed) % address_count;
@@ -202,7 +226,9 @@ async fn connect_market_ws(url: &str) -> Result<(MarketWs, String)> {
         let address = addresses[(offset + index) % address_count];
         let request_url = url.to_string();
         attempts.push(async move {
-            connect_market_route(request_url, address).await.map(|result| (result, address))
+            connect_market_route(request_url, address)
+                .await
+                .map(|result| (result, address))
         });
     }
 
@@ -210,7 +236,10 @@ async fn connect_market_ws(url: &str) -> Result<(MarketWs, String)> {
     while let Some(attempt) = attempts.next().await {
         match attempt {
             Ok(((ws, first_text, lag_ms), address)) => {
-                info!("[binance_market_ws] selected route via {} first_event_lag_ms={}", address, lag_ms);
+                info!(
+                    "[binance_market_ws] selected route via {} first_event_lag_ms={}",
+                    address, lag_ms
+                );
                 return Ok((ws, first_text));
             }
             Err(error) => failures.push(error.to_string()),
@@ -336,13 +365,15 @@ pub async fn run(
                         signal_for_dynamic.clone(),
                     ),
                     async {
-                        tokio::time::sleep(Duration::from_secs(SECOND_DYNAMIC_START_DELAY_SECS)).await;
+                        tokio::time::sleep(Duration::from_secs(SECOND_DYNAMIC_START_DELAY_SECS))
+                            .await;
                         run_dynamic_l2_depth_stream(
                             l2_books_for_depth.clone(),
                             prices_for_depth.clone(),
                             l2_wanted_for_dynamic,
                             signal_for_dynamic,
-                        ).await;
+                        )
+                        .await;
                     },
                     run_l2_health_fallback(
                         l2_books_for_depth.clone(),
@@ -436,7 +467,10 @@ async fn run_l1_discovery_fallback(
         timer.tick().await;
         let active = settings.read().await.iter().any(|profile| {
             profile.is_active
-                && !profile.disabled_exchanges.iter().any(|exchange| exchange == "binance")
+                && !profile
+                    .disabled_exchanges
+                    .iter()
+                    .any(|exchange| exchange == "binance")
         });
         if !active {
             continue;
@@ -475,9 +509,7 @@ async fn run_l1_discovery_fallback(
 fn baseline_health_refresh_due(active: bool, updated_ms: Option<i64>, now_ms: i64) -> bool {
     active
         && updated_ms
-            .map(|updated| {
-                now_ms < updated || now_ms - updated > BASELINE_HEALTH_REFRESH_AGE_MS
-            })
+            .map(|updated| now_ms < updated || now_ms - updated > BASELINE_HEALTH_REFRESH_AGE_MS)
             .unwrap_or(true)
 }
 
@@ -501,7 +533,10 @@ async fn run_l2_health_fallback(
         tokio::time::sleep(Duration::from_millis(100)).await;
         let active = settings.read().await.iter().any(|profile| {
             profile.is_active
-                && !profile.disabled_exchanges.iter().any(|exchange| exchange == "binance")
+                && !profile
+                    .disabled_exchanges
+                    .iter()
+                    .any(|exchange| exchange == "binance")
         });
         let now = crate::engine::utils::now_ms();
         let updated_ms = l2_books.get(key).map(|book| book.updated_ms);
@@ -509,8 +544,7 @@ async fn run_l2_health_fallback(
             continue;
         }
         match crate::engine::exchanges::binance::fetch_public_depth_snapshot_resilient(
-            &http,
-            "BTCUSDT",
+            &http, "BTCUSDT",
         )
         .await
         {
@@ -714,12 +748,17 @@ fn apply_book_ticker(
     if !ticker.symbol.ends_with("USDT") {
         return false;
     }
-    // Once a bounded execution-depth stream owns a candidate, its top of book
+    // While a fresh execution-depth stream owns a candidate, its top of book
     // is authoritative for discovery too. The all-symbol REST/WS ticker can be
     // internally older despite a later response/event timestamp; allowing it
     // to overwrite depth creates a false signal that disappears at JIT refresh.
+    // An old cache entry is not ownership: after a subscription gap it must
+    // not suppress discovery indefinitely. This only restores L1; stale L2
+    // remains stale and still cannot authorize execution.
     if l2_books.is_some_and(|books| {
-        books.contains_key(&format!("binance:{}", ticker.symbol))
+        books
+            .get(&format!("binance:{}", ticker.symbol))
+            .is_some_and(|book| (0..=750).contains(&(received_ms - book.updated_ms)))
     }) {
         return false;
     }
@@ -794,8 +833,10 @@ async fn run_l2_depth_stream(
         // Keep the liquid baseline stable. Short-lived/owned candidates are handled by
         // the separate dynamic stream, so they never force all baseline connections to
         // restart or create duplicate subscriptions here.
-        let universe: std::collections::HashSet<String> =
-            FALLBACK_DEPTH_SYMBOLS.iter().map(|s| s.to_string()).collect();
+        let universe: std::collections::HashSet<String> = FALLBACK_DEPTH_SYMBOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let mut symbols: Vec<String> = universe.into_iter().collect();
         symbols.sort_unstable();
 
@@ -979,7 +1020,9 @@ async fn run_dynamic_l2_depth_stream(
     loop {
         let connection = tokio::time::timeout(
             Duration::from_secs(10),
-            connect_market_ws(&format!("{BINANCE_RAW_WS_URL}/btcusdt@depth5@{DYNAMIC_DEPTH_UPDATE_INTERVAL_MS}ms")),
+            connect_market_ws(&format!(
+                "{BINANCE_RAW_WS_URL}/btcusdt@depth5@{DYNAMIC_DEPTH_UPDATE_INTERVAL_MS}ms"
+            )),
         )
         .await;
         let (mut ws, first_text) = match connection {
@@ -1016,8 +1059,15 @@ async fn run_dynamic_l2_depth_stream(
         let mut report_at = std::time::Instant::now();
         if let Ok(data) = serde_json::from_str::<Value>(&first_text) {
             match apply_depth_update(&data, &l2_books, &price_map, &signal) {
-                DepthUpdate::Accepted(lag_ms) => { accepted = 1; last_lag_ms = lag_ms; }
-                DepthUpdate::Stale(lag_ms) => { stale = 1; stale_streak = 1; last_lag_ms = lag_ms; }
+                DepthUpdate::Accepted(lag_ms) => {
+                    accepted = 1;
+                    last_lag_ms = lag_ms;
+                }
+                DepthUpdate::Stale(lag_ms) => {
+                    stale = 1;
+                    stale_streak = 1;
+                    last_lag_ms = lag_ms;
+                }
                 DepthUpdate::Invalid => invalid = 1,
                 DepthUpdate::Ignored => {}
             }
@@ -1358,8 +1408,7 @@ mod tests {
         let five_minutes = 300u64;
         let baseline_races = five_minutes.div_ceil(BASELINE_DEPTH_SESSION_SECS);
         let dynamic_races = five_minutes.div_ceil(DYNAMIC_DEPTH_SESSION_SECS) * 2;
-        let steady_attempts =
-            (baseline_races + dynamic_races) * MAX_MARKET_ROUTE_ATTEMPTS as u64;
+        let steady_attempts = (baseline_races + dynamic_races) * MAX_MARKET_ROUTE_ATTEMPTS as u64;
         // Preserve ample room below Binance's 300-attempt/5-minute IP limit for
         // discovery, execution sockets, transient failures, and operator probes.
         assert!(steady_attempts < 150);
@@ -1370,7 +1419,10 @@ mod tests {
         let now = 1_900_000_000_000i64;
         for (value, expected_lag) in [
             (serde_json::json!({"E": now - 12}), 12),
-            (serde_json::json!({"stream":"btcusdt@depth5@100ms","data":{"E":now - 13}}), 13),
+            (
+                serde_json::json!({"stream":"btcusdt@depth5@100ms","data":{"E":now - 13}}),
+                13,
+            ),
             (serde_json::json!([{"E":now - 14}]), 14),
         ] {
             assert_eq!(event_lag_ms(&value.to_string(), now), Some(expected_lag));
@@ -1501,7 +1553,9 @@ mod tests {
     async fn live_dynamic_subscription_receives_partial_depth() {
         let (mut ws, first_text) = connect_market_ws(&format!(
             "{BINANCE_RAW_WS_URL}/btcusdt@depth5@{DYNAMIC_DEPTH_UPDATE_INTERVAL_MS}ms"
-        )).await.unwrap();
+        ))
+        .await
+        .unwrap();
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let mut buffered = Some(Message::Text(first_text.into()));
@@ -1509,8 +1563,11 @@ mod tests {
             let message = if let Some(message) = buffered.take() {
                 message
             } else {
-                tokio::time::timeout_at(deadline, ws.next()).await
-                    .expect("depth event timeout").expect("stream closed").expect("websocket error")
+                tokio::time::timeout_at(deadline, ws.next())
+                    .await
+                    .expect("depth event timeout")
+                    .expect("stream closed")
+                    .expect("websocket error")
             };
             if let Message::Text(text) = message {
                 let data: Value = serde_json::from_str(&text).unwrap();
@@ -1701,5 +1758,40 @@ mod tests {
         ));
         assert_eq!(venue["HUSDT"].bid, 0.0614);
         assert_eq!(venue["HUSDT"].ask, 0.0615);
+    }
+
+    #[test]
+    fn stale_depth_cache_does_not_disable_discovery_or_become_fresh() {
+        let symbol = "STALECACHEUSDT";
+        let books = L2OrderbookMap::default();
+        books.insert(
+            format!("binance:{symbol}"),
+            L2Snapshot {
+                bids: vec![(100.0, 1.0)],
+                asks: vec![(101.0, 1.0)],
+                updated_ms: 1_000_000,
+            },
+        );
+        let mut venue = std::collections::HashMap::new();
+        let ticker = BinanceBookTicker {
+            event_ms: 1_001_000,
+            symbol: symbol.into(),
+            bid: "102".into(),
+            ask: "103".into(),
+            bid_quantity: "1".into(),
+            ask_quantity: "1".into(),
+        };
+        assert!(apply_book_ticker(
+            &mut venue,
+            ticker,
+            1_001_100,
+            Some(&books)
+        ));
+        assert_eq!(venue[symbol].bid, 102.0);
+        assert_eq!(
+            books.get(&format!("binance:{symbol}")).unwrap().updated_ms,
+            1_000_000
+        );
+        assert_eq!(ticker_source_ms(symbol), Some(1_001_000));
     }
 }

@@ -316,6 +316,17 @@ class ReplayOpportunityTests(unittest.TestCase):
 
         self.assertAlmostEqual(report[0]["diagnostic_actual_volume_a_usdt_min"], 6.0)
         self.assertEqual(report[0]["budget_pass_samples"], 1)
+
+        overrides = {**profile, "fee_overrides": {"kucoin": 0.0006}}
+        overridden, reason = replay.diagnose_nomination_sample(sample, overrides)
+        self.assertEqual(reason, "priced")
+        self.assertEqual(overridden["fee_a"], 0.0006)
+        self.assertEqual(overridden["fee_b"], 0.0005)
+        self.assertAlmostEqual(overridden["required_pct"], 0.85)
+        reversed_venues = copy.deepcopy(sample)
+        reversed_venues["spread"]["exchangeA"] = "binance"
+        reversed_venues["spread"]["exchangeB"] = "kucoin"
+        self.assertEqual(replay.sample_fees(reversed_venues, overrides), (0.0005, 0.0006))
         self.assertEqual(report[0]["hard_stop_pass_samples"], 0)
         self.assertEqual(report[0]["both_pass_samples"], 0)
         self.assertAlmostEqual(report[0]["gross_pct_max"], 1.0)
@@ -441,6 +452,26 @@ class ReplayOpportunityTests(unittest.TestCase):
         self.assertEqual(reason, "eligible")
         self.assertAlmostEqual(event["fee_a"], 0.0006)
         self.assertAlmostEqual(event["fee_b"], 0.0005)
+
+    def test_run_contract_uses_real_technical_settings_and_requires_them(self):
+        config = {
+            "notional_usdt": 6, "min_entry_spread": 0.5, "max_entry_spread": 5,
+            "min_structural_deviation": 0.45, "min_depth_percent": 500,
+            "take_profit_percent": 0.1, "hard_stop_percent": 0.4,
+            "slippage_percent": 0.05, "max_holding_time_ms": 600_000,
+            "min_volume_millions": 0.5,
+        }
+        technical = {"intra_spread_max_pct": "0.2", "vol_tolerance_pct": "15.0"}
+        profile = replay.profile_from_run_config(config, technical, {"kucoin": 0.0006})
+        self.assertEqual(profile["volume_tolerance_pct"], 15.0)
+        self.assertEqual(profile["max_intra_spread_pct"], 0.2)
+        self.assertEqual(profile["max_holding_time_ms"], 600_000)
+        self.assertEqual(profile["min_structural_deviation"], 0.45)
+        self.assertEqual(profile["fee_overrides"], {"kucoin": 0.0006})
+        with self.assertRaises(KeyError):
+            replay.profile_from_run_config(config, {})
+        with self.assertRaises(ValueError):
+            replay.profile_from_run_config({**config, "notional_usdt": float("nan")}, technical)
 
 
 if __name__ == "__main__":

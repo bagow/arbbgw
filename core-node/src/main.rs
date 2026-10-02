@@ -9,12 +9,12 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
 use anyhow::{Context, Result};
-use futures_util::FutureExt;
 use axum::{
     extract::State,
     routing::{get, post},
     Json, Router,
 };
+use futures_util::FutureExt;
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -27,14 +27,37 @@ use spreads::{compute_spreads, discovery_spread_threshold, DISCOVERY_PREWARM_RAT
 use state::{PriceMap, UpdateSignal};
 
 const DIAGNOSTIC_L2_PAIR_LIMIT: usize = 2;
-const DIAGNOSTIC_L2_RETENTION_MS: i64 = 15_000;
 const DIAGNOSTIC_MIN_VOLUME_RATIO: f64 = 0.75;
 // KuCoin's first Pro top-500 snapshot can take several seconds. Keep a very
-// small public-only watchlist warm before a stable route reaches the ordinary
+// small public-only watchlist warm before a liquid route reaches the ordinary
 // discounted prewarm gate, so a short executable excursion does not spend its
 // lifetime waiting for the initial snapshot. This lane never starts private
 // preflight and the scanner still enforces every entry/risk rule.
-const STABLE_L2_WARM_PAIR_LIMIT: usize = 4;
+const PUBLIC_L2_WARM_PAIR_LIMIT: usize = 4;
+
+fn diagnostic_retention_ms(profile: &settings::TradingSettings) -> i64 {
+    profile.max_holding_time_ms.clamp(15_000, 1_800_000) + 10_000
+}
+
+/// Never evict a nominated outcome path for a newer spike, or extend its
+/// deadline forever. Missing the next nomination is explicit and preferable to
+/// silently truncating the ten-minute outcome of the previous one.
+fn retain_diagnostic(
+    ctx: &state::EngineContext,
+    key: String,
+    nomination: state::DiagnosticL2Nomination,
+) -> bool {
+    if ctx.diagnostic_l2_rows.contains_key(&key) {
+        return true;
+    }
+    if ctx.diagnostic_l2_rows.len() >= DIAGNOSTIC_L2_PAIR_LIMIT {
+        return false;
+    }
+    ctx.diagnostic_l2_rows.insert(key, nomination);
+    ctx.diagnostic_l2_nominations
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    true
+}
 
 /// Select an unstable route only for passive public-book recording.
 ///
@@ -129,12 +152,13 @@ fn low_volume_diagnostic_l2_profile_matches(
     .is_some()
 }
 
-/// Rank a stable, fully liquid public route by its distance to the complete L1
+/// Rank a fully liquid public route by its distance to the complete L1
 /// entry budget. The smaller of the raw-spread and net-deviation margins is the
 /// binding gate; a higher value is therefore closer to admission. Negative
 /// scores are intentional because this watchlist exists to make L2 ready
 /// *before* the normal prewarm threshold is crossed.
-fn stable_l2_warm_score(
+/// The direction-stability gate belongs to trading, not public observation.
+fn public_l2_warm_score(
     row: &shared::SpreadRow,
     profile: &settings::TradingSettings,
     break_even_pct: f64,
@@ -163,12 +187,6 @@ fn stable_l2_warm_score(
         || row.vol_b < configured_volume
         || !break_even_pct.is_finite()
         || break_even_pct < 0.0
-        || !engine::scanner_common::directional_structural_regime_is_stable(
-            row.structural_verified,
-            row.has_structural_spread,
-            row.structural_min,
-            row.structural_max,
-        )
     {
         return None;
     }
@@ -505,7 +523,16 @@ async fn main() -> Result<()> {
                     let mut discovery_ts = ts.clone();
                     discovery_ts.spread_threshold =
                         discovery_spread_threshold(ts.spread_threshold, &real_profiles);
-                    let spreads = compute_spreads(&t_prices, 0.0, &discovery_ts);
+                    let entry_discovery_threshold = discovery_ts.spread_threshold;
+                    // Observe liquid routes before they meet discovery economics.
+                    // Compute EMA only once; scanner/API keep their existing gate.
+                    if real_profiles.iter().any(|profile| profile.is_active) {
+                        discovery_ts.spread_threshold = 0.0;
+                    }
+                    let observation_spreads = compute_spreads(&t_prices, 0.0, &discovery_ts);
+                    let spreads: Vec<_> = observation_spreads.iter()
+                        .filter(|row| row.spread >= entry_discovery_threshold)
+                        .cloned().collect();
 
                     // Writes to profiles_db since vps-api reads from it
                     // Replay must resolve the scanner's non-blocking 500 ms confirmation rule.
@@ -534,26 +561,22 @@ async fn main() -> Result<()> {
                         for key in expired_diagnostics {
                             t_e_ctx.diagnostic_l2_rows.remove(&key);
                         }
+                        let nominations: Vec<_> = t_e_ctx.diagnostic_l2_rows.iter()
+                            .map(|entry| entry.value().clone()).collect();
+                        let ordinary_rows: Vec<_> = observation_spreads.iter()
+                            .filter(|row| !nominations.iter().any(|nomination| {
+                                row.pair == nomination.row.pair
+                                    && row.exchange_a == nomination.row.exchange_a
+                                    && row.exchange_b == nomination.row.exchange_b
+                            })).cloned().collect();
                         let mut shadow_rows = engine::shadow::capture(
-                            &spreads,
+                            &ordinary_rows,
                             &t_e_ctx,
                             now_ms as i64,
                             ts.default_fee_rate,
                         );
-                        let diagnostic_only: Vec<_> = t_e_ctx
-                            .diagnostic_l2_rows
-                            .iter()
-                            .filter(|nomination| {
-                                !spreads.iter().any(|row| {
-                                    row.pair == nomination.row.pair
-                                        && row.exchange_a == nomination.row.exchange_a
-                                        && row.exchange_b == nomination.row.exchange_b
-                                })
-                            })
-                            .map(|entry| entry.value().clone())
-                            .collect();
                         shadow_rows.extend(engine::shadow::capture_diagnostics(
-                            &diagnostic_only,
+                            &nominations,
                             &t_e_ctx,
                             now_ms as i64,
                             ts.default_fee_rate,
@@ -587,9 +610,20 @@ async fn main() -> Result<()> {
 
 
                     // ── UPDATE L2 WANTED SET (demand-driven subscriptions) ──
-                    let (diagnostic_l2_pairs, stable_l2_warm_pairs) = {
+                    let (diagnostic_l2_pairs, public_l2_warm_pairs) = {
                         t_e_ctx.l2_wanted.clear();
                         for key in t_e_ctx.owned_l2_wanted.read().await.iter() {t_e_ctx.l2_wanted.insert(key.clone());}
+                        // Outcome capture owns these public subscriptions until
+                        // its fixed deadline, independently of later L1 rank.
+                        for nomination in t_e_ctx.diagnostic_l2_rows.iter() {
+                            if nomination.expires_ms > now_ms as i64 && real_profiles.iter().any(|p| {
+                                p.is_active && !p.disabled_exchanges.contains(&nomination.row.exchange_a)
+                                    && !p.disabled_exchanges.contains(&nomination.row.exchange_b)
+                            }) {
+                                t_e_ctx.l2_wanted.insert(format!("{}:{}", nomination.row.exchange_a, nomination.row.pair));
+                                t_e_ctx.l2_wanted.insert(format!("{}:{}", nomination.row.exchange_b, nomination.row.pair));
+                            }
+                        }
                         // L2 is expensive on Binance. Follow only routes which are close
                         // to an active profile's entry window; open trades above remain
                         // mandatory regardless of rank. The collector retains candidates
@@ -727,13 +761,13 @@ async fn main() -> Result<()> {
                         }
 
                         // Keep a bounded public L2 head start for the best
-                        // stable/liquid routes. KuCoin's initial Pro snapshot is
+                        // liquid routes, including unstable directions. KuCoin's initial Pro snapshot is
                         // too slow to request only after a fleeting excursion
                         // has already crossed the entry threshold. No REST
                         // prewarm or private-account preflight is performed in
                         // this lane, and generate_signals below remains the sole
                         // authority for admission.
-                        let mut stable_warm_rows: Vec<(&shared::SpreadRow, f64)> = spreads
+                        let mut public_warm_rows: Vec<(&shared::SpreadRow, f64)> = observation_spreads
                             .iter()
                             .filter(|row| {
                                 let key_a = format!("{}:{}", row.exchange_a, row.pair);
@@ -771,19 +805,19 @@ async fn main() -> Result<()> {
                                 real_profiles
                                     .iter()
                                     .filter_map(|profile| {
-                                        stable_l2_warm_score(row, profile, break_even_pct)
+                                        public_l2_warm_score(row, profile, break_even_pct)
                                     })
                                     .max_by(f64::total_cmp)
                                     .map(|score| (row, score))
                             })
                             .collect();
-                        stable_warm_rows.sort_by(|(left_row, left_score), (right_row, right_score)| {
+                        public_warm_rows.sort_by(|(left_row, left_score), (right_row, right_score)| {
                             right_score
                                 .total_cmp(left_score)
                                 .then_with(|| left_row.pair.cmp(&right_row.pair))
                         });
-                        let mut stable_l2_warm_pairs = 0usize;
-                        for (row, _) in stable_warm_rows {
+                        let mut public_l2_warm_pairs = 0usize;
+                        for (row, _) in public_warm_rows {
                             let key_a = format!("{}:{}", row.exchange_a, row.pair);
                             let key_b = format!("{}:{}", row.exchange_b, row.pair);
                             if t_e_ctx.l2_wanted.contains(&key_a)
@@ -793,8 +827,8 @@ async fn main() -> Result<()> {
                             }
                             t_e_ctx.l2_wanted.insert(key_a);
                             t_e_ctx.l2_wanted.insert(key_b);
-                            stable_l2_warm_pairs += 1;
-                            if stable_l2_warm_pairs >= STABLE_L2_WARM_PAIR_LIMIT {
+                            public_l2_warm_pairs += 1;
+                            if public_l2_warm_pairs >= PUBLIC_L2_WARM_PAIR_LIMIT {
                                 break;
                             }
                         }
@@ -812,9 +846,7 @@ async fn main() -> Result<()> {
                             }
                             let key_a = format!("{}:{}", row.exchange_a, row.pair);
                             let key_b = format!("{}:{}", row.exchange_b, row.pair);
-                            if t_e_ctx.l2_wanted.contains(&key_a)
-                                || t_e_ctx.l2_wanted.contains(&key_b)
-                                || [&key_a, &key_b].iter().any(|key| {
+                            if [&key_a, &key_b].iter().any(|key| {
                                     !t_e_ctx.specifications.contains_key(*key)
                                         || !t_e_ctx.multipliers.contains_key(*key)
                                         || !t_e_ctx.tick_sizes.contains_key(*key)
@@ -851,45 +883,38 @@ async fn main() -> Result<()> {
                             );
                             let capture_reason = real_profiles.iter().find_map(|profile| {
                                 if diagnostic_l2_profile_matches(row, profile, break_even_pct) {
-                                    Some("unstable_l1_nomination")
+                                    Some(("unstable_l1_nomination", diagnostic_retention_ms(profile)))
                                 } else if low_volume_diagnostic_l2_profile_matches(
                                     row,
                                     profile,
                                     break_even_pct,
                                 ) {
-                                    Some("low_volume_l1_nomination")
+                                    Some(("low_volume_l1_nomination", diagnostic_retention_ms(profile)))
                                 } else {
                                     None
                                 }
                             });
-                            let Some(capture_reason) = capture_reason else {
+                            let Some((capture_reason, retention_ms)) = capture_reason else {
                                 continue;
                             };
-                            t_e_ctx.l2_wanted.insert(key_a);
-                            t_e_ctx.l2_wanted.insert(key_b);
                             let diagnostic_key = format!(
                                 "{}:{}:{}:{}",
                                 capture_reason, row.exchange_a, row.exchange_b, row.pair,
                             );
-                            let prior_nomination_ms = t_e_ctx
-                                .diagnostic_l2_rows
-                                .get(&diagnostic_key)
-                                .map(|nomination| nomination.nominated_ms);
-                            t_e_ctx.diagnostic_l2_rows.insert(
+                            if !retain_diagnostic(
+                                &t_e_ctx,
                                 diagnostic_key,
                                 crate::state::DiagnosticL2Nomination {
                                     row: row.clone(),
                                     capture_reason,
-                                    nominated_ms: prior_nomination_ms.unwrap_or(now_ms as i64),
-                                    expires_ms: now_ms as i64 + DIAGNOSTIC_L2_RETENTION_MS,
+                                    nominated_ms: now_ms as i64,
+                                    expires_ms: now_ms as i64 + retention_ms,
                                 },
-                            );
-                            if prior_nomination_ms.is_none() {
-                                t_e_ctx.diagnostic_l2_nominations.fetch_add(
-                                    1,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
+                            ) {
+                                continue;
                             }
+                            t_e_ctx.l2_wanted.insert(key_a);
+                            t_e_ctx.l2_wanted.insert(key_b);
                             if !binance_depth_prewarm_scheduled
                                 && (row.exchange_a == "binance" || row.exchange_b == "binance")
                             {
@@ -946,9 +971,9 @@ async fn main() -> Result<()> {
                                 let row = nomination.row;
                                 let key_a = format!("{}:{}", row.exchange_a, row.pair);
                                 let key_b = format!("{}:{}", row.exchange_b, row.pair);
-                                if t_e_ctx.l2_wanted.contains(&key_a)
-                                    || t_e_ctx.l2_wanted.contains(&key_b)
-                                {
+                                if !real_profiles.iter().any(|profile| profile.is_active
+                                    && !profile.disabled_exchanges.contains(&row.exchange_a)
+                                    && !profile.disabled_exchanges.contains(&row.exchange_b)) {
                                     continue;
                                 }
                                 t_e_ctx.l2_wanted.insert(key_a);
@@ -990,7 +1015,7 @@ async fn main() -> Result<()> {
                                 diagnostic_l2_pairs += 1;
                             }
                         }
-                        (diagnostic_l2_pairs, stable_l2_warm_pairs)
+                        (t_e_ctx.diagnostic_l2_rows.len(), public_l2_warm_pairs)
                     };
 
                     // ── EVALUATE SMART SIGNALS & RUN ENGINE ──
@@ -1011,8 +1036,8 @@ async fn main() -> Result<()> {
                         t_e_ctx.diagnostic_l2_rows.len() as u64,
                     );
                     t_e_ctx.scanner_status.insert(
-                        "stable_l2_warm_pairs".to_string(),
-                        stable_l2_warm_pairs as u64,
+                        "public_l2_warm_pairs".to_string(),
+                        public_l2_warm_pairs as u64,
                     );
                     t_e_ctx.scanner_status.insert(
                         "diagnostic_l2_nominations".to_string(),
@@ -1158,8 +1183,8 @@ async fn handle_health(
         .load(std::sync::atomic::Ordering::Acquire);
     let age = now - supervisor_tick_ms;
     let active = journal.active().await;
-    let process_healthy = active.is_ok()
-        && engine::utils::local_timestamp_is_fresh(now, supervisor_tick_ms, 4_999);
+    let process_healthy =
+        active.is_ok() && engine::utils::local_timestamp_is_fresh(now, supervisor_tick_ms, 4_999);
     let mut market_ready_venues = 0usize;
     let venues: Vec<_> = ["binance", "kucoin"]
         .iter()
@@ -1374,7 +1399,7 @@ mod diagnostic_l2_tests {
     }
 
     #[test]
-    fn stable_warm_lane_ranks_by_the_binding_full_entry_gate() {
+    fn public_warm_lane_ranks_before_entry_without_requiring_stable_direction() {
         let profile = profile();
         let mut row = unstable_row();
         row.has_structural_spread = true;
@@ -1384,34 +1409,81 @@ mod diagnostic_l2_tests {
 
         // Raw spread is already 0.20% above its gate, but structural reserve,
         // fees and configured deviation leave the binding margin at -0.23%.
-        let score = stable_l2_warm_score(&row, &profile, 0.28).unwrap();
+        let score = public_l2_warm_score(&row, &profile, 0.28).unwrap();
         assert!((score - -0.23).abs() < 1e-12);
 
         row.spread = 0.95;
-        let score = stable_l2_warm_score(&row, &profile, 0.28).unwrap();
+        let score = public_l2_warm_score(&row, &profile, 0.28).unwrap();
         assert!((score - 0.02).abs() < 1e-12);
 
         row.has_structural_spread = false;
-        assert_eq!(stable_l2_warm_score(&row, &profile, 0.28), None);
+        assert!(public_l2_warm_score(&row, &profile, 0.28).is_some());
+        assert!(
+            !engine::scanner_common::directional_structural_regime_is_stable(
+                row.structural_verified,
+                row.has_structural_spread,
+                row.structural_min,
+                row.structural_max,
+            )
+        );
+        row.spread = 0.1;
+        assert!(public_l2_warm_score(&row, &profile, 0.28).unwrap() < 0.0);
     }
 
     #[test]
-    fn stable_warm_lane_never_bypasses_profile_scope_or_liquidity() {
+    fn public_warm_lane_never_bypasses_profile_scope_or_liquidity() {
         let profile = profile();
         let mut row = unstable_row();
         row.has_structural_spread = true;
         row.structural_min = 0.01;
 
         row.vol_a = 499_999.0;
-        assert_eq!(stable_l2_warm_score(&row, &profile, 0.28), None);
+        assert_eq!(public_l2_warm_score(&row, &profile, 0.28), None);
 
         row.vol_a = 500_000.0;
         let mut disabled = profile.clone();
         disabled.disabled_exchanges.push("kucoin".to_string());
-        assert_eq!(stable_l2_warm_score(&row, &disabled, 0.28), None);
+        assert_eq!(public_l2_warm_score(&row, &disabled, 0.28), None);
 
         let mut inactive = profile.clone();
         inactive.is_active = false;
-        assert_eq!(stable_l2_warm_score(&row, &inactive, 0.28), None);
+        assert_eq!(public_l2_warm_score(&row, &inactive, 0.28), None);
+    }
+
+    #[test]
+    fn diagnostic_outcome_cannot_be_evicted_or_extended_by_new_spikes() {
+        let ctx = state::EngineContext::default();
+        let mut profile = profile();
+        profile.max_holding_time_ms = 600_000;
+        assert_eq!(diagnostic_retention_ms(&profile), 610_000);
+        let nomination = state::DiagnosticL2Nomination {
+            row: unstable_row(),
+            capture_reason: "unstable_l1_nomination",
+            nominated_ms: 1_000,
+            expires_ms: 611_000,
+        };
+        assert!(retain_diagnostic(&ctx, "first".into(), nomination.clone()));
+        let later = state::DiagnosticL2Nomination {
+            nominated_ms: 2_000,
+            expires_ms: 612_000,
+            ..nomination.clone()
+        };
+        assert!(retain_diagnostic(&ctx, "first".into(), later));
+        assert_eq!(
+            ctx.diagnostic_l2_rows.get("first").unwrap().expires_ms,
+            611_000
+        );
+        assert_eq!(
+            ctx.diagnostic_l2_rows.get("first").unwrap().nominated_ms,
+            1_000
+        );
+        assert!(retain_diagnostic(&ctx, "second".into(), nomination.clone()));
+        assert!(!retain_diagnostic(&ctx, "third".into(), nomination));
+        assert_eq!(ctx.diagnostic_l2_rows.len(), 2);
+        assert_eq!(
+            ctx.diagnostic_l2_nominations
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
     }
 }

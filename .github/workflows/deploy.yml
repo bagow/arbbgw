@@ -92,6 +92,26 @@ jobs:
           path: ci-*.log
           retention-days: 14
 
+  # Stage the exact tested artifact for operator-controlled smoke/deployment.
+  # This job never replaces the production binary or restarts any service.
+  stage-core-candidate:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/binance-kucoin-trading'
+    needs: [check]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: target/release
+      - name: Stage tested core without activating it
+        env:
+          ARB_DEPLOY_HOST: ${{ secrets.VPS_SSH_HOST }}
+          ARB_DEPLOY_USER: ${{ secrets.VPS_SSH_USER }}
+          ARB_DEPLOY_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        run: python3 .github/scripts/copy-core.py
+
   smoke-audit:
     if: github.ref == 'refs/heads/fix/audit-risk-20260909'
     needs: [check]

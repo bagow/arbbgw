@@ -339,6 +339,19 @@ def wait_for_readiness(config, report):
     )
 
 
+def bind_technical_settings(config, actual):
+    """Freeze replay-critical settings and refuse a mismatched run contract."""
+    requested = config.get("technical_settings") or {}
+    for key in ("intra_spread_max_pct", "vol_tolerance_pct"):
+        if key not in actual:
+            raise RuntimeError(f"missing technical setting: {key}")
+        if key in requested and float(requested[key]) != float(actual[key]):
+            raise RuntimeError(f"technical setting mismatch: {key}")
+    config["technical_settings"] = {key: actual[key] for key in (
+        "intra_spread_max_pct", "vol_tolerance_pct",
+    )}
+
+
 def preflight(config):
     current_health = health()
     expected = config["expected_build_sha"]
@@ -355,6 +368,12 @@ def preflight(config):
         raise RuntimeError("core process or private dependencies are not healthy")
     if current_health.get("entries_halted") is not True:
         raise RuntimeError("canary must start from a persisted halted state")
+    with sqlite3.connect(PROFILE_DB.resolve().as_uri() + "?mode=ro", uri=True) as db:
+        actual_technical = dict(db.execute(
+            "SELECT key,value FROM technical_settings WHERE key IN "
+            "('intra_spread_max_pct','vol_tolerance_pct')"
+        ))
+    bind_technical_settings(config, actual_technical)
     with trade_connection() as db:
         active = db.execute(
             "SELECT COUNT(*) FROM trades WHERE status NOT IN ('CLOSED','CANCELLED')"

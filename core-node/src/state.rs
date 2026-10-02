@@ -109,7 +109,7 @@ pub struct EngineContext {
     /// Populated by scanner (spread rows) + cycle (open trades).
     /// Collectors subscribe only to pairs present here.
     pub l2_wanted: Arc<DashSet<String>>,
-    /// Economically interesting public-L1 routes retained briefly for passive
+    /// Economically interesting public-L1 routes retained through their holding horizon for passive
     /// L2 diagnosis even though a safety gate prevents them from trading.
     pub diagnostic_l2_rows: Arc<DashMap<String, DiagnosticL2Nomination>>,
     pub diagnostic_l2_nominations: Arc<std::sync::atomic::AtomicU64>,

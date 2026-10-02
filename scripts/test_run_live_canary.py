@@ -12,6 +12,19 @@ SPEC.loader.exec_module(CANARY)
 
 
 class MarketReadinessObservationTests(unittest.TestCase):
+    def test_technical_contract_is_captured_and_mismatch_refuses_activation(self):
+        actual = {"intra_spread_max_pct": "0.2", "vol_tolerance_pct": "15.0"}
+        config = {}
+        CANARY.bind_technical_settings(config, actual)
+        self.assertEqual(config["technical_settings"], actual)
+        CANARY.bind_technical_settings(config, actual)
+        with self.assertRaises(RuntimeError):
+            CANARY.bind_technical_settings(
+                {"technical_settings": {"vol_tolerance_pct": 7}}, actual,
+            )
+        with self.assertRaises(RuntimeError):
+            CANARY.bind_technical_settings({}, {})
+
     def test_outage_is_recorded_until_recovery(self):
         report = {}
         gap = 0

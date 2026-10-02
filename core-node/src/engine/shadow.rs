@@ -23,7 +23,10 @@ pub async fn start(path: std::path::PathBuf) -> anyhow::Result<mpsc::Sender<Vec<
             if let Err(e) = db.call(move |c| {
                 let tx=c.transaction()?;
                 for row in rows {tx.execute("INSERT INTO book_samples(snapshot) VALUES(?)",params![row])?;}
-                if prune {tx.execute("DELETE FROM book_samples WHERE id < (SELECT MAX(id)-50000 FROM book_samples)",[])?;}
+                // Up to 22 rows / 100 ms: keep more than the 10-minute canary
+                // outcome even with every recording slot occupied. Still a
+                // bounded, lossy recorder, never an unbounded trading-path queue.
+                if prune {tx.execute("DELETE FROM book_samples WHERE id < (SELECT MAX(id)-250000 FROM book_samples)",[])?;}
                 tx.commit()?; Ok(())
             }).await {tracing::warn!("Shadow recording failed: {e}");}
         }
@@ -84,10 +87,12 @@ fn capture_row(
     let key_b = format!("{}:{}", row.exchange_b, row.pair);
     let a = ctx.l2_books.get(&key_a)?.clone();
     let b = ctx.l2_books.get(&key_b)?.clone();
-    let spec_json = |key: &str| ctx.specifications.get(key).map(|value| serde_json::json!({
+    let spec_json = |key: &str| {
+        ctx.specifications.get(key).map(|value| serde_json::json!({
         "fetched_ms":value.fetched_ms,"quantity_step":value.quantity_step,"price_tick":value.price_tick,
         "min_quantity":value.min_quantity,"max_quantity":value.max_quantity,"min_notional":value.min_notional
-    }));
+    }))
+    };
     // Include age explicitly: stale observations are evidence, never executable quotes.
     Some(serde_json::json!({
         "recorded_ms":now,

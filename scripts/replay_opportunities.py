@@ -18,6 +18,16 @@ FEE_TTL_MS = 3_600_000
 MAX_EXECUTION_BOOK_SKEW_MS = 250
 
 
+def sample_fees(sample, profile):
+    """Use the same explicit fee evidence in normal and diagnostic replay."""
+    spread = sample.get("spread") or {}
+    overrides = profile.get("fee_overrides") or {}
+    return tuple(
+        overrides.get(str(spread.get(exchange, "")), sample.get(fee))
+        for exchange, fee in (("exchangeA", "fee_a"), ("exchangeB", "fee_b"))
+    )
+
+
 def finite_positive(value):
     return isinstance(value, (int, float)) and math.isfinite(value) and value > 0
 
@@ -266,8 +276,7 @@ def evaluate(sample, profile):
     fee_overrides = profile.get("fee_overrides") or {}
     exchange_a = str(spread.get("exchangeA", ""))
     exchange_b = str(spread.get("exchangeB", ""))
-    fee_a = fee_overrides.get(exchange_a, sample.get("fee_a"))
-    fee_b = fee_overrides.get(exchange_b, sample.get("fee_b"))
+    fee_a, fee_b = sample_fees(sample, profile)
     fee_stamps = (sample.get("fee_a_updated_ms"), sample.get("fee_b_updated_ms"))
     fee_exchanges = (exchange_a, exchange_b)
     if any(
@@ -440,7 +449,7 @@ def diagnose_nomination_sample(sample, profile, bypass_volume=False):
     if not specification_permits(spec_b, now_ms, quantity, entry_b["vwap"], spec_b["quantity_step"]):
         return None, "specification_b"
 
-    fee_a, fee_b = sample.get("fee_a"), sample.get("fee_b")
+    fee_a, fee_b = sample_fees(sample, profile)
     fixed_costs = break_even_pct(fee_a, fee_b)
     if fixed_costs is None:
         return None, "fees"
@@ -478,6 +487,8 @@ def diagnose_nomination_sample(sample, profile, bypass_volume=False):
     )
     return {
         **volume_diagnostic,
+        "fee_a": fee_a,
+        "fee_b": fee_b,
         "recorded_ms": now_ms,
         "gross_pct": gross,
         "required_pct": required,
@@ -848,6 +859,7 @@ def summarize_evaluated(
         "confirmed_cycles": cycles,
         "sequential_cycle_outcomes": dict(sequential_counts),
         "sequential_cycles": sequential,
+        "effective_profile": profile,
         "fee_overrides": profile.get("fee_overrides") or {},
         "limitations": [
             "Recorded snapshots cannot prove fills, queue position, or prices between samples.",
@@ -962,10 +974,40 @@ def profile_from_args(args, deviation):
     }
 
 
+def profile_from_run_config(config, technical, fee_overrides=None):
+    """Replay the actual run contract, not a second manually copied profile.
+
+    Missing technical settings fail explicitly; guessing a lot tolerance or
+    spread cap makes the claimed production replay a different experiment.
+    """
+    fields = (
+        "notional_usdt", "min_entry_spread", "max_entry_spread",
+        "min_structural_deviation", "min_depth_percent", "take_profit_percent",
+        "hard_stop_percent", "slippage_percent", "max_holding_time_ms",
+    )
+    profile = {key: float(config[key]) for key in fields}
+    profile.update({
+        "min_volume_usd": float(config["min_volume_millions"]) * 1_000_000,
+        "max_intra_spread_pct": float(technical["intra_spread_max_pct"]),
+        "volume_tolerance_pct": float(technical["vol_tolerance_pct"]),
+        "max_book_skew_ms": MAX_EXECUTION_BOOK_SKEW_MS,
+        "fee_overrides": fee_overrides or {},
+        "profile_source": "run_config",
+    })
+    if any(not math.isfinite(value) or value < 0 for value in profile.values()
+           if isinstance(value, (int, float))):
+        raise ValueError("run profile values must be finite and non-negative")
+    return profile
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("database", type=Path)
     parser.add_argument("--build")
+    parser.add_argument("--run-config", type=Path,
+                        help="use an immutable canary config instead of CLI strategy thresholds")
+    parser.add_argument("--settings-db", type=Path,
+                        help="read technical settings for older configs without technical_settings")
     parser.add_argument("--notional", type=float, default=6.0)
     parser.add_argument("--min-entry", type=float, default=0.5)
     parser.add_argument("--max-entry", type=float, default=4.0)
@@ -1002,11 +1044,32 @@ def main():
         for fee in (args.binance_fee, args.kucoin_fee)
     ):
         parser.error("fee overrides must be finite and non-negative")
-    if args.diagnose_nominations_since_ms is None:
+    if args.run_config is not None:
+        config = json.loads(args.run_config.read_text())
+        technical = config.get("technical_settings")
+        if technical is None and args.settings_db is not None:
+            uri = args.settings_db.resolve().as_uri() + "?mode=ro"
+            with sqlite3.connect(uri, uri=True) as db:
+                technical = dict(db.execute(
+                    "SELECT key,value FROM technical_settings WHERE key IN "
+                    "('intra_spread_max_pct','vol_tolerance_pct')"
+                ))
+        try:
+            profile = profile_from_run_config(
+                config, technical or {}, profile_from_args(args, 0)["fee_overrides"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            parser.error(f"incomplete or invalid run contract: {exc}")
+        if args.build is not None and args.build != config["expected_build_sha"]:
+            parser.error("--build must match the run contract")
+        args.build = config["expected_build_sha"]
+        profiles = {"run_config": profile}
+    else:
         profiles = {
             str(deviation): profile_from_args(args, deviation)
             for deviation in args.deviations
         }
+    if args.diagnose_nominations_since_ms is None:
         report = summarize_database_profiles(
             args.database,
             args.build,
@@ -1016,10 +1079,12 @@ def main():
         )
     else:
         report = {
-            str(deviation): {
+            name: {
+                "effective_profile": profile,
+                "fee_overrides": profile.get("fee_overrides") or {},
                 "nomination_diagnostics": summarize_nomination_diagnostics(
                     iter_samples(args.database, args.build),
-                    profile_from_args(args, deviation),
+                    profile,
                     args.diagnose_nominations_since_ms,
                 ),
                 "limitations": [
@@ -1027,7 +1092,7 @@ def main():
                     "Budget and hard-stop pass counts are counterfactuals, not evidence of fills.",
                 ],
             }
-            for deviation in args.deviations
+            for name, profile in profiles.items()
         }
     print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
 
