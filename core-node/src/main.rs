@@ -202,6 +202,22 @@ fn public_l2_warm_score(
     score.is_finite().then_some(score)
 }
 
+fn prioritize_one_stable_warm_route(rows: &mut Vec<(&shared::SpreadRow, f64)>) {
+    // Keep one already tradeable regime warm even when its next excursion is
+    // farther away. The remaining slots observe all directions by score.
+    if let Some(index) = rows.iter().position(|(row, _)| {
+        engine::scanner_common::directional_structural_regime_is_stable(
+            row.structural_verified,
+            row.has_structural_spread,
+            row.structural_min,
+            row.structural_max,
+        )
+    }) {
+        let route = rows.remove(index);
+        rows.insert(0, route);
+    }
+}
+
 mod collector {
     pub mod ascendex;
     pub mod binance;
@@ -816,6 +832,7 @@ async fn main() -> Result<()> {
                                 .total_cmp(left_score)
                                 .then_with(|| left_row.pair.cmp(&right_row.pair))
                         });
+                        prioritize_one_stable_warm_route(&mut public_warm_rows);
                         let mut public_l2_warm_pairs = 0usize;
                         for (row, _) in public_warm_rows {
                             let key_a = format!("{}:{}", row.exchange_a, row.pair);
@@ -1448,6 +1465,17 @@ mod diagnostic_l2_tests {
         let mut inactive = profile.clone();
         inactive.is_active = false;
         assert_eq!(public_l2_warm_score(&row, &inactive, 0.28), None);
+    }
+
+    #[test]
+    fn observation_does_not_evict_the_only_stable_warm_route() {
+        let unstable = unstable_row();
+        let mut stable = unstable.clone();
+        stable.has_structural_spread = true;
+        let mut rows = vec![(&unstable, 0.1), (&stable, -1.0)];
+        prioritize_one_stable_warm_route(&mut rows);
+        assert!(rows[0].0.has_structural_spread);
+        assert!(!rows[1].0.has_structural_spread);
     }
 
     #[test]
