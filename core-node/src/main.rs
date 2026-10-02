@@ -29,6 +29,12 @@ use state::{PriceMap, UpdateSignal};
 const DIAGNOSTIC_L2_PAIR_LIMIT: usize = 2;
 const DIAGNOSTIC_L2_RETENTION_MS: i64 = 15_000;
 const DIAGNOSTIC_MIN_VOLUME_RATIO: f64 = 0.75;
+// KuCoin's first Pro top-500 snapshot can take several seconds. Keep a very
+// small public-only watchlist warm before a stable route reaches the ordinary
+// discounted prewarm gate, so a short executable excursion does not spend its
+// lifetime waiting for the initial snapshot. This lane never starts private
+// preflight and the scanner still enforces every entry/risk rule.
+const STABLE_L2_WARM_PAIR_LIMIT: usize = 4;
 
 /// Select an unstable route only for passive public-book recording.
 ///
@@ -121,6 +127,61 @@ fn low_volume_diagnostic_l2_profile_matches(
         break_even_pct,
     )
     .is_some()
+}
+
+/// Rank a stable, fully liquid public route by its distance to the complete L1
+/// entry budget. The smaller of the raw-spread and net-deviation margins is the
+/// binding gate; a higher value is therefore closer to admission. Negative
+/// scores are intentional because this watchlist exists to make L2 ready
+/// *before* the normal prewarm threshold is crossed.
+fn stable_l2_warm_score(
+    row: &shared::SpreadRow,
+    profile: &settings::TradingSettings,
+    break_even_pct: f64,
+) -> Option<f64> {
+    let configured_volume = profile.min_volume_millions * 1_000_000.0;
+    if !profile.is_active
+        || profile.strategy_type != "ema"
+        || profile.disabled_exchanges.contains(&row.exchange_a)
+        || profile.disabled_exchanges.contains(&row.exchange_b)
+        || ![&row.exchange_a, &row.exchange_b].iter().all(|exchange| {
+            engine::exchanges::get_connector(exchange)
+                .is_some_and(|connector| connector.supports_managed_orders())
+        })
+        || !row.spread.is_finite()
+        || row.spread < 0.0
+        || !profile.min_entry_spread.is_finite()
+        || !profile.max_entry_spread.is_finite()
+        || profile.min_entry_spread < 0.0
+        || profile.max_entry_spread < profile.min_entry_spread
+        || row.spread > profile.max_entry_spread
+        || !configured_volume.is_finite()
+        || configured_volume < 0.0
+        || !row.vol_a.is_finite()
+        || !row.vol_b.is_finite()
+        || row.vol_a < configured_volume
+        || row.vol_b < configured_volume
+        || !break_even_pct.is_finite()
+        || break_even_pct < 0.0
+        || !engine::scanner_common::directional_structural_regime_is_stable(
+            row.structural_verified,
+            row.has_structural_spread,
+            row.structural_min,
+            row.structural_max,
+        )
+    {
+        return None;
+    }
+    let structural_reserve = engine::scanner_common::configured_structural_reserve(
+        profile.min_structural_deviation,
+        row.structural_verified,
+        row.structural_spread,
+    )?;
+    let raw_margin = row.spread - profile.min_entry_spread;
+    let deviation_margin =
+        row.spread - structural_reserve - break_even_pct - profile.min_structural_deviation;
+    let score = raw_margin.min(deviation_margin);
+    score.is_finite().then_some(score)
 }
 
 mod collector {
@@ -526,7 +587,7 @@ async fn main() -> Result<()> {
 
 
                     // ── UPDATE L2 WANTED SET (demand-driven subscriptions) ──
-                    let diagnostic_l2_pairs = {
+                    let (diagnostic_l2_pairs, stable_l2_warm_pairs) = {
                         t_e_ctx.l2_wanted.clear();
                         for key in t_e_ctx.owned_l2_wanted.read().await.iter() {t_e_ctx.l2_wanted.insert(key.clone());}
                         // L2 is expensive on Binance. Follow only routes which are close
@@ -661,6 +722,79 @@ async fn main() -> Result<()> {
                             }
                             candidate_rows += 1;
                             if candidate_rows >= 24 {
+                                break;
+                            }
+                        }
+
+                        // Keep a bounded public L2 head start for the best
+                        // stable/liquid routes. KuCoin's initial Pro snapshot is
+                        // too slow to request only after a fleeting excursion
+                        // has already crossed the entry threshold. No REST
+                        // prewarm or private-account preflight is performed in
+                        // this lane, and generate_signals below remains the sole
+                        // authority for admission.
+                        let mut stable_warm_rows: Vec<(&shared::SpreadRow, f64)> = spreads
+                            .iter()
+                            .filter(|row| {
+                                let key_a = format!("{}:{}", row.exchange_a, row.pair);
+                                let key_b = format!("{}:{}", row.exchange_b, row.pair);
+                                let pair_cooldown = t_e_ctx
+                                    .pair_cooldown
+                                    .get(&row.pair)
+                                    .map(|value| *value)
+                                    .unwrap_or(0);
+                                [&key_a, &key_b].iter().all(|key| {
+                                    t_e_ctx.specifications.contains_key(*key)
+                                        && t_e_ctx.multipliers.contains_key(*key)
+                                        && t_e_ctx.tick_sizes.contains_key(*key)
+                                }) && !engine::utils::cooldown_active(
+                                    pair_cooldown,
+                                    now_ms as i64,
+                                    ts.pair_cooldown_ms,
+                                )
+                            })
+                            .filter_map(|row| {
+                                let fee_a = engine::utils::get_exchange_fee(
+                                    &row.exchange_a,
+                                    &row.pair,
+                                    ts.default_fee_rate,
+                                    &t_e_ctx,
+                                );
+                                let fee_b = engine::utils::get_exchange_fee(
+                                    &row.exchange_b,
+                                    &row.pair,
+                                    ts.default_fee_rate,
+                                    &t_e_ctx,
+                                );
+                                let break_even_pct =
+                                    engine::scanner_common::ioc_break_even_pct(fee_a, fee_b);
+                                real_profiles
+                                    .iter()
+                                    .filter_map(|profile| {
+                                        stable_l2_warm_score(row, profile, break_even_pct)
+                                    })
+                                    .max_by(f64::total_cmp)
+                                    .map(|score| (row, score))
+                            })
+                            .collect();
+                        stable_warm_rows.sort_by(|(left_row, left_score), (right_row, right_score)| {
+                            right_score
+                                .total_cmp(left_score)
+                                .then_with(|| left_row.pair.cmp(&right_row.pair))
+                        });
+                        let mut stable_l2_warm_pairs = 0usize;
+                        for (row, _) in stable_warm_rows {
+                            let key_a = format!("{}:{}", row.exchange_a, row.pair);
+                            let key_b = format!("{}:{}", row.exchange_b, row.pair);
+                            if t_e_ctx.l2_wanted.contains(&key_a)
+                                && t_e_ctx.l2_wanted.contains(&key_b)
+                            {
+                                continue;
+                            }
+                            t_e_ctx.l2_wanted.insert(key_a);
+                            t_e_ctx.l2_wanted.insert(key_b);
+                            stable_l2_warm_pairs += 1;
+                            if stable_l2_warm_pairs >= STABLE_L2_WARM_PAIR_LIMIT {
                                 break;
                             }
                         }
@@ -856,7 +990,7 @@ async fn main() -> Result<()> {
                                 diagnostic_l2_pairs += 1;
                             }
                         }
-                        diagnostic_l2_pairs
+                        (diagnostic_l2_pairs, stable_l2_warm_pairs)
                     };
 
                     // ── EVALUATE SMART SIGNALS & RUN ENGINE ──
@@ -875,6 +1009,10 @@ async fn main() -> Result<()> {
                     t_e_ctx.scanner_status.insert(
                         "diagnostic_l2_retained_rows".to_string(),
                         t_e_ctx.diagnostic_l2_rows.len() as u64,
+                    );
+                    t_e_ctx.scanner_status.insert(
+                        "stable_l2_warm_pairs".to_string(),
+                        stable_l2_warm_pairs as u64,
                     );
                     t_e_ctx.scanner_status.insert(
                         "diagnostic_l2_nominations".to_string(),
@@ -1227,5 +1365,47 @@ mod diagnostic_l2_tests {
         assert!(!low_volume_diagnostic_l2_profile_matches(
             &row, &profile, 0.28,
         ));
+    }
+
+    #[test]
+    fn stable_warm_lane_ranks_by_the_binding_full_entry_gate() {
+        let profile = profile();
+        let mut row = unstable_row();
+        row.has_structural_spread = true;
+        row.structural_min = 0.01;
+        row.structural_spread = 0.20;
+        row.spread = 0.70;
+
+        // Raw spread is already 0.20% above its gate, but structural reserve,
+        // fees and configured deviation leave the binding margin at -0.23%.
+        let score = stable_l2_warm_score(&row, &profile, 0.28).unwrap();
+        assert!((score - -0.23).abs() < 1e-12);
+
+        row.spread = 0.95;
+        let score = stable_l2_warm_score(&row, &profile, 0.28).unwrap();
+        assert!((score - 0.02).abs() < 1e-12);
+
+        row.has_structural_spread = false;
+        assert_eq!(stable_l2_warm_score(&row, &profile, 0.28), None);
+    }
+
+    #[test]
+    fn stable_warm_lane_never_bypasses_profile_scope_or_liquidity() {
+        let profile = profile();
+        let mut row = unstable_row();
+        row.has_structural_spread = true;
+        row.structural_min = 0.01;
+
+        row.vol_a = 499_999.0;
+        assert_eq!(stable_l2_warm_score(&row, &profile, 0.28), None);
+
+        row.vol_a = 500_000.0;
+        let mut disabled = profile.clone();
+        disabled.disabled_exchanges.push("kucoin".to_string());
+        assert_eq!(stable_l2_warm_score(&row, &disabled, 0.28), None);
+
+        let mut inactive = profile.clone();
+        inactive.is_active = false;
+        assert_eq!(stable_l2_warm_score(&row, &inactive, 0.28), None);
     }
 }
