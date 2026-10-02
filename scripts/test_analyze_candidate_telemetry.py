@@ -113,6 +113,42 @@ class CandidateTelemetrySummaryTests(unittest.TestCase):
         self.assertEqual(result["readiness_outages"][0]["samples"], 2)
         self.assertEqual(result["readiness_outages"][0]["observed_duration_ms"], 2_500)
 
+    def test_reports_order_lane_outage_when_general_health_stays_true(self):
+        result = summarize(
+            [
+                line(
+                    {
+                        "kind": "snapshot",
+                        "ts": 1_000,
+                        "rows": [],
+                        "health": {
+                            "healthy": True,
+                            "order_ws_ready": False,
+                            "trading_ready": False,
+                        },
+                    }
+                ),
+                line(
+                    {
+                        "kind": "snapshot",
+                        "ts": 2_000,
+                        "rows": [],
+                        "health": {
+                            "healthy": True,
+                            "order_ws_ready": True,
+                            "trading_ready": True,
+                        },
+                    }
+                ),
+            ]
+        )
+        self.assertEqual(len(result["readiness_outages"]), 1)
+        self.assertEqual(
+            result["readiness_outages"][0]["errors"],
+            ["order_ws_ready=false", "trading_ready=false"],
+        )
+        self.assertEqual(result["readiness_outages"][0]["observed_duration_ms"], 1_000)
+
 
 if __name__ == "__main__":
     unittest.main()

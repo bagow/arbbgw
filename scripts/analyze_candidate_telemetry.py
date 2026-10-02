@@ -64,25 +64,49 @@ def episode_counts(snapshots, predicate):
     return dict(episodes)
 
 
+READINESS_FIELDS = (
+    "process_healthy",
+    "market_ready",
+    "private_ready",
+    "order_ws_ready",
+    "trading_ready",
+)
+
+
+def readiness_failures(health):
+    failures = []
+    if health.get("error"):
+        failures.append(str(health["error"]))
+    if health.get("healthy") is False:
+        failures.append("healthy=false")
+    failures.extend(
+        f"{field}=false"
+        for field in READINESS_FIELDS
+        if health.get(field) is False
+    )
+    return failures
+
+
 def readiness_outages(snapshots):
     episodes = []
     current = None
     for record in snapshots:
         health = record.get("health") or {}
-        unavailable = bool(health.get("error")) or health.get("healthy") is False
+        failures = readiness_failures(health)
+        unavailable = bool(failures)
         if unavailable and current is None:
             current = {
                 "start_ms": record["ts"],
                 "last_unavailable_ms": record["ts"],
                 "samples": 1,
-                "errors": [health.get("error") or "unhealthy"],
+                "errors": failures,
             }
         elif unavailable:
             current["last_unavailable_ms"] = record["ts"]
             current["samples"] += 1
-            error = health.get("error") or "unhealthy"
-            if error not in current["errors"]:
-                current["errors"].append(error)
+            for failure in failures:
+                if failure not in current["errors"]:
+                    current["errors"].append(failure)
         elif current is not None:
             current["recovered_ms"] = record["ts"]
             current["observed_duration_ms"] = record["ts"] - current["start_ms"]
