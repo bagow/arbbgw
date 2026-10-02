@@ -508,6 +508,30 @@ def summarize_nomination_diagnostics(samples, profile, since_ms=0):
             "has_structural_spread": spread.get("has_structural_spread"),
             "volume_a": spread.get("volA"),
             "volume_b": spread.get("volB"),
+            "source_ms_a": spread.get("sourceMsA"),
+            "source_ms_b": spread.get("sourceMsB"),
+            "source_skew_ms": (
+                abs(spread["sourceMsA"] - spread["sourceMsB"])
+                if isinstance(spread.get("sourceMsA"), int)
+                and isinstance(spread.get("sourceMsB"), int)
+                and spread["sourceMsA"] > 0
+                and spread["sourceMsB"] > 0
+                else None
+            ),
+            "l1_sell_top_usdt": (
+                spread.get("bidSizeAUsd")
+                if str(spread.get("direction", "")).startswith(
+                    str(spread.get("exchangeA", ""))
+                )
+                else spread.get("bidSizeBUsd")
+            ),
+            "l1_buy_top_usdt": (
+                spread.get("askSizeBUsd")
+                if str(spread.get("direction", "")).startswith(
+                    str(spread.get("exchangeA", ""))
+                )
+                else spread.get("askSizeAUsd")
+            ),
             "rows": 0,
             "first_recorded_ms": None,
             "last_recorded_ms": None,

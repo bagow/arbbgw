@@ -25,8 +25,9 @@ def load_profile(root: Path):
     with sqlite3.connect(uri, uri=True, timeout=2) as db:
         db.row_factory = sqlite3.Row
         profile = db.execute(
-            "SELECT min_entry_spread,max_entry_spread,min_volume_millions,"
-            "min_structural_deviation FROM trading_profiles WHERE id='real-default'"
+            "SELECT trade_volume,min_entry_spread,max_entry_spread,min_volume_millions,"
+            "min_structural_deviation,min_depth_percent "
+            "FROM trading_profiles WHERE id='real-default'"
         ).fetchone()
         settings = dict(
             db.execute(
@@ -37,10 +38,12 @@ def load_profile(root: Path):
     if profile is None:
         raise RuntimeError("real-default profile is missing")
     return {
+        "trade_volume": float(profile["trade_volume"]),
         "min_entry_spread": float(profile["min_entry_spread"]),
         "max_entry_spread": float(profile["max_entry_spread"]),
         "min_volume": float(profile["min_volume_millions"]) * 1_000_000.0,
         "min_structural_deviation": float(profile["min_structural_deviation"]),
+        "min_depth_percent": float(profile["min_depth_percent"]),
         "intra_spread_max_pct": float(settings.get("intra_spread_max_pct", "0.2")),
         "default_fee_rate": float(settings.get("default_fee_rate", "0.0005")),
     }
@@ -83,6 +86,26 @@ def classify(row, fees, config):
         and intra_b <= config["intra_spread_max_pct"]
     )
     deviation_gate = net_excursion >= config["min_structural_deviation"]
+    source_ms_a = int(row.get("sourceMsA") or 0)
+    source_ms_b = int(row.get("sourceMsB") or 0)
+    source_skew_ms = (
+        abs(source_ms_a - source_ms_b)
+        if source_ms_a > 0 and source_ms_b > 0
+        else None
+    )
+    is_a_higher = str(row.get("direction") or "").startswith(exchange_a)
+    sell_top_usd = float(
+        row.get("bidSizeAUsd" if is_a_higher else "bidSizeBUsd") or 0.0
+    )
+    buy_top_usd = float(
+        row.get("askSizeBUsd" if is_a_higher else "askSizeAUsd") or 0.0
+    )
+    required_top_depth_usd = (
+        float(config.get("trade_volume", 6.0))
+        * float(config.get("min_depth_percent", 500.0))
+        / 100.0
+    )
+    top_depth_usd = min(sell_top_usd, buy_top_usd)
     result = dict(row)
     result.update(
         {
@@ -98,6 +121,12 @@ def classify(row, fees, config):
             "intra_gate": intra_gate,
             "stable_regime": stable,
             "deviation_gate": deviation_gate,
+            "source_skew_ms": source_skew_ms,
+            "sell_top_usd": sell_top_usd,
+            "buy_top_usd": buy_top_usd,
+            "top_depth_usd": top_depth_usd,
+            "required_top_depth_usd": required_top_depth_usd,
+            "top_depth_gate": top_depth_usd >= required_top_depth_usd,
             "l1_candidate": spread_gate
             and volume_gate
             and intra_gate

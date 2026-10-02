@@ -19,6 +19,7 @@ use tracing::{info, warn};
 use crate::state::{L2OrderbookMap, L2Snapshot, PriceMap, TickerData, UpdateSignal};
 
 static PRO_DEPTH_UPDATED_MS: OnceLock<dashmap::DashMap<String, i64>> = OnceLock::new();
+static TICKER_SOURCE_MS: OnceLock<dashmap::DashMap<String, i64>> = OnceLock::new();
 static PRO_DEPTH_SNAPSHOTS_ACCEPTED: AtomicU64 = AtomicU64::new(0);
 static PRO_DEPTH_SNAPSHOTS_WITH_OLD_MATCHING_TIME: AtomicU64 = AtomicU64::new(0);
 static PRO_DEPTH_LAST_SNAPSHOT_LATENCY_MS: AtomicU64 = AtomicU64::new(0);
@@ -52,6 +53,24 @@ fn is_classic_depth_baseline(symbol: &str) -> bool {
 
 fn pro_depth_updates() -> &'static dashmap::DashMap<String, i64> {
     PRO_DEPTH_UPDATED_MS.get_or_init(dashmap::DashMap::new)
+}
+
+fn ticker_source_map() -> &'static dashmap::DashMap<String, i64> {
+    TICKER_SOURCE_MS.get_or_init(dashmap::DashMap::new)
+}
+
+pub(crate) fn ticker_source_ms(pair: &str) -> Option<i64> {
+    ticker_source_map().get(pair).map(|stamp| *stamp)
+}
+
+pub(crate) fn record_ticker_source_ms(pair: &str, source_ms: i64) {
+    if source_ms <= 0 {
+        return;
+    }
+    ticker_source_map()
+        .entry(pair.to_string())
+        .and_modify(|current| *current = (*current).max(source_ms))
+        .or_insert(source_ms);
 }
 
 /// Entry must never silently fall back to the 100 ms Classic depth stream.
@@ -842,6 +861,7 @@ fn apply_depth_ticker(
     entry.bid_size = bid * bid_quantity;
     entry.ask_size = ask * ask_quantity;
     entry.last_updated = (source_ms / 1000) as u64;
+    record_ticker_source_ms(symbol, source_ms);
     true
 }
 
@@ -1081,6 +1101,7 @@ async fn run_ws(
                                             });
                                         }
                                         latest_prices.insert(sym.to_string(), (source_ms, false));
+                                        record_ticker_source_ms(sym, source_ms);
                                     }
                                     signal.notify_one();
                                 }

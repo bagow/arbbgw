@@ -10,10 +10,12 @@ from capture_canary_candidates import classify, health, supervisor_running
 
 
 CONFIG = {
+    "trade_volume": 6.0,
     "min_entry_spread": 0.5,
     "max_entry_spread": 5.0,
     "min_volume": 500_000.0,
     "min_structural_deviation": 0.45,
+    "min_depth_percent": 500.0,
     "intra_spread_max_pct": 0.2,
     "default_fee_rate": 0.0005,
 }
@@ -28,6 +30,12 @@ def row(**updates):
         "askA": 101.1,
         "bidB": 99.9,
         "askB": 100.0,
+        "bidSizeAUsd": 40.0,
+        "askSizeAUsd": 40.0,
+        "bidSizeBUsd": 40.0,
+        "askSizeBUsd": 40.0,
+        "sourceMsA": 1_000,
+        "sourceMsB": 1_025,
         "spread": 1.0,
         "structural_spread": 0.2,
         "structural_verified": True,
@@ -48,6 +56,8 @@ class CandidateClassificationTests(unittest.TestCase):
         )
         self.assertAlmostEqual(result["break_even_pct"], 0.3)
         self.assertAlmostEqual(result["net_excursion_pct"], 0.5)
+        self.assertEqual(result["source_skew_ms"], 25)
+        self.assertTrue(result["top_depth_gate"])
         self.assertTrue(result["l1_candidate"])
 
     def test_direction_flip_blocks_large_apparent_edge(self):

@@ -68,6 +68,26 @@ const MAX_DEPTH_ROUTE_LAG_DRIFT_MS: i64 = 250;
 static MARKET_ROUTE_OFFSET: AtomicUsize = AtomicUsize::new(0);
 static HEALTH_REST_FALLBACK_SUCCESS: AtomicU64 = AtomicU64::new(0);
 static HEALTH_REST_FALLBACK_FAILURE: AtomicU64 = AtomicU64::new(0);
+static TICKER_SOURCE_MS: std::sync::OnceLock<dashmap::DashMap<String, i64>> =
+    std::sync::OnceLock::new();
+
+fn ticker_source_map() -> &'static dashmap::DashMap<String, i64> {
+    TICKER_SOURCE_MS.get_or_init(dashmap::DashMap::new)
+}
+
+pub(crate) fn ticker_source_ms(pair: &str) -> Option<i64> {
+    ticker_source_map().get(pair).map(|stamp| *stamp)
+}
+
+pub(crate) fn record_ticker_source_ms(pair: &str, source_ms: i64) {
+    if source_ms <= 0 {
+        return;
+    }
+    ticker_source_map()
+        .entry(pair.to_string())
+        .and_modify(|current| *current = (*current).max(source_ms))
+        .or_insert(source_ms);
+}
 
 pub fn health_rest_fallback_metrics() -> (u64, u64) {
     (
@@ -728,6 +748,12 @@ fn apply_book_ticker(
     if !(0..=10_000).contains(&(received_ms - event_ms)) {
         return false;
     }
+    // Second-precision ordering allowed an older WS/REST quote from the same
+    // second to overwrite a newer one. Preserve exact exchange ordering so a
+    // transient cross-exchange spread cannot be manufactured locally.
+    if ticker_source_ms(&ticker.symbol).is_some_and(|current| current >= event_ms) {
+        return false;
+    }
     let event_secs = (event_ms / 1000) as u64;
     if venue
         .get(&ticker.symbol)
@@ -736,6 +762,7 @@ fn apply_book_ticker(
         return false;
     }
     let mid = (bid + ask) / 2.0;
+    record_ticker_source_ms(&ticker.symbol, event_ms);
     let entry = venue.entry(ticker.symbol).or_default();
     entry.bid = bid;
     entry.ask = ask;
@@ -1223,6 +1250,7 @@ fn apply_depth_update(
             ticker.bid_size = bids[0].0 * bids[0].1;
             ticker.ask_size = asks[0].0 * asks[0].1;
             ticker.last_updated = (exchange_ms / 1000) as u64;
+            record_ticker_source_ms(&symbol, exchange_ms);
         }
     }
     l2_books.insert(
@@ -1520,8 +1548,9 @@ mod tests {
 
     #[test]
     fn discovery_ticker_preserves_volume_and_rejects_stale_data() {
+        let symbol = "DISCOVERYUSDT";
         let mut venue = std::collections::HashMap::from([(
-            "BTCUSDT".to_string(),
+            symbol.to_string(),
             TickerData {
                 vol: 42.0,
                 ..Default::default()
@@ -1529,7 +1558,7 @@ mod tests {
         )]);
         let payload: BookTickerPayload = serde_json::from_value(serde_json::json!({
             "E": 1_000_000,
-            "s": "BTCUSDT",
+            "s": symbol,
             "b": "100.0",
             "B": "2.0",
             "a": "101.0",
@@ -1541,27 +1570,28 @@ mod tests {
             BookTickerPayload::Many(_) => panic!("single ticker expected"),
         };
         assert!(apply_book_ticker(&mut venue, ticker, 1_000_100, None));
-        let updated = &venue["BTCUSDT"];
+        let updated = &venue[symbol];
         assert_eq!(updated.vol, 42.0);
         assert_eq!(updated.bid, 100.0);
         assert_eq!(updated.ask, 101.0);
 
         let stale = BinanceBookTicker {
             event_ms: 900_000,
-            symbol: "BTCUSDT".into(),
+            symbol: symbol.into(),
             bid: "99".into(),
             ask: "100".into(),
             bid_quantity: "1".into(),
             ask_quantity: "1".into(),
         };
         assert!(!apply_book_ticker(&mut venue, stale, 1_000_100, None));
-        assert_eq!(venue["BTCUSDT"].bid, 100.0);
+        assert_eq!(venue[symbol].bid, 100.0);
     }
 
     #[test]
     fn rest_book_ticker_uses_exchange_time_and_preserves_volume() {
+        let symbol = "RESTBOOKUSDT";
         let ticker: BinanceBookTicker = serde_json::from_value(serde_json::json!({
-            "symbol": "BTCUSDT",
+            "symbol": symbol,
             "bidPrice": "100.0",
             "bidQty": "2.0",
             "askPrice": "101.0",
@@ -1570,23 +1600,24 @@ mod tests {
         }))
         .unwrap();
         let mut venue = std::collections::HashMap::from([(
-            "BTCUSDT".to_string(),
+            symbol.to_string(),
             TickerData {
                 vol: 42.0,
                 ..Default::default()
             },
         )]);
         assert!(apply_book_ticker(&mut venue, ticker, 1_000_100, None));
-        assert_eq!(venue["BTCUSDT"].vol, 42.0);
-        assert_eq!(venue["BTCUSDT"].bid_size, 200.0);
-        assert_eq!(venue["BTCUSDT"].ask_size, 303.0);
-        assert_eq!(venue["BTCUSDT"].last_updated, 1_000);
+        assert_eq!(venue[symbol].vol, 42.0);
+        assert_eq!(venue[symbol].bid_size, 200.0);
+        assert_eq!(venue[symbol].ask_size, 303.0);
+        assert_eq!(venue[symbol].last_updated, 1_000);
     }
 
     #[test]
     fn older_websocket_ticker_cannot_replace_newer_rest_snapshot() {
+        let symbol = "ORDERINGUSDT";
         let mut venue = std::collections::HashMap::from([(
-            "BTCUSDT".to_string(),
+            symbol.to_string(),
             TickerData {
                 bid: 100.0,
                 ask: 101.0,
@@ -1596,15 +1627,42 @@ mod tests {
         )]);
         let delayed = BinanceBookTicker {
             event_ms: 1_001_900,
-            symbol: "BTCUSDT".into(),
+            symbol: symbol.into(),
             bid: "90".into(),
             ask: "91".into(),
             bid_quantity: "1".into(),
             ask_quantity: "1".into(),
         };
         assert!(!apply_book_ticker(&mut venue, delayed, 1_002_100, None));
-        assert_eq!(venue["BTCUSDT"].bid, 100.0);
-        assert_eq!(venue["BTCUSDT"].last_updated, 1_002);
+        assert_eq!(venue[symbol].bid, 100.0);
+        assert_eq!(venue[symbol].last_updated, 1_002);
+    }
+
+    #[test]
+    fn older_ticker_in_the_same_second_cannot_replace_newer_quote() {
+        let symbol = "SAMESECONDUSDT";
+        let mut venue = std::collections::HashMap::new();
+        let newer = BinanceBookTicker {
+            event_ms: 1_000_900,
+            symbol: symbol.into(),
+            bid: "100".into(),
+            ask: "101".into(),
+            bid_quantity: "1".into(),
+            ask_quantity: "1".into(),
+        };
+        assert!(apply_book_ticker(&mut venue, newer, 1_001_000, None));
+
+        let older = BinanceBookTicker {
+            event_ms: 1_000_100,
+            symbol: symbol.into(),
+            bid: "90".into(),
+            ask: "91".into(),
+            bid_quantity: "1".into(),
+            ask_quantity: "1".into(),
+        };
+        assert!(!apply_book_ticker(&mut venue, older, 1_001_050, None));
+        assert_eq!(venue[symbol].bid, 100.0);
+        assert_eq!(ticker_source_ms(symbol), Some(1_000_900));
     }
 
     #[test]

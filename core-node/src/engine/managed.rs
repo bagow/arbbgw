@@ -348,6 +348,10 @@ pub fn prewarm_binance_execution_book(
                             ticker.bid_size = bid.0 * bid.1;
                             ticker.ask_size = ask.0 * ask.1;
                             ticker.last_updated = (book.updated_ms / 1_000) as u64;
+                            crate::collector::binance::record_ticker_source_ms(
+                                &pair,
+                                book.updated_ms,
+                            );
                         }
                     }
                     ctx.l2_books.insert(key, book);
@@ -441,6 +445,10 @@ pub fn prewarm_kucoin_execution_book(
                             ticker.bid_size = bid.0 * bid.1;
                             ticker.ask_size = ask.0 * ask.1;
                             ticker.last_updated = (book.updated_ms / 1_000) as u64;
+                            crate::collector::kucoin::record_ticker_source_ms(
+                                &pair,
+                                book.updated_ms,
+                            );
                         }
                     }
                     ctx.l2_books.insert(key, book);

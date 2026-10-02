@@ -426,6 +426,22 @@ pub fn compute_spreads(
                     ask_a: data_a.ask,
                     bid_b: data_b.bid,
                     ask_b: data_b.ask,
+                    bid_size_a_usd: data_a.bid_size,
+                    ask_size_a_usd: data_a.ask_size,
+                    bid_size_b_usd: data_b.bid_size,
+                    ask_size_b_usd: data_b.ask_size,
+                    source_ms_a: match name_a.as_str() {
+                        "binance" => crate::collector::binance::ticker_source_ms(sym),
+                        "kucoin" => crate::collector::kucoin::ticker_source_ms(sym),
+                        _ => None,
+                    }
+                    .unwrap_or((data_a.last_updated as i64).saturating_mul(1_000)),
+                    source_ms_b: match name_b.as_str() {
+                        "binance" => crate::collector::binance::ticker_source_ms(sym),
+                        "kucoin" => crate::collector::kucoin::ticker_source_ms(sym),
+                        _ => None,
+                    }
+                    .unwrap_or((data_b.last_updated as i64).saturating_mul(1_000)),
                     vol_a: data_a.vol,
                     vol_b: data_b.vol,
                     funding_a: data_a.funding_rate,

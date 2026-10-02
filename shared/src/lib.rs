@@ -52,6 +52,22 @@ pub struct SpreadRow {
     pub bid_b: f64,
     #[serde(rename = "askB")]
     pub ask_b: f64,
+    /// Quote-currency liquidity advertised at venue A's best bid/ask.
+    #[serde(rename = "bidSizeAUsd", default)]
+    pub bid_size_a_usd: f64,
+    #[serde(rename = "askSizeAUsd", default)]
+    pub ask_size_a_usd: f64,
+    /// Quote-currency liquidity advertised at venue B's best bid/ask.
+    #[serde(rename = "bidSizeBUsd", default)]
+    pub bid_size_b_usd: f64,
+    #[serde(rename = "askSizeBUsd", default)]
+    pub ask_size_b_usd: f64,
+    /// Exchange event timestamps for the discovery quotes. Zero means that a
+    /// legacy collector exposed only second precision.
+    #[serde(rename = "sourceMsA", default)]
+    pub source_ms_a: i64,
+    #[serde(rename = "sourceMsB", default)]
+    pub source_ms_b: i64,
     #[serde(rename = "volA", default)]
     pub vol_a: f64,
     #[serde(rename = "volB", default)]
