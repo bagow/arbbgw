@@ -149,6 +149,29 @@ class CandidateTelemetrySummaryTests(unittest.TestCase):
         )
         self.assertEqual(result["readiness_outages"][0]["observed_duration_ms"], 1_000)
 
+    def test_does_not_report_intentional_terminal_halt_as_outage(self):
+        result = summarize(
+            [
+                line(
+                    {
+                        "kind": "snapshot",
+                        "ts": 1_000,
+                        "rows": [],
+                        "health": {
+                            "healthy": True,
+                            "process_healthy": True,
+                            "market_ready": True,
+                            "private_ready": True,
+                            "order_ws_ready": True,
+                            "trading_ready": False,
+                            "entries_halted": True,
+                        },
+                    }
+                )
+            ]
+        )
+        self.assertEqual(result["readiness_outages"], [])
+
     def test_summarizes_engine_cycle_tail_latency(self):
         records = []
         for index, cycle_us in enumerate((100, 200, 300, 400, 500), start=1):

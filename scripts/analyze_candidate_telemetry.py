@@ -84,6 +84,7 @@ def readiness_failures(health):
         f"{field}=false"
         for field in READINESS_FIELDS
         if health.get(field) is False
+        and not (field == "trading_ready" and health.get("entries_halted") is True)
     )
     return failures
 
