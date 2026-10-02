@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 import sqlite3
@@ -312,11 +313,50 @@ class ReplayOpportunityTests(unittest.TestCase):
         self.assertEqual(len(report), 1)
         self.assertEqual(report[0]["reasons"], {"priced": 1})
         self.assertEqual(report[0]["priced_samples"], 1)
+        self.assertAlmostEqual(report[0]["diagnostic_actual_volume_a_usdt_min"], 6.0)
         self.assertEqual(report[0]["budget_pass_samples"], 1)
         self.assertEqual(report[0]["hard_stop_pass_samples"], 0)
         self.assertEqual(report[0]["both_pass_samples"], 0)
         self.assertAlmostEqual(report[0]["gross_pct_max"], 1.0)
         self.assertAlmostEqual(report[0]["required_pct_max"], 0.83)
+
+        coarse = copy.deepcopy(sample)
+        coarse["capture_reason"] = "unstable_l1_nomination"
+        coarse["spread"].update({
+            "askA": 0.044,
+            "bidA": 0.0439,
+            "askB": 0.0445,
+            "bidB": 0.0444,
+        })
+        coarse["book_a"] = {
+            "updated_ms": 1_990,
+            "bids": [[0.0439, 1_000.0]],
+            "asks": [[0.044, 1_000.0]],
+        }
+        coarse["book_b"] = {
+            "updated_ms": 1_980,
+            "bids": [[0.0444, 1_000.0]],
+            "asks": [[0.0445, 1_000.0]],
+        }
+        coarse["spec_a"].update({
+            "quantity_step": 100.0,
+            "min_quantity": 100.0,
+            "max_quantity": 100_000.0,
+        })
+        coarse["spec_b"].update({
+            "quantity_step": 1.0,
+            "min_quantity": 1.0,
+            "max_quantity": 100_000.0,
+        })
+        report = replay.summarize_nomination_diagnostics([coarse], profile, 1_000)
+        self.assertEqual(report[0]["reasons"], {"actual_volume": 1})
+        self.assertEqual(report[0]["priced_samples"], 0)
+        self.assertEqual(report[0]["diagnostic_quantity_min"], 100.0)
+        self.assertAlmostEqual(report[0]["diagnostic_actual_volume_a_usdt_min"], 4.4)
+        self.assertAlmostEqual(report[0]["diagnostic_actual_volume_b_usdt_min"], 4.44)
+        self.assertEqual(report[0]["budget_pass_samples"], 0)
+        self.assertEqual(report[0]["hard_stop_pass_samples"], 0)
+        self.assertEqual(report[0]["both_pass_samples"], 0)
 
         sample["capture_reason"] = "low_volume_l1_nomination"
         sample["spread"]["has_structural_spread"] = True

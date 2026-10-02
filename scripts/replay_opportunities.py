@@ -420,8 +420,15 @@ def diagnose_nomination_sample(sample, profile, bypass_volume=False):
     actual_a, actual_b = quantity * entry_a["vwap"], quantity * entry_b["vwap"]
     lower = profile["notional_usdt"] * (1 - profile["volume_tolerance_pct"] / 100)
     upper = profile["notional_usdt"] * (1 + profile["volume_tolerance_pct"] / 100)
+    volume_diagnostic = {
+        "quantity": quantity,
+        "actual_volume_a_usdt": actual_a,
+        "actual_volume_b_usdt": actual_b,
+        "allowed_volume_min_usdt": lower,
+        "allowed_volume_max_usdt": upper,
+    }
     if not lower <= actual_a <= upper or not lower <= actual_b <= upper:
-        return None, "actual_volume"
+        return volume_diagnostic, "actual_volume"
     if not specification_permits(spec_a, now_ms, quantity, entry_a["vwap"], spec_a["quantity_step"]):
         return None, "specification_a"
     if not specification_permits(spec_b, now_ms, quantity, entry_b["vwap"], spec_b["quantity_step"]):
@@ -464,12 +471,12 @@ def diagnose_nomination_sample(sample, profile, bypass_volume=False):
         profile["slippage_percent"],
     )
     return {
+        **volume_diagnostic,
         "recorded_ms": now_ms,
         "gross_pct": gross,
         "required_pct": required,
         "initial_liquidation_net_pct": initial_net_pct,
         "crossing_cost_pct": crossing_cost,
-        "quantity": quantity,
         "budget_pass": budget_pass,
         "hard_stop_pass": hard_stop_pass,
         "both_pass": budget_pass and hard_stop_pass,
@@ -506,6 +513,7 @@ def summarize_nomination_diagnostics(samples, profile, since_ms=0):
             "last_recorded_ms": None,
             "reasons": Counter(),
             "events": [],
+            "diagnostics": [],
         })
         group["rows"] += 1
         recorded_ms = sample.get("recorded_ms")
@@ -521,7 +529,9 @@ def summarize_nomination_diagnostics(samples, profile, since_ms=0):
         )
         group["reasons"][reason] += 1
         if event is not None:
-            group["events"].append(event)
+            group["diagnostics"].append(event)
+            if reason == "priced":
+                group["events"].append(event)
 
     def bounds(events, field):
         values = [event[field] for event in events if event.get(field) is not None]
@@ -531,6 +541,7 @@ def summarize_nomination_diagnostics(samples, profile, since_ms=0):
     for key in sorted(groups):
         group = groups[key]
         events = group.pop("events")
+        diagnostics = group.pop("diagnostics")
         group["reasons"] = dict(group["reasons"])
         group["priced_samples"] = len(events)
         for field in (
@@ -543,6 +554,16 @@ def summarize_nomination_diagnostics(samples, profile, since_ms=0):
             minimum, maximum = bounds(events, field)
             group[f"{field}_min"] = minimum
             group[f"{field}_max"] = maximum
+        for field in (
+            "quantity",
+            "actual_volume_a_usdt",
+            "actual_volume_b_usdt",
+            "allowed_volume_min_usdt",
+            "allowed_volume_max_usdt",
+        ):
+            minimum, maximum = bounds(diagnostics, field)
+            group[f"diagnostic_{field}_min"] = minimum
+            group[f"diagnostic_{field}_max"] = maximum
         group["budget_pass_samples"] = sum(event["budget_pass"] for event in events)
         group["hard_stop_pass_samples"] = sum(event["hard_stop_pass"] for event in events)
         group["both_pass_samples"] = sum(event["both_pass"] for event in events)
