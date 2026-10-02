@@ -50,12 +50,14 @@ class CanarySupervisorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             child = root / "child.py"
+            ready = root / "child.ready"
             child.write_text(
-                "import json,signal,time\n"
+                "import json,pathlib,signal,time\n"
                 "def stop(signum, frame):\n"
                 " print(json.dumps({'ok': False, 'cleanup': True, 'signal': signum}), flush=True)\n"
                 " raise SystemExit(7)\n"
                 "signal.signal(signal.SIGTERM, stop)\n"
+                f"pathlib.Path({str(ready)!r}).write_text('ready')\n"
                 "while True: time.sleep(0.05)\n"
             )
             config = root / "config.json"
@@ -76,10 +78,10 @@ class CanarySupervisorTests(unittest.TestCase):
                 ]
             )
             deadline = time.monotonic() + 5
-            while not (root / "child.pid").exists() and time.monotonic() < deadline:
+            while not ready.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
+            self.assertTrue(ready.exists())
             self.assertTrue((root / "child.pid").exists())
-            time.sleep(0.1)
             process.send_signal(signal.SIGTERM)
             self.assertEqual(process.wait(timeout=10), 7)
             report = json.loads(result.read_text())
