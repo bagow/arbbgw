@@ -742,14 +742,22 @@ def select_sequential_cycles(cycles, max_holding_ms):
     return selected
 
 
-def summarize(samples, profile, gap_ms=5_000, confirmation_ms=500):
-    reasons = Counter()
-    events = []
-    for sample in samples:
-        event, reason = evaluate(sample, profile)
-        reasons[reason] += 1
-        if event is not None:
-            events.append(event)
+def summarize_evaluated(
+    sample_count,
+    reasons,
+    events,
+    profile,
+    exit_samples,
+    gap_ms=5_000,
+    confirmation_ms=500,
+):
+    """Finish a replay from compact eligibility events.
+
+    ``exit_samples`` is a factory so database-backed callers can reopen a
+    streaming cursor only when a confirmed entry actually needs an exit scan.
+    Keeping full L2 books for every rejected sample previously exhausted the
+    small production VPS during parameter grids.
+    """
     windows = group_windows(events, gap_ms)
     durable = []
     cycles = []
@@ -767,7 +775,7 @@ def summarize(samples, profile, gap_ms=5_000, confirmation_ms=500):
                 "max_headroom_pct": max(row["headroom_pct"] for row in rows),
                 "max_gross_pct": max(row["gross_pct"] for row in rows),
             })
-            exit_result = simulate_exit(samples, entry, profile)
+            exit_result = simulate_exit(exit_samples(), entry, profile)
             cycles.append({
                 "pair": route[0],
                 "direction": route[3],
@@ -780,7 +788,7 @@ def summarize(samples, profile, gap_ms=5_000, confirmation_ms=500):
     sequential = select_sequential_cycles(cycles, profile["max_holding_time_ms"])
     sequential_counts = Counter(cycle["outcome"] for cycle in sequential)
     return {
-        "samples": len(samples),
+        "samples": sample_count,
         "reasons": dict(reasons),
         "eligible_samples": len(events),
         "independent_windows": len(windows),
@@ -800,18 +808,79 @@ def summarize(samples, profile, gap_ms=5_000, confirmation_ms=500):
     }
 
 
-def load_samples(path, build=None):
+def summarize(samples, profile, gap_ms=5_000, confirmation_ms=500):
+    reasons = Counter()
+    events = []
+    for sample in samples:
+        event, reason = evaluate(sample, profile)
+        reasons[reason] += 1
+        if event is not None:
+            events.append(event)
+    return summarize_evaluated(
+        len(samples),
+        reasons,
+        events,
+        profile,
+        lambda: iter(samples),
+        gap_ms,
+        confirmation_ms,
+    )
+
+
+def iter_samples(path, build=None):
+    """Yield decoded snapshots without retaining raw JSON or rejected books."""
     uri = Path(path).resolve().as_uri() + "?mode=ro"
-    with sqlite3.connect(uri, uri=True) as db:
+    db = sqlite3.connect(uri, uri=True)
+    try:
         db.execute("PRAGMA query_only=ON")
-        rows = db.execute("SELECT snapshot FROM book_samples ORDER BY id").fetchall()
-    samples = []
-    for index, (raw,) in enumerate(rows):
-        sample = json.loads(raw)
-        if build is None or sample.get("build_sha") == build:
-            sample["_replay_index"] = index
-            samples.append(sample)
-    return samples
+        rows = db.execute("SELECT snapshot FROM book_samples ORDER BY id")
+        for index, (raw,) in enumerate(rows):
+            sample = json.loads(raw)
+            if build is None or sample.get("build_sha") == build:
+                sample["_replay_index"] = index
+                yield sample
+    finally:
+        db.close()
+
+
+def load_samples(path, build=None):
+    """Compatibility helper for callers that explicitly need an in-memory set."""
+    return list(iter_samples(path, build))
+
+
+def summarize_database_profiles(
+    path,
+    build,
+    profiles,
+    gap_ms=5_000,
+    confirmation_ms=500,
+):
+    """Replay a parameter grid in one streaming eligibility pass."""
+    states = {
+        key: {"reasons": Counter(), "events": []}
+        for key in profiles
+    }
+    sample_count = 0
+    for sample in iter_samples(path, build):
+        sample_count += 1
+        for key, profile in profiles.items():
+            event, reason = evaluate(sample, profile)
+            states[key]["reasons"][reason] += 1
+            if event is not None:
+                states[key]["events"].append(event)
+
+    return {
+        key: summarize_evaluated(
+            sample_count,
+            states[key]["reasons"],
+            states[key]["events"],
+            profile,
+            lambda path=path, build=build: iter_samples(path, build),
+            gap_ms,
+            confirmation_ms,
+        )
+        for key, profile in profiles.items()
+    }
 
 
 def profile_from_args(args, deviation):
@@ -857,22 +926,23 @@ def main():
         help="report executable L2 economics for diagnostic nominations at or after this timestamp",
     )
     args = parser.parse_args()
-    samples = load_samples(args.database, args.build)
     if args.diagnose_nominations_since_ms is None:
-        report = {
-            str(deviation): summarize(
-                samples,
-                profile_from_args(args, deviation),
-                args.window_gap_ms,
-                args.confirmation_ms,
-            )
+        profiles = {
+            str(deviation): profile_from_args(args, deviation)
             for deviation in args.deviations
         }
+        report = summarize_database_profiles(
+            args.database,
+            args.build,
+            profiles,
+            args.window_gap_ms,
+            args.confirmation_ms,
+        )
     else:
         report = {
             str(deviation): {
                 "nomination_diagnostics": summarize_nomination_diagnostics(
-                    samples,
+                    iter_samples(args.database, args.build),
                     profile_from_args(args, deviation),
                     args.diagnose_nominations_since_ms,
                 ),

@@ -1,9 +1,93 @@
+import json
+from pathlib import Path
+import sqlite3
+import tempfile
 import unittest
+from unittest import mock
 
 import replay_opportunities as replay
 
 
 class ReplayOpportunityTests(unittest.TestCase):
+    def test_database_grid_streams_build_filtered_samples_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "shadow.db"
+            with sqlite3.connect(database) as db:
+                db.execute("CREATE TABLE book_samples(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL)")
+                for build in ("old", "new", "new"):
+                    db.execute(
+                        "INSERT INTO book_samples(snapshot) VALUES(?)",
+                        (json.dumps({"build_sha": build}),),
+                    )
+
+            seen = []
+
+            def reject(sample, profile):
+                seen.append((sample["_replay_index"], profile["label"]))
+                return None, "test_rejection"
+
+            profiles = {
+                "a": {"label": "a", "max_holding_time_ms": 1_000},
+                "b": {"label": "b", "max_holding_time_ms": 1_000},
+            }
+            with mock.patch.object(replay, "evaluate", side_effect=reject):
+                report = replay.summarize_database_profiles(database, "new", profiles)
+
+            self.assertEqual(seen, [(1, "a"), (1, "b"), (2, "a"), (2, "b")])
+            self.assertEqual(report["a"]["samples"], 2)
+            self.assertEqual(report["b"]["reasons"], {"test_rejection": 2})
+
+    def test_database_grid_reopens_stream_only_for_confirmed_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "shadow.db"
+            with sqlite3.connect(database) as db:
+                db.execute("CREATE TABLE book_samples(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL)")
+                for recorded_ms in (1_000, 1_250, 1_500):
+                    db.execute(
+                        "INSERT INTO book_samples(snapshot) VALUES(?)",
+                        (json.dumps({"recorded_ms": recorded_ms}),),
+                    )
+
+            route = ("TESTUSDT", "kucoin", "binance", "kucoin>binance")
+
+            def eligible(sample, _profile):
+                stamp = sample["recorded_ms"]
+                return {
+                    "route": route,
+                    "recorded_ms": stamp,
+                    "gross_pct": 1.0,
+                    "headroom_pct": 0.1,
+                    "book_a_updated_ms": stamp,
+                    "book_b_updated_ms": stamp,
+                }, "eligible"
+
+            def exit_result(samples, entry, _profile):
+                self.assertEqual([row["_replay_index"] for row in samples], [0, 1, 2])
+                self.assertEqual(entry["recorded_ms"], 1_500)
+                return {
+                    "outcome": "TP",
+                    "exit_ms": 1_500,
+                    "net_pct": 0.1,
+                    "net_usdt": 0.006,
+                    "best_pct": 0.1,
+                    "worst_pct": 0.1,
+                }
+
+            profile = {"max_holding_time_ms": 1_000}
+            with (
+                mock.patch.object(replay, "evaluate", side_effect=eligible),
+                mock.patch.object(replay, "simulate_exit", side_effect=exit_result) as simulated,
+            ):
+                report = replay.summarize_database_profiles(
+                    database,
+                    None,
+                    {"profile": profile},
+                )["profile"]
+
+            self.assertEqual(simulated.call_count, 1)
+            self.assertEqual(report["confirmed_cycle_outcomes"], {"TP": 1})
+            self.assertEqual(report["durable_windows"][0]["samples"], 3)
+
     def test_quote_requires_full_sorted_depth(self):
         self.assertEqual(replay.quote([[10.0, 1.0], [11.0, 1.0]], 2.0, True)["vwap"], 10.5)
         self.assertIsNone(replay.quote([[10.0, 1.0]], 2.0, True))
