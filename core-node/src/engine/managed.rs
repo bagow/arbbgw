@@ -341,18 +341,9 @@ pub fn prewarm_binance_execution_book(
                         book.asks.first(),
                         prices.get_mut("binance"),
                     ) {
-                        if let Some(ticker) = venue.get_mut(&pair) {
-                            ticker.bid = bid.0;
-                            ticker.ask = ask.0;
-                            ticker.price = (bid.0 + ask.0) / 2.0;
-                            ticker.bid_size = bid.0 * bid.1;
-                            ticker.ask_size = ask.0 * ask.1;
-                            ticker.last_updated = (book.updated_ms / 1_000) as u64;
-                            crate::collector::binance::record_ticker_source_ms(
-                                &pair,
-                                book.updated_ms,
-                            );
-                        }
+                        crate::collector::binance::publish_depth_ticker(
+                            &mut venue, &pair, *bid, *ask, book.updated_ms,
+                        );
                     }
                     ctx.l2_books.insert(key, book);
                     signal.notify_one();

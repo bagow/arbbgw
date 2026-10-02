@@ -89,6 +89,29 @@ pub(crate) fn record_ticker_source_ms(pair: &str, source_ms: i64) {
         .or_insert(source_ms);
 }
 
+/// Publish an L2 top only if it cannot rewind an already newer discovery tick.
+/// Called with the venue price lock held by both WS and REST depth publishers.
+pub(crate) fn publish_depth_ticker(
+    venue: &mut std::collections::HashMap<String, TickerData>,
+    pair: &str,
+    bid: (f64, f64),
+    ask: (f64, f64),
+    source_ms: i64,
+) {
+    if source_ms <= 0 || ticker_source_ms(pair).is_some_and(|current| current > source_ms) {
+        return;
+    }
+    if let Some(ticker) = venue.get_mut(pair) {
+        ticker.bid = bid.0;
+        ticker.ask = ask.0;
+        ticker.price = (bid.0 + ask.0) / 2.0;
+        ticker.bid_size = bid.0 * bid.1;
+        ticker.ask_size = ask.0 * ask.1;
+        ticker.last_updated = (source_ms / 1_000) as u64;
+        record_ticker_source_ms(pair, source_ms);
+    }
+}
+
 pub fn health_rest_fallback_metrics() -> (u64, u64) {
     (
         HEALTH_REST_FALLBACK_SUCCESS.load(Ordering::Relaxed),
@@ -1293,15 +1316,7 @@ fn apply_depth_update(
     }
 
     if let Some(mut venue) = prices.get_mut("binance") {
-        if let Some(ticker) = venue.get_mut(&symbol) {
-            ticker.price = (bids[0].0 + asks[0].0) / 2.0;
-            ticker.bid = bids[0].0;
-            ticker.ask = asks[0].0;
-            ticker.bid_size = bids[0].0 * bids[0].1;
-            ticker.ask_size = asks[0].0 * asks[0].1;
-            ticker.last_updated = (exchange_ms / 1000) as u64;
-            record_ticker_source_ms(&symbol, exchange_ms);
-        }
+        publish_depth_ticker(&mut venue, &symbol, bids[0], asks[0], exchange_ms);
     }
     l2_books.insert(
         format!("binance:{}", symbol),
@@ -1793,5 +1808,46 @@ mod tests {
             1_000_000
         );
         assert_eq!(ticker_source_ms(symbol), Some(1_001_000));
+    }
+
+    #[test]
+    fn delayed_depth_after_discovery_recovery_cannot_relabel_an_older_price() {
+        let symbol = "HANDOFFUSDT";
+        let now = crate::engine::utils::now_ms();
+        let prices = PriceMap::default();
+        prices.insert(
+            "binance".into(),
+            std::collections::HashMap::from([(
+                symbol.into(),
+                TickerData {
+                    bid: 102.0,
+                    ask: 103.0,
+                    ..Default::default()
+                },
+            )]),
+        );
+        record_ticker_source_ms(symbol, now - 100);
+        let books = L2OrderbookMap::default();
+        let signal = UpdateSignal::default();
+        let delayed = serde_json::json!({"s":symbol,"E":now-200,
+            "b":[["100","1"]],"a":[["101","1"]]});
+        assert!(matches!(
+            apply_depth_update(&delayed, &books, &prices, &signal),
+            DepthUpdate::Accepted(_)
+        ));
+        assert_eq!(prices.get("binance").unwrap()[symbol].bid, 102.0);
+        assert_eq!(ticker_source_ms(symbol), Some(now - 100));
+        assert_eq!(
+            books.get(&format!("binance:{symbol}")).unwrap().updated_ms,
+            now - 200
+        );
+        let newer = serde_json::json!({"s":symbol,"E":now-50,
+            "b":[["104","1"]],"a":[["105","1"]]});
+        assert!(matches!(
+            apply_depth_update(&newer, &books, &prices, &signal),
+            DepthUpdate::Accepted(_)
+        ));
+        assert_eq!(prices.get("binance").unwrap()[symbol].bid, 104.0);
+        assert_eq!(ticker_source_ms(symbol), Some(now - 50));
     }
 }
