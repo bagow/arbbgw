@@ -20,7 +20,47 @@ def read_cache(db_path: Path, key: str):
     return json.loads(row[0]) if row else None
 
 
-def load_profile(root: Path):
+def telemetry_config(profile, settings, canary=None):
+    """Build the observer thresholds from the immutable canary contract.
+
+    The live runner applies its profile changes after it starts.  Reading only
+    the database therefore races with activation and can classify an entire
+    run using the profile which existed before the canary.  The run config is
+    the authoritative contract when it is available; the database remains a
+    backwards-compatible fallback for standalone observers.
+    """
+    canary = canary or {}
+
+    def configured(run_key, profile_key):
+        return canary.get(run_key, profile[profile_key])
+
+    return {
+        "trade_volume": float(configured("notional_usdt", "trade_volume")),
+        "min_entry_spread": float(
+            configured("min_entry_spread", "min_entry_spread")
+        ),
+        "max_entry_spread": float(
+            configured("max_entry_spread", "max_entry_spread")
+        ),
+        "min_volume": float(
+            configured("min_volume_millions", "min_volume_millions")
+        )
+        * 1_000_000.0,
+        "min_structural_deviation": float(
+            configured("min_structural_deviation", "min_structural_deviation")
+        ),
+        "min_depth_percent": float(
+            configured("min_depth_percent", "min_depth_percent")
+        ),
+        "intra_spread_max_pct": float(
+            settings.get("intra_spread_max_pct", "0.2")
+        ),
+        "default_fee_rate": float(settings.get("default_fee_rate", "0.0005")),
+        "config_source": "run_config" if canary else "database_profile",
+    }
+
+
+def load_profile(root: Path, run_dir=None):
     uri = (root / "vps-api.db").resolve().as_uri() + "?mode=ro"
     with sqlite3.connect(uri, uri=True, timeout=2) as db:
         db.row_factory = sqlite3.Row
@@ -37,16 +77,12 @@ def load_profile(root: Path):
         )
     if profile is None:
         raise RuntimeError("real-default profile is missing")
-    return {
-        "trade_volume": float(profile["trade_volume"]),
-        "min_entry_spread": float(profile["min_entry_spread"]),
-        "max_entry_spread": float(profile["max_entry_spread"]),
-        "min_volume": float(profile["min_volume_millions"]) * 1_000_000.0,
-        "min_structural_deviation": float(profile["min_structural_deviation"]),
-        "min_depth_percent": float(profile["min_depth_percent"]),
-        "intra_spread_max_pct": float(settings.get("intra_spread_max_pct", "0.2")),
-        "default_fee_rate": float(settings.get("default_fee_rate", "0.0005")),
-    }
+    canary = None
+    if run_dir is not None:
+        config_path = run_dir / "config.json"
+        if config_path.is_file():
+            canary = json.loads(config_path.read_text())
+    return telemetry_config(dict(profile), settings, canary)
 
 
 def classify(row, fees, config):
@@ -212,7 +248,7 @@ def main():
     args = parser.parse_args()
     root = args.root.resolve()
     run_dir = args.run_dir.resolve()
-    config = load_profile(root)
+    config = load_profile(root, run_dir)
     started = time.time()
     last_snapshot = None
     samples = 0

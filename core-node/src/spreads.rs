@@ -59,6 +59,23 @@ static FIRST_SEEN: OnceLock<DashMap<String, ObservationQuality>> = OnceLock::new
 /// This is discovery-only: the scanner still enforces the profile's full entry
 /// threshold and all structural, fee, freshness, and depth budgets.
 pub const DISCOVERY_PREWARM_RATIO: f64 = 0.4;
+const MAX_DISCOVERY_SOURCE_SKEW_MS: i64 = 3_000;
+
+fn exact_discovery_sources_are_fresh(
+    source_ms_a: i64,
+    source_ms_b: i64,
+    now_ms: i64,
+    max_age_ms: i64,
+) -> bool {
+    if source_ms_a <= 0 || source_ms_b <= 0 || max_age_ms < 0 {
+        return false;
+    }
+    let age_a = now_ms - source_ms_a;
+    let age_b = now_ms - source_ms_b;
+    (0..=max_age_ms).contains(&age_a)
+        && (0..=max_age_ms).contains(&age_b)
+        && source_ms_a.abs_diff(source_ms_b) <= MAX_DISCOVERY_SOURCE_SKEW_MS as u64
+}
 
 pub fn discovery_spread_threshold(configured_threshold: f64, profiles: &[TradingSettings]) -> f64 {
     profiles
@@ -212,6 +229,31 @@ pub fn compute_spreads(
                 {
                     cnt_stale += 1;
                     continue;
+                }
+
+                let exact_source_ms_a = match name_a.as_str() {
+                    "binance" => crate::collector::binance::ticker_source_ms(sym),
+                    "kucoin" => crate::collector::kucoin::ticker_source_ms(sym),
+                    _ => None,
+                };
+                let exact_source_ms_b = match name_b.as_str() {
+                    "binance" => crate::collector::binance::ticker_source_ms(sym),
+                    "kucoin" => crate::collector::kucoin::ticker_source_ms(sym),
+                    _ => None,
+                };
+                if let (Some(source_ms_a), Some(source_ms_b)) =
+                    (exact_source_ms_a, exact_source_ms_b)
+                {
+                    let max_age_ms = (max_stale as i64).saturating_mul(1_000);
+                    if !exact_discovery_sources_are_fresh(
+                        source_ms_a,
+                        source_ms_b,
+                        now_ms,
+                        max_age_ms,
+                    ) {
+                        cnt_stale += 1;
+                        continue;
+                    }
                 }
 
                 // ── CROSS-EXCHANGE SYNCHRONIZATION GUARD ──
@@ -430,18 +472,10 @@ pub fn compute_spreads(
                     ask_size_a_usd: data_a.ask_size,
                     bid_size_b_usd: data_b.bid_size,
                     ask_size_b_usd: data_b.ask_size,
-                    source_ms_a: match name_a.as_str() {
-                        "binance" => crate::collector::binance::ticker_source_ms(sym),
-                        "kucoin" => crate::collector::kucoin::ticker_source_ms(sym),
-                        _ => None,
-                    }
-                    .unwrap_or((data_a.last_updated as i64).saturating_mul(1_000)),
-                    source_ms_b: match name_b.as_str() {
-                        "binance" => crate::collector::binance::ticker_source_ms(sym),
-                        "kucoin" => crate::collector::kucoin::ticker_source_ms(sym),
-                        _ => None,
-                    }
-                    .unwrap_or((data_b.last_updated as i64).saturating_mul(1_000)),
+                    source_ms_a: exact_source_ms_a
+                        .unwrap_or((data_a.last_updated as i64).saturating_mul(1_000)),
+                    source_ms_b: exact_source_ms_b
+                        .unwrap_or((data_b.last_updated as i64).saturating_mul(1_000)),
                     vol_a: data_a.vol,
                     vol_b: data_b.vol,
                     funding_a: data_a.funding_rate,
@@ -637,6 +671,18 @@ mod quality_tests {
         profile.min_entry_spread = 0.5;
 
         assert_eq!(discovery_spread_threshold(-1.0, &[profile]), -1.0);
+    }
+
+    #[test]
+    fn exact_discovery_freshness_rejects_subsecond_rounding_loopholes() {
+        let now = 10_000;
+        assert!(exact_discovery_sources_are_fresh(5_000, 8_000, now, 5_000));
+        assert!(!exact_discovery_sources_are_fresh(4_999, 8_000, now, 5_000));
+        assert!(!exact_discovery_sources_are_fresh(5_000, 8_001, now, 5_000));
+        assert!(!exact_discovery_sources_are_fresh(
+            10_001, 10_000, now, 5_000
+        ));
+        assert!(!exact_discovery_sources_are_fresh(0, 10_000, now, 5_000));
     }
 
     #[test]

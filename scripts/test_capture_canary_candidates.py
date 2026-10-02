@@ -6,7 +6,12 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-from capture_canary_candidates import classify, health, supervisor_running
+from capture_canary_candidates import (
+    classify,
+    health,
+    supervisor_running,
+    telemetry_config,
+)
 
 
 CONFIG = {
@@ -80,6 +85,37 @@ class CandidateClassificationTests(unittest.TestCase):
         self.assertFalse(result["intra_gate"])
         self.assertFalse(result["l1_candidate"])
 
+
+class TelemetryConfigTests(unittest.TestCase):
+    def test_canary_contract_overrides_pre_activation_database_profile(self):
+        database_profile = {
+            "trade_volume": 20.0,
+            "min_entry_spread": 1.2,
+            "max_entry_spread": 2.5,
+            "min_volume_millions": 3.0,
+            "min_structural_deviation": 0.0,
+            "min_depth_percent": 200.0,
+        }
+        canary = {
+            "notional_usdt": 6.0,
+            "min_entry_spread": 0.5,
+            "max_entry_spread": 5.0,
+            "min_volume_millions": 0.5,
+            "min_structural_deviation": 0.45,
+            "min_depth_percent": 500.0,
+        }
+        result = telemetry_config(
+            database_profile,
+            {"intra_spread_max_pct": "0.2", "default_fee_rate": "0.0005"},
+            canary,
+        )
+        self.assertEqual(result["trade_volume"], 6.0)
+        self.assertEqual(result["min_entry_spread"], 0.5)
+        self.assertEqual(result["max_entry_spread"], 5.0)
+        self.assertEqual(result["min_volume"], 500_000.0)
+        self.assertEqual(result["min_structural_deviation"], 0.45)
+        self.assertEqual(result["min_depth_percent"], 500.0)
+        self.assertEqual(result["config_source"], "run_config")
 
 class HealthCaptureTests(unittest.TestCase):
     def test_preserves_fail_closed_503_body(self):
