@@ -190,11 +190,15 @@ fn public_l2_warm_score(
     {
         return None;
     }
-    let structural_reserve = engine::scanner_common::configured_structural_reserve(
-        profile.min_structural_deviation,
-        row.structural_verified,
-        row.structural_spread,
-    )?;
+    // Public observation must also start during historical EMA warmup. The
+    // live estimate is a ranking hint only, never an authoritative entry reserve.
+    if !row.structural_spread.is_finite()
+        || !profile.min_structural_deviation.is_finite()
+        || profile.min_structural_deviation < 0.0
+    {
+        return None;
+    }
+    let structural_reserve = row.structural_spread.max(0.0);
     let raw_margin = row.spread - profile.min_entry_spread;
     let deviation_margin =
         row.spread - structural_reserve - break_even_pct - profile.min_structural_deviation;
@@ -1445,6 +1449,16 @@ mod diagnostic_l2_tests {
         );
         row.spread = 0.1;
         assert!(public_l2_warm_score(&row, &profile, 0.28).unwrap() < 0.0);
+        row.structural_verified = false;
+        assert!(public_l2_warm_score(&row, &profile, 0.28).is_some());
+        assert!(engine::scanner_common::configured_structural_reserve(
+            profile.min_structural_deviation,
+            row.structural_verified,
+            row.structural_spread,
+        )
+        .is_none());
+        row.structural_spread = f64::NAN;
+        assert_eq!(public_l2_warm_score(&row, &profile, 0.28), None);
     }
 
     #[test]
