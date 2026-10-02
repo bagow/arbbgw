@@ -4,6 +4,7 @@
 import argparse
 from collections import Counter, defaultdict
 import json
+import math
 from pathlib import Path
 
 
@@ -121,6 +122,37 @@ def readiness_outages(snapshots):
     return episodes
 
 
+def engine_cycle_summary(snapshots):
+    values = []
+    for record in snapshots:
+        scanner = ((record.get("health") or {}).get("scanner_status") or {})
+        value = scanner.get("engine_cycle_us")
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        ):
+            values.append(float(value))
+    if not values:
+        return {"samples": 0}
+    values.sort()
+
+    def percentile(fraction):
+        index = max(0, math.ceil(fraction * len(values)) - 1)
+        return values[min(index, len(values) - 1)]
+
+    return {
+        "samples": len(values),
+        "min": values[0],
+        "p50": percentile(0.50),
+        "p95": percentile(0.95),
+        "p99": percentile(0.99),
+        "max": values[-1],
+        "mean": round(sum(values) / len(values), 3),
+    }
+
+
 def summarize(lines):
     starts = 0
     read_errors = []
@@ -228,6 +260,7 @@ def summarize(lines):
         "read_errors": len(read_errors),
         "health_errors": health_errors,
         "readiness_outages": readiness_outages(snapshots),
+        "engine_cycle_us": engine_cycle_summary(snapshots),
         "observer_summaries": len(observer_summaries),
         "first_snapshot_ms": first_ts,
         "last_snapshot_ms": last_ts,

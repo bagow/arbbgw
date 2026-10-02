@@ -149,6 +149,42 @@ class CandidateTelemetrySummaryTests(unittest.TestCase):
         )
         self.assertEqual(result["readiness_outages"][0]["observed_duration_ms"], 1_000)
 
+    def test_summarizes_engine_cycle_tail_latency(self):
+        records = []
+        for index, cycle_us in enumerate((100, 200, 300, 400, 500), start=1):
+            records.append(
+                line(
+                    {
+                        "kind": "snapshot",
+                        "ts": index,
+                        "rows": [],
+                        "health": {"scanner_status": {"engine_cycle_us": cycle_us}},
+                    }
+                )
+            )
+        records.append(
+            line(
+                {
+                    "kind": "snapshot",
+                    "ts": 6,
+                    "rows": [],
+                    "health": {"scanner_status": {"engine_cycle_us": None}},
+                }
+            )
+        )
+        self.assertEqual(
+            summarize(records)["engine_cycle_us"],
+            {
+                "samples": 5,
+                "min": 100.0,
+                "p50": 300.0,
+                "p95": 500.0,
+                "p99": 500.0,
+                "max": 500.0,
+                "mean": 300.0,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
