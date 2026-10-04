@@ -15,6 +15,26 @@ fn signal_throttle() -> &'static DashMap<String, i64> {
     SIGNAL_LOG_THROTTLE.get_or_init(|| DashMap::new())
 }
 
+/// A profile-window L1 excursion can disappear between the 100 ms shadow
+/// samples.  Keep the first stale-L2 observation visible in the service log,
+/// but bound repeated messages while the same route is waiting for depth.
+static L2_PENDING_LOG_THROTTLE: OnceLock<DashMap<String, i64>> = OnceLock::new();
+const L2_PENDING_LOG_THROTTLE_MS: i64 = 10_000;
+
+fn should_log_l2_pending(route: &str, now_ms: i64) -> bool {
+    let throttle = L2_PENDING_LOG_THROTTLE.get_or_init(DashMap::new);
+    if let Some(mut last) = throttle.get_mut(route) {
+        if now_ms.saturating_sub(*last) < L2_PENDING_LOG_THROTTLE_MS {
+            return false;
+        }
+        *last = now_ms;
+        true
+    } else {
+        throttle.insert(route.to_string(), now_ms);
+        true
+    }
+}
+
 static LAST_DIAG_LOG: AtomicI64 = AtomicI64::new(0);
 
 /// An entry must remain executable while both venue books advance.  Keeping
@@ -226,6 +246,7 @@ pub fn generate_signals(
     let mut signals = Vec::new();
     let mut emitted_pairs: HashSet<String> = HashSet::new();
     let mut l2_pending_rows = 0u64;
+    let mut profile_l2_pending_rows = 0u64;
     let mut structural_rejections = 0u64;
     let mut lot_grid_rejections = 0u64;
     let mut depth_rejections = 0u64;
@@ -308,6 +329,15 @@ pub fn generate_signals(
         let in_profile_window = profiles.iter().any(|p| {
             p.is_active && row.spread >= p.min_entry_spread && row.spread <= p.max_entry_spread
         });
+        let matching_profile = profiles.iter().find(|profile| {
+            profile.is_active
+                && !profile.disabled_exchanges.contains(&row.exchange_a)
+                && !profile.disabled_exchanges.contains(&row.exchange_b)
+                && row.spread >= profile.min_entry_spread
+                && row.spread <= profile.max_entry_spread
+                && row.vol_a >= profile.min_volume_millions * 1_000_000.0
+                && row.vol_b >= profile.min_volume_millions * 1_000_000.0
+        });
         let worth_diag = log_diag && in_profile_window;
 
         // Discovery quotes only nominate candidates. Do not create an order
@@ -317,6 +347,39 @@ pub fn generate_signals(
         if !execution_books_are_fresh(e_ctx, &key_a, &key_b, now) {
             if in_profile_window {
                 l2_pending_rows += 1;
+            }
+            if let Some(profile) = matching_profile {
+                profile_l2_pending_rows += 1;
+                let route = format!(
+                    "{}:{}:{}:{}",
+                    profile.id, row.pair, row.exchange_a, row.exchange_b,
+                );
+                if should_log_l2_pending(&route, now) {
+                    let age_a = e_ctx
+                        .l2_books
+                        .get(&key_a)
+                        .map(|book| now.saturating_sub(book.updated_ms));
+                    let age_b = e_ctx
+                        .l2_books
+                        .get(&key_b)
+                        .map(|book| now.saturating_sub(book.updated_ms));
+                    tracing::info!(
+                        "[scanner] PROFILE_L2_PENDING pair={} direction={} profile={} l1={:.4}% vol_a=${:.0} vol_b=${:.0} structural={:.4}% verified={} persistent={} age_a_ms={:?} age_b_ms={:?} wanted_a={} wanted_b={}",
+                        row.pair,
+                        row.direction,
+                        profile.id,
+                        row.spread,
+                        row.vol_a,
+                        row.vol_b,
+                        row.structural_spread,
+                        row.structural_verified,
+                        row.has_structural_spread,
+                        age_a,
+                        age_b,
+                        e_ctx.l2_wanted.contains(&key_a),
+                        e_ctx.l2_wanted.contains(&key_b),
+                    );
+                }
             }
             if worth_diag {
                 tracing::debug!(
@@ -811,8 +874,11 @@ pub fn generate_signals(
     // next `/health` sample.
     e_ctx
         .scanner_status
-        .retain(|key, _| key.starts_with("kucoin_depth_prewarm_"));
-    for (key, value) in [
+        .retain(|key, _| {
+            key.starts_with("kucoin_depth_prewarm_")
+                || key.ends_with("_observations_total")
+        });
+    let cycle_metrics = [
         ("updated_ms", now.max(0) as u64),
         ("spreads_available", spreads.len() as u64),
         ("spreads_considered", considered as u64),
@@ -825,6 +891,24 @@ pub fn generate_signals(
         ("signals_before_pair_dedupe", signals_before_pair_dedupe),
         ("signals_awaiting_confirmation", signals_awaiting_confirmation),
         ("l2_pending_rows", l2_pending_rows),
+        ("profile_l2_pending_rows", profile_l2_pending_rows),
+        ("structural_rejections", structural_rejections),
+        ("lot_grid_rejections", lot_grid_rejections),
+        ("depth_rejections", depth_rejections),
+        ("l2_budget_rejections", l2_budget_rejections),
+        (
+            "hard_stop_compatibility_rejections",
+            hard_stop_compatibility_rejections,
+        ),
+        ("volume_rejections", volume_rejections),
+    ];
+    for (key, value) in cycle_metrics {
+        e_ctx.scanner_status.insert(key.to_string(), value);
+    }
+    for (key, value) in [
+        ("profile_window_rows", profile_window_rows as u64),
+        ("profile_l2_pending_rows", profile_l2_pending_rows),
+        ("signals_emitted", signals.len() as u64),
         ("structural_rejections", structural_rejections),
         ("lot_grid_rejections", lot_grid_rejections),
         ("depth_rejections", depth_rejections),
@@ -835,7 +919,15 @@ pub fn generate_signals(
         ),
         ("volume_rejections", volume_rejections),
     ] {
-        e_ctx.scanner_status.insert(key.to_string(), value);
+        if value == 0 {
+            continue;
+        }
+        let total_key = format!("{key}_observations_total");
+        e_ctx
+            .scanner_status
+            .entry(total_key)
+            .and_modify(|total| *total = total.saturating_add(value))
+            .or_insert(value);
     }
     signals
 }
@@ -851,6 +943,14 @@ mod l2_gate_tests {
             asks: vec![(101.0, 1.0)],
             updated_ms,
         }
+    }
+
+    #[test]
+    fn pending_profile_log_is_immediate_and_route_throttled() {
+        let route = "test-profile:TESTUSDT:binance:kucoin";
+        assert!(should_log_l2_pending(route, 10_000));
+        assert!(!should_log_l2_pending(route, 19_999));
+        assert!(should_log_l2_pending(route, 20_000));
     }
 
     #[test]
