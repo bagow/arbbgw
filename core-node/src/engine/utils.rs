@@ -72,6 +72,12 @@ pub fn symbols_match(a: &str, b: &str) -> bool {
     normalize_symbol(a) == normalize_symbol(b)
 }
 
+// The live account's recent KuCoin fills were charged 0.06%. Candidate
+// preflight replaces this with the authenticated symbol rate before an order,
+// but discovery, public warm ranking and shadow replay need a conservative
+// value before that pair-specific request completes.
+const KUCOIN_TAKER_FEE_FALLBACK: f64 = 0.0006;
+
 /// Get cached taker fee rate for an exchange (as fraction, e.g. 0.0005 = 0.05%).
 pub fn get_exchange_fee(
     exchange: &str,
@@ -79,12 +85,17 @@ pub fn get_exchange_fee(
     default_fee: f64,
     e_ctx: &crate::state::EngineContext,
 ) -> f64 {
+    let fallback = if exchange == "kucoin" {
+        default_fee.max(KUCOIN_TAKER_FEE_FALLBACK)
+    } else {
+        default_fee
+    };
     e_ctx
         .fee_rates
         .get(&exchange_pair_key(exchange, pair))
         .map(|v| *v)
         .filter(|v| v.is_finite() && *v >= 0.0 && *v <= 0.1)
-        .unwrap_or(default_fee)
+        .unwrap_or(fallback)
 }
 
 /// Check if a position error indicates the position is already gone (liquidation/external close).
@@ -247,6 +258,16 @@ mod tests {
     #[test]
     fn exchange_pair_key_is_stable() {
         assert_eq!(exchange_pair_key("gate", "BTCUSDT"), "gate:BTCUSDT");
+    }
+
+    #[test]
+    fn kucoin_fee_fallback_matches_observed_taker_rate_until_preflight() {
+        let ctx = crate::state::EngineContext::default();
+        assert_eq!(get_exchange_fee("binance", "BTCUSDT", 0.0005, &ctx), 0.0005);
+        assert_eq!(get_exchange_fee("kucoin", "BTCUSDT", 0.0005, &ctx), 0.0006);
+
+        ctx.fee_rates.insert("kucoin:BTCUSDT".into(), 0.0004);
+        assert_eq!(get_exchange_fee("kucoin", "BTCUSDT", 0.0005, &ctx), 0.0004);
     }
 
     #[test]
