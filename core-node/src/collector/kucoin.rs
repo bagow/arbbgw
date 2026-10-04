@@ -35,7 +35,7 @@ const CLASSIC_DEPTH_BASELINE_SYMBOL: &str = "XBTUSDTM";
 // snapshot latency again without allowing 10 ms depth traffic to grow without
 // bound on the small VPS.
 const PRO_DEPTH_WARM_RETENTION: Duration = Duration::from_secs(300);
-const MAX_PRO_DEPTH_RETAINED_SYMBOLS: usize = 8;
+const MAX_PRO_DEPTH_RETAINED_SYMBOLS: usize = 16;
 // `l2_wanted` is rebuilt in place by the scanner. A collector refresh can
 // briefly observe the set between clear and repopulation, which is not a real
 // inactive interval. Only count a reuse after the symbol was continuously

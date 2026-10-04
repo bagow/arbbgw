@@ -33,7 +33,7 @@ const DIAGNOSTIC_MIN_VOLUME_RATIO: f64 = 0.75;
 // discounted prewarm gate, so a short executable excursion does not spend its
 // lifetime waiting for the initial snapshot. This lane never starts private
 // preflight and the scanner still enforces every entry/risk rule.
-const PUBLIC_L2_WARM_PAIR_LIMIT: usize = 4;
+const PUBLIC_L2_WARM_PAIR_LIMIT: usize = 8;
 const PUBLIC_L2_WARM_RETENTION_MS: i64 = 60_000;
 
 fn retain_public_warm_route(ctx: &state::EngineContext, row: &shared::SpreadRow, now: i64) -> bool {
@@ -1586,9 +1586,12 @@ mod diagnostic_l2_tests {
         );
         ctx.public_l2_warm_rows
             .retain(|_, route| route.expires_ms > 61_000);
-        assert_eq!(ctx.public_l2_warm_rows.len(), 3);
+        assert_eq!(
+            ctx.public_l2_warm_rows.len(),
+            PUBLIC_L2_WARM_PAIR_LIMIT - 1
+        );
         row.pair = "SPIKEUSDT".into();
         assert!(retain_public_warm_route(&ctx, &row, 61_000));
-        assert_eq!(ctx.public_l2_warm_rows.len(), 4);
+        assert_eq!(ctx.public_l2_warm_rows.len(), PUBLIC_L2_WARM_PAIR_LIMIT);
     }
 }
