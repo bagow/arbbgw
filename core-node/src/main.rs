@@ -29,11 +29,14 @@ use state::{PriceMap, UpdateSignal};
 const DIAGNOSTIC_L2_PAIR_LIMIT: usize = 2;
 const DIAGNOSTIC_MIN_VOLUME_RATIO: f64 = 0.75;
 // KuCoin's first Pro top-500 snapshot can take several seconds. Keep a very
-// small public-only watchlist warm before a liquid route reaches the ordinary
+// bounded public-only watchlist warm before a liquid route reaches the ordinary
 // discounted prewarm gate, so a short executable excursion does not spend its
 // lifetime waiting for the initial snapshot. This lane never starts private
-// preflight and the scanner still enforces every entry/risk rule.
-const PUBLIC_L2_WARM_PAIR_LIMIT: usize = 8;
+// preflight and the scanner still enforces every entry/risk rule. KuCoin's Pro
+// collector already supports sixteen retained symbols and Binance's dynamic
+// lane supports forty, so use the full conservative KuCoin budget here instead
+// of leaving half of it occupied by expired leases while live candidates wait.
+const PUBLIC_L2_WARM_PAIR_LIMIT: usize = 16;
 const PUBLIC_L2_WARM_RETENTION_MS: i64 = 60_000;
 
 fn retain_public_warm_route(ctx: &state::EngineContext, row: &shared::SpreadRow, now: i64) -> bool {
