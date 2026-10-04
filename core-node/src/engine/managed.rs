@@ -26,6 +26,7 @@ static LAST_BINANCE_DEPTH_PREWARM: std::sync::atomic::AtomicI64 =
 static BINANCE_DEPTH_REST_FALLBACK_SUCCESS: AtomicU64 = AtomicU64::new(0);
 static BINANCE_DEPTH_REST_FALLBACK_FAILURE: AtomicU64 = AtomicU64::new(0);
 static KUCOIN_DEPTH_PREWARM_INFLIGHT: OnceLock<DashSet<String>> = OnceLock::new();
+static KUCOIN_DEPTH_PREWARM_RETRY_AFTER: OnceLock<DashMap<String, i64>> = OnceLock::new();
 static LAST_KUCOIN_DEPTH_PREWARM: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
 const FEE_TTL_MS: i64 = 3_600_000;
@@ -36,6 +37,8 @@ const CANDIDATE_PREWARM_INTERVAL_MS: i64 = 1_000;
 const CANDIDATE_PREWARM_RETRY_MS: i64 = 5_000;
 const BINANCE_DEPTH_PREWARM_INTERVAL_MS: i64 = 500;
 const KUCOIN_DEPTH_PREWARM_INTERVAL_MS: i64 = 1_000;
+const KUCOIN_DEPTH_PREWARM_RETRY_MIN_MS: i64 = 5_000;
+const KUCOIN_DEPTH_PREWARM_RETRY_MAX_MS: i64 = 30_000;
 const NORMAL_EXIT_PAIR_COOLDOWN_MS: i64 = 60_000;
 const RISK_EXIT_PAIR_COOLDOWN_MS: i64 = 30 * 60_000;
 const ENTRY_WIDENING_EPSILON_PCT: f64 = 0.000001;
@@ -291,6 +294,16 @@ fn kucoin_stale_depth_age_ms(error: &str) -> Option<u64> {
         .ok()
 }
 
+fn kucoin_depth_prewarm_retry_ms(stale_age_ms: Option<u64>) -> i64 {
+    stale_age_ms
+        .and_then(|age_ms| i64::try_from(age_ms).ok())
+        .unwrap_or(KUCOIN_DEPTH_PREWARM_RETRY_MIN_MS)
+        .clamp(
+            KUCOIN_DEPTH_PREWARM_RETRY_MIN_MS,
+            KUCOIN_DEPTH_PREWARM_RETRY_MAX_MS,
+        )
+}
+
 /// Fill a stale candidate book through Binance REST while the streaming route
 /// is catching up. This is bounded globally and never authorizes an entry: the
 /// scanner and final preflight still require a <=750 ms full-quantity quote.
@@ -385,6 +398,19 @@ pub fn prewarm_kucoin_execution_book(
     {
         return false;
     }
+    // KuCoin stamps depth20 with the matching-engine update time. An idle
+    // contract can therefore return the same correctly rejected stale book
+    // on every request. Without a per-pair delay, the first retained route
+    // monopolizes the global one-per-second lane and later routes never get a
+    // chance to warm. A fresh Pro-stream update still reaches the scanner
+    // immediately and remains mandatory in the final entry preflight.
+    let retry_after = KUCOIN_DEPTH_PREWARM_RETRY_AFTER.get_or_init(DashMap::new);
+    if let Some(deadline_ms) = retry_after.get(pair).map(|deadline| *deadline) {
+        if now < deadline_ms {
+            return false;
+        }
+        retry_after.remove(pair);
+    }
     let inflight = KUCOIN_DEPTH_PREWARM_INFLIGHT.get_or_init(DashSet::new);
     if inflight.contains(pair) || inflight.len() >= 2 {
         return false;
@@ -434,6 +460,11 @@ pub fn prewarm_kucoin_execution_book(
                 }
             }
             Err(error) => {
+                let stale_age_ms = kucoin_stale_depth_age_ms(&error);
+                let retry_ms = kucoin_depth_prewarm_retry_ms(stale_age_ms);
+                KUCOIN_DEPTH_PREWARM_RETRY_AFTER
+                    .get_or_init(DashMap::new)
+                    .insert(pair.clone(), now_ms().saturating_add(retry_ms));
                 *ctx.scanner_status
                     .entry("kucoin_depth_prewarm_failure".to_string())
                     .or_insert(0) += 1;
@@ -441,7 +472,11 @@ pub fn prewarm_kucoin_execution_book(
                     "kucoin_depth_prewarm_last_latency_ms".to_string(),
                     now_ms().saturating_sub(started_ms).max(0) as u64,
                 );
-                if let Some(age_ms) = kucoin_stale_depth_age_ms(&error) {
+                ctx.scanner_status.insert(
+                    "kucoin_depth_prewarm_last_retry_ms".to_string(),
+                    retry_ms as u64,
+                );
+                if let Some(age_ms) = stale_age_ms {
                     *ctx.scanner_status
                         .entry("kucoin_depth_prewarm_failure_stale".to_string())
                         .or_insert(0) += 1;
@@ -1508,6 +1543,14 @@ mod transport_tests {
             Some(2_431),
         );
         assert_eq!(kucoin_stale_depth_age_ms("request failed"), None);
+    }
+
+    #[test]
+    fn kucoin_depth_retry_uses_stale_age_without_starving_other_pairs() {
+        assert_eq!(kucoin_depth_prewarm_retry_ms(None), 5_000);
+        assert_eq!(kucoin_depth_prewarm_retry_ms(Some(2_431)), 5_000);
+        assert_eq!(kucoin_depth_prewarm_retry_ms(Some(8_000)), 8_000);
+        assert_eq!(kucoin_depth_prewarm_retry_ms(Some(90_000)), 30_000);
     }
 
     #[test]
