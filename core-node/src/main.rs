@@ -62,6 +62,36 @@ fn diagnostic_retention_ms(profile: &settings::TradingSettings) -> i64 {
     profile.max_holding_time_ms.clamp(15_000, 1_800_000) + 10_000
 }
 
+/// Reject discovery routes whose common contract grid cannot produce both
+/// legs inside the profile's notional tolerance. This mirrors the scanner's
+/// lot and volume checks before an impossible route consumes scarce L2 slots.
+fn l1_lot_is_profile_compatible(
+    row: &shared::SpreadRow,
+    profile: &settings::TradingSettings,
+    multiplier_a: f64,
+    multiplier_b: f64,
+    volume_tolerance_pct: f64,
+) -> bool {
+    let is_a_higher = row.direction.starts_with(&row.exchange_a);
+    let entry_a = if is_a_higher { row.bid_a } else { row.ask_a };
+    let entry_b = if is_a_higher { row.ask_b } else { row.bid_b };
+    engine::scanner_common::compute_lot_size(
+        profile.trade_volume,
+        entry_a,
+        multiplier_a,
+        multiplier_b,
+        volume_tolerance_pct,
+    )
+    .is_some_and(|lot| {
+        engine::scanner_common::volumes_within_tolerance(
+            profile.trade_volume,
+            volume_tolerance_pct,
+            lot.phys_qty * entry_a,
+            lot.phys_qty * entry_b,
+        )
+    })
+}
+
 /// Never evict a nominated outcome path for a newer spike, or extend its
 /// deadline forever. Missing the next nomination is explicit and preferable to
 /// silently truncating the ten-minute outcome of the previous one.
@@ -689,6 +719,14 @@ async fn main() -> Result<()> {
                             }) {
                                 continue;
                             }
+                            let Some((multiplier_a, multiplier_b)) = t_e_ctx
+                                .multipliers
+                                .get(&key_a)
+                                .map(|value| *value)
+                                .zip(t_e_ctx.multipliers.get(&key_b).map(|value| *value))
+                            else {
+                                continue;
+                            };
                             let pair_cooldown = t_e_ctx
                                 .pair_cooldown
                                 .get(&row.pair)
@@ -711,6 +749,13 @@ async fn main() -> Result<()> {
                                     && row.spread <= profile.max_entry_spread
                                     && row.vol_a >= profile.min_volume_millions * 1_000_000.0
                                     && row.vol_b >= profile.min_volume_millions * 1_000_000.0
+                                    && l1_lot_is_profile_compatible(
+                                        row,
+                                        profile,
+                                        multiplier_a,
+                                        multiplier_b,
+                                        ts.vol_tolerance_pct,
+                                    )
                                     && engine::scanner_common::directional_structural_regime_is_stable(
                                         row.structural_verified,
                                         row.has_structural_spread,
@@ -842,6 +887,13 @@ async fn main() -> Result<()> {
                                 )
                             })
                             .filter_map(|row| {
+                                let key_a = format!("{}:{}", row.exchange_a, row.pair);
+                                let key_b = format!("{}:{}", row.exchange_b, row.pair);
+                                let (multiplier_a, multiplier_b) = t_e_ctx
+                                    .multipliers
+                                    .get(&key_a)
+                                    .map(|value| *value)
+                                    .zip(t_e_ctx.multipliers.get(&key_b).map(|value| *value))?;
                                 let fee_a = engine::utils::get_exchange_fee(
                                     &row.exchange_a,
                                     &row.pair,
@@ -859,7 +911,17 @@ async fn main() -> Result<()> {
                                 real_profiles
                                     .iter()
                                     .filter_map(|profile| {
-                                        public_l2_warm_score(row, profile, break_even_pct)
+                                        if l1_lot_is_profile_compatible(
+                                            row,
+                                            profile,
+                                            multiplier_a,
+                                            multiplier_b,
+                                            ts.vol_tolerance_pct,
+                                        ) {
+                                            public_l2_warm_score(row, profile, break_even_pct)
+                                        } else {
+                                            None
+                                        }
                                     })
                                     .max_by(f64::total_cmp)
                                     .map(|score| (row, score))
@@ -911,6 +973,14 @@ async fn main() -> Result<()> {
                             {
                                 continue;
                             }
+                            let Some((multiplier_a, multiplier_b)) = t_e_ctx
+                                .multipliers
+                                .get(&key_a)
+                                .map(|value| *value)
+                                .zip(t_e_ctx.multipliers.get(&key_b).map(|value| *value))
+                            else {
+                                continue;
+                            };
                             let pair_cooldown = t_e_ctx
                                 .pair_cooldown
                                 .get(&row.pair)
@@ -939,7 +1009,19 @@ async fn main() -> Result<()> {
                                 fee_a, fee_b,
                             );
                             let capture_reason = real_profiles.iter().find_map(|profile| {
-                                if diagnostic_l2_profile_matches(row, profile, break_even_pct) {
+                                if !l1_lot_is_profile_compatible(
+                                    row,
+                                    profile,
+                                    multiplier_a,
+                                    multiplier_b,
+                                    ts.vol_tolerance_pct,
+                                ) {
+                                    None
+                                } else if diagnostic_l2_profile_matches(
+                                    row,
+                                    profile,
+                                    break_even_pct,
+                                ) {
                                     Some(("unstable_l1_nomination", diagnostic_retention_ms(profile)))
                                 } else if low_volume_diagnostic_l2_profile_matches(
                                     row,
@@ -1452,6 +1534,27 @@ mod diagnostic_l2_tests {
         row.vol_b = f64::NAN;
         assert!(!low_volume_diagnostic_l2_profile_matches(
             &row, &profile, 0.28,
+        ));
+    }
+
+    #[test]
+    fn l1_lot_filter_rejects_routes_outside_the_profile_notional_tolerance() {
+        let mut profile = profile();
+        profile.trade_volume = 6.0;
+        let mut row = unstable_row();
+        row.exchange_a = "binance".into();
+        row.exchange_b = "kucoin".into();
+        row.direction = "kucoin>binance".into();
+        row.bid_a = 0.3873;
+        row.ask_a = 0.3874;
+        row.bid_b = 0.39061;
+        row.ask_b = 0.39086;
+
+        assert!(!l1_lot_is_profile_compatible(
+            &row, &profile, 1.0, 10.0, 15.0,
+        ));
+        assert!(l1_lot_is_profile_compatible(
+            &row, &profile, 1.0, 1.0, 15.0,
         ));
     }
 
