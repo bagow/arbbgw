@@ -1422,7 +1422,7 @@ mod tests {
             ("ACTIVE".to_string(), now - Duration::from_secs(600)),
             ("EXPIRED".to_string(), now - Duration::from_secs(301)),
         ]);
-        for index in 0..10 {
+        for index in 0..20 {
             retained.insert(
                 format!("WARM{index}"),
                 now - Duration::from_secs(10 + index),
@@ -1435,7 +1435,7 @@ mod tests {
         assert!(!retained.contains_key("EXPIRED"));
         assert_eq!(retained.len(), MAX_PRO_DEPTH_RETAINED_SYMBOLS);
         assert!(retained.contains_key("WARM0"));
-        assert!(!retained.contains_key("WARM9"));
+        assert!(!retained.contains_key("WARM19"));
     }
 
     #[test]
