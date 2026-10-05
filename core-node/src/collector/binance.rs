@@ -42,11 +42,12 @@ const MAX_BASELINE_CONSECUTIVE_STALE_DEPTH: u32 = 10;
 // gate. Reconnect only for a sustained backlog or a catastrophic one-off lag;
 // restarting on a short burst of delayed frames removes every candidate book
 // and creates a larger blind window than the rejected frames. The dynamic
-// connection multiplexes several symbols, so three consecutive stale messages
-// can arrive in much less than one update interval; require the same sustained
-// ten-frame evidence as the baseline stream.
+// connection multiplexes many symbols, so a frame count does not measure time:
+// one delayed update round can contain more messages than the old reconnect
+// threshold. Require a continuous wall-clock interval without any accepted
+// depth instead. Stale frames still fail closed at the 750 ms execution gate.
 const MAX_DYNAMIC_DEPTH_BACKLOG_MS: i64 = 10_000;
-const MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH: u32 = 10;
+const MAX_DYNAMIC_STALE_DURATION_MS: u64 = 3_000;
 const BASELINE_HEALTH_REFRESH_AGE_MS: i64 = 250;
 // Binance documents the all-book websocket with a five-second update speed.
 // Refresh the current all-symbol best book once per second so a valid confirmed
@@ -1076,7 +1077,7 @@ async fn run_dynamic_l2_depth_stream(
         let mut stale = 0u64;
         let mut invalid = 0u64;
         let mut last_lag_ms = 0i64;
-        let mut stale_streak = 0u32;
+        let mut stale_since = None;
         let mut backlog_detected = false;
         let mut planned_rotation = false;
         let mut report_at = std::time::Instant::now();
@@ -1088,7 +1089,7 @@ async fn run_dynamic_l2_depth_stream(
                 }
                 DepthUpdate::Stale(lag_ms) => {
                     stale = 1;
-                    stale_streak = 1;
+                    stale_since = Some(std::time::Instant::now());
                     last_lag_ms = lag_ms;
                 }
                 DepthUpdate::Invalid => invalid = 1,
@@ -1200,21 +1201,26 @@ async fn run_dynamic_l2_depth_stream(
                         match apply_depth_update(&data, &l2_books, &price_map, &signal) {
                             DepthUpdate::Accepted(lag_ms) => {
                                 accepted += 1;
-                                stale_streak = 0;
+                                stale_since = None;
                                 last_lag_ms = lag_ms;
                             }
                             DepthUpdate::Stale(lag_ms) => {
                                 stale += 1;
-                                stale_streak += 1;
                                 last_lag_ms = lag_ms;
-                                if depth_backlog_detected(
+                                let stale_for_ms = stale_since
+                                    .get_or_insert_with(std::time::Instant::now)
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u64::MAX as u128)
+                                    as u64;
+                                if dynamic_depth_backlog_detected(
                                     lag_ms,
-                                    stale_streak,
+                                    stale_for_ms,
                                     MAX_DYNAMIC_DEPTH_BACKLOG_MS,
-                                    MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+                                    MAX_DYNAMIC_STALE_DURATION_MS,
                                 ) {
                                     backlog_detected = true;
-                                    warn!("[binance_l2_dynamic] Backlog detected: lag_ms={} stale_streak={}; reconnecting", lag_ms, stale_streak);
+                                    warn!("[binance_l2_dynamic] Backlog detected: lag_ms={} stale_for_ms={}; reconnecting", lag_ms, stale_for_ms);
                                     break;
                                 }
                             }
@@ -1267,6 +1273,15 @@ fn depth_backlog_detected(
     max_stale_streak: u32,
 ) -> bool {
     lag_ms > max_lag_ms || stale_streak >= max_stale_streak
+}
+
+fn dynamic_depth_backlog_detected(
+    lag_ms: i64,
+    stale_for_ms: u64,
+    max_lag_ms: i64,
+    max_stale_duration_ms: u64,
+) -> bool {
+    lag_ms > max_lag_ms || stale_for_ms >= max_stale_duration_ms
 }
 
 fn apply_depth_update(
@@ -1463,30 +1478,30 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_depth_ignores_short_delayed_bursts() {
-        assert!(!depth_backlog_detected(
+    fn dynamic_depth_uses_elapsed_staleness_not_multiplexed_frame_count() {
+        assert!(!dynamic_depth_backlog_detected(
             4_361,
             1,
             MAX_DYNAMIC_DEPTH_BACKLOG_MS,
-            MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+            MAX_DYNAMIC_STALE_DURATION_MS,
         ));
-        assert!(!depth_backlog_detected(
+        assert!(!dynamic_depth_backlog_detected(
             751,
-            3,
+            MAX_DYNAMIC_STALE_DURATION_MS - 1,
             MAX_DYNAMIC_DEPTH_BACKLOG_MS,
-            MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+            MAX_DYNAMIC_STALE_DURATION_MS,
         ));
-        assert!(depth_backlog_detected(
+        assert!(dynamic_depth_backlog_detected(
             751,
-            MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+            MAX_DYNAMIC_STALE_DURATION_MS,
             MAX_DYNAMIC_DEPTH_BACKLOG_MS,
-            MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+            MAX_DYNAMIC_STALE_DURATION_MS,
         ));
-        assert!(depth_backlog_detected(
+        assert!(dynamic_depth_backlog_detected(
             MAX_DYNAMIC_DEPTH_BACKLOG_MS + 1,
-            1,
+            0,
             MAX_DYNAMIC_DEPTH_BACKLOG_MS,
-            MAX_DYNAMIC_CONSECUTIVE_STALE_DEPTH,
+            MAX_DYNAMIC_STALE_DURATION_MS,
         ));
     }
 
