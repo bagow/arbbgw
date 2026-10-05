@@ -35,7 +35,15 @@ const CANDIDATE_PREWARM_INTERVAL_MS: i64 = 1_000;
 // A single transient venue timeout should not make a short-lived pair
 // untradeable for half a minute. Calls still share the one-per-second lane.
 const CANDIDATE_PREWARM_RETRY_MS: i64 = 5_000;
-const BINANCE_DEPTH_PREWARM_INTERVAL_MS: i64 = 500;
+// The Oracle route can leave Binance's multiplexed market stream seconds old.
+// Keep the already-qualified candidate set executable through the independent
+// REST lane while that stream recovers. At limit=5 each depth request costs two
+// weight, so the five-per-second ceiling is 600 weight/minute; discovery and
+// all other callers still share the central 2,200/minute hard stop. A 200 ms
+// cadence can round-robin three stale candidates before the scanner's 750 ms
+// freshness deadline instead of letting the first candidate monopolize a
+// 500 ms lane.
+const BINANCE_DEPTH_PREWARM_INTERVAL_MS: i64 = 200;
 const KUCOIN_DEPTH_PREWARM_INTERVAL_MS: i64 = 1_000;
 const KUCOIN_DEPTH_PREWARM_RETRY_MIN_MS: i64 = 5_000;
 const KUCOIN_DEPTH_PREWARM_RETRY_MAX_MS: i64 = 30_000;
@@ -1534,6 +1542,20 @@ mod transport_tests {
         assert!(execution_depth_needs_prewarm(Some(9_499), 10_000));
         assert!(execution_depth_needs_prewarm(None, 10_000));
         assert!(execution_depth_needs_prewarm(Some(11_001), 10_000));
+    }
+
+    #[test]
+    fn binance_candidate_depth_lane_is_fast_but_rate_bounded() {
+        const DEPTH_LIMIT_FIVE_WEIGHT: i64 = 2;
+        let requests_per_minute = 60_000 / BINANCE_DEPTH_PREWARM_INTERVAL_MS;
+        assert!(
+            requests_per_minute * DEPTH_LIMIT_FIVE_WEIGHT <= 600,
+            "candidate recovery must preserve REST headroom"
+        );
+        assert!(
+            BINANCE_DEPTH_PREWARM_INTERVAL_MS * 3 < 750,
+            "three qualified candidates must fit inside the execution freshness window"
+        );
     }
 
     #[test]
