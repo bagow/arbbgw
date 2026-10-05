@@ -4,11 +4,21 @@ use shared::SpreadRow;
 use tokio::sync::mpsc;
 use tokio_rusqlite::{params, Connection};
 
+const MAX_SHADOW_WAL_BYTES: u64 = 512 * 1024 * 1024;
+
+fn shadow_wal_requires_checkpoint(wal_bytes: u64) -> bool {
+    wal_bytes > MAX_SHADOW_WAL_BYTES
+}
+
 pub async fn start(path: std::path::PathBuf) -> anyhow::Result<mpsc::Sender<Vec<String>>> {
+    let mut wal_name = path.as_os_str().to_os_string();
+    wal_name.push("-wal");
+    let wal_path = std::path::PathBuf::from(wal_name);
     let db = Connection::open(path).await?;
     db.call(|c| {
         c.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;
+          PRAGMA journal_size_limit=536870912;
           CREATE TABLE IF NOT EXISTS book_samples(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL);",
         )?;
         Ok(())
@@ -17,7 +27,45 @@ pub async fn start(path: std::path::PathBuf) -> anyhow::Result<mpsc::Sender<Vec<
     let (tx, mut rx) = mpsc::channel::<Vec<String>>(1);
     tokio::spawn(async move {
         let mut batches = 0u64;
+        let mut last_wal_warning: Option<std::time::Instant> = None;
         while let Some(rows) = rx.recv().await {
+            let wal_bytes = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+            if shadow_wal_requires_checkpoint(wal_bytes) {
+                let checkpoint = db
+                    .call(|c| {
+                        let status = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, i64>(2)?,
+                            ))
+                        })?;
+                        Ok(status)
+                    })
+                    .await;
+                match checkpoint {
+                    Ok((0, _, _)) => {
+                        tracing::info!(
+                            "Shadow WAL checkpoint recovered recorder after {} bytes",
+                            wal_bytes
+                        );
+                        last_wal_warning = None;
+                    }
+                    result => {
+                        if last_wal_warning
+                            .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(60))
+                        {
+                            tracing::warn!(
+                                "Shadow recording paused: WAL is {} bytes and checkpoint is busy ({:?})",
+                                wal_bytes,
+                                result
+                            );
+                            last_wal_warning = Some(std::time::Instant::now());
+                        }
+                        continue;
+                    }
+                }
+            }
             batches += 1;
             let prune = batches % 30 == 0;
             if let Err(e) = db.call(move |c| {
@@ -156,6 +204,12 @@ mod tests {
             has_structural_spread: false,
             structural_verified: true,
         }
+    }
+
+    #[test]
+    fn oversized_shadow_wal_pauses_before_disk_exhaustion() {
+        assert!(!shadow_wal_requires_checkpoint(MAX_SHADOW_WAL_BYTES));
+        assert!(shadow_wal_requires_checkpoint(MAX_SHADOW_WAL_BYTES + 1));
     }
 
     #[test]
