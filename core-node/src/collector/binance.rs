@@ -30,6 +30,11 @@ const DEPTH_SUBSCRIPTION_REFRESH_SECS: u64 = 1_800;
 const BASELINE_DEPTH_SESSION_SECS: u64 = 33;
 const DYNAMIC_DEPTH_SESSION_SECS: u64 = 25;
 const SECOND_DYNAMIC_START_DELAY_SECS: u64 = 12;
+// Redundant dynamic lanes must never rotate together. Their initial start
+// delay is not sufficient: route selection and retry timing eventually make
+// two independent fixed-duration loops converge. Coordinate planned rotations
+// while keeping the deferred lane connected and publishing.
+const MIN_DYNAMIC_ROTATION_STAGGER_SECS: u64 = 10;
 // Poll faster than the engine's five-millisecond floor so subscription hand-off
 // adds no extra scan cycle.
 // This does not send extra exchange traffic: messages are emitted only when
@@ -88,6 +93,11 @@ pub(crate) fn record_ticker_source_ms(pair: &str, source_ms: i64) {
         .entry(pair.to_string())
         .and_modify(|current| *current = (*current).max(source_ms))
         .or_insert(source_ms);
+}
+
+fn dynamic_rotation_is_due(session_elapsed: Duration, last_rotation_elapsed: Duration) -> bool {
+    session_elapsed >= Duration::from_secs(DYNAMIC_DEPTH_SESSION_SECS)
+        && last_rotation_elapsed >= Duration::from_secs(MIN_DYNAMIC_ROTATION_STAGGER_SECS)
 }
 
 /// Publish an L2 top only if it cannot rewind an already newer discovery tick.
@@ -373,6 +383,11 @@ pub async fn run(
             let discovery_for_depth = discovery_ready.clone();
             let settings_for_health = settings.clone();
             let settings_for_discovery = settings.clone();
+            let dynamic_last_rotation = std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::time::Instant::now()
+                    .checked_sub(Duration::from_secs(MIN_DYNAMIC_ROTATION_STAGGER_SECS))
+                    .unwrap_or_else(std::time::Instant::now),
+            ));
             children.spawn(async move {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 tokio::join!(
@@ -387,6 +402,7 @@ pub async fn run(
                         prices_for_depth.clone(),
                         l2_wanted_for_dynamic.clone(),
                         signal_for_dynamic.clone(),
+                        dynamic_last_rotation.clone(),
                     ),
                     async {
                         tokio::time::sleep(Duration::from_secs(SECOND_DYNAMIC_START_DELAY_SECS))
@@ -396,6 +412,7 @@ pub async fn run(
                             prices_for_depth.clone(),
                             l2_wanted_for_dynamic,
                             signal_for_dynamic,
+                            dynamic_last_rotation,
                         )
                         .await;
                     },
@@ -1038,6 +1055,7 @@ async fn run_dynamic_l2_depth_stream(
     price_map: crate::state::PriceMap,
     l2_wanted: std::sync::Arc<dashmap::DashSet<String>>,
     signal: UpdateSignal,
+    last_planned_rotation: std::sync::Arc<tokio::sync::Mutex<std::time::Instant>>,
 ) {
     let mut backoff = Duration::from_secs(1);
 
@@ -1103,9 +1121,13 @@ async fn run_dynamic_l2_depth_stream(
             tokio::select! {
                 _ = refresh.tick() => {
                     if session_start.elapsed() >= Duration::from_secs(DYNAMIC_DEPTH_SESSION_SECS) {
-                        planned_rotation = true;
-                        info!("[binance_l2_dynamic] Proactive route rotation");
-                        break;
+                        let mut last_rotation = last_planned_rotation.lock().await;
+                        if dynamic_rotation_is_due(session_start.elapsed(), last_rotation.elapsed()) {
+                            *last_rotation = std::time::Instant::now();
+                            planned_rotation = true;
+                            info!("[binance_l2_dynamic] Proactive route rotation");
+                            break;
+                        }
                     }
                     let now = std::time::Instant::now();
                     let mut wanted: Vec<String> = l2_wanted
@@ -1502,6 +1524,22 @@ mod tests {
             0,
             MAX_DYNAMIC_DEPTH_BACKLOG_MS,
             MAX_DYNAMIC_STALE_DURATION_MS,
+        ));
+    }
+
+    #[test]
+    fn redundant_dynamic_lanes_cannot_rotate_together() {
+        assert!(!dynamic_rotation_is_due(
+            Duration::from_secs(DYNAMIC_DEPTH_SESSION_SECS - 1),
+            Duration::from_secs(MIN_DYNAMIC_ROTATION_STAGGER_SECS),
+        ));
+        assert!(!dynamic_rotation_is_due(
+            Duration::from_secs(DYNAMIC_DEPTH_SESSION_SECS),
+            Duration::from_secs(MIN_DYNAMIC_ROTATION_STAGGER_SECS - 1),
+        ));
+        assert!(dynamic_rotation_is_due(
+            Duration::from_secs(DYNAMIC_DEPTH_SESSION_SECS),
+            Duration::from_secs(MIN_DYNAMIC_ROTATION_STAGGER_SECS),
         ));
     }
 
