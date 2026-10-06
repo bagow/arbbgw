@@ -61,6 +61,10 @@ const BASELINE_HEALTH_REFRESH_AGE_MS: i64 = 250;
 // Binance REST callers still share the 2,200/minute hard stop below the
 // documented 2,400/minute limit.
 const DISCOVERY_REST_REFRESH_SECS: u64 = 1;
+// Public funding metadata is research input for the funding/basis strategy.
+// It never authorizes an order by itself; the managed entry path still fetches
+// each candidate's funding deadline just in time.
+const FUNDING_RATE_REFRESH_SECS: u64 = 60;
 // 24 ranked candidates plus the profile-wide maximum of 10 owned trades.
 const MAX_DYNAMIC_DEPTH_SYMBOLS: usize = 40;
 // Binance's documented USD-M market-stream endpoints. The `/public/*` relay
@@ -427,7 +431,8 @@ pub async fn run(
                         prices_for_depth.clone(),
                         signal_for_discovery,
                         settings_for_discovery,
-                    )
+                    ),
+                    run_funding_rate_refresh(prices_for_depth.clone())
                 );
             });
         }
@@ -540,6 +545,87 @@ async fn run_l1_discovery_fallback(
             Err(error) => {
                 if last_warning.elapsed() >= Duration::from_secs(30) {
                     warn!("[binance_l1_rest] Refresh failed: {}", error);
+                    last_warning = std::time::Instant::now();
+                }
+            }
+        }
+    }
+}
+
+fn apply_funding_rate_snapshot(snapshot: &Value, price_map: &PriceMap) -> usize {
+    let Some(rows) = snapshot.as_array() else {
+        return 0;
+    };
+    let Some(mut venue) = price_map.get_mut("binance") else {
+        return 0;
+    };
+    let mut updated = 0usize;
+    for row in rows {
+        let Some(symbol) = row["symbol"].as_str() else {
+            continue;
+        };
+        let rate = row["lastFundingRate"]
+            .as_str()
+            .and_then(|value| value.parse::<f64>().ok())
+            .or_else(|| row["lastFundingRate"].as_f64());
+        let Some(rate) = rate.filter(|rate| rate.is_finite() && rate.abs() <= 0.1) else {
+            continue;
+        };
+        if let Some(ticker) = venue.get_mut(symbol) {
+            ticker.funding_rate = rate;
+            updated += 1;
+        }
+    }
+    updated
+}
+
+async fn run_funding_rate_refresh(price_map: PriceMap) {
+    let http = Client::builder()
+        .user_agent("cryptoarb-binance-funding-research/1")
+        .build()
+        .expect("Binance funding client");
+    let mut timer = tokio::time::interval(Duration::from_secs(FUNDING_RATE_REFRESH_SECS));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_warning = std::time::Instant::now();
+    loop {
+        timer.tick().await;
+        if crate::engine::exchanges::binance::check_before_binance_rest().is_err() {
+            continue;
+        }
+        let response = http
+            .get("https://fapi.binance.com/fapi/v1/premiumIndex")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await;
+        let result = match response {
+            Ok(response) => {
+                let status = response.status();
+                crate::engine::exchanges::binance::record_binance_response(
+                    status.as_u16(),
+                    response.headers(),
+                );
+                if !status.is_success() {
+                    Err(format!("HTTP {}", status.as_u16()))
+                } else {
+                    response
+                        .json::<Value>()
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        match result {
+            Ok(snapshot) if apply_funding_rate_snapshot(&snapshot, &price_map) > 0 => {}
+            Ok(_) => {
+                if last_warning.elapsed() >= Duration::from_secs(60) {
+                    warn!("[binance_funding] Snapshot contained no usable rates");
+                    last_warning = std::time::Instant::now();
+                }
+            }
+            Err(error) => {
+                if last_warning.elapsed() >= Duration::from_secs(60) {
+                    warn!("[binance_funding] Refresh failed: {}", error);
                     last_warning = std::time::Instant::now();
                 }
             }
@@ -1480,6 +1566,34 @@ mod tests {
             assert_eq!(event_lag_ms(&value.to_string(), now), Some(expected_lag));
         }
         assert_eq!(event_lag_ms(r#"{"result":null,"id":1}"#, now), None);
+    }
+
+    #[test]
+    fn public_funding_snapshot_updates_existing_symbols_only() {
+        let prices = PriceMap::default();
+        prices.insert(
+            "binance".into(),
+            std::collections::HashMap::from([(
+                "BTCUSDT".into(),
+                TickerData {
+                    vol: 123_456.0,
+                    funding_rate: 0.0001,
+                    ..Default::default()
+                },
+            )]),
+        );
+        let snapshot = serde_json::json!([
+            {"symbol":"BTCUSDT","lastFundingRate":"-0.00001234"},
+            {"symbol":"NEWUSDT","lastFundingRate":"0.001"},
+            {"symbol":"BTCUSDT","lastFundingRate":"NaN"},
+            {"symbol":"BTCUSDT","lastFundingRate":"0.2"}
+        ]);
+
+        assert_eq!(apply_funding_rate_snapshot(&snapshot, &prices), 1);
+        let venue = prices.get("binance").unwrap();
+        assert_eq!(venue.len(), 1);
+        assert_eq!(venue["BTCUSDT"].funding_rate, -0.00001234);
+        assert_eq!(venue["BTCUSDT"].vol, 123_456.0);
     }
 
     #[test]

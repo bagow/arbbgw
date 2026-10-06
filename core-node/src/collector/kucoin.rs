@@ -41,7 +41,10 @@ const MAX_PRO_DEPTH_RETAINED_SYMBOLS: usize = 16;
 // inactive interval. Only count a reuse after the symbol was continuously
 // unwanted long enough to rule out that hand-off window.
 const PRO_DEPTH_WARM_REUSE_MIN_IDLE: Duration = Duration::from_secs(1);
-const INSTRUMENT_UNIVERSE_REFRESH: Duration = Duration::from_secs(1800);
+// The active-contract response also carries the current funding fee rate.
+// Refresh it once per minute for passive funding/basis research. Contract
+// identity changes still cause the same full collector rebuild.
+const INSTRUMENT_UNIVERSE_REFRESH: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq)]
 struct ContractUniverse {
@@ -188,15 +191,18 @@ fn parse_contract_universe(
         symbol_map.insert(symbol.to_string(), (normalized.clone(), multiplier));
 
         let volume_usd = contract["turnoverOf24h"].as_f64().unwrap_or(0.0);
-        if volume_usd > 0.0 {
+        let funding_rate = contract["fundingFeeRate"]
+            .as_f64()
+            .filter(|rate| rate.is_finite() && rate.abs() <= 0.1);
+        if volume_usd > 0.0 || funding_rate.is_some() {
             let mut entry = price_map.entry("kucoin".to_string()).or_default();
-            entry
-                .entry(normalized)
-                .or_insert_with(|| TickerData {
-                    vol: volume_usd,
-                    ..Default::default()
-                })
-                .vol = volume_usd;
+            let ticker = entry.entry(normalized).or_default();
+            if volume_usd > 0.0 {
+                ticker.vol = volume_usd;
+            }
+            if let Some(funding_rate) = funding_rate {
+                ticker.funding_rate = funding_rate;
+            }
         }
     }
     symbols.sort_unstable();
@@ -312,10 +318,7 @@ async fn handler(
             _ = tokio::time::sleep(INSTRUMENT_UNIVERSE_REFRESH) => {
                 match fetch_contract_universe(&http, price_map).await {
                     Ok(refreshed) if refreshed == universe => {
-                        info!(
-                            "[kucoin] Instrument universe unchanged at {} contracts; keeping live streams",
-                            universe.symbols.len(),
-                        );
+                        // Volume and funding-rate side effects were refreshed.
                     }
                     Ok(refreshed) => {
                         info!(
@@ -1153,8 +1156,8 @@ mod tests {
     fn turnover_refresh_keeps_streams_but_identity_changes_require_rebuild() {
         let prices = PriceMap::default();
         let payload = serde_json::json!({"data":[
-            {"symbol":"XBTUSDTM","multiplier":0.001,"turnoverOf24h":400000.0},
-            {"symbol":"ETHUSDTM","multiplier":0.01,"turnoverOf24h":900000.0},
+            {"symbol":"XBTUSDTM","multiplier":0.001,"turnoverOf24h":400000.0,"fundingFeeRate":0.0002},
+            {"symbol":"ETHUSDTM","multiplier":0.01,"turnoverOf24h":900000.0,"fundingFeeRate":-0.0001},
             {"symbol":"ETHUSDM","multiplier":0.01,"turnoverOf24h":1.0}
         ]});
         let initial = parse_contract_universe(&payload, &prices).unwrap();
@@ -1167,6 +1170,15 @@ mod tests {
             prices.get("kucoin").unwrap().get("BTCUSDT").unwrap().vol,
             400_000.0,
         );
+        assert_eq!(
+            prices
+                .get("kucoin")
+                .unwrap()
+                .get("BTCUSDT")
+                .unwrap()
+                .funding_rate,
+            0.0002,
+        );
 
         let volume_only = serde_json::json!({"data":[
             {"symbol":"ETHUSDTM","multiplier":0.01,"turnoverOf24h":950000.0},
@@ -1177,6 +1189,15 @@ mod tests {
         assert_eq!(
             prices.get("kucoin").unwrap().get("BTCUSDT").unwrap().vol,
             430_000.0,
+        );
+        assert_eq!(
+            prices
+                .get("kucoin")
+                .unwrap()
+                .get("BTCUSDT")
+                .unwrap()
+                .funding_rate,
+            0.0002,
         );
 
         let multiplier_change = serde_json::json!({"data":[
