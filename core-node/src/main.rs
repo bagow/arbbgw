@@ -265,6 +265,7 @@ fn public_l2_warm_score(
 fn funding_capture_watch_matches(
     row: &shared::SpreadRow,
     profile: &settings::TradingSettings,
+    ctx: &state::EngineContext,
 ) -> bool {
     let configured_volume = profile.min_volume_millions * 1_000_000.0;
     profile.is_active
@@ -288,6 +289,13 @@ fn funding_capture_watch_matches(
         .is_some_and(|edge| {
             edge >= engine::scanner_common::FUNDING_CAPTURE_WATCH_EDGE_PCT
         })
+        && engine::funding_guard::capture_watch_due(
+            ctx,
+            &row.exchange_a,
+            &row.exchange_b,
+            &row.pair,
+            profile.max_holding_time_ms,
+        )
 }
 
 fn prioritize_one_stable_warm_route(rows: &mut Vec<(&shared::SpreadRow, f64)>) {
@@ -640,7 +648,9 @@ async fn main() -> Result<()> {
                             row.spread >= entry_discovery_threshold
                                 || real_profiles
                                     .iter()
-                                    .any(|profile| funding_capture_watch_matches(row, profile))
+                                    .any(|profile| {
+                                        funding_capture_watch_matches(row, profile, &t_e_ctx)
+                                    })
                         })
                         .cloned()
                         .collect();
@@ -659,13 +669,22 @@ async fn main() -> Result<()> {
                         };
                         let edge_a = edge(a);
                         let edge_b = edge(b);
-                        let watch_a = edge_a
-                            >= engine::scanner_common::FUNDING_CAPTURE_WATCH_EDGE_PCT;
-                        let watch_b = edge_b
-                            >= engine::scanner_common::FUNDING_CAPTURE_WATCH_EDGE_PCT;
+                        let watch = |row: &shared::SpreadRow| {
+                            real_profiles.iter().any(|profile| {
+                                funding_capture_watch_matches(row, profile, &t_e_ctx)
+                            })
+                        };
+                        let watch_a = watch(a);
+                        let watch_b = watch(b);
                         watch_b
                             .cmp(&watch_a)
-                            .then_with(|| edge_b.total_cmp(&edge_a))
+                            .then_with(|| {
+                                if watch_a && watch_b {
+                                    edge_b.total_cmp(&edge_a)
+                                } else {
+                                    std::cmp::Ordering::Equal
+                                }
+                            })
                     });
 
                     // Writes to profiles_db since vps-api reads from it
@@ -814,7 +833,7 @@ async fn main() -> Result<()> {
                                         multiplier_b,
                                         ts.vol_tolerance_pct,
                                     )
-                                    && (funding_capture_watch_matches(row, profile)
+                                    && (funding_capture_watch_matches(row, profile, &t_e_ctx)
                                         || (row.spread
                                             >= profile.min_entry_spread
                                                 * DISCOVERY_PREWARM_RATIO

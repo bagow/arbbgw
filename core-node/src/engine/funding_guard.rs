@@ -10,6 +10,7 @@ pub const CAPTURE_EXIT_DELAY_MS: i64 = 30_000;
 const CAPTURE_MIN_LEAD_MS: i64 = 60_000;
 const CAPTURE_MAX_LEAD_MS: i64 = 300_000;
 const CAPTURE_MAX_SETTLEMENT_SKEW_MS: i64 = 60_000;
+const CAPTURE_SCHEDULE_REFRESH_MS: i64 = 300_000;
 // The schedule is stable for hours, but the rate being captured is not. The
 // preflight already refreshes open-order state every five seconds, so a
 // thirty-second funding refresh adds little load and keeps entry fail-closed.
@@ -50,6 +51,47 @@ pub fn cached_info(ctx: &EngineContext, exchange: &str, pair: &str) -> Option<Fu
     ctx.funding_rates
         .get(&cache_key(exchange, pair))
         .and_then(|info| valid_cached_timestamp(info.value(), now).map(|_| info.value().clone()))
+}
+
+/// Decide whether a public funding observation should consume scarce L2 and
+/// private-preflight capacity. A distant settlement only needs a cheap
+/// schedule refresh every five minutes. Continuous warming starts one refresh
+/// interval before the actual entry window so phase alignment cannot miss it.
+pub fn capture_watch_due(
+    ctx: &EngineContext,
+    exchange_a: &str,
+    exchange_b: &str,
+    pair: &str,
+    max_holding_ms: i64,
+) -> bool {
+    let now = now_ms();
+    let read = |exchange: &str| {
+        ctx.funding_rates
+            .get(&cache_key(exchange, pair))
+            .map(|info| info.value().clone())
+    };
+    let Some((info_a, info_b)) = read(exchange_a).zip(read(exchange_b)) else {
+        return true;
+    };
+    if [info_a.fetched_at, info_b.fetched_at]
+        .iter()
+        .any(|stamp| now < *stamp || now - *stamp >= CAPTURE_SCHEDULE_REFRESH_MS)
+    {
+        return true;
+    }
+    if info_a.next_ts <= now
+        || info_b.next_ts <= now
+        || info_a.next_ts.abs_diff(info_b.next_ts)
+            > CAPTURE_MAX_SETTLEMENT_SKEW_MS as u64
+    {
+        return false;
+    }
+    let entry_lead = CAPTURE_MAX_LEAD_MS.min(max_holding_ms - CAPTURE_EXIT_DELAY_MS);
+    if entry_lead <= CAPTURE_MIN_LEAD_MS {
+        return false;
+    }
+    let settlement = info_a.next_ts.max(info_b.next_ts);
+    settlement <= now + entry_lead + CAPTURE_SCHEDULE_REFRESH_MS
 }
 
 pub fn deadline(next_a: i64, next_b: i64, now: i64) -> Option<i64> {
@@ -282,5 +324,38 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn distant_capture_only_wakes_for_periodic_schedule_refresh() {
+        let ctx = EngineContext::default();
+        let now = now_ms();
+        for exchange in ["binance", "kucoin"] {
+            ctx.funding_rates.insert(
+                cache_key(exchange, "TESTUSDT"),
+                FundingInfo {
+                    rate: 0.002,
+                    next_ts: now + 3_600_000,
+                    fetched_at: now,
+                },
+            );
+        }
+        assert!(!capture_watch_due(
+            &ctx,
+            "binance",
+            "kucoin",
+            "TESTUSDT",
+            600_000,
+        ));
+        for mut info in ctx.funding_rates.iter_mut() {
+            info.fetched_at = now - CAPTURE_SCHEDULE_REFRESH_MS;
+        }
+        assert!(capture_watch_due(
+            &ctx,
+            "binance",
+            "kucoin",
+            "TESTUSDT",
+            600_000,
+        ));
     }
 }
