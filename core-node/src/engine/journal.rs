@@ -9,12 +9,23 @@ pub const PAIR_LOSS_QUARANTINE_THRESHOLD: i64 = 2;
 /// Increment only when entry/exit risk semantics materially change. Historical
 /// losses remain auditable, but cannot permanently quarantine a corrected
 /// strategy before it has produced any outcome under the new rules.
-pub const RISK_STRATEGY_REVISION: i64 = 5;
+pub const RISK_STRATEGY_REVISION: i64 = 6;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Plan {
     #[serde(default)]
     pub funding_deadline_ms: Option<i64>,
+    /// Settlement whose payment this trade is explicitly capturing. Ordinary
+    /// EMA plans leave it empty and retain pre-settlement exit semantics.
+    #[serde(default)]
+    pub funding_settlement_ms: Option<i64>,
+    /// Final exchange rates observed immediately before entry. They make the
+    /// expected settlement legs durable across restarts, so accounting cannot
+    /// silently verify a capture before the exchange ledgers publish them.
+    #[serde(default)]
+    pub funding_rate_a: Option<f64>,
+    #[serde(default)]
+    pub funding_rate_b: Option<f64>,
     pub signal: TradeSignal,
     pub settings: TradingSettings,
 }
@@ -526,6 +537,9 @@ mod tests {
     fn plan() -> Plan {
         Plan {
             funding_deadline_ms: None,
+            funding_settlement_ms: None,
+            funding_rate_a: None,
+            funding_rate_b: None,
             settings: TradingSettings::default(),
             signal: TradeSignal {
                 profile_id: "real-default".into(),
@@ -547,6 +561,8 @@ mod tests {
                 spread: 10.0,
                 structural_spread: 0.0,
                 is_a_higher: false,
+                funding_capture: false,
+                expected_funding_pct: 0.0,
                 tick_a: 0.01,
                 tick_b: 0.01,
                 mult_a: 1.0,
@@ -595,6 +611,9 @@ mod tests {
         j.init().await.unwrap();
         let mut p = plan();
         p.funding_deadline_ms = Some(1_900_000_000_000);
+        p.funding_settlement_ms = Some(1_899_999_970_000);
+        p.funding_rate_a = Some(0.0012);
+        p.funding_rate_b = Some(-0.0001);
         let id = j.reserve(p).await.unwrap().unwrap();
         let o = order(id);
         j.prepare(&o).await.unwrap();
@@ -606,6 +625,12 @@ mod tests {
         j.init().await.unwrap();
         let recovered = j.active().await.unwrap().remove(0);
         assert_eq!(recovered.plan.funding_deadline_ms, Some(1_900_000_000_000));
+        assert_eq!(
+            recovered.plan.funding_settlement_ms,
+            Some(1_899_999_970_000)
+        );
+        assert_eq!(recovered.plan.funding_rate_a, Some(0.0012));
+        assert_eq!(recovered.plan.funding_rate_b, Some(-0.0001));
         assert_eq!(
             j.orders(id).await.unwrap()[0].observation.state,
             OrderState::Unknown

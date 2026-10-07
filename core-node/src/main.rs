@@ -262,6 +262,34 @@ fn public_l2_warm_score(
     score.is_finite().then_some(score)
 }
 
+fn funding_capture_watch_matches(
+    row: &shared::SpreadRow,
+    profile: &settings::TradingSettings,
+) -> bool {
+    let configured_volume = profile.min_volume_millions * 1_000_000.0;
+    profile.is_active
+        && profile.strategy_type == "ema"
+        && profile.max_holding_time_ms
+            > engine::funding_guard::CAPTURE_EXIT_DELAY_MS + 60_000
+        && !profile.disabled_exchanges.contains(&row.exchange_a)
+        && !profile.disabled_exchanges.contains(&row.exchange_b)
+        && row.spread.is_finite()
+        && row.spread.abs() <= profile.max_entry_spread
+        && row.vol_a.is_finite()
+        && row.vol_b.is_finite()
+        && row.vol_a >= configured_volume
+        && row.vol_b >= configured_volume
+        && engine::scanner_common::directional_funding_edge_pct(
+            &row.exchange_a,
+            &row.direction,
+            row.funding_a,
+            row.funding_b,
+        )
+        .is_some_and(|edge| {
+            edge >= engine::scanner_common::FUNDING_CAPTURE_WATCH_EDGE_PCT
+        })
+}
+
 fn prioritize_one_stable_warm_route(rows: &mut Vec<(&shared::SpreadRow, f64)>) {
     // Keep one already tradeable regime warm even when its next excursion is
     // farther away. The remaining slots observe all directions by score.
@@ -606,9 +634,39 @@ async fn main() -> Result<()> {
                         discovery_ts.spread_threshold = 0.0;
                     }
                     let observation_spreads = compute_spreads(&t_prices, 0.0, &discovery_ts);
-                    let spreads: Vec<_> = observation_spreads.iter()
-                        .filter(|row| row.spread >= entry_discovery_threshold)
-                        .cloned().collect();
+                    let mut spreads: Vec<_> = observation_spreads
+                        .iter()
+                        .filter(|row| {
+                            row.spread >= entry_discovery_threshold
+                                || real_profiles
+                                    .iter()
+                                    .any(|profile| funding_capture_watch_matches(row, profile))
+                        })
+                        .cloned()
+                        .collect();
+                    // Funding watches are rare and time-sensitive. Put them in
+                    // front of the bounded scanner/preflight list without
+                    // weakening either strategy's final admission checks.
+                    spreads.sort_by(|a, b| {
+                        let edge = |row: &shared::SpreadRow| {
+                            engine::scanner_common::directional_funding_edge_pct(
+                                &row.exchange_a,
+                                &row.direction,
+                                row.funding_a,
+                                row.funding_b,
+                            )
+                            .unwrap_or(f64::NEG_INFINITY)
+                        };
+                        let edge_a = edge(a);
+                        let edge_b = edge(b);
+                        let watch_a = edge_a
+                            >= engine::scanner_common::FUNDING_CAPTURE_WATCH_EDGE_PCT;
+                        let watch_b = edge_b
+                            >= engine::scanner_common::FUNDING_CAPTURE_WATCH_EDGE_PCT;
+                        watch_b
+                            .cmp(&watch_a)
+                            .then_with(|| edge_b.total_cmp(&edge_a))
+                    });
 
                     // Writes to profiles_db since vps-api reads from it
                     // Replay must resolve the scanner's non-blocking 500 ms confirmation rule.
@@ -747,9 +805,6 @@ async fn main() -> Result<()> {
                                     && profile.strategy_type == "ema"
                                     && !profile.disabled_exchanges.contains(&row.exchange_a)
                                     && !profile.disabled_exchanges.contains(&row.exchange_b)
-                                    && row.spread
-                                        >= profile.min_entry_spread * DISCOVERY_PREWARM_RATIO
-                                    && row.spread <= profile.max_entry_spread
                                     && row.vol_a >= profile.min_volume_millions * 1_000_000.0
                                     && row.vol_b >= profile.min_volume_millions * 1_000_000.0
                                     && l1_lot_is_profile_compatible(
@@ -759,45 +814,50 @@ async fn main() -> Result<()> {
                                         multiplier_b,
                                         ts.vol_tolerance_pct,
                                     )
-                                    && engine::scanner_common::directional_structural_regime_is_stable(
-                                        row.structural_verified,
-                                        row.has_structural_spread,
-                                        row.structural_min,
-                                        row.structural_max,
-                                    )
-                                    && engine::scanner_common::configured_structural_reserve(
-                                        profile.min_structural_deviation,
-                                        row.structural_verified,
-                                        row.structural_spread,
-                                    )
-                                    .is_some_and(|structural_reserve| {
-                                        let fee_a = engine::utils::get_exchange_fee(
-                                            &row.exchange_a,
-                                            &row.pair,
-                                            ts.default_fee_rate,
-                                            &t_e_ctx,
-                                        );
-                                        let fee_b = engine::utils::get_exchange_fee(
-                                            &row.exchange_b,
-                                            &row.pair,
-                                            ts.default_fee_rate,
-                                            &t_e_ctx,
-                                        );
-                                        let break_even_pct =
-                                            engine::scanner_common::ioc_break_even_pct(
-                                                fee_a, fee_b,
-                                            );
-                                        engine::scanner_common::prewarm_execution_budget(
-                                            row.spread,
-                                            profile.min_entry_spread,
-                                            profile.max_entry_spread,
-                                            structural_reserve,
-                                            profile.min_structural_deviation,
-                                            break_even_pct,
-                                            DISCOVERY_PREWARM_RATIO,
-                                        )
-                                        .is_some()
-                                    })
+                                    && (funding_capture_watch_matches(row, profile)
+                                        || (row.spread
+                                            >= profile.min_entry_spread
+                                                * DISCOVERY_PREWARM_RATIO
+                                            && row.spread <= profile.max_entry_spread
+                                            && engine::scanner_common::directional_structural_regime_is_stable(
+                                                row.structural_verified,
+                                                row.has_structural_spread,
+                                                row.structural_min,
+                                                row.structural_max,
+                                            )
+                                            && engine::scanner_common::configured_structural_reserve(
+                                                profile.min_structural_deviation,
+                                                row.structural_verified,
+                                                row.structural_spread,
+                                            )
+                                            .is_some_and(|structural_reserve| {
+                                                let fee_a = engine::utils::get_exchange_fee(
+                                                    &row.exchange_a,
+                                                    &row.pair,
+                                                    ts.default_fee_rate,
+                                                    &t_e_ctx,
+                                                );
+                                                let fee_b = engine::utils::get_exchange_fee(
+                                                    &row.exchange_b,
+                                                    &row.pair,
+                                                    ts.default_fee_rate,
+                                                    &t_e_ctx,
+                                                );
+                                                let break_even_pct =
+                                                    engine::scanner_common::ioc_break_even_pct(
+                                                        fee_a, fee_b,
+                                                    );
+                                                engine::scanner_common::prewarm_execution_budget(
+                                                    row.spread,
+                                                    profile.min_entry_spread,
+                                                    profile.max_entry_spread,
+                                                    structural_reserve,
+                                                    profile.min_structural_deviation,
+                                                    break_even_pct,
+                                                    DISCOVERY_PREWARM_RATIO,
+                                                )
+                                                .is_some()
+                                            })))
                             });
                             let Some(wanted_profile) = wanted_profile else {
                                 continue;

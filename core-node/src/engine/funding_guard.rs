@@ -1,13 +1,19 @@
-//! New entries must have a known funding boundary and exit before it.
+//! New entries must have a known funding boundary. EMA trades exit before it;
+//! explicitly admitted funding captures exit just after synchronized payments.
 use super::utils::now_ms;
 use crate::state::{EngineContext, FundingInfo};
 use reqwest::Client;
 use serde_json::Value;
 
 pub const EXIT_BUFFER_MS: i64 = 60_000;
-// Settlement schedules are stable for hours. Match the persisted five-minute
-// technical default so one hot candidate cannot monopolize the prewarm lane.
-const CACHE_TTL_MS: i64 = 300_000;
+pub const CAPTURE_EXIT_DELAY_MS: i64 = 30_000;
+const CAPTURE_MIN_LEAD_MS: i64 = 60_000;
+const CAPTURE_MAX_LEAD_MS: i64 = 300_000;
+const CAPTURE_MAX_SETTLEMENT_SKEW_MS: i64 = 60_000;
+// The schedule is stable for hours, but the rate being captured is not. The
+// preflight already refreshes open-order state every five seconds, so a
+// thirty-second funding refresh adds little load and keeps entry fail-closed.
+const CACHE_TTL_MS: i64 = 30_000;
 
 fn cache_key(exchange: &str, pair: &str) -> String {
     format!("{exchange}:{pair}")
@@ -39,12 +45,59 @@ pub fn cached_next(ctx: &EngineContext, exchange: &str, pair: &str) -> Option<i6
         .and_then(|info| valid_cached_timestamp(info.value(), now))
 }
 
+pub fn cached_info(ctx: &EngineContext, exchange: &str, pair: &str) -> Option<FundingInfo> {
+    let now = now_ms();
+    ctx.funding_rates
+        .get(&cache_key(exchange, pair))
+        .and_then(|info| valid_cached_timestamp(info.value(), now).map(|_| info.value().clone()))
+}
+
 pub fn deadline(next_a: i64, next_b: i64, now: i64) -> Option<i64> {
     let next = next_a.min(next_b);
     // No new exposure in the five minutes immediately before settlement.
     (next > now + 300_000 && next <= now + 86_400_000).then_some(next - EXIT_BUFFER_MS)
 }
-async fn fetch_next(http: &Client, exchange: &str, pair: &str) -> anyhow::Result<i64> {
+
+/// A funding capture must own both legs before both settlements and must close
+/// shortly after the later one. The profile's ordinary holding limit remains
+/// the hard upper bound, so this strategy cannot silently become a multi-hour
+/// carry trade.
+pub fn capture_window(
+    next_a: i64,
+    next_b: i64,
+    now: i64,
+    max_holding_ms: i64,
+) -> Option<(i64, i64)> {
+    let first = next_a.min(next_b);
+    let settlement = next_a.max(next_b);
+    let exit = settlement.checked_add(CAPTURE_EXIT_DELAY_MS)?;
+    (max_holding_ms > CAPTURE_EXIT_DELAY_MS
+        && first > now + CAPTURE_MIN_LEAD_MS
+        && settlement <= now + CAPTURE_MAX_LEAD_MS
+        && next_a.abs_diff(next_b) <= CAPTURE_MAX_SETTLEMENT_SKEW_MS as u64
+        && exit > now
+        && exit - now <= max_holding_ms)
+        .then_some((settlement, exit))
+}
+
+fn rate(value: &Value, key: &str) -> Option<f64> {
+    value[key]
+        .as_f64()
+        .or_else(|| value[key].as_str().and_then(|raw| raw.parse().ok()))
+        .filter(|rate: &f64| rate.is_finite() && rate.abs() <= 0.1)
+}
+
+fn kucoin_current_cycle_rate(data: &Value) -> Option<f64> {
+    match data["period"].as_i64() {
+        // KuCoin documents period=0 as a cross-period record that is not
+        // charged in the current cycle.
+        Some(0) => Some(0.0),
+        Some(1) => rate(data, "fundingFeeRate"),
+        _ => None,
+    }
+}
+
+async fn fetch_next(http: &Client, exchange: &str, pair: &str) -> anyhow::Result<FundingInfo> {
     anyhow::ensure!(
         pair.ends_with("USDT") && pair.bytes().all(|b| b.is_ascii_alphanumeric()),
         "Invalid funding symbol"
@@ -82,22 +135,25 @@ async fn fetch_next(http: &Client, exchange: &str, pair: &str) -> anyhow::Result
         .error_for_status()?
         .json()
         .await?;
-    let timestamp = match exchange {
+    let (timestamp, funding_rate) = match exchange {
         "binance" => {
             anyhow::ensure!(
                 v["symbol"].as_str() == Some(&symbol),
                 "Funding symbol mismatch"
             );
-            v["nextFundingTime"].as_i64()
+            (v["nextFundingTime"].as_i64(), rate(&v, "lastFundingRate"))
         }
         "gate" => {
             anyhow::ensure!(
                 v["name"].as_str() == Some(&symbol),
                 "Funding symbol mismatch"
             );
-            v["funding_next_apply"]
-                .as_i64()
-                .and_then(|x| x.checked_mul(1000))
+            (
+                v["funding_next_apply"]
+                    .as_i64()
+                    .and_then(|x| x.checked_mul(1000)),
+                rate(&v, "funding_rate"),
+            )
         }
         "kucoin" => {
             anyhow::ensure!(
@@ -106,16 +162,25 @@ async fn fetch_next(http: &Client, exchange: &str, pair: &str) -> anyhow::Result
                 "Funding symbol mismatch"
             );
             // Absolute epoch milliseconds, not the countdown nextFundingRateTime.
-            v["data"]["nextFundingRateDateTime"].as_i64()
+            (
+                v["data"]["nextFundingRateDateTime"].as_i64(),
+                kucoin_current_cycle_rate(&v["data"]),
+            )
         }
-        _ => None,
-    }
-    .ok_or_else(|| anyhow::anyhow!("Missing funding settlement timestamp"))?;
+        _ => (None, None),
+    };
+    let timestamp = timestamp
+        .ok_or_else(|| anyhow::anyhow!("Missing funding settlement timestamp"))?;
+    let funding_rate = funding_rate.ok_or_else(|| anyhow::anyhow!("Missing funding rate"))?;
     anyhow::ensure!(
         timestamp > now_ms() && timestamp <= now_ms() + 86_400_000,
         "Stale funding schedule"
     );
-    Ok(timestamp)
+    Ok(FundingInfo {
+        rate: funding_rate,
+        next_ts: timestamp,
+        fetched_at: now_ms(),
+    })
 }
 
 /// Return an authoritative recent funding boundary. Funding schedules are public
@@ -136,15 +201,9 @@ pub async fn next(
     {
         return Ok(timestamp);
     }
-    let timestamp = fetch_next(http, exchange, pair).await?;
-    ctx.funding_rates.insert(
-        key,
-        FundingInfo {
-            rate: 0.0,
-            next_ts: timestamp,
-            fetched_at: now_ms(),
-        },
-    );
+    let info = fetch_next(http, exchange, pair).await?;
+    let timestamp = info.next_ts;
+    ctx.funding_rates.insert(key, info);
     Ok(timestamp)
 }
 #[cfg(test)]
@@ -156,6 +215,42 @@ mod tests {
         assert_eq!(deadline(300_000, 900_000, 0), None);
         assert_eq!(deadline(600, 900_000, 0), None);
         assert_eq!(deadline(90_000_000, 95_000_000, 0), None);
+    }
+
+    #[test]
+    fn capture_requires_synchronized_settlement_inside_holding_limit() {
+        assert_eq!(
+            capture_window(240_000, 240_030, 0, 300_000),
+            Some((240_030, 270_030)),
+        );
+        assert_eq!(capture_window(240_000, 301_000, 0, 700_000), None);
+        assert_eq!(capture_window(60_000, 60_000, 0, 700_000), None);
+        assert_eq!(capture_window(300_001, 300_001, 0, 700_000), None);
+        assert_eq!(capture_window(240_000, 240_000, 0, 240_000), None);
+    }
+
+    #[test]
+    fn public_rate_parser_rejects_nonfinite_and_implausible_values() {
+        assert_eq!(rate(&serde_json::json!({"r":"-0.0025"}), "r"), Some(-0.0025));
+        assert_eq!(rate(&serde_json::json!({"r":0.003}), "r"), Some(0.003));
+        assert_eq!(rate(&serde_json::json!({"r":"NaN"}), "r"), None);
+        assert_eq!(rate(&serde_json::json!({"r":0.2}), "r"), None);
+        assert_eq!(
+            kucoin_current_cycle_rate(
+                &serde_json::json!({"period":1,"fundingFeeRate":-0.002})
+            ),
+            Some(-0.002),
+        );
+        assert_eq!(
+            kucoin_current_cycle_rate(
+                &serde_json::json!({"period":0,"fundingFeeRate":-0.002})
+            ),
+            Some(0.0),
+        );
+        assert_eq!(
+            kucoin_current_cycle_rate(&serde_json::json!({"fundingFeeRate":-0.002})),
+            None,
+        );
     }
 
     #[test]

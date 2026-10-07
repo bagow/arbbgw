@@ -61,6 +61,34 @@ static FIRST_SEEN: OnceLock<DashMap<String, ObservationQuality>> = OnceLock::new
 pub const DISCOVERY_PREWARM_RATIO: f64 = 0.4;
 const MAX_DISCOVERY_SOURCE_SKEW_MS: i64 = 3_000;
 
+fn select_price_or_funding_direction(
+    name_a: &str,
+    name_b: &str,
+    a_over_b: f64,
+    b_over_a: f64,
+    funding_a: f64,
+    funding_b: f64,
+) -> (f64, String, bool) {
+    let funding_diff_pct = (funding_a - funding_b).abs() * 100.0;
+    let funding_watch = funding_a.is_finite()
+        && funding_b.is_finite()
+        && funding_a.abs() <= 0.1
+        && funding_b.abs() <= 0.1
+        && funding_diff_pct
+            >= crate::engine::scanner_common::FUNDING_CAPTURE_WATCH_EDGE_PCT;
+    if funding_watch {
+        if funding_a >= funding_b {
+            (a_over_b, format!("{name_a}>{name_b}"), true)
+        } else {
+            (b_over_a, format!("{name_b}>{name_a}"), true)
+        }
+    } else if a_over_b >= b_over_a {
+        (a_over_b, format!("{name_a}>{name_b}"), false)
+    } else {
+        (b_over_a, format!("{name_b}>{name_a}"), false)
+    }
+}
+
 fn exact_discovery_sources_are_fresh(
     source_ms_a: i64,
     source_ms_b: i64,
@@ -306,11 +334,18 @@ pub fn compute_spreads(
                 // ── DIRECTIONAL ARBITRAGE SPREAD ──
                 let a_over_b = (data_a.bid - data_b.ask) / data_b.ask * 100.0;
                 let b_over_a = (data_b.bid - data_a.ask) / data_a.ask * 100.0;
-                let (spread, direction) = if a_over_b >= b_over_a {
-                    (a_over_b, format!("{name_a}>{name_b}"))
-                } else {
-                    (b_over_a, format!("{name_b}>{name_a}"))
-                };
+                // A large one-payment funding edge must be observed in the
+                // actual receive-funding direction, even when that means
+                // buying the higher-priced venue and the executable basis is
+                // negative. Final admission never counts that basis as profit.
+                let (spread, direction, funding_watch) = select_price_or_funding_direction(
+                    name_a,
+                    name_b,
+                    a_over_b,
+                    b_over_a,
+                    data_a.funding_rate,
+                    data_b.funding_rate,
+                );
 
                 // ── STRUCTURAL SPREAD (EXECUTABLE SPREAD EMA) ──
                 let is_a_first = name_a < name_b;
@@ -451,7 +486,10 @@ pub fn compute_spreads(
                 }
                 let is_verified = verified.contains(&ema_key);
 
-                if spread < ts.spread_threshold || spread > ts.spread_max {
+                if (spread < ts.spread_threshold && !funding_watch)
+                    || spread > ts.spread_max
+                    || spread < -ts.spread_max
+                {
                     cnt_spread_range += 1;
                     continue;
                 }
@@ -649,6 +687,27 @@ pub fn unverified_ema_keys() -> Vec<String> {
 #[cfg(test)]
 mod quality_tests {
     use super::*;
+
+    #[test]
+    fn large_funding_difference_selects_the_receive_direction() {
+        let (spread, direction, funding_watch) = select_price_or_funding_direction(
+            "binance",
+            "kucoin",
+            0.2,
+            -0.3,
+            -0.004,
+            -0.001,
+        );
+        assert!(funding_watch);
+        assert_eq!(direction, "kucoin>binance");
+        assert_eq!(spread, -0.3);
+
+        let (_, direction, funding_watch) = select_price_or_funding_direction(
+            "binance", "kucoin", 0.2, -0.3, 0.0001, 0.0001,
+        );
+        assert!(!funding_watch);
+        assert_eq!(direction, "binance>kucoin");
+    }
 
     #[test]
     fn active_profile_prewarms_below_entry_without_lowering_entry_setting() {

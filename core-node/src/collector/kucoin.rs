@@ -191,18 +191,24 @@ fn parse_contract_universe(
         symbol_map.insert(symbol.to_string(), (normalized.clone(), multiplier));
 
         let volume_usd = contract["turnoverOf24h"].as_f64().unwrap_or(0.0);
-        let funding_rate = contract["fundingFeeRate"]
-            .as_f64()
-            .filter(|rate| rate.is_finite() && rate.abs() <= 0.1);
+        let funding_rate = match contract["period"].as_i64() {
+            // A cross-period record is visible but is explicitly not charged
+            // at the next settlement.
+            Some(0) => Some(0.0),
+            Some(1) => contract["fundingFeeRate"]
+                .as_f64()
+                .filter(|rate| rate.is_finite() && rate.abs() <= 0.1),
+            _ => None,
+        };
         if volume_usd > 0.0 || funding_rate.is_some() {
             let mut entry = price_map.entry("kucoin".to_string()).or_default();
             let ticker = entry.entry(normalized).or_default();
             if volume_usd > 0.0 {
                 ticker.vol = volume_usd;
             }
-            if let Some(funding_rate) = funding_rate {
-                ticker.funding_rate = funding_rate;
-            }
+            // Missing/invalid current-cycle metadata must clear the previous
+            // observation rather than leave a stale funding direction alive.
+            ticker.funding_rate = funding_rate.unwrap_or(0.0);
         }
     }
     symbols.sort_unstable();
@@ -1156,8 +1162,8 @@ mod tests {
     fn turnover_refresh_keeps_streams_but_identity_changes_require_rebuild() {
         let prices = PriceMap::default();
         let payload = serde_json::json!({"data":[
-            {"symbol":"XBTUSDTM","multiplier":0.001,"turnoverOf24h":400000.0,"fundingFeeRate":0.0002},
-            {"symbol":"ETHUSDTM","multiplier":0.01,"turnoverOf24h":900000.0,"fundingFeeRate":-0.0001},
+            {"symbol":"XBTUSDTM","multiplier":0.001,"turnoverOf24h":400000.0,"period":1,"fundingFeeRate":0.0002},
+            {"symbol":"ETHUSDTM","multiplier":0.01,"turnoverOf24h":900000.0,"period":0,"fundingFeeRate":-0.0001},
             {"symbol":"ETHUSDM","multiplier":0.01,"turnoverOf24h":1.0}
         ]});
         let initial = parse_contract_universe(&payload, &prices).unwrap();
@@ -1179,6 +1185,15 @@ mod tests {
                 .funding_rate,
             0.0002,
         );
+        assert_eq!(
+            prices
+                .get("kucoin")
+                .unwrap()
+                .get("ETHUSDT")
+                .unwrap()
+                .funding_rate,
+            0.0,
+        );
 
         let volume_only = serde_json::json!({"data":[
             {"symbol":"ETHUSDTM","multiplier":0.01,"turnoverOf24h":950000.0},
@@ -1197,7 +1212,7 @@ mod tests {
                 .get("BTCUSDT")
                 .unwrap()
                 .funding_rate,
-            0.0002,
+            0.0,
         );
 
         let multiplier_change = serde_json::json!({"data":[

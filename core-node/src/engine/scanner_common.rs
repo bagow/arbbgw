@@ -10,6 +10,74 @@
 /// guaranteed cost can make the configured entry window mathematically
 /// unreachable (for example a 2% ceiling with a 2.5% maximum spread).
 pub const EXPECTED_IOC_SLIPPAGE_PER_LEG_PCT: f64 = 0.02;
+/// Funding routes below this projected one-payment edge are not worth spending
+/// scarce executable-book and private-preflight capacity on. Final admission
+/// is substantially stricter and uses immediate liquidation economics.
+pub const FUNDING_CAPTURE_WATCH_EDGE_PCT: f64 = 0.10;
+/// Projected rates can still change before settlement and the two leg
+/// notionals are never perfectly identical. Spend only this fraction of the
+/// displayed differential when authorizing an order.
+pub const FUNDING_CAPTURE_CREDIT_HAIRCUT: f64 = 0.80;
+/// Large venue dislocations are precisely where historical funding captures
+/// lost more to basis movement than they received in funding. Do not enter
+/// that regime even if the instantaneous liquidation snapshot still fits.
+pub const FUNDING_CAPTURE_MAX_BASIS_PCT: f64 = 0.50;
+
+/// Funding received by the short leg minus funding paid by the long leg, in
+/// percentage points of notional. A negative value means the selected spread
+/// direction would pay more funding than it receives.
+pub fn directional_funding_edge_pct(
+    exchange_a: &str,
+    direction: &str,
+    funding_a: f64,
+    funding_b: f64,
+) -> Option<f64> {
+    if exchange_a.is_empty()
+        || direction.is_empty()
+        || !funding_a.is_finite()
+        || !funding_b.is_finite()
+        || funding_a.abs() > 0.1
+        || funding_b.abs() > 0.1
+    {
+        return None;
+    }
+    let edge = if direction.starts_with(exchange_a) {
+        funding_a - funding_b
+    } else {
+        funding_b - funding_a
+    } * 100.0;
+    edge.is_finite().then_some(edge)
+}
+
+pub fn conservative_funding_credit_pct(edge_pct: f64) -> Option<f64> {
+    (edge_pct.is_finite() && edge_pct > 0.0)
+        .then_some(edge_pct * FUNDING_CAPTURE_CREDIT_HAIRCUT)
+}
+
+/// Remaining IOC movement budget after a synchronized funding payment covers
+/// the loss from immediately unwinding the newly opened position and the
+/// configured minimum profit. This deliberately does not count the visible
+/// cross-venue basis as profit: unchanged basis produces no trading PnL.
+pub fn funding_capture_budget(
+    immediate_liquidation_net_pct: f64,
+    funding_edge_pct: f64,
+    minimum_profit_pct: f64,
+) -> Option<f64> {
+    if ![
+        immediate_liquidation_net_pct,
+        funding_edge_pct,
+        minimum_profit_pct,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+        || funding_edge_pct <= 0.0
+        || minimum_profit_pct < 0.0
+    {
+        return None;
+    }
+    let budget = immediate_liquidation_net_pct + funding_edge_pct - minimum_profit_pct;
+    (budget > 0.0).then_some(budget)
+}
 
 /// Fees for entry and exit on both venues, plus the expected cost of four IOC
 /// legs. Fee rates are fractional (0.0005 = 0.05%); the result is a percent.
@@ -371,6 +439,35 @@ mod tests {
     fn ioc_break_even_uses_expected_cost_not_price_limit_ceiling() {
         // Four 0.05% taker fees + four expected 0.02% slips = 0.28%.
         assert!((ioc_break_even_pct(0.0005, 0.0005) - 0.28).abs() < 1e-12);
+    }
+
+    #[test]
+    fn funding_edge_follows_the_actual_short_and_long_legs() {
+        assert_eq!(
+            directional_funding_edge_pct("binance", "binance>kucoin", 0.003, 0.0005),
+            Some(0.25),
+        );
+        assert_eq!(
+            directional_funding_edge_pct("binance", "kucoin>binance", -0.004, -0.001),
+            Some(0.3),
+        );
+        assert!((conservative_funding_credit_pct(0.3).unwrap() - 0.24).abs() < 1e-12);
+        assert!(directional_funding_edge_pct(
+            "binance",
+            "binance>kucoin",
+            f64::NAN,
+            0.0,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn funding_capture_never_counts_visible_basis_as_realized_profit() {
+        // A 0.31% funding credit does not pass when immediate liquidation is
+        // -0.24% and the profile requires a retained 0.10% profit.
+        assert!(funding_capture_budget(-0.24, 0.31, 0.10).is_none());
+        let budget = funding_capture_budget(-0.20, 0.35, 0.10).unwrap();
+        assert!((budget - 0.05).abs() < 1e-12);
     }
 
     #[test]

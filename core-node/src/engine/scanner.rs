@@ -183,7 +183,7 @@ fn executable_l2_spread(
 /// Price the immediate reduce-only unwind that managed risk evaluates after
 /// entry. The scanner rejects a signal if ordinary crossing costs would put a
 /// new position on its own hard-stop boundary before any adverse move.
-fn initial_l2_liquidation_net_pct(
+pub(crate) fn initial_l2_liquidation_net_pct(
     e_ctx: &EngineContext,
     key_a: &str,
     key_b: &str,
@@ -232,6 +232,42 @@ fn initial_l2_liquidation_net_pct(
         fee_a,
         fee_b,
     )
+}
+
+fn funding_capture_context(
+    row: &SpreadRow,
+    profile: &TradingSettings,
+    e_ctx: &EngineContext,
+    now_ms: i64,
+) -> Option<(f64, i64, i64)> {
+    if profile.strategy_type != "ema"
+        || !row.spread.is_finite()
+        || row.spread.abs()
+            > profile
+                .max_entry_spread
+                .min(crate::engine::scanner_common::FUNDING_CAPTURE_MAX_BASIS_PCT)
+    {
+        return None;
+    }
+    let info_a = crate::engine::funding_guard::cached_info(e_ctx, &row.exchange_a, &row.pair)?;
+    let info_b = crate::engine::funding_guard::cached_info(e_ctx, &row.exchange_b, &row.pair)?;
+    let raw_edge = crate::engine::scanner_common::directional_funding_edge_pct(
+        &row.exchange_a,
+        &row.direction,
+        info_a.rate,
+        info_b.rate,
+    )?;
+    if raw_edge < crate::engine::scanner_common::FUNDING_CAPTURE_WATCH_EDGE_PCT {
+        return None;
+    }
+    let edge = crate::engine::scanner_common::conservative_funding_credit_pct(raw_edge)?;
+    let (settlement, exit) = crate::engine::funding_guard::capture_window(
+        info_a.next_ts,
+        info_b.next_ts,
+        now_ms,
+        profile.max_holding_time_ms,
+    )?;
+    Some((edge, settlement, exit))
 }
 
 /// Core logic of token analysis: translates bare `SpreadRow` into ready-to-execute `TradeSignal`.
@@ -325,16 +361,30 @@ pub fn generate_signals(
             .and_then(|m| m.get(&row.pair).cloned());
 
 
-        // Check if this spread is worth diagnosing (exceeds any active profile's min)
+        let public_funding_edge = crate::engine::scanner_common::directional_funding_edge_pct(
+            &row.exchange_a,
+            &row.direction,
+            row.funding_a,
+            row.funding_b,
+        );
+        let funding_watch = public_funding_edge.is_some_and(|edge| {
+            edge >= crate::engine::scanner_common::FUNDING_CAPTURE_WATCH_EDGE_PCT
+        });
+
+        // Check if this spread is worth diagnosing (ordinary EMA window or a
+        // material funding route which needs executable books before payment).
         let in_profile_window = profiles.iter().any(|p| {
-            p.is_active && row.spread >= p.min_entry_spread && row.spread <= p.max_entry_spread
+            p.is_active
+                && ((row.spread >= p.min_entry_spread && row.spread <= p.max_entry_spread)
+                    || (funding_watch && row.spread.abs() <= p.max_entry_spread))
         });
         let matching_profile = profiles.iter().find(|profile| {
             profile.is_active
                 && !profile.disabled_exchanges.contains(&row.exchange_a)
                 && !profile.disabled_exchanges.contains(&row.exchange_b)
-                && row.spread >= profile.min_entry_spread
-                && row.spread <= profile.max_entry_spread
+                && ((row.spread >= profile.min_entry_spread
+                    && row.spread <= profile.max_entry_spread)
+                    || (funding_watch && row.spread.abs() <= profile.max_entry_spread))
                 && row.vol_a >= profile.min_volume_millions * 1_000_000.0
                 && row.vol_b >= profile.min_volume_millions * 1_000_000.0
         });
@@ -497,9 +547,10 @@ pub fn generate_signals(
             {
                 continue;
             }
-            // Min/max entry spread is the raw executable spread shown in the UI.
-            // Structural deviation is an independent filter with its own off switch.
-            if row.spread < profile.min_entry_spread || row.spread > profile.max_entry_spread {
+            let ema_window = row.spread >= profile.min_entry_spread
+                && row.spread <= profile.max_entry_spread;
+            let capture_context = funding_capture_context(row, profile, e_ctx, now);
+            if !ema_window && capture_context.is_none() {
                 continue;
             }
             // Intentional product rule: listing age is treated as token age from the
@@ -510,7 +561,7 @@ pub fn generate_signals(
                 continue;
             }
 
-            let diag_prefix = if log_diag && row.spread >= profile.min_entry_spread {
+            let diag_prefix = if log_diag && (ema_window || capture_context.is_some()) {
                 Some(format!(
                     "[scanner] REJECT {} ({} vs {}) {}={:.4}%",
                     row.pair, row.exchange_a, row.exchange_b, profile.id, row.spread
@@ -519,73 +570,39 @@ pub fn generate_signals(
                 None
             };
 
-            let stable_regime =
-                crate::engine::scanner_common::directional_structural_regime_is_stable(
-                    row.structural_verified,
-                    row.has_structural_spread,
-                    row.structural_min,
-                    row.structural_max,
-                );
-            let structural_reserve = match stable_regime.then(|| {
-                crate::engine::scanner_common::configured_structural_reserve(
-                    profile.min_structural_deviation,
-                    row.structural_verified,
-                    row.structural_spread,
-                )
-            }) {
-                Some(Some(value)) => value,
-                _ => {
-                    structural_rejections += 1;
-                    if let Some(p) = &diag_prefix {
-                        tracing::debug!(
-                            "{} -> unstable structural regime (verified={}, persistent={}, range={:.4}%..{:.4}%)",
-                            p,
+            let ema_structural_reserve = ema_window
+                .then(|| {
+                    crate::engine::scanner_common::directional_structural_regime_is_stable(
+                        row.structural_verified,
+                        row.has_structural_spread,
+                        row.structural_min,
+                        row.structural_max,
+                    )
+                    .then(|| {
+                        crate::engine::scanner_common::configured_structural_reserve(
+                            profile.min_structural_deviation,
                             row.structural_verified,
-                            row.has_structural_spread,
-                            row.structural_min,
-                            row.structural_max,
-                        );
-                    }
-                    continue;
-                }
-            };
-            let structural_deviation = row.spread - structural_reserve - break_even_pct;
-
-            // The configured deviation is net of the verified structural
-            // baseline and round-trip costs; it is not a replacement for fees.
-            if profile.min_structural_deviation > 0.0
-                && structural_deviation < profile.min_structural_deviation
-            {
+                            row.structural_spread,
+                        )
+                    })
+                    .flatten()
+                })
+                .flatten()
+                .filter(|reserve| {
+                    let structural_deviation = row.spread - *reserve - break_even_pct;
+                    (profile.min_structural_deviation <= 0.0
+                        || structural_deviation >= profile.min_structural_deviation)
+                        && row.spread - *reserve - break_even_pct > 0.0
+                });
+            if capture_context.is_none() && ema_structural_reserve.is_none() {
                 structural_rejections += 1;
                 if let Some(p) = &diag_prefix {
-                    tracing::info!(
-                        "{} -> net ema deviation {:.4}% < {:.4}% req (base: {:.4}%, costs: {:.4}%)",
+                    tracing::debug!(
+                        "{} -> neither verified EMA economics nor synchronized funding capture is admissible",
                         p,
-                        structural_deviation,
-                        profile.min_structural_deviation,
-                        row.structural_spread,
-                        break_even_pct,
                     );
                 }
                 continue;
-            }
-
-            // ── ABSOLUTE STRUCTURAL GUARD (ALWAYS ACTIVE) ──
-            // Blocks entry when spread - structural_spread < break_even (fees).
-            // structural_spread is the EMA baseline — what the spread will converge TO.
-            // If structural_spread ≈ 0 (no premium), this simply checks spread > BE.
-            // If structural_spread is high (persistent premium), this blocks entry
-            // because the spread will never converge enough to cover fees.
-            {
-                let profit_potential = row.spread - structural_reserve - break_even_pct;
-                if profit_potential <= 0.0 {
-                    structural_rejections += 1;
-                    if let Some(p) = &diag_prefix {
-                        tracing::debug!("{} -> structural_guard: profit impossible (spread={:.4}% - structural={:.4}% - BE={:.4}% = {:.4}%)",
-                            p, row.spread, structural_reserve, break_even_pct, profit_potential);
-                    }
-                    continue;
-                }
             }
 
             // ENSURE PERFECT PHYSICAL BALANCE (0.0% COIN DUST)
@@ -652,43 +669,58 @@ pub fn generate_signals(
                     continue;
                 }
             };
-            if crate::engine::scanner_common::entry_execution_budget(
-                executable_spread,
-                profile.min_entry_spread,
-                profile.max_entry_spread,
-                structural_reserve,
-                profile.min_structural_deviation,
-                break_even_pct,
-            )
-            .is_none()
-            {
+            let initial_net_pct = initial_l2_liquidation_net_pct(
+                e_ctx,
+                &key_a,
+                &key_b,
+                is_a_higher,
+                phys_qty,
+                fee_a,
+                fee_b,
+                now,
+            );
+            let minimum_capture_profit = profile.take_profit_percent.max(0.05);
+            let funding_budget = capture_context.and_then(|(edge, _, _)| {
+                initial_net_pct.and_then(|initial| {
+                    crate::engine::scanner_common::funding_capture_budget(
+                        initial,
+                        edge,
+                        minimum_capture_profit,
+                    )
+                    .map(|budget| (edge, budget))
+                })
+            });
+            let ema_budget = ema_structural_reserve.and_then(|reserve| {
+                crate::engine::scanner_common::entry_execution_budget(
+                    executable_spread,
+                    profile.min_entry_spread,
+                    profile.max_entry_spread,
+                    reserve,
+                    profile.min_structural_deviation,
+                    break_even_pct,
+                )
+                .map(|budget| (reserve, budget))
+            });
+            let (funding_capture, expected_funding_pct, structural_reserve, _execution_budget) =
+                if let Some((edge, budget)) = funding_budget {
+                    (true, edge, 0.0, budget)
+                } else if let Some((reserve, budget)) = ema_budget {
+                    (false, 0.0, reserve, budget)
+                } else {
                 l2_budget_rejections += 1;
                 if let Some(p) = &diag_prefix {
-                    let required = profile.min_entry_spread.max(
-                        structural_reserve + break_even_pct + profile.min_structural_deviation,
-                    );
                     tracing::info!(
-                        "{} -> L2 VWAP spread {:.4}% below executable budget {:.4}% (L1 {:.4}%)",
+                        "{} -> neither L2 EMA budget nor funding-covered immediate liquidation passed (L2 {:.4}%, initial_net={:?}%, funding={:?}%)",
                         p,
                         executable_spread,
-                        required,
-                        row.spread,
+                        initial_net_pct.map(|value| (value * 10_000.0).round() / 10_000.0),
+                        capture_context.map(|context| context.0),
                     );
                 }
                 continue;
-            }
+            };
 
             if profile.hard_stop_percent > 0.0 {
-                let initial_net_pct = initial_l2_liquidation_net_pct(
-                    e_ctx,
-                    &key_a,
-                    &key_b,
-                    is_a_higher,
-                    phys_qty,
-                    fee_a,
-                    fee_b,
-                    now,
-                );
                 if !initial_net_pct.is_some_and(|value| {
                     crate::engine::scanner_common::hard_stop_entry_is_compatible(
                         value,
@@ -789,6 +821,8 @@ pub fn generate_signals(
                 // Carry only the baseline that this profile explicitly enabled.
                 structural_spread: structural_reserve,
                 is_a_higher,
+                funding_capture,
+                expected_funding_pct,
 
                 tick_a,
                 tick_b,
@@ -800,8 +834,16 @@ pub fn generate_signals(
     // Rank by executable net edge before retaining one route per profile/pair.
     let signals_before_pair_dedupe = signals.len() as u64;
     signals.sort_by(|a, b| {
-        let edge_a = a.spread - a.structural_spread - a.break_even_pct;
-        let edge_b = b.spread - b.structural_spread - b.break_even_pct;
+        let edge_a = if a.funding_capture {
+            a.expected_funding_pct - a.break_even_pct
+        } else {
+            a.spread - a.structural_spread - a.break_even_pct
+        };
+        let edge_b = if b.funding_capture {
+            b.expected_funding_pct - b.break_even_pct
+        } else {
+            b.spread - b.structural_spread - b.break_even_pct
+        };
         edge_b.total_cmp(&edge_a)
     });
     signals.retain(|signal| emitted_pairs.insert(format!("{}:{}", signal.profile_id, signal.pair)));
@@ -821,10 +863,18 @@ pub fn generate_signals(
             return false;
         };
         let previous = confirmations.get(&route_key).map(|state| *state);
+        let confirmation_value = if signal.funding_capture {
+            // Cross-venue basis is deliberately absent from funding-capture
+            // economics. Require both books to advance for 500 ms; the final
+            // managed preflight rechecks immediate-liquidation profitability.
+            0.0
+        } else {
+            signal.spread
+        };
         let (next, ready) = advance_entry_confirmation(
             previous,
             now,
-            signal.spread,
+            confirmation_value,
             sell_book_ms,
             buy_book_ms,
         );
@@ -867,6 +917,25 @@ pub fn generate_signals(
             })
         })
         .count();
+    let funding_watch_rows = spreads
+        .iter()
+        .take(considered)
+        .filter(|row| {
+            crate::engine::scanner_common::directional_funding_edge_pct(
+                &row.exchange_a,
+                &row.direction,
+                row.funding_a,
+                row.funding_b,
+            )
+            .is_some_and(|edge| {
+                edge >= crate::engine::scanner_common::FUNDING_CAPTURE_WATCH_EDGE_PCT
+            })
+        })
+        .count();
+    let funding_capture_signals = signals
+        .iter()
+        .filter(|signal| signal.funding_capture)
+        .count();
     // Candidate-depth fetches finish asynchronously and publish their own
     // cumulative diagnostics into this map. Keep only those external metrics
     // while replacing every scanner-owned value below; a wholesale clear can
@@ -887,6 +956,8 @@ pub fn generate_signals(
             profiles.iter().filter(|profile| profile.is_active).count() as u64,
         ),
         ("profile_window_rows", profile_window_rows as u64),
+        ("funding_watch_rows", funding_watch_rows as u64),
+        ("funding_capture_signals", funding_capture_signals as u64),
         ("signals_emitted", signals.len() as u64),
         ("signals_before_pair_dedupe", signals_before_pair_dedupe),
         ("signals_awaiting_confirmation", signals_awaiting_confirmation),
@@ -907,6 +978,8 @@ pub fn generate_signals(
     }
     for (key, value) in [
         ("profile_window_rows", profile_window_rows as u64),
+        ("funding_watch_rows", funding_watch_rows as u64),
+        ("funding_capture_signals", funding_capture_signals as u64),
         ("profile_l2_pending_rows", profile_l2_pending_rows),
         ("signals_emitted", signals.len() as u64),
         ("structural_rejections", structural_rejections),
@@ -935,7 +1008,7 @@ pub fn generate_signals(
 #[cfg(test)]
 mod l2_gate_tests {
     use super::*;
-    use crate::state::L2Snapshot;
+    use crate::state::{FundingInfo, L2Snapshot};
 
     fn book(updated_ms: i64) -> L2Snapshot {
         L2Snapshot {
@@ -951,6 +1024,61 @@ mod l2_gate_tests {
         assert!(should_log_l2_pending(route, 10_000));
         assert!(!should_log_l2_pending(route, 19_999));
         assert!(should_log_l2_pending(route, 20_000));
+    }
+
+    #[test]
+    fn funding_capture_context_requires_fresh_rates_and_bounded_basis() {
+        let ctx = EngineContext::default();
+        let now = now_ms();
+        for (exchange, rate) in [("binance", 0.005), ("kucoin", 0.0)] {
+            ctx.funding_rates.insert(
+                format!("{exchange}:TESTUSDT"),
+                FundingInfo {
+                    rate,
+                    next_ts: now + 300_000,
+                    fetched_at: now,
+                },
+            );
+        }
+        let mut profile = TradingSettings::default();
+        profile.max_holding_time_ms = 600_000;
+        profile.max_entry_spread = 5.0;
+        let mut row = SpreadRow {
+            pair: "TESTUSDT".into(),
+            exchange_a: "binance".into(),
+            exchange_b: "kucoin".into(),
+            price_a: 100.0,
+            price_b: 99.9,
+            bid_a: 100.0,
+            ask_a: 100.01,
+            bid_b: 99.89,
+            ask_b: 99.9,
+            bid_size_a_usd: 100.0,
+            ask_size_a_usd: 100.0,
+            bid_size_b_usd: 100.0,
+            ask_size_b_usd: 100.0,
+            source_ms_a: now,
+            source_ms_b: now,
+            vol_a: 1_000_000.0,
+            vol_b: 1_000_000.0,
+            funding_a: 0.005,
+            funding_b: 0.0,
+            structural_spread: 0.0,
+            structural_max: 0.0,
+            structural_min: 0.0,
+            spread: 0.1,
+            direction: "binance>kucoin".into(),
+            has_structural_spread: false,
+            structural_verified: false,
+        };
+        let (credit, settlement, exit) =
+            funding_capture_context(&row, &profile, &ctx, now).unwrap();
+        assert!((credit - 0.4).abs() < 1e-12);
+        assert_eq!(settlement, now + 300_000);
+        assert_eq!(exit, now + 330_000);
+
+        row.spread = 0.51;
+        assert!(funding_capture_context(&row, &profile, &ctx, now).is_none());
     }
 
     #[test]

@@ -121,6 +121,15 @@ pub struct TradeSignal {
     pub spread: f64,
     pub structural_spread: f64,
     pub is_a_higher: bool,
+    /// True when admission is funded by the next synchronized funding payment
+    /// rather than an assumed EMA convergence. Old persisted plans default to
+    /// the ordinary EMA semantics.
+    #[serde(default)]
+    pub funding_capture: bool,
+    /// Conservative net funding credit expected at the synchronized payment,
+    /// expressed in percentage points of one leg's entry notional.
+    #[serde(default)]
+    pub expected_funding_pct: f64,
 
     // Base math contexts (in case emergency closes or logging needs them)
     pub tick_a: f64,

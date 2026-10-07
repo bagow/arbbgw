@@ -59,7 +59,7 @@ pub fn binance_depth_rest_fallback_metrics() -> (u64, u64) {
 }
 
 fn pair_cooldown_after_close(reason: &str) -> i64 {
-    if matches!(reason, "TP" | "MANUAL_CLOSE") {
+    if matches!(reason, "TP" | "MANUAL_CLOSE" | "FUNDING_CAPTURE_COMPLETE") {
         NORMAL_EXIT_PAIR_COOLDOWN_MS
     } else {
         RISK_EXIT_PAIR_COOLDOWN_MS
@@ -956,13 +956,73 @@ async fn enter(
             record_entry_decision(ctx, "rejected_live_margin");
             continue;
         }
-        let funding_deadline_ms = super::funding_guard::cached_next(ctx, &s.exchange_a, &s.pair)
-            .zip(super::funding_guard::cached_next(ctx, &s.exchange_b, &s.pair))
-            .and_then(|(a, b)| super::funding_guard::deadline(a, b, now_ms()));
-        if funding_deadline_ms.is_none() {
-            record_entry_decision(ctx, "rejected_funding_cache");
-            continue;
-        }
+        let (
+            funding_deadline_ms,
+            funding_settlement_ms,
+            funding_rate_a,
+            funding_rate_b,
+            live_funding_edge_pct,
+        ) = if s.funding_capture {
+                let Some((info_a, info_b)) = super::funding_guard::cached_info(
+                    ctx,
+                    &s.exchange_a,
+                    &s.pair,
+                )
+                .zip(super::funding_guard::cached_info(
+                    ctx,
+                    &s.exchange_b,
+                    &s.pair,
+                ))
+                else {
+                    record_entry_decision(ctx, "rejected_funding_cache");
+                    continue;
+                };
+                let Some(raw_edge) = super::scanner_common::directional_funding_edge_pct(
+                    &s.exchange_a,
+                    &s.direction,
+                    info_a.rate,
+                    info_b.rate,
+                )
+                .filter(|edge| {
+                    *edge >= super::scanner_common::FUNDING_CAPTURE_WATCH_EDGE_PCT
+                })
+                else {
+                    record_entry_decision(ctx, "rejected_funding_edge");
+                    continue;
+                };
+                let Some(edge) =
+                    super::scanner_common::conservative_funding_credit_pct(raw_edge)
+                else {
+                    record_entry_decision(ctx, "rejected_funding_edge");
+                    continue;
+                };
+                let Some((settlement, exit)) = super::funding_guard::capture_window(
+                    info_a.next_ts,
+                    info_b.next_ts,
+                    now_ms(),
+                    p.max_holding_time_ms,
+                ) else {
+                    record_entry_decision(ctx, "rejected_funding_capture_window");
+                    continue;
+                };
+                (
+                    Some(exit),
+                    Some(settlement),
+                    Some(info_a.rate),
+                    Some(info_b.rate),
+                    edge,
+                )
+            } else {
+                let deadline = super::funding_guard::cached_next(ctx, &s.exchange_a, &s.pair)
+                    .zip(super::funding_guard::cached_next(ctx, &s.exchange_b, &s.pair))
+                    .and_then(|(a, b)| super::funding_guard::deadline(a, b, now_ms()));
+                if deadline.is_none() {
+                    record_entry_decision(ctx, "rejected_funding_cache");
+                    continue;
+                }
+                (deadline, None, None, None, 0.0)
+            };
+        s.expected_funding_pct = live_funding_edge_pct;
         if !super::scanner::execution_books_are_fresh(
             ctx,
             &format!("{}:{}", s.exchange_a, s.pair),
@@ -1041,37 +1101,78 @@ async fn enter(
         } else {
             (pb - pa) / pa * 100.0
         };
-        let _initial_budget = match super::scanner_common::entry_execution_budget(
-            gross,
-            p.min_entry_spread,
-            p.max_entry_spread,
-            s.structural_spread,
-            p.min_structural_deviation,
-            s.break_even_pct,
-        ) {
-            Some(value) => value,
-            None => {
-                let required_floor = p
-                    .min_entry_spread
-                    .max(s.structural_spread + s.break_even_pct + p.min_structural_deviation);
-                tracing::info!(
-                    "[managed] Entry budget rejected {}: signal={:.4}% fresh_l2={:.4}% required={:.4}% structural={:.4}% break_even={:.4}% window={:.4}%..={:.4}%",
-                    s.pair,
-                    s.spread,
-                    gross,
-                    required_floor,
-                    s.structural_spread,
-                    s.break_even_pct,
-                    p.min_entry_spread,
-                    p.max_entry_spread,
-                );
-                record_entry_decision(ctx, "rejected_entry_budget");
+        let budget = if s.funding_capture {
+            if !gross.is_finite()
+                || gross.abs()
+                    > p.max_entry_spread
+                        .min(super::scanner_common::FUNDING_CAPTURE_MAX_BASIS_PCT)
+            {
+                record_entry_decision(ctx, "rejected_funding_basis");
                 continue;
+            }
+            let initial_net = super::scanner::initial_l2_liquidation_net_pct(
+                ctx,
+                &format!("{}:{}", s.exchange_a, s.pair),
+                &format!("{}:{}", s.exchange_b, s.pair),
+                s.is_a_higher,
+                s.target_qty_a,
+                fee_a,
+                fee_b,
+                now_ms(),
+            );
+            match initial_net.and_then(|initial| {
+                super::scanner_common::funding_capture_budget(
+                    initial,
+                    live_funding_edge_pct,
+                    p.take_profit_percent.max(0.05),
+                )
+            }) {
+                Some(value) => value,
+                None => {
+                    tracing::info!(
+                        "[managed] Funding capture rejected {}: immediate_net={:?}% funding={:.4}% required_profit={:.4}%",
+                        s.pair,
+                        initial_net.map(|value| (value * 10_000.0).round() / 10_000.0),
+                        live_funding_edge_pct,
+                        p.take_profit_percent.max(0.05),
+                    );
+                    record_entry_decision(ctx, "rejected_funding_liquidation_budget");
+                    continue;
+                }
+            }
+        } else {
+            match super::scanner_common::entry_execution_budget(
+                gross,
+                p.min_entry_spread,
+                p.max_entry_spread,
+                s.structural_spread,
+                p.min_structural_deviation,
+                s.break_even_pct,
+            ) {
+                Some(value) => value,
+                None => {
+                    let required_floor = p.min_entry_spread.max(
+                        s.structural_spread + s.break_even_pct + p.min_structural_deviation,
+                    );
+                    tracing::info!(
+                        "[managed] Entry budget rejected {}: signal={:.4}% fresh_l2={:.4}% required={:.4}% structural={:.4}% break_even={:.4}% window={:.4}%..={:.4}%",
+                        s.pair,
+                        s.spread,
+                        gross,
+                        required_floor,
+                        s.structural_spread,
+                        s.break_even_pct,
+                        p.min_entry_spread,
+                        p.max_entry_spread,
+                    );
+                    record_entry_decision(ctx, "rejected_entry_budget");
+                    continue;
+                }
             }
         };
         // Compare the current executable books with the snapshot that emitted
         // the signal. There is deliberately no fixed sleep or network preflight.
-        if entry_spread_is_widening(s.spread, gross) {
+        if !s.funding_capture && entry_spread_is_widening(s.spread, gross) {
             tracing::info!(
                 "[managed] Direction confirmation rejected {} after {}ms: executable L2 widened {:.4}% -> {:.4}%",
                 s.pair,
@@ -1082,30 +1183,6 @@ async fn enter(
             record_entry_decision(ctx, "rejected_widening_l2");
             continue;
         }
-        let budget = match super::scanner_common::entry_execution_budget(
-            gross,
-            p.min_entry_spread,
-            p.max_entry_spread,
-            s.structural_spread,
-            p.min_structural_deviation,
-            s.break_even_pct,
-        ) {
-            Some(value) => value,
-            None => {
-                let required_floor = p
-                    .min_entry_spread
-                    .max(s.structural_spread + s.break_even_pct + p.min_structural_deviation);
-                tracing::info!(
-                    "[managed] Direction confirmation budget rejected {}: signal_l2={:.4}% final_l2={:.4}% required={:.4}%",
-                    s.pair,
-                    s.spread,
-                    gross,
-                    required_floor,
-                );
-                record_entry_decision(ctx, "rejected_direction_confirmation_budget");
-                continue;
-            }
-        };
         let half = (budget / 2.0).min(p.slippage_percent);
         if half < 0.0 {
             record_entry_decision(ctx, "rejected_slippage_budget");
@@ -1124,7 +1201,14 @@ async fn enter(
             record_entry_decision(ctx, "rejected_authorization");
             continue;
         }
-        let plan = Plan { funding_deadline_ms, signal: s.clone(), settings: p.clone() };
+        let plan = Plan {
+            funding_deadline_ms,
+            funding_settlement_ms,
+            funding_rate_a,
+            funding_rate_b,
+            signal: s.clone(),
+            settings: p.clone(),
+        };
         let mut t = ManagedTrade {
             id: 0,
             state: "ENTRY".into(),
@@ -1372,7 +1456,17 @@ async fn manage(
                     .fee_with_reserve(super::utils::get_exchange_fee(&o.exchange, &s.pair, 0.001, ctx))
             })
             .sum();
-        let percent = (pnl - entry_fees - reserve) / a.entry_value.max(1e-12) * 100.0;
+        let funding_credit_pct = if s.funding_capture
+            && t.plan
+                .funding_settlement_ms
+                .is_some_and(|settlement| now_ms() >= settlement)
+        {
+            s.expected_funding_pct
+        } else {
+            0.0
+        };
+        let percent = (pnl - entry_fees - reserve) / a.entry_value.max(1e-12) * 100.0
+            + funding_credit_pct;
         let peak = j.mark_to_market(t.id, pa, pb, pnl, percent).await?;
         // TP must remain profitable at both hard IOC limits, not merely at
         // their average prices. Otherwise a multi-level book creates partial
@@ -1418,7 +1512,11 @@ async fn manage(
             .filter(|s| !s.is_empty())
             .unwrap_or("INTERRUPTED_ENTRY")
     } else if funding_due {
-        "FUNDING_BOUNDARY"
+        if s.funding_capture {
+            "FUNDING_CAPTURE_COMPLETE"
+        } else {
+            "FUNDING_BOUNDARY"
+        }
     } else if timed {
         "TIME_STOP"
     } else if hard_stop {
@@ -1517,6 +1615,7 @@ mod transport_tests {
     fn risk_exits_quarantine_the_pair_longer_than_normal_exits() {
         assert_eq!(pair_cooldown_after_close("TP"), 60_000);
         assert_eq!(pair_cooldown_after_close("MANUAL_CLOSE"), 60_000);
+        assert_eq!(pair_cooldown_after_close("FUNDING_CAPTURE_COMPLETE"), 60_000);
         assert_eq!(pair_cooldown_after_close("HARD_STOP"), 1_800_000);
         assert_eq!(pair_cooldown_after_close("HEDGE_UNAVAILABLE"), 1_800_000);
     }
