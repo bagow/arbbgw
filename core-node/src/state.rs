@@ -28,8 +28,10 @@ pub struct L2Snapshot {
     pub bids: Vec<(f64, f64)>,
     /// Sorted ascending by price (best ask first)
     pub asks: Vec<(f64, f64)>,
-    /// Unix millis of last update
+    /// Exchange-side unix millis of last update (used for per-book freshness)
     pub updated_ms: i64,
+    /// Local unix millis when this snapshot was received (used for cross-exchange skew)
+    pub received_ms: i64,
 }
 
 /// Fired after every WS tick update. Engine wakes up and recomputes spreads.

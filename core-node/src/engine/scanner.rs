@@ -133,13 +133,13 @@ pub(crate) fn execution_books_are_fresh(
     if !valid(key_a) || !valid(key_b) {
         return false;
     }
-    let Some(updated_a) = e_ctx.l2_books.get(key_a).map(|book| book.updated_ms) else {
+    let Some(received_a) = e_ctx.l2_books.get(key_a).map(|book| book.received_ms) else {
         return false;
     };
-    let Some(updated_b) = e_ctx.l2_books.get(key_b).map(|book| book.updated_ms) else {
+    let Some(received_b) = e_ctx.l2_books.get(key_b).map(|book| book.received_ms) else {
         return false;
     };
-    updated_a.abs_diff(updated_b) <= MAX_EXECUTION_BOOK_SKEW_MS as u64
+    received_a.abs_diff(received_b) <= MAX_EXECUTION_BOOK_SKEW_MS as u64
 }
 
 /// Price the complete physical quantity against both executable books.
@@ -1020,6 +1020,7 @@ mod l2_gate_tests {
             bids: vec![(100.0, 1.0)],
             asks: vec![(101.0, 1.0)],
             updated_ms,
+            received_ms: updated_ms,
         }
     }
 
@@ -1205,6 +1206,7 @@ mod l2_gate_tests {
                 bids: vec![(110.0, 0.02), (99.0, 1.0)],
                 asks: vec![(111.0, 1.0)],
                 updated_ms: now,
+                received_ms: now,
             },
         );
         ctx.l2_books.insert(
@@ -1213,6 +1215,7 @@ mod l2_gate_tests {
                 bids: vec![(98.0, 1.0)],
                 asks: vec![(100.0, 0.02), (101.0, 1.0)],
                 updated_ms: now,
+                received_ms: now,
             },
         );
 
@@ -1248,6 +1251,7 @@ mod l2_gate_tests {
                 bids: vec![(101.0, 2.0)],
                 asks: vec![(101.2, 2.0)],
                 updated_ms: now,
+                received_ms: now,
             },
         );
         ctx.l2_books.insert(
@@ -1256,6 +1260,7 @@ mod l2_gate_tests {
                 bids: vec![(99.8, 2.0)],
                 asks: vec![(100.0, 2.0)],
                 updated_ms: now,
+                received_ms: now,
             },
         );
         let immediate = initial_l2_liquidation_net_pct(
@@ -1280,6 +1285,7 @@ mod l2_gate_tests {
                 bids: vec![(101.0, 2.0)],
                 asks: vec![(101.02, 2.0)],
                 updated_ms: now,
+                received_ms: now,
             },
         );
         ctx.l2_books.insert(
@@ -1288,6 +1294,7 @@ mod l2_gate_tests {
                 bids: vec![(99.98, 2.0)],
                 asks: vec![(100.0, 2.0)],
                 updated_ms: now,
+                received_ms: now,
             },
         );
         let tight = initial_l2_liquidation_net_pct(

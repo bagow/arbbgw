@@ -741,7 +741,7 @@ async fn run_pro_depth(
                     }
                     l2_books.insert(
                         format!("kucoin:{normalized}"),
-                        L2Snapshot { bids, asks, updated_ms: source_ms },
+                        L2Snapshot { bids, asks, updated_ms: source_ms, received_ms: now_ms },
                     );
                     pro_depth_updates().insert(normalized.to_string(), source_ms);
                     if is_snapshot {
@@ -1080,6 +1080,7 @@ async fn run_ws(
                                                 bids,
                                                 asks,
                                                 updated_ms: source_ms,
+                                                received_ms: now_ms,
                                             },
                                         );
                                         signal.notify_one();

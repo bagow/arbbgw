@@ -355,7 +355,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                     let key = format!("bybit:{}", sym);
                                     
                                     if type_str == "snapshot" {
-                                        l2_books.insert(key, crate::state::L2Snapshot { bids: new_bids, asks: new_asks, updated_ms: now_ms });
+                                        l2_books.insert(key, crate::state::L2Snapshot { bids: new_bids, asks: new_asks, updated_ms: now_ms, received_ms: now_ms });
                                     } else if type_str == "delta" {
                                         if let Some(mut book) = l2_books.get_mut(&key) {
                                             // Apply bids
@@ -387,6 +387,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                             book.asks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                                             
                                             book.updated_ms = now_ms;
+                                            book.received_ms = now_ms;
                                         }
                                     }
                                     continue;

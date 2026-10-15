@@ -175,6 +175,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, _l2_books: &L2Orde
                                             bids: vec![(bid, bid_sz * mult)],
                                             asks: vec![(ask, ask_sz * mult)],
                                             updated_ms: now_ms,
+                                            received_ms: now_ms,
                                         }
                                     );
                                     signal.notify_one();

@@ -242,6 +242,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                                 Some((px, sz))
                                             }).collect()).unwrap_or_else(|| vec![(ask, ask_sz)]),
                                         updated_ms: now_ms,
+                                        received_ms: now_ms,
                                     }
                                 );
                                 signal.notify_one();

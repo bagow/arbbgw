@@ -329,7 +329,7 @@ async fn ws_shard(
                                     let exchange_ms=item.get("t").and_then(|v|v.as_i64()).unwrap_or(0);
                                     if exchange_ms<=0 || exchange_ms>now_ms+250 || now_ms-exchange_ms>750 || ![bid,ask,bid_qty,ask_qty,*mult].iter().all(|n|n.is_finite() && *n>0.0) || bid>=ask {continue;}
                                     // A measured best level is enough only for an order fully covered by it.
-                                    l2_books.insert(format!("gate:{sym}"),crate::state::L2Snapshot{bids:vec![(bid,bid_qty*mult)],asks:vec![(ask,ask_qty*mult)],updated_ms:exchange_ms.min(now_ms)});
+                                    l2_books.insert(format!("gate:{sym}"),crate::state::L2Snapshot{bids:vec![(bid,bid_qty*mult)],asks:vec![(ask,ask_qty*mult)],updated_ms:exchange_ms.min(now_ms),received_ms:now_ms});
                                     let mid = (bid + ask) / 2.0;
                                     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                                     if let Some(mut ex_map) = price_map.get_mut("gate") {

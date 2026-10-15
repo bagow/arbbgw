@@ -226,6 +226,7 @@ async fn handler(price_map: &PriceMap, signal: &UpdateSignal, l2_books: &L2Order
                                     bids: limited_bids,
                                     asks: limited_asks,
                                     updated_ms: now_ms,
+                                    received_ms: now_ms,
                                 }
                             );
                             signal.notify_one();

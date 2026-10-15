@@ -271,7 +271,7 @@ async fn shard_handler(
                                         }
                                     }
                                 }
-                                l2_books.insert(format!("bingx:{}", sym_raw), crate::state::L2Snapshot { bids, asks, updated_ms: now_ms });
+                                l2_books.insert(format!("bingx:{}", sym_raw), crate::state::L2Snapshot { bids, asks, updated_ms: now_ms, received_ms: now_ms });
                             }
                         }
                         if let Some(sym_raw) = extract_sym(data_type, "@bookTicker") {

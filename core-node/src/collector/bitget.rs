@@ -363,7 +363,7 @@ async fn shard_handler(
                                             .as_millis() as i64;
                                         l2_books.insert(
                                             format!("bitget:{}", inst_id),
-                                            L2Snapshot { bids, asks, updated_ms: now_ms },
+                                            L2Snapshot { bids, asks, updated_ms: now_ms, received_ms: now_ms },
                                         );
                                     }
                                 }

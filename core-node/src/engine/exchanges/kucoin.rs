@@ -91,6 +91,7 @@ fn parse_public_depth_snapshot(
         bids,
         asks,
         updated_ms,
+        received_ms,
     })
 }
 

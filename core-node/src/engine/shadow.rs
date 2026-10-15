@@ -222,6 +222,7 @@ mod tests {
                     bids: vec![(1.0, 10.0)],
                     asks: vec![(1.001, 10.0)],
                     updated_ms: 1_005,
+                    received_ms: 1_005,
                 },
             );
         }
@@ -257,6 +258,7 @@ mod tests {
                     bids: vec![(1.0, 10.0)],
                     asks: vec![(1.001, 10.0)],
                     updated_ms: 1_005,
+                    received_ms: 1_005,
                 });
             }
             row

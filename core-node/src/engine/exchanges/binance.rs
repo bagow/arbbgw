@@ -233,7 +233,7 @@ fn parse_public_depth_snapshot(body: &Value, received_ms: i64) -> Result<crate::
     if !(0..=750).contains(&(received_ms - exchange_ms)) {
         return Err(format!("Stale Binance depth snapshot: {}ms", received_ms - exchange_ms));
     }
-    Ok(crate::state::L2Snapshot { bids, asks, updated_ms: exchange_ms })
+    Ok(crate::state::L2Snapshot { bids, asks, updated_ms: exchange_ms, received_ms })
 }
 
 fn parse_public_depth_ws_response(

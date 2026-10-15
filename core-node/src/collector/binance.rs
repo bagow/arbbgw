@@ -1447,6 +1447,7 @@ fn apply_depth_update(
             bids,
             asks,
             updated_ms: exchange_ms,
+            received_ms,
         },
     );
     signal.notify_one();
@@ -1913,6 +1914,7 @@ mod tests {
                 bids: vec![(0.0614, 1_000.0)],
                 asks: vec![(0.0615, 1_000.0)],
                 updated_ms: 1_000_000,
+                received_ms: 1_000_000,
             },
         );
         let mut venue = std::collections::HashMap::from([(
@@ -1952,6 +1954,7 @@ mod tests {
                 bids: vec![(100.0, 1.0)],
                 asks: vec![(101.0, 1.0)],
                 updated_ms: 1_000_000,
+                received_ms: 1_000_000,
             },
         );
         let mut venue = std::collections::HashMap::new();
