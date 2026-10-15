@@ -110,7 +110,7 @@ fn confirmation_route(signal: &TradeSignal) -> (String, String, String) {
 /// moments. With 100 ms venue feeds, 250 ms leaves room for normal phase
 /// offset and network jitter while rejecting a quote assembled from a moving
 /// market and a lagging peer.
-pub(crate) const MAX_EXECUTION_BOOK_SKEW_MS: i64 = 250;
+pub(crate) const MAX_EXECUTION_BOOK_SKEW_MS: i64 = 400;
 
 pub(crate) fn execution_books_are_fresh(
     e_ctx: &EngineContext,
@@ -1146,7 +1146,7 @@ mod l2_gate_tests {
         ));
 
         ctx.l2_books
-            .insert("binance:TESTUSDT".into(), book(now - 249));
+            .insert("binance:TESTUSDT".into(), book(now - 399));
         ctx.l2_books
             .insert("kucoin:TESTUSDT".into(), book(now));
         assert!(execution_books_are_fresh(
@@ -1157,7 +1157,7 @@ mod l2_gate_tests {
         ));
 
         ctx.l2_books
-            .insert("binance:TESTUSDT".into(), book(now - 251));
+            .insert("binance:TESTUSDT".into(), book(now - 401));
         assert!(!execution_books_are_fresh(
             &ctx,
             "binance:TESTUSDT",
