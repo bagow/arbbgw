@@ -1032,19 +1032,81 @@ pub async fn handle_delete_profile(
     }
 }
 
-// Durable trading history cannot be deleted through the UI.
+// Clear closed trade history for an inactive profile.
+// Protects against deleting trades while the engine is running or while active/closing positions exist.
 pub async fn handle_clear_trades(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
 ) -> Response {
-    if check_basic_auth(&headers, &state).is_none() {
+    let Some(username) = check_basic_auth(&headers, &state) else {
         return json_err(StatusCode::UNAUTHORIZED, "Unauthorized");
+    };
+
+    if !can_manage_profile(&state, id.clone(), username).await {
+        return json_err(StatusCode::FORBIDDEN, "Profile must be owned");
     }
-    json_err(
-        StatusCode::CONFLICT,
-        "Trade history is an execution ledger and cannot be cleared",
-    )
+
+    let profile_id = id.clone();
+    let is_active_res = state
+        .db
+        .call(move |conn| {
+            Ok(conn.query_row(
+                "SELECT is_active FROM trading_profiles WHERE id = ?1",
+                params![profile_id],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await;
+
+    match is_active_res {
+        Ok(active) if active != 0 => {
+            return json_err(
+                StatusCode::CONFLICT,
+                "Profile must be disabled before clearing trades",
+            );
+        }
+        Ok(_) => {}
+        Err(tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows)) => {
+            return json_err(StatusCode::NOT_FOUND, "Profile not found");
+        }
+        Err(_) => {
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, "Cannot check profile status");
+        }
+    }
+
+    let profile_id = id.clone();
+    let delete_res = state
+        .real_db
+        .call(move |conn| {
+            let active_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM trades WHERE profile_id = ?1 AND status IN ('ENTRY', 'RECONCILING', 'OPEN', 'CLOSING')",
+                params![profile_id],
+                |r| r.get(0),
+            )?;
+            if active_count > 0 {
+                return Ok(None);
+            }
+            let deleted = conn.execute(
+                "DELETE FROM trades WHERE profile_id = ?1 AND status NOT IN ('ENTRY', 'RECONCILING', 'OPEN', 'CLOSING')",
+                params![profile_id],
+            )?;
+            Ok(Some(deleted))
+        })
+        .await;
+
+    match delete_res {
+        Ok(None) => json_err(
+            StatusCode::CONFLICT,
+            "Cannot clear trades while active or closing positions exist",
+        ),
+        Ok(Some(n)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "success": true, "deleted": n })),
+        )
+            .into_response(),
+        Err(_) => json_err(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+    }
 }
 
 async fn can_manage_profile(state: &AppState, id: String, username: String) -> bool {
@@ -2322,12 +2384,99 @@ mod integrity_api_tests {
             .get("db_expected_balance_delta_total")
             .unwrap()
             .is_null());
+        state
+            .db
+            .call(|conn| {
+                conn.execute(
+                    "UPDATE trading_profiles SET is_active = 1 WHERE id = 'real-default'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         assert_eq!(
-            handle_clear_trades(State(state.clone()), headers, Path("real-default".into()))
-                .await
-                .status(),
+            handle_clear_trades(
+                State(state.clone()),
+                headers.clone(),
+                Path("real-default".into())
+            )
+            .await
+            .status(),
             StatusCode::CONFLICT
         );
+        state
+            .db
+            .call(|conn| {
+                conn.execute(
+                    "UPDATE trading_profiles SET is_active = 0 WHERE id = 'real-default'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            handle_clear_trades(
+                State(state.clone()),
+                headers.clone(),
+                Path("real-default".into())
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+
+        // While OPEN trade exists, clear is rejected even if profile is inactive
+        state
+            .real_db
+            .call(|conn| {
+                conn.execute(
+                    "INSERT INTO trades (pair, exchange_a, exchange_b, direction, volume, entry_price_a, entry_price_b, entry_spread, entry_time, highest_spread_reached, status, profile_id)
+                     VALUES ('BTCUSDT', 'binance', 'kucoin', 'BUY_A_SELL_B', 100.0, 50000.0, 50100.0, 0.2, 1000, 0.2, 'OPEN', 'real-default')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            handle_clear_trades(
+                State(state.clone()),
+                headers.clone(),
+                Path("real-default".into())
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+
+        // Once CLOSED, clearing succeeds and deletes it
+        state
+            .real_db
+            .call(|conn| {
+                conn.execute(
+                    "UPDATE trades SET status = 'CLOSED' WHERE profile_id = 'real-default'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let clear_res = handle_clear_trades(
+            State(state.clone()),
+            headers.clone(),
+            Path("real-default".into()),
+        )
+        .await;
+        assert_eq!(clear_res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(clear_res.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["deleted"], 1);
         assert_eq!(
             handle_get_unified(
                 State(state),

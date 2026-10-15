@@ -2469,11 +2469,15 @@ window.resumeKillSwitch = async function () {
 
 
 window.clearTrades = async function (profileId, mode) {
-    if (!confirm('Delete ALL active and historical trades for this profile?')) return;
+    if (!confirm('Clear closed trade history for this profile? Note: The profile must be disabled and have no open positions.')) return;
     try {
-        await apiFetch(`/api/profiles/${profileId}/trades`, { method: 'DELETE' });
+        const res = await apiFetch(`/api/profiles/${profileId}/trades`, { method: 'DELETE' });
+        const count = res && res.deleted !== undefined ? res.deleted : 0;
+        showToast(`Cleared ${count} historical trades`, 'success');
         await refreshActiveTab();
-    } catch (e) { alert('Failed: ' + e.message); }
+    } catch (e) {
+        showToast(`Failed: ${e.message || 'Unknown error'}`, 'error');
+    }
 };
 
 window.marketCloseAll = async function (profileId) {
