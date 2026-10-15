@@ -399,36 +399,41 @@ pub fn generate_signals(
                 l2_pending_rows += 1;
             }
             if let Some(profile) = matching_profile {
-                profile_l2_pending_rows += 1;
-                let route = format!(
-                    "{}:{}:{}:{}",
-                    profile.id, row.pair, row.exchange_a, row.exchange_b,
-                );
-                if should_log_l2_pending(&route, now) {
-                    let age_a = e_ctx
-                        .l2_books
-                        .get(&key_a)
-                        .map(|book| now.saturating_sub(book.updated_ms));
-                    let age_b = e_ctx
-                        .l2_books
-                        .get(&key_b)
-                        .map(|book| now.saturating_sub(book.updated_ms));
-                    tracing::info!(
-                        "[scanner] PROFILE_L2_PENDING pair={} direction={} profile={} l1={:.4}% vol_a=${:.0} vol_b=${:.0} structural={:.4}% verified={} persistent={} age_a_ms={:?} age_b_ms={:?} wanted_a={} wanted_b={}",
-                        row.pair,
-                        row.direction,
-                        profile.id,
-                        row.spread,
-                        row.vol_a,
-                        row.vol_b,
-                        row.structural_spread,
-                        row.structural_verified,
-                        row.has_structural_spread,
-                        age_a,
-                        age_b,
-                        e_ctx.l2_wanted.contains(&key_a),
-                        e_ctx.l2_wanted.contains(&key_b),
+                let wanted_a = e_ctx.l2_wanted.contains(&key_a);
+                let wanted_b = e_ctx.l2_wanted.contains(&key_b);
+                // Only count and log as pending if this route was actually requested / wanted by collectors
+                if wanted_a || wanted_b {
+                    profile_l2_pending_rows += 1;
+                    let route = format!(
+                        "{}:{}:{}:{}",
+                        profile.id, row.pair, row.exchange_a, row.exchange_b,
                     );
+                    if should_log_l2_pending(&route, now) {
+                        let age_a = e_ctx
+                            .l2_books
+                            .get(&key_a)
+                            .map(|book| now.saturating_sub(book.updated_ms));
+                        let age_b = e_ctx
+                            .l2_books
+                            .get(&key_b)
+                            .map(|book| now.saturating_sub(book.updated_ms));
+                        tracing::info!(
+                            "[scanner] PROFILE_L2_PENDING pair={} direction={} profile={} l1={:.4}% vol_a=${:.0} vol_b=${:.0} structural={:.4}% verified={} persistent={} age_a_ms={:?} age_b_ms={:?} wanted_a={} wanted_b={}",
+                            row.pair,
+                            row.direction,
+                            profile.id,
+                            row.spread,
+                            row.vol_a,
+                            row.vol_b,
+                            row.structural_spread,
+                            row.structural_verified,
+                            row.has_structural_spread,
+                            age_a,
+                            age_b,
+                            wanted_a,
+                            wanted_b,
+                        );
+                    }
                 }
             }
             if worth_diag {

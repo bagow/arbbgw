@@ -1272,8 +1272,48 @@ async fn enter(
             now_ms().saturating_sub(signal_received_ms),
             dispatch_gap_ns,
         );
-        let fill_a = fill_a.1?;
-        let fill_b = fill_b.1?;
+        let mut fill_a = fill_a.1?;
+        let mut fill_b = fill_b.1?;
+
+        // If either leg is not yet in a terminal state (e.g. Binance returned Submitted / NEW),
+        // poll up to 2000 ms to give the exchange matching report time to arrive
+        // before declaring an unknown outcome.
+        if !fill_a.state.terminal() || !fill_b.state.terminal() {
+            let poll_start = tokio::time::Instant::now();
+            let poll_timeout = std::time::Duration::from_millis(2000);
+            while (!fill_a.state.terminal() || !fill_b.state.terminal())
+                && poll_start.elapsed() < poll_timeout
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if !fill_a.state.terminal() {
+                    if let Some(conn) = get_connector(&order_a.exchange) {
+                        if let Ok(obs) = conn
+                            .query_managed(http, keys, &order_a.request, fill_a.order_id.as_deref())
+                            .await
+                        {
+                            if obs.state != fill_a.state || obs.filled_quantity != fill_a.filled_quantity {
+                                let _ = j.observe(&order_a, obs.clone()).await;
+                                fill_a = obs;
+                            }
+                        }
+                    }
+                }
+                if !fill_b.state.terminal() {
+                    if let Some(conn) = get_connector(&order_b.exchange) {
+                        if let Ok(obs) = conn
+                            .query_managed(http, keys, &order_b.request, fill_b.order_id.as_deref())
+                            .await
+                        {
+                            if obs.state != fill_b.state || obs.filled_quantity != fill_b.filled_quantity {
+                                let _ = j.observe(&order_b, obs.clone()).await;
+                                fill_b = obs;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let orders = j.orders(id).await?;
         if !fill_a.state.terminal() || !fill_b.state.terminal() {
             j.state(id, "RECONCILING", "DUAL_ENTRY_UNKNOWN").await?;
