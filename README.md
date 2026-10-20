@@ -1,108 +1,66 @@
 # CEX Arbitrage
 
-Межбиржевой арбитраж линейных USDT perpetual futures. Это реальная торговая система: положительный спред до открытия не гарантирует положительный результат после исполнения, комиссий, funding и закрытия.
+Cross-exchange arbitrage for linear USDT perpetual futures. This is execution software, not a profit guarantee: a positive displayed spread can become a loss after fills, fees, funding, slippage, and exit.
 
-## Архитектура
+## Components
 
-- `core-node/`: один Rust-процесс — сбор котировок, сканер EMA, исполнение и контроль позиций. Исполнение находится в `engine/managed.rs`, журнал — в `engine/journal.rs`, финансовая сверка — в `engine/settlement.rs`.
-- `vps-api/`: Rust/Axum API для настроек, истории, состояния и запросов закрытия. Читает те же SQLite-файлы, что и core.
-- `shared/`: общие структуры и настройки.
-- `public/`: HTML, CSS и обычный JavaScript. React/Vite в проекте нет.
-- `src/index.js`: Cloudflare Worker, статика и перенаправление `/api/*` на `api.arb.bagow.com`; аутентификацию API проверяет `vps-api`; статика на Cloudflare задаётся `wrangler.toml`.
-- Cloudflare Tunnel соединяет Cloudflare с API на VPS. Торговые ключи и исполнение находятся на VPS, не во фронтенде.
+| Path | Purpose |
+| --- | --- |
+| `core-node/` | Rust trading engine: market data, EMA/funding scanner, execution, position management, and reconciliation. |
+| `vps-api/` | Rust/Axum API for profiles, history, health, and manual-close requests. |
+| `shared/` | Shared models and settings. |
+| `public/` | Static dashboard (plain HTML/CSS/JavaScript). |
+| `src/index.js` | Cloudflare Worker: static site and `/api/*` proxy. |
 
-Основной репозиторий — **GitHub `bagow/arbbgw`**. GitLab в текущем процессе публикации не используется.
+Trading credentials and execution stay on the VPS. Cloudflare and the browser never receive exchange keys.
 
-## Исполнение и ограничения
+## Trading model
 
-Новый механизм поддерживает адаптеры Binance, KuCoin и Gate. Наличие сборщика котировок другой биржи не означает разрешение реального входа через неё. Биржа допускается только при наличии реализации подтверждения состояния ордера и достаточных свежих данных.
+- Live managed execution is supported only for adapters with verified order-state reconciliation (currently Binance, KuCoin, and Gate; a market-data collector alone is not execution support).
+- Entries use price-bounded IOC orders. New unmanaged maker orders and unrestricted market entries are not used.
+- A trade plan and unique client-order IDs are durably stored before orders are sent.
+- An acknowledgement is not a fill. Quantities, average prices, fees, and partial fills are reconciled from the exchange.
+- Unknown order outcomes are never retried as new orders. The original ID is checked until resolved; unresolved exposure pauses new entries.
+- Existing positions are supervised independently of new signals, market ticks, or an enabled profile. Emergency reduction may use reduce-only market orders and can realize a loss.
 
-Вход — ограниченные по цене IOC-ордера. Maker и неограниченный рыночный вход не разрешены новым механизмом. Поддерживаемые настройки — EMA, cross margin и односторонняя позиция по контракту. Это ограничения текущей реализации, а не обещание поддержки всех режимов бирж.
+The default strategy uses an executable L2 spread, a verified EMA structural baseline, round-trip fees, depth, margin, lot-size, freshness, and risk checks. The optional funding-capture path enters only near synchronized funding settlements when conservative funding credit covers immediate liquidation costs and the retained profit target. Funding is reconciled from unique exchange-ledger events; missing evidence never becomes zero funding.
 
-Новый вход требует актуального времени следующего funding на обеих биржах; за пять минут до ближайшего события вход запрещён. План сохраняет срок выхода за минуту до него. Это защитный срок, а не гарантия закрытия при недоступности биржи; окончательный funding всё равно сверяется по ledger. Требуемый запас после комиссий не меньше максимума порога входа и TP.
+## Safety and accounting
 
-1. Проверяются настройки, актуальные биржевые min/max quantity и min notional, общий шаг количества, котировки, доступная маржа и отсутствие существующей позиции и открытых обычных ордеров по символу. Настройка плеча должна быть подтверждена; на KuCoin cross leverage отдельно устанавливается и повторно читается через API. Не используйте те же символы для ручной торговли или условных заявок вне этого журнала.
-2. Торговый план и уникальный client order ID записываются в SQLite **до отправки** ордера.
-3. ACK означает приём запроса, не исполнение. Учитываются только подтверждённые количество и средняя цена. Частичный IOC остаётся частичным, даже если он уже отменён.
-4. После тайм-аута новый ордер вместо неизвестного не отправляется. Проверяется тот же ID; неизвестное состояние сохраняется для последующих проверок и перезапуска.
-5. Объём и допустимая цена второй ноги определяются по фактическому исполнению первой. Неисполненная или несопоставимая часть вызывает обработку остаточной экспозиции.
-6. Независимый периодический контроль обрабатывает закрытия даже без рыночных тиков, без новых сигналов и при выключенном профиле. При неизвестном результате закрытия нельзя считать позицию закрытой или отправлять повтор на тот же объём.
-7. Аварийное уменьшение риска может использовать reduce-only market. Это не гарантирует цену или исполнение и может зафиксировать убыток.
+Trade states are `ENTRY → OPEN → CLOSING → CLOSED`; `RECONCILING` means an exchange outcome is still unknown, and `CANCELLED` means no entry fill. Each leg tracks opened and closed base quantity separately.
 
-Единицы журнала: количества — базовый актив; цена — USDT за базовый актив; комиссии и funding — USDT; время — Unix milliseconds. Размер контракта/шаг и price tick сохраняются в запросе. L2 содержит количество базового актива: повторно умножать его на размер контракта нельзя.
+`real-trader.db` is the execution authority:
 
-Для входа нужен свежий непротиворечивый L2, покрывающий весь объём. Таймер, ping и обновление 24-часового объёма не являются новым стаканом. Неизвестный объём ликвидности не заменяется выдуманным числом.
+- `trades`: visible state and PnL;
+- `execution_plans`, `execution_orders`, `execution_observations`: durable intent and evidence;
+- `funding_events`: unique attributed funding ledger records;
+- `reconciliation_alerts`: integrity failures.
 
-EMA отслеживает направленную премию средних цен и обновляется также на наблюдениях, не прошедших порог входа. Оценка структурного выхода включает пересечение bid/ask. Исторический warmup допускается только при достаточном покрытии свежими согласованными свечами; альтернативная проверка требует минимум 300 различных свежих наблюдений на протяжении десяти минут. Разрыв наблюдений сбрасывает этот отсчёт.
+`vps-api.db` contains profiles, technical settings, and the persistent kill switch. SQLite WAL is enabled: back up databases through SQLite's backup API, not by copying only the main `.db` file.
 
-## Состояния и учёт
+Net PnL is actual price PnL minus actual fees and funding. `VERIFIED` means evidence was reconciled; pending or legacy rows must not be reported as exact results. Wallet-balance changes are not trading PnL.
 
-`ENTRY → OPEN → CLOSING → CLOSED`; `RECONCILING` означает неопределённый результат биржевой операции, `CANCELLED` — попытку без исполненного входа. У каждой ноги отдельно учитываются открытое и закрытое количества.
+## Configuration and operation
 
-`real-trader.db` содержит:
+`trade_volume` is the target one-leg notional; leverage changes required margin, not notional. Spread, TP, stop, and slippage settings use percentage points; exchange fees use fractions (`0.0005 = 0.05%`).
 
-- `trades`: отображаемое состояние сделок и расчётов;
-- `execution_plans`: сохранённый сигнал и параметры;
-- `execution_orders`: намерение и последнее подтверждённое состояние каждого client ID;
-- `execution_observations`: история подтверждений;
-- `funding_events`: уникальные записи биржевого журнала с привязкой к сделке;
-- `reconciliation_alerts`: обнаруженные нарушения целостности.
+Before entry, the engine requires valid profile settings, current instrument limits, balanced lot sizes, executable full-size L2, fresh private account state, confirmed leverage, free margin, no owned position/open order for the symbol, current fees, and a positive post-cost budget. A disabled profile blocks new entries but never stops supervision of owned positions.
 
-`vps-api.db` содержит профили, `technical_settings` и `server_cache`. Используется WAL; копирование только основного `.db` при работающем процессе недостаточно. Делайте согласованную копию через SQLite backup API, сохраняйте обе базы и проверяйте `PRAGMA integrity_check`.
+`/health` reports process, market, private-account, order-lane, and trading readiness separately. Manual close is a request to close confirmed owned exposure; acceptance is not proof that exchanges have filled it.
 
-Комиссии новых сделок сверяются по конкретным ордерам. Funding — по символу, интервалу владения и уникальным ID журнала. Неполная пагинация, неизвестная валюта комиссии или ошибка API не дают права подставить ноль.
+`shadow-books.db` is a bounded, passive L2 research log. Replay with:
 
-`VERIFIED` — расчёт сверён по доступным подтверждениям; `FEES_PENDING`/`FUNDING_PENDING` — данных ещё недостаточно. Сверка начинается после задержки на появление истории и повторяется, включая недавние уже сверенные сделки. Net PnL = результат фактических цен и количеств − комиссии − funding; проскальзывание повторно не вычитается из уже фактических цен.
+```bash
+scripts/replay_opportunities.py shadow-books.db \
+  --run-config /path/to/config.json --settings-db vps-api.db
+```
 
-`LEGACY_UNVERIFIED` — старые записи прежнего движка. Исходные значения сохраняются и показываются с этой пометкой. Их нельзя объявлять точным результатом счёта или автоматически «исправлять» ради красивой статистики. Неизвестный PnL не означает нулевой результат и не должен считаться проигрышной сделкой. Изменение баланса кошелька также включает переводы и не равно торговому PnL.
+Replay assumptions are research output, not proof of live profitability.
 
-## Настройки и управление
+## Development and deployment
 
-`trade_volume` — плановый notional одной ноги, не её маржа. Плечо влияет на требуемую маржу. Проценты спреда/TP/stop задаются в процентных пунктах; тариф биржи в расчётах — доля, например `0.0005 = 0.05%`.
+Run Rust checks, tests, release builds, and Clippy in GitHub Actions only; do not build Rust locally or on the VPS. `.github/workflows/deploy.yml` checks every `fix/**` push and `main` PR, builds release artifacts once, and deploys only tested artifacts. Confirm the exact deployed SHA through `/health`.
 
-`slippage_percent` ограничивает допустимый запас цены входа, но не разрешает потратить больше общего бюджета связки. EMA-вход всегда требует проверенный исторический structural baseline; `min_structural_deviation` добавляет к нему пользовательский запас, а значение `0` отключает только этот дополнительный запас. `take_profit_percent` проверяется по оценке достижимого выхода с резервом комиссии. `trailing_stop_percent` задаёт отступ от сохраняемого максимума оценки net PnL, но после активации его расчётный порог не опускается ниже безубытка; `max_holding_time_ms` ограничивает удержание. Оценка выхода не является уже полученной прибылью.
+Production services are `core-node`, `vps-api`, and `cloudflared`. Core data lives in `/home/opc/core-node/`; secrets are root-readable environment files (`/etc/core-node.env`, `/etc/vps-api.env`) and must never be committed, logged, or copied to the frontend.
 
-Комиссия перед первым входом запрашивается для конкретного контракта и аккаунта, кешируется не более часа и повторно проверяется в JIT-preflight. Ошибка или некорректная ставка блокирует вход. `hard_stop_percent` — отдельный немедленный предел оценочного net-убытка; trailing включается только после `trailing_activation_percent`. `daily_loss_limit_usdt` ограничивает UTC-дневной `VERIFIED` убыток, а `max_total_exposure_usdt` — сумму one-leg notionals активных managed-сделок. Пока закрытая managed-сделка не сверена, следующая не открывается.
-
-`/health` различает здоровье процесса, готовность публичного рынка и приватных снимков. Время публикации `exchange_maps` не заменяет timestamps последних успешных ответов бирж.
-
-Выключение профиля блокирует новые входы и не отменяет контроль существующих позиций. Аварийная остановка сохраняется при перезапуске. Возобновление после неё требует выяснения причины и проверки ордеров на биржах. Старые активные сделки без нового журнала требуют отдельной сверки; их нельзя автоматически присваивать новому исполнению.
-
-Ручное закрытие — запрос на закрытие подтверждённых остатков связки. Ответ о принятии запроса не означает, что биржи уже закрыли позиции. Размер из браузерного кеша не используется как доказательство текущей позиции.
-
-Профили с историей нельзя удалить; очистка журнала через UI запрещена. График балансов показывает последние полученные остатки, а не искусственно восстановленную историю капитала.
-
-`shadow-books.db` рядом с торговой базой хранит до примерно 250 000 последних наблюдений двух стаканов, их timestamps, спред и оценки ставок комиссий. Запись пассивная, очередь ограничена, ключей и отправки ордеров в этом модуле нет. До шестнадцати ликвидных маршрутов прогреваются независимо от суточного фильтра направления; этот фильтр остаётся обязательным для сделок. Две диагностические номинации удерживаются на горизонт позиции плюс 10 секунд (не более 30 минут плюс 10 секунд), без вытеснения новым всплеском. Эти данные предназначены для последующего replay; их наличие не означает подтверждённую прибыльность.
-
-Для replay конкретного запуска используйте `scripts/replay_opportunities.py shadow-books.db --run-config /path/to/config.json --settings-db vps-api.db`. Конфигурация запуска задаёт торговые пороги, база — технические параметры; при наличии `technical_settings` в конфигурации используется этот зафиксированный снимок. Результат содержит `effective_profile`. Явные ставки `--binance-fee` и `--kucoin-fee` применяются и к обычному replay, и к диагностике номинаций; они остаются маркированным предположением, не доказательством исторической комиссии.
-
-У каждого записанного стакана поле `requested` фиксирует запрос L2 со стороны сканера. Запрошенные маршруты получают приоритет в ограниченной очереди записи. Аудит `scripts/audit_shadow.py` разделяет качество по `by_recorded_demand`: обе ноги запрошены, одна, ни одна или статус неизвестен в старых записях. Это не подтверждение подписки биржей: незапрошенный стакан может ещё обновляться в период удержания подписки. Общая доля старых стаканов включает остатки кеша и не является метрикой задержки активных потоков.
-
-## CI/CD и эксплуатация
-
-**Сборка, `cargo check`, Rust-тесты и Clippy выполняются в GitHub Actions, не локально и не на VPS.** Локально допустимы чтение кода, форматирование, `git diff --check` и синтаксическая проверка JavaScript.
-
-Workflow `.github/workflows/deploy.yml`:
-
-- push в `fix/**` и PR в `main`: проверка workspace, тесты и release-сборка;
-- push в `main`: после успешной проверки деплой затронутых компонентов;
-- ручной запуск: выбранные явно компоненты;
-- core/API собираются один раз в проверочном job; на VPS доставляются именно эти release artifacts, Cloudflare Worker и статика публикуются Wrangler;
-- логи проверки сохраняются как artifacts и в служебных ветках `ci-results/<commit>-<run>-<attempt>` (они не запускают деплой); для push копируются в `/home/opc/arb-ci/<commit>/` на VPS. Этот шаг не перезапускает сервисы. Итоги production jobs сохраняются в `ci-deploy/<commit>-<run>-<attempt>`; фактический SHA ядра всё равно проверяется через `/health`.
-- доставка core допускает три ограниченные по времени попытки; установка и перезапуск выполняются только после успешной доставки.
-
-Перед публикацией проверяйте результат CI именно для текущего SHA. Повторный запуск старого job проверяет старый коммит. Прохождение unit-тестов не является проверкой прибыльности или полноценным испытанием на бирже.
-
-Продакшен: systemd-сервисы `core-node`, `vps-api`, `cloudflared`. Торговые базы находятся в `/home/opc/core-node/`; core читает секреты из `/etc/core-node.env`, API — из `/etc/vps-api.env` (root, 0600). При обновлении существующей установки workflow переносит переменные работающего API в этот файл до замены unit; для первой установки файл нужно подготовить отдельно. Адрес и SSH-ключи деплоя задаются GitHub Secrets. Внутренний HTTP core слушает loopback; внешний доступ идёт через API и Cloudflare.
-
-Для разбора инцидента сохраняйте SHA/хеш бинарника, журналы systemd, обе базы, client/exchange order IDs и ответы бирж. Сначала установите фактическое состояние ордеров, затем решайте вопрос перезапуска/отката. Откат к старому движку поверх незавершённого нового журнала недопустим без сверки экспозиции.
-
-Не коммитьте `.env`, торговые ключи, пароли и выгрузки счетов. Удаление файла из текущей версии не удаляет секреты из истории Git: ранее опубликованные ключи требуют замены владельцем.
-
-## Аудит 8 сентября 2026
-
-В старом механизме подтверждены неверная атрибуция комиссий Gate, принятие неполного подтверждения за исполнение, недостаточный контроль частичных закрытий, повторные операции после неопределённого ответа и ложная свежесть данных. Исторические журналы торговли на VPS уже были частично утрачены из-за ротации, поэтому точный replay всех старых сделок восстановить нельзя.
-
-Приёмка изменений требует тестов частичных fills, дубликатов, неизвестного результата, восстановления журнала и идемпотентной финансовой сверки. До включения реальных входов необходимы наблюдение без ордеров и проверка актуальных ключей, спецификаций контрактов, лимитов и остатков на биржах. Кодовые исправления сами по себе не доказывают доходность стратегии.
-
-Протоколы: [Gate WS](https://www.gate.com/docs/developers/futures/ws/en/), [Gate Futures REST](https://www.gate.com/docs/developers/apiv4/en/futures/), [Binance Futures](https://developers.binance.com/docs/derivatives/usds-margined-futures/general-info), [KuCoin Futures](https://www.kucoin.com/docs-new).
+For an incident, preserve the deployed SHA and binary hash, systemd logs, both SQLite databases, client/exchange order IDs, and exchange responses. Establish actual exchange exposure before restarting, rolling back, or issuing another close.
